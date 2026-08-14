@@ -10,7 +10,7 @@ env:
 
 jobs:
   test:
-    name: fmt, clippy, test
+    name: fmt, clippy, test, coverage
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,7 +18,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools
 
       - uses: Swatinem/rust-cache@v2
 
@@ -28,8 +28,21 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: cargo test
-        run: cargo test --workspace
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: cargo test (coverage gate, >= 80% lines)
+        run: cargo llvm-cov --workspace --html --fail-under-lines 80
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: target/llvm-cov/html
+          if-no-files-found: ignore
 
   build:
     name: build (release)
@@ -52,3 +65,70 @@ jobs:
           name: hl-cli-linux-x86_64
           path: target/release/hl-cli
           if-no-files-found: error
+
+  mutation-test:
+    name: mutation testing (cargo-mutants, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+
+      - name: cargo mutants
+        run: cargo mutants --workspace --timeout-multiplier 3 --output mutants.out
+
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-report
+          path: mutants.out
+          if-no-files-found: ignore
+
+  fuzz-smoke:
+    name: fuzz smoke test (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_lex, fuzz_parse, fuzz_pipeline]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Seed corpus from test fixtures
+        run: |
+          mkdir -p fuzz/corpus/${{ matrix.target }}
+          cp crates/hl-lexer/tests/fixtures/*.hll fuzz/corpus/${{ matrix.target }}/ 2>/dev/null || true
+          cp crates/hl-parser/tests/fixtures/*.hll fuzz/corpus/${{ matrix.target }}/ 2>/dev/null || true
+
+      - name: cargo fuzz run (60s)
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
