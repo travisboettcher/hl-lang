@@ -1,4 +1,4 @@
-# combined.dsl — both worked examples concatenated, with extra blank
+# combined.hll — both worked examples concatenated, with extra blank
 # lines and comments interleaved, to exercise trivia-skipping across
 # declaration boundaries.
 

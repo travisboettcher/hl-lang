@@ -3,9 +3,9 @@
 
 use hl_lexer::{Lexer, TokenKind};
 
-const JELLYFIN: &str = include_str!("fixtures/jellyfin.dsl");
-const SYNCTHING: &str = include_str!("fixtures/syncthing.dsl");
-const COMBINED: &str = include_str!("fixtures/combined.dsl");
+const JELLYFIN: &str = include_str!("fixtures/jellyfin.hll");
+const SYNCTHING: &str = include_str!("fixtures/syncthing.hll");
+const COMBINED: &str = include_str!("fixtures/combined.hll");
 
 fn kinds(source: &str) -> Vec<TokenKind> {
     Lexer::tokenize(source)
