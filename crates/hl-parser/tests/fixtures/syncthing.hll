@@ -1,6 +1,11 @@
 # Composable templates + a service that merges them, per the design
 # doc's "Composition" section.
 
+network traefik-net {
+  external
+  name: "docker_default"
+}
+
 template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
