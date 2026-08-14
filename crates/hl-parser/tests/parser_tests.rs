@@ -1,5 +1,5 @@
 use hl_parser::schema::MapSide;
-use hl_parser::{Literal, ParseError, TopDecl, parse};
+use hl_parser::{Literal, ParseError, TemplateDecl, TopDecl, parse};
 
 fn parse_ok(source: &str) -> hl_parser::Program {
     parse(source).unwrap_or_else(|err| panic!("unexpected parse error: {err}"))
@@ -8,14 +8,21 @@ fn parse_ok(source: &str) -> hl_parser::Program {
 fn as_service(decl: &TopDecl) -> &hl_parser::Service {
     match decl {
         TopDecl::Service(s) => s,
-        TopDecl::Network(_) => panic!("expected a Service decl"),
+        other => panic!("expected a Service decl, got {other:?}"),
     }
 }
 
 fn as_network(decl: &TopDecl) -> &hl_parser::Network {
     match decl {
         TopDecl::Network(n) => n,
-        TopDecl::Service(_) => panic!("expected a Network decl"),
+        other => panic!("expected a Network decl, got {other:?}"),
+    }
+}
+
+fn as_template(decl: &TopDecl) -> &TemplateDecl {
+    match decl {
+        TopDecl::Template(t) => t,
+        other => panic!("expected a Template decl, got {other:?}"),
     }
 }
 
@@ -31,18 +38,6 @@ fn named_decl_requires_two_idents() {
 fn unknown_top_level_type_is_error() {
     let err = parse("widget foo {}").unwrap_err();
     assert!(matches!(err, ParseError::UnknownTopLevelType { name, .. } if name == "widget"));
-}
-
-#[test]
-fn template_declaration_is_not_yet_supported_error() {
-    let err = parse("template foo {}").unwrap_err();
-    assert!(matches!(
-        err,
-        ParseError::TemplatesNotSupported {
-            what: "template declaration",
-            ..
-        }
-    ));
 }
 
 #[test]
@@ -65,7 +60,7 @@ fn empty_program_parses_to_empty_decls() {
 fn image_primary_value_shorthand() {
     let program = parse_ok("service s {\n  image \"foo/bar:latest\"\n}\n");
     let service = as_service(&program.decls[0]);
-    let image = service.image.as_ref().unwrap();
+    let image = service.fields.image.as_ref().unwrap();
     assert_eq!(image.reference.as_ref().unwrap().text(), "foo/bar:latest");
 }
 
@@ -73,7 +68,7 @@ fn image_primary_value_shorthand() {
 fn image_canonical_body_form() {
     let program = parse_ok("service s {\n  image { ref: \"foo/bar:latest\" }\n}\n");
     let service = as_service(&program.decls[0]);
-    let image = service.image.as_ref().unwrap();
+    let image = service.fields.image.as_ref().unwrap();
     assert_eq!(image.reference.as_ref().unwrap().text(), "foo/bar:latest");
 }
 
@@ -94,7 +89,7 @@ fn duplicate_image_field_is_error() {
 fn restart_primary_shorthand_bare_ident_policy() {
     let program = parse_ok("service s {\n  restart unless-stopped\n}\n");
     let service = as_service(&program.decls[0]);
-    let restart = service.restart.as_ref().unwrap();
+    let restart = service.fields.restart.as_ref().unwrap();
     let policy = restart.policy.as_ref().unwrap();
     assert_eq!(policy.text(), "unless-stopped");
     assert!(matches!(policy, Literal::Ident(_, _)));
@@ -104,7 +99,14 @@ fn restart_primary_shorthand_bare_ident_policy() {
 fn restart_primary_shorthand_string_policy() {
     let program = parse_ok("service s {\n  restart \"unless-stopped\"\n}\n");
     let service = as_service(&program.decls[0]);
-    let policy = service.restart.as_ref().unwrap().policy.as_ref().unwrap();
+    let policy = service
+        .fields
+        .restart
+        .as_ref()
+        .unwrap()
+        .policy
+        .as_ref()
+        .unwrap();
     assert_eq!(policy.text(), "unless-stopped");
     assert!(matches!(policy, Literal::Str(_, _)));
 }
@@ -124,7 +126,7 @@ fn unknown_struct_field_is_error() {
 fn expose_primary_only() {
     let program = parse_ok("service s {\n  expose 8096\n}\n");
     let service = as_service(&program.decls[0]);
-    let expose = service.expose.as_ref().unwrap();
+    let expose = service.fields.expose.as_ref().unwrap();
     assert_eq!(expose.port.as_ref().unwrap().text(), "8096");
     assert!(expose.host.is_none());
 }
@@ -133,7 +135,7 @@ fn expose_primary_only() {
 fn expose_as_sugar_aliases_to_host() {
     let program = parse_ok("service s {\n  expose 8096 as \"host.example.com\"\n}\n");
     let service = as_service(&program.decls[0]);
-    let expose = service.expose.as_ref().unwrap();
+    let expose = service.fields.expose.as_ref().unwrap();
     assert_eq!(expose.host.as_ref().unwrap().text(), "host.example.com");
 }
 
@@ -141,7 +143,7 @@ fn expose_as_sugar_aliases_to_host() {
 fn expose_host_explicit_field_form() {
     let program = parse_ok("service s {\n  expose 8096 host: \"host.example.com\"\n}\n");
     let service = as_service(&program.decls[0]);
-    let expose = service.expose.as_ref().unwrap();
+    let expose = service.fields.expose.as_ref().unwrap();
     assert_eq!(expose.host.as_ref().unwrap().text(), "host.example.com");
 }
 
@@ -210,34 +212,43 @@ fn bool_flag_duplicate_is_error() {
 fn volume_arrow_sugar_bare_entry() {
     let program = parse_ok("service s {\n  volume \"host\" -> \"container\"\n}\n");
     let service = as_service(&program.decls[0]);
-    assert_eq!(service.volumes.entries.len(), 1);
-    assert_eq!(service.volumes.entries[0].host.text(), "host");
-    assert_eq!(service.volumes.entries[0].container.text(), "container");
+    assert_eq!(service.fields.volumes.entries.len(), 1);
+    assert_eq!(service.fields.volumes.entries[0].host.text(), "host");
+    assert_eq!(
+        service.fields.volumes.entries[0].container.text(),
+        "container"
+    );
 }
 
 #[test]
 fn volume_colon_canonical_entry() {
     let program = parse_ok("service s {\n  volume { \"syncthing-config\": \"/config\" }\n}\n");
     let service = as_service(&program.decls[0]);
-    assert_eq!(service.volumes.entries.len(), 1);
-    assert_eq!(service.volumes.entries[0].host.text(), "syncthing-config");
-    assert_eq!(service.volumes.entries[0].container.text(), "/config");
+    assert_eq!(service.fields.volumes.entries.len(), 1);
+    assert_eq!(
+        service.fields.volumes.entries[0].host.text(),
+        "syncthing-config"
+    );
+    assert_eq!(
+        service.fields.volumes.entries[0].container.text(),
+        "/config"
+    );
 }
 
 #[test]
 fn env_equals_sugar_bare_entry() {
     let program = parse_ok("service s {\n  env PUID = \"1000\"\n}\n");
     let service = as_service(&program.decls[0]);
-    assert_eq!(service.env.entries.len(), 1);
-    assert_eq!(service.env.entries[0].key.text(), "PUID");
-    assert_eq!(service.env.entries[0].value.text(), "1000");
+    assert_eq!(service.fields.env.entries.len(), 1);
+    assert_eq!(service.fields.env.entries[0].key.text(), "PUID");
+    assert_eq!(service.fields.env.entries[0].value.text(), "1000");
 }
 
 #[test]
 fn env_repeated_entries_accumulate() {
     let program = parse_ok("service s {\n  env PUID = \"1000\"\n  env PGID = \"100\"\n}\n");
     let service = as_service(&program.decls[0]);
-    assert_eq!(service.env.entries.len(), 2);
+    assert_eq!(service.fields.env.entries.len(), 2);
 }
 
 #[test]
@@ -278,7 +289,7 @@ fn volume_same_host_different_container_is_ok() {
     let program =
         parse_ok("service s {\n  volume \"a\" -> \"/data1\"\n  volume \"a\" -> \"/data2\"\n}\n");
     let service = as_service(&program.decls[0]);
-    assert_eq!(service.volumes.entries.len(), 2);
+    assert_eq!(service.fields.volumes.entries.len(), 2);
 }
 
 // --- raw ---
@@ -287,8 +298,8 @@ fn volume_same_host_different_container_is_ok() {
 fn raw_allows_arbitrary_keys() {
     let program = parse_ok("service s {\n  raw {\n    privileged: true\n  }\n}\n");
     let service = as_service(&program.decls[0]);
-    assert_eq!(service.raw.entries.len(), 1);
-    assert_eq!(service.raw.entries[0].key.text(), "privileged");
+    assert_eq!(service.fields.raw.entries.len(), 1);
+    assert_eq!(service.fields.raw.entries[0].key.text(), "privileged");
 }
 
 #[test]
@@ -297,8 +308,8 @@ fn raw_preserves_nested_structure() {
         "service s {\n  raw {\n    devices: [\"/dev/kmsg\"]\n    opts: { level: \"high\" }\n  }\n}\n",
     );
     let service = as_service(&program.decls[0]);
-    assert_eq!(service.raw.entries.len(), 2);
-    match &service.raw.entries[0].value {
+    assert_eq!(service.fields.raw.entries.len(), 2);
+    match &service.fields.raw.entries[0].value {
         hl_parser::RawValue::List(items, _) => {
             assert_eq!(items.len(), 1);
             match &items[0] {
@@ -308,7 +319,7 @@ fn raw_preserves_nested_structure() {
         }
         other => panic!("expected a list value, got {other:?}"),
     }
-    match &service.raw.entries[1].value {
+    match &service.fields.raw.entries[1].value {
         hl_parser::RawValue::Map(entries, _) => {
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].0.text(), "level");
@@ -322,7 +333,7 @@ fn raw_no_uniqueness_check() {
     let program =
         parse_ok("service s {\n  raw {\n    key: \"a\"\n  }\n  raw {\n    key: \"b\"\n  }\n}\n");
     let service = as_service(&program.decls[0]);
-    assert_eq!(service.raw.entries.len(), 2);
+    assert_eq!(service.fields.raw.entries.len(), 2);
 }
 
 // --- reference lists ---
@@ -331,7 +342,12 @@ fn raw_no_uniqueness_check() {
 fn middleware_repeats_accumulate() {
     let program = parse_ok("service s {\n  middleware a\n  middleware b\n}\n");
     let service = as_service(&program.decls[0]);
-    let names: Vec<&str> = service.middleware.iter().map(|r| r.name.as_str()).collect();
+    let names: Vec<&str> = service
+        .fields
+        .middleware
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
     assert_eq!(names, vec!["a", "b"]);
 }
 
@@ -339,7 +355,12 @@ fn middleware_repeats_accumulate() {
 fn depends_on_bracket_list_form() {
     let program = parse_ok("service s {\n  depends_on [a, b]\n}\n");
     let service = as_service(&program.decls[0]);
-    let names: Vec<&str> = service.depends_on.iter().map(|r| r.name.as_str()).collect();
+    let names: Vec<&str> = service
+        .fields
+        .depends_on
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
     assert_eq!(names, vec!["a", "b"]);
 }
 
@@ -347,22 +368,210 @@ fn depends_on_bracket_list_form() {
 fn networks_comma_sugar_form() {
     let program = parse_ok("service s {\n  networks a, b\n}\n");
     let service = as_service(&program.decls[0]);
-    let names: Vec<&str> = service.networks.iter().map(|r| r.name.as_str()).collect();
+    let names: Vec<&str> = service
+        .fields
+        .networks
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
     assert_eq!(names, vec!["a", "b"]);
+}
+
+// --- template declarations ---
+
+#[test]
+fn template_decl_with_body_parses() {
+    let program = parse_ok("template t {\n  image \"x\"\n}\n");
+    let template = as_template(&program.decls[0]);
+    assert_eq!(template.name.name, "t");
+    assert!(template.params.is_empty());
+    assert_eq!(
+        template
+            .fields
+            .image
+            .as_ref()
+            .unwrap()
+            .reference
+            .as_ref()
+            .unwrap()
+            .text(),
+        "x"
+    );
+}
+
+#[test]
+fn template_decl_empty_parens_same_as_no_parens() {
+    let program = parse_ok("template t() {\n  image \"x\"\n}\n");
+    let template = as_template(&program.decls[0]);
+    assert!(template.params.is_empty());
+}
+
+#[test]
+fn template_decl_with_params() {
+    let program = parse_ok("template t(a, b) {\n  image \"x\"\n}\n");
+    let template = as_template(&program.decls[0]);
+    let names: Vec<&str> = template.params.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["a", "b"]);
+}
+
+#[test]
+fn template_decl_equals_shorthand() {
+    let program = parse_ok("template t = restart unless-stopped\n");
+    let template = as_template(&program.decls[0]);
+    assert_eq!(
+        template
+            .fields
+            .restart
+            .as_ref()
+            .unwrap()
+            .policy
+            .as_ref()
+            .unwrap()
+            .text(),
+        "unless-stopped"
+    );
+    assert!(template.fields.image.is_none());
+}
+
+#[test]
+fn param_list_trailing_comma_is_error() {
+    let err = parse("template t(a,) {\n}\n").unwrap_err();
+    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+}
+
+#[test]
+fn param_list_duplicate_param_is_error() {
+    let err = parse("template t(a, a) {\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::DuplicateTemplateParam { param, .. } if param == "a"
+    ));
+}
+
+#[test]
+fn unknown_field_in_template_body_reports_template_type_name() {
+    let err = parse("template t {\n  bogus: \"x\"\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnknownField { type_name: "template", field, .. } if field == "bogus"
+    ));
+}
+
+#[test]
+fn literal_param_marks_only_matching_bare_idents_inside_own_template() {
+    let program = parse_ok("template t(port) {\n  expose port\n}\n");
+    let template = as_template(&program.decls[0]);
+    let port = template
+        .fields
+        .expose
+        .as_ref()
+        .unwrap()
+        .port
+        .as_ref()
+        .unwrap();
+    assert!(matches!(port, Literal::Param(name, _) if name == "port"));
+}
+
+#[test]
+fn literal_param_does_not_leak_into_unrelated_service() {
+    // A service using the bare identifier "port" (unrelated to any
+    // template's own parameter list) must still produce a plain
+    // `Literal::Ident`, proving the parameter-marking pass never runs
+    // outside a single template's own body.
+    let program = parse_ok("service s {\n  restart port\n}\n");
+    let service = as_service(&program.decls[0]);
+    let policy = service
+        .fields
+        .restart
+        .as_ref()
+        .unwrap()
+        .policy
+        .as_ref()
+        .unwrap();
+    assert!(matches!(policy, Literal::Ident(name, _) if name == "port"));
 }
 
 // --- with ---
 
 #[test]
-fn with_field_inside_service_is_not_yet_supported_error() {
-    let err = parse("service s {\n  with foo\n}\n").unwrap_err();
+fn with_bare_comma_list_with_args_parses() {
+    let program = parse_ok("service s {\n  with internal_web { port: 8384 }, authenticated\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.with.len(), 2);
+    assert_eq!(service.fields.with[0].name.name, "internal_web");
+    assert_eq!(service.fields.with[0].args.entries.len(), 1);
+    assert_eq!(service.fields.with[0].args.entries[0].key.text(), "port");
+    assert_eq!(service.fields.with[1].name.name, "authenticated");
+    assert!(service.fields.with[1].args.entries.is_empty());
+}
+
+#[test]
+fn with_bracket_list_form_parses() {
+    let program = parse_ok("service s {\n  with [a, b { x: 1 }]\n}\n");
+    let service = as_service(&program.decls[0]);
+    let names: Vec<&str> = service
+        .fields
+        .with
+        .iter()
+        .map(|inv| inv.name.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["a", "b"]);
+}
+
+#[test]
+fn with_canonical_struct_form_parses() {
+    let program = parse_ok("service s {\n  with { templates: [a, b] }\n}\n");
+    let service = as_service(&program.decls[0]);
+    let names: Vec<&str> = service
+        .fields
+        .with
+        .iter()
+        .map(|inv| inv.name.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["a", "b"]);
+}
+
+#[test]
+fn with_zero_arg_invocation_has_empty_args() {
+    let program = parse_ok("service s {\n  with authenticated\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.with.len(), 1);
+    assert!(service.fields.with[0].args.entries.is_empty());
+}
+
+#[test]
+fn with_second_occurrence_is_duplicate_field() {
+    let err = parse("service s {\n  with a\n  with b\n}\n").unwrap_err();
     assert!(matches!(
         err,
-        ParseError::TemplatesNotSupported {
-            what: "the `with` field",
+        ParseError::DuplicateField {
+            type_name: "service",
+            field: "with",
             ..
         }
     ));
+}
+
+#[test]
+fn with_does_not_prevent_following_statement_from_parsing() {
+    // Regression test for the syncthing worked example: `with a, b`
+    // followed by `image "..."` on the next line must not swallow
+    // `image` as part of the with-list.
+    let program = parse_ok("service s {\n  with a, b\n  image \"x\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.with.len(), 2);
+    assert_eq!(
+        service
+            .fields
+            .image
+            .as_ref()
+            .unwrap()
+            .reference
+            .as_ref()
+            .unwrap()
+            .text(),
+        "x"
+    );
 }
 
 // --- misc ---
@@ -372,7 +581,7 @@ fn spans_are_retained_on_ast_nodes() {
     let program = parse_ok("service s {\n  image \"x\"\n}\n");
     let service = as_service(&program.decls[0]);
     assert!(service.span.start < service.span.end);
-    let image = service.image.as_ref().unwrap();
+    let image = service.fields.image.as_ref().unwrap();
     assert!(image.span.start < image.span.end);
 }
 

@@ -39,6 +39,12 @@ pub enum FieldKind {
     /// statements — never duplicate-checked, since list fields can't
     /// collide.
     ReferenceList,
+    /// A list of template invocations (`with`'s `templates` field): each
+    /// item is an `IDENT` naming a template, optionally followed by a
+    /// `{ arg: value, ... }` argument body. Parses like [`ReferenceList`]
+    /// (bracketed list, bare comma-list sugar, accumulates, never
+    /// duplicate-checked) except each item can carry an argument body.
+    TemplateInvocationList,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -198,48 +204,79 @@ pub static NETWORK: TypeSchema = TypeSchema {
     schema_free: false,
 };
 
+/// `with template_name { arg: value, ... }, other_template, ...` — a
+/// template-invocation list nested one level under the `with` field
+/// itself, matching docs/DESIGN.md's schema table row for `with`
+/// literally (`struct` kind, primary field `templates`).
+pub static WITH: TypeSchema = TypeSchema {
+    type_name: "with",
+    kind: SchemaKind::Struct,
+    fields: &[FieldSchema {
+        name: "templates",
+        kind: FieldKind::TemplateInvocationList,
+    }],
+    primary_field: Some("templates"),
+    map_separator: None,
+    uniqueness: None,
+    bare_keyword_alias: None,
+    needs_name: false,
+    schema_free: false,
+};
+
+/// The field set shared by a `service` body and a `template` body — per
+/// docs/DESIGN.md, a template is "a named, optionally parameterized
+/// block that produces a *partial* record of fields, meant to be merged
+/// onto a real `service`," so the two bodies accept exactly the same
+/// fields. Factored out once so `SERVICE` and `TEMPLATE` can't drift
+/// apart.
+static SERVICE_FIELDS: &[FieldSchema] = &[
+    FieldSchema {
+        name: "image",
+        kind: FieldKind::Nested(&IMAGE),
+    },
+    FieldSchema {
+        name: "expose",
+        kind: FieldKind::Nested(&EXPOSE),
+    },
+    FieldSchema {
+        name: "restart",
+        kind: FieldKind::Nested(&RESTART),
+    },
+    FieldSchema {
+        name: "volume",
+        kind: FieldKind::Nested(&VOLUME),
+    },
+    FieldSchema {
+        name: "env",
+        kind: FieldKind::Nested(&ENV),
+    },
+    FieldSchema {
+        name: "raw",
+        kind: FieldKind::Nested(&RAW),
+    },
+    FieldSchema {
+        name: "middleware",
+        kind: FieldKind::ReferenceList,
+    },
+    FieldSchema {
+        name: "depends_on",
+        kind: FieldKind::ReferenceList,
+    },
+    FieldSchema {
+        name: "networks",
+        kind: FieldKind::ReferenceList,
+    },
+    FieldSchema {
+        name: "with",
+        kind: FieldKind::Nested(&WITH),
+    },
+];
+
 /// A top-level `service name { ... }` declaration.
 pub static SERVICE: TypeSchema = TypeSchema {
     type_name: "service",
     kind: SchemaKind::Struct,
-    fields: &[
-        FieldSchema {
-            name: "image",
-            kind: FieldKind::Nested(&IMAGE),
-        },
-        FieldSchema {
-            name: "expose",
-            kind: FieldKind::Nested(&EXPOSE),
-        },
-        FieldSchema {
-            name: "restart",
-            kind: FieldKind::Nested(&RESTART),
-        },
-        FieldSchema {
-            name: "volume",
-            kind: FieldKind::Nested(&VOLUME),
-        },
-        FieldSchema {
-            name: "env",
-            kind: FieldKind::Nested(&ENV),
-        },
-        FieldSchema {
-            name: "raw",
-            kind: FieldKind::Nested(&RAW),
-        },
-        FieldSchema {
-            name: "middleware",
-            kind: FieldKind::ReferenceList,
-        },
-        FieldSchema {
-            name: "depends_on",
-            kind: FieldKind::ReferenceList,
-        },
-        FieldSchema {
-            name: "networks",
-            kind: FieldKind::ReferenceList,
-        },
-    ],
+    fields: SERVICE_FIELDS,
     primary_field: None,
     map_separator: None,
     uniqueness: None,
@@ -248,10 +285,25 @@ pub static SERVICE: TypeSchema = TypeSchema {
     schema_free: false,
 };
 
-/// Looks up a top-level declaration's type schema by name. Only
-/// `network` and `service` are supported this milestone — `template` is
-/// handled separately by the parser as a lexical-token check, not via
-/// this table (see [`crate::ParseError::TemplatesNotSupported`]).
+/// A top-level `template name(params) { ... }` declaration. Shares
+/// `SERVICE_FIELDS` with `SERVICE` (see that field's doc), but keeps its
+/// own `type_name` so `UnknownField`/`DuplicateField` errors correctly
+/// say "template" rather than "service".
+pub static TEMPLATE: TypeSchema = TypeSchema {
+    type_name: "template",
+    kind: SchemaKind::Struct,
+    fields: SERVICE_FIELDS,
+    primary_field: None,
+    map_separator: None,
+    uniqueness: None,
+    bare_keyword_alias: None,
+    needs_name: true,
+    schema_free: false,
+};
+
+/// Looks up a top-level declaration's type schema by name. `template` is
+/// handled separately by the parser as a lexical-token check (`template`
+/// is a reserved word, not an ordinary `IDENT`), not via this table.
 pub fn top_level_type(name: &str) -> Option<&'static TypeSchema> {
     match name {
         "network" => Some(&NETWORK),
@@ -265,19 +317,13 @@ pub enum FieldResolution {
     /// The type is schema-free (`raw`) and the key should be accepted as
     /// an arbitrary passthrough entry rather than looked up by name.
     RawPassthrough,
-    /// The key is `with` — a real, spec'd future keyword, not a typo.
-    WithNotSupported,
     Unknown,
 }
 
 /// The single function every field-name lookup in the parser goes
-/// through. This is what keeps the `as`→`host` alias and the
-/// `with`-vs-typo distinction driven by schema data instead of hardcoded
-/// per-type branches in the parser body.
+/// through. This is what keeps the `as`→`host` alias driven by schema
+/// data instead of hardcoded per-type branches in the parser body.
 pub fn resolve_field(schema: &'static TypeSchema, key_text: &str) -> FieldResolution {
-    if key_text == "with" {
-        return FieldResolution::WithNotSupported;
-    }
     if let Some(field) = schema.fields.iter().find(|f| f.name == key_text) {
         return FieldResolution::Field(field);
     }

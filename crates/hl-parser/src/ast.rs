@@ -1,23 +1,19 @@
 use hl_lexer::Span;
 
 /// A parsed hl-lang source file: a sequence of top-level declarations.
-///
-/// Only `network` and `service` declarations are supported this
-/// milestone — `template` declarations are rejected with
-/// [`crate::ParseError::TemplatesNotSupported`] rather than represented
-/// here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub decls: Vec<TopDecl>,
 }
 
-/// One top-level declaration. `Service` is boxed since it's much larger
-/// than `Network` (many optional/list fields) — keeps `TopDecl` itself
-/// small to pass around.
+/// One top-level declaration. `Service`/`TemplateDecl` are boxed since
+/// they're much larger than `Network` (many optional/list fields) — keeps
+/// `TopDecl` itself small to pass around.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TopDecl {
     Network(Network),
     Service(Box<Service>),
+    Template(Box<TemplateDecl>),
 }
 
 /// A literal value as written in source. The kind (string/number/bare
@@ -42,13 +38,24 @@ pub enum Literal {
         span: Span,
     },
     Ident(String, Span),
+    /// A bare identifier inside a `template`'s own body that names one of
+    /// that *same* template's own declared parameters, e.g. `puid` in
+    /// `template linuxserver_app(puid, pgid) { env PUID = puid }`.
+    /// Produced only by a post-parse pass scoped to a single template
+    /// declaration ([`crate::parser`]'s parameter-marking pass) — never
+    /// by ordinary literal parsing, and never present in a plain
+    /// `service`'s own directly-written fields (services aren't
+    /// parameterized). Composition ([`crate::compose`]) substitutes every
+    /// `Param` with the invocation's bound argument value; a `Param`
+    /// surviving composition would be a bug.
+    Param(String, Span),
 }
 
 impl Literal {
     /// The literal's text content, regardless of which kind it is.
     pub fn text(&self) -> &str {
         match self {
-            Literal::Str(s, _) | Literal::Ident(s, _) => s,
+            Literal::Str(s, _) | Literal::Ident(s, _) | Literal::Param(s, _) => s,
             Literal::Number { text, .. } => text,
         }
     }
@@ -56,7 +63,7 @@ impl Literal {
     /// The literal's location in source.
     pub fn span(&self) -> Span {
         match self {
-            Literal::Str(_, span) | Literal::Ident(_, span) => *span,
+            Literal::Str(_, span) | Literal::Ident(_, span) | Literal::Param(_, span) => *span,
             Literal::Number { span, .. } => *span,
         }
     }
@@ -187,15 +194,33 @@ impl RawValue {
     }
 }
 
-/// A parsed `service` declaration.
+/// One entry in a `with`-list: a template name plus its argument body,
+/// e.g. `internal_web { port: 8384 }` or the zero-arg `authenticated`.
+/// `args` reuses [`RawMap`] rather than a dedicated type: argument names
+/// can't be validated against the target template's declared parameters
+/// until composition looks the template up by name in a whole-program
+/// symbol table, so at parse time an invocation's argument body is
+/// exactly as schema-free as `raw`'s — an arbitrary `key: value` bag
+/// whose values may themselves be literals, lists, or nested maps.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateInvocation {
+    pub name: Ident,
+    pub args: RawMap,
+    pub span: Span,
+}
+
+/// The mergeable-fields shape shared by a `service` body and a
+/// `template` body (both accept exactly the same field set — see
+/// [`TemplateDecl`]'s doc). Factored out so composition's merge
+/// operation ("merge N field-bags in priority order") has one signature
+/// usable both to resolve a template's own `with`-list and a service's.
 ///
 /// Note: this milestone does not enforce "required" fields (e.g. that a
 /// service has an `image`) — that's a semantic/codegen concern, not a
 /// syntax one. The parser only enforces "known fields, correct kinds, no
 /// illegal duplicates."
-#[derive(Debug, Clone, PartialEq)]
-pub struct Service {
-    pub name: Ident,
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ServiceFields {
     pub image: Option<Image>,
     pub expose: Option<Expose>,
     pub restart: Option<Restart>,
@@ -205,5 +230,32 @@ pub struct Service {
     pub middleware: Vec<Reference>,
     pub depends_on: Vec<Reference>,
     pub networks: Vec<Reference>,
+    /// Unresolved template invocations pulled in via `with`. Always
+    /// empty after [`crate::compose::compose`] runs — composition's job
+    /// is precisely to merge each of these away.
+    pub with: Vec<TemplateInvocation>,
+}
+
+/// A parsed `service` declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Service {
+    pub name: Ident,
+    pub fields: ServiceFields,
+    pub span: Span,
+}
+
+/// A parsed `template` declaration: a named, optionally parameterized
+/// block producing a *partial* [`ServiceFields`] record, meant to be
+/// merged onto a real `service` (or another template) via `with`. A
+/// template's body accepts exactly the same fields as a `service` body —
+/// see docs/DESIGN.md's Composition section.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateDecl {
+    pub name: Ident,
+    /// Declared parameter names, in source order. Empty for a
+    /// zero-parameter template (`template foo { ... }` or
+    /// `template foo() { ... }` — both parse to the same empty `Vec`).
+    pub params: Vec<Ident>,
+    pub fields: ServiceFields,
     pub span: Span,
 }

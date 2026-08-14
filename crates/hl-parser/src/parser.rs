@@ -4,7 +4,8 @@ use hl_lexer::{Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
     EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Program, RawEntry, RawMap, RawValue,
-    Reference, Restart, Service, TopDecl, VolumeEntry, VolumeMap,
+    Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl,
+    VolumeEntry, VolumeMap,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -32,6 +33,8 @@ enum FieldValue {
     Raw(RawMap),
     /// An accumulating reference-list field (middleware/depends_on/networks).
     RefList(Vec<Reference>),
+    /// An accumulating template-invocation-list field (`with`'s `templates`).
+    TemplateInvocations(Vec<TemplateInvocation>),
 }
 
 impl FieldValue {
@@ -44,7 +47,10 @@ impl FieldValue {
             FieldValue::Scalar(lit) => lit.span(),
             FieldValue::Flag(span) => *span,
             FieldValue::Struct(_, span) => *span,
-            FieldValue::LiteralMap(_) | FieldValue::Raw(_) | FieldValue::RefList(_) => {
+            FieldValue::LiteralMap(_)
+            | FieldValue::Raw(_)
+            | FieldValue::RefList(_)
+            | FieldValue::TemplateInvocations(_) => {
                 unreachable!("map/list-kind fields accumulate and are never duplicate-checked")
             }
         }
@@ -204,6 +210,86 @@ impl<'src> Parser<'src> {
         }
     }
 
+    // ---- template invocations (`with`'s `templates` field) ----
+
+    /// `IDENT ( "{" raw_entry* "}" )?` — one `with`-list item. A
+    /// zero-arg invocation (`authenticated`) needs no `{ }`; its `args`
+    /// is an empty [`RawMap`]. The name must be a plain `IDENT` (not the
+    /// more general `parse_key`, which also accepts `STRING`) — a
+    /// `template_decl` can only ever be named by an `IDENT`, so a string
+    /// here could never resolve to a real template.
+    fn parse_template_invocation(&mut self) -> Result<TemplateInvocation, ParseError> {
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let name = Ident {
+            name: name_tok.lexeme.to_string(),
+            span: name_tok.span,
+        };
+        let mut end = name.span.end;
+        let args = if self.peek().kind == TokenKind::LBrace {
+            let raw = self.parse_raw_body()?;
+            end = self.tokens[self.pos.saturating_sub(1)].span.end;
+            raw
+        } else {
+            RawMap::default()
+        };
+        let span = Span {
+            start: name.span.start,
+            end,
+            line: name.span.line,
+            col: name.span.col,
+        };
+        Ok(TemplateInvocation { name, args, span })
+    }
+
+    fn parse_bare_template_invocation_list(
+        &mut self,
+    ) -> Result<Vec<TemplateInvocation>, ParseError> {
+        let mut invs = vec![self.parse_template_invocation()?];
+        while self.peek().kind == TokenKind::Comma {
+            self.bump();
+            invs.push(self.parse_template_invocation()?);
+        }
+        Ok(invs)
+    }
+
+    fn parse_bracket_template_invocation_list(
+        &mut self,
+    ) -> Result<Vec<TemplateInvocation>, ParseError> {
+        self.expect(TokenKind::LBracket)?;
+        let mut invs = Vec::new();
+        if self.peek().kind != TokenKind::RBracket {
+            loop {
+                invs.push(self.parse_template_invocation()?);
+                if self.peek().kind == TokenKind::Comma {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RBracket)?;
+        Ok(invs)
+    }
+
+    /// Mirrors [`Self::parse_reference_list_value`]: an optional leading
+    /// `:`, then either a bracketed list or the bare comma-list sugar.
+    fn parse_template_invocation_list_value(
+        &mut self,
+    ) -> Result<Vec<TemplateInvocation>, ParseError> {
+        if self.peek().kind == TokenKind::Colon {
+            self.bump();
+        }
+        if self.peek().kind == TokenKind::LBracket {
+            self.parse_bracket_template_invocation_list()
+        } else if self.peek().kind == TokenKind::Ident {
+            self.parse_bare_template_invocation_list()
+        } else {
+            Err(self.unexpected(Expected::Description(
+                "a template invocation or a list of template invocations",
+            )))
+        }
+    }
+
     // ---- struct-kind bodies (network/service/image/expose/restart) ----
 
     fn parse_struct_body(
@@ -214,6 +300,15 @@ impl<'src> Parser<'src> {
         let mut fields = StructFields::new();
         while self.peek().kind != TokenKind::RBrace {
             self.parse_statement_into(schema, &mut fields)?;
+            // Per docs/DESIGN.md: "a trailing comma continues a
+            // comma-list, its absence unambiguously ends the current
+            // statement" — a body's statements need no separator, but an
+            // optional comma between them is tolerated too (e.g. a
+            // `with`-invocation's argument body: `{ puid: 1000, pgid:
+            // 100 }`).
+            if self.peek().kind == TokenKind::Comma {
+                self.bump();
+            }
         }
         let close = self.expect(TokenKind::RBrace)?;
         let span = Span {
@@ -233,6 +328,13 @@ impl<'src> Parser<'src> {
     /// as part of this nested value if the nested schema actually
     /// resolves it to a real field/alias — otherwise stop and let the
     /// enclosing body parse it as its own next statement.
+    ///
+    /// The primary field is usually `Scalar` (one literal), but
+    /// docs/DESIGN.md's desugaring rule 1 also anticipates a list-typed
+    /// primary field ("a comma-list, if the primary field is
+    /// list-typed") — `with`'s `templates` field is the one built-in
+    /// case, so this dispatches on the primary field's own [`FieldKind`]
+    /// rather than assuming `Scalar`.
     fn parse_struct_primary_shorthand(
         &mut self,
         nested: &'static TypeSchema,
@@ -240,10 +342,31 @@ impl<'src> Parser<'src> {
         let primary_name = nested
             .primary_field
             .expect("nested struct types used via bare shorthand must declare a primary field");
+        let primary_field = nested
+            .fields
+            .iter()
+            .find(|f| f.name == primary_name)
+            .expect("primary_field must name a real field in the type's own field list");
         let mut fields = StructFields::new();
-        let first_value = self.parse_literal()?;
-        let start_span = first_value.span();
-        fields.insert(primary_name, FieldValue::Scalar(first_value));
+
+        let start_span = match primary_field.kind {
+            FieldKind::TemplateInvocationList => {
+                let list_start = self.peek().span;
+                let invs = if self.peek().kind == TokenKind::LBracket {
+                    self.parse_bracket_template_invocation_list()?
+                } else {
+                    self.parse_bare_template_invocation_list()?
+                };
+                fields.insert(primary_name, FieldValue::TemplateInvocations(invs));
+                list_start
+            }
+            _ => {
+                let first_value = self.parse_literal()?;
+                let span = first_value.span();
+                fields.insert(primary_name, FieldValue::Scalar(first_value));
+                span
+            }
+        };
 
         loop {
             let continues = match self.peek().kind {
@@ -279,12 +402,6 @@ impl<'src> Parser<'src> {
         let key_span = key.span();
 
         let field = match schema::resolve_field(schema, &key_text) {
-            FieldResolution::WithNotSupported => {
-                return Err(ParseError::TemplatesNotSupported {
-                    what: "the `with` field",
-                    span: key_span,
-                });
-            }
             FieldResolution::Unknown => {
                 return Err(ParseError::UnknownField {
                     type_name: schema.type_name,
@@ -325,6 +442,17 @@ impl<'src> Parser<'src> {
                     .or_insert_with(|| FieldValue::RefList(Vec::new()))
                 {
                     FieldValue::RefList(v) => v.extend(refs),
+                    _ => unreachable!("field kind is stable for a given field name"),
+                }
+                Ok(())
+            }
+            FieldKind::TemplateInvocationList => {
+                let invs = self.parse_template_invocation_list_value()?;
+                match fields
+                    .entry(field.name)
+                    .or_insert_with(|| FieldValue::TemplateInvocations(Vec::new()))
+                {
+                    FieldValue::TemplateInvocations(v) => v.extend(invs),
                     _ => unreachable!("field kind is stable for a given field name"),
                 }
                 Ok(())
@@ -467,6 +595,14 @@ impl<'src> Parser<'src> {
         let mut entries = Vec::new();
         while self.peek().kind != TokenKind::RBrace {
             entries.push(self.parse_raw_entry()?);
+            // See the matching comment in `parse_struct_body`: an
+            // optional trailing comma between entries is tolerated (a
+            // `with`-invocation's argument body reuses this parser, and
+            // docs/DESIGN.md's worked example writes its multi-argument
+            // bodies comma-separated: `{ puid: 1000, pgid: 100 }`).
+            if self.peek().kind == TokenKind::Comma {
+                self.bump();
+            }
         }
         self.expect(TokenKind::RBrace)?;
         Ok(RawMap { entries })
@@ -525,6 +661,9 @@ impl<'src> Parser<'src> {
                     self.expect(TokenKind::Colon)?;
                     let value = self.parse_raw_value()?;
                     entries.push((key, value));
+                    if self.peek().kind == TokenKind::Comma {
+                        self.bump();
+                    }
                 }
                 let close = self.expect(TokenKind::RBrace)?;
                 let span = Span {
@@ -551,11 +690,7 @@ impl<'src> Parser<'src> {
 
     fn parse_top_decl(&mut self) -> Result<TopDecl, ParseError> {
         if self.peek().kind == TokenKind::Template {
-            let span = self.peek().span;
-            return Err(ParseError::TemplatesNotSupported {
-                what: "template declaration",
-                span,
-            });
+            return Ok(TopDecl::Template(Box::new(self.parse_template_decl()?)));
         }
 
         let type_tok = self.expect(TokenKind::Ident)?;
@@ -587,6 +722,89 @@ impl<'src> Parser<'src> {
             )))),
             _ => unreachable!("top_level_type only ever returns the network/service schemas"),
         }
+    }
+
+    /// `template_decl ::= "template" IDENT param_list? ( body | "=" statement )`.
+    fn parse_template_decl(&mut self) -> Result<TemplateDecl, ParseError> {
+        let template_tok = self.expect(TokenKind::Template)?;
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let name = Ident {
+            name: name_tok.lexeme.to_string(),
+            span: name_tok.span,
+        };
+
+        let params = if self.peek().kind == TokenKind::LParen {
+            self.parse_param_list()?
+        } else {
+            Vec::new()
+        };
+
+        let (fields_map, body_span) = if self.peek().kind == TokenKind::Equals {
+            self.bump();
+            let mut fields = StructFields::new();
+            let stmt_start = self.peek().span;
+            self.parse_statement_into(&schema::TEMPLATE, &mut fields)?;
+            let end = self.tokens[self.pos.saturating_sub(1)].span.end;
+            (
+                fields,
+                Span {
+                    start: stmt_start.start,
+                    end,
+                    line: stmt_start.line,
+                    col: stmt_start.col,
+                },
+            )
+        } else if self.peek().kind == TokenKind::LBrace {
+            self.parse_struct_body(&schema::TEMPLATE)?
+        } else {
+            return Err(self.unexpected(Expected::Description("`{` or `=`")));
+        };
+
+        let span = Span {
+            start: template_tok.span.start,
+            end: body_span.end,
+            line: template_tok.span.line,
+            col: template_tok.span.col,
+        };
+
+        let mut decl = TemplateDecl {
+            name,
+            params,
+            fields: lower_service_fields(fields_map),
+            span,
+        };
+        mark_template_params(&mut decl.fields, &decl.params);
+        Ok(decl)
+    }
+
+    /// `param_list ::= "(" ( IDENT ( "," IDENT )* )? ")"`.
+    fn parse_param_list(&mut self) -> Result<Vec<Ident>, ParseError> {
+        self.expect(TokenKind::LParen)?;
+        let mut params: Vec<Ident> = Vec::new();
+        if self.peek().kind != TokenKind::RParen {
+            loop {
+                let tok = self.expect(TokenKind::Ident)?;
+                let param = Ident {
+                    name: tok.lexeme.to_string(),
+                    span: tok.span,
+                };
+                if let Some(existing) = params.iter().find(|p| p.name == param.name) {
+                    return Err(ParseError::DuplicateTemplateParam {
+                        param: param.name,
+                        first: existing.span,
+                        second: param.span,
+                    });
+                }
+                params.push(param);
+                if self.peek().kind == TokenKind::Comma {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        Ok(params)
     }
 }
 
@@ -645,7 +863,10 @@ fn lower_network(name: Ident, mut fields: StructFields, span: Span) -> Network {
     }
 }
 
-fn lower_service(name: Ident, mut fields: StructFields, span: Span) -> Service {
+/// Lowers a raw `StructFields` map into a [`ServiceFields`] — shared by
+/// both `lower_service` and `parse_template_decl`, since a `service` body
+/// and a `template` body accept exactly the same field set.
+fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
     let image = match fields.remove("image") {
         Some(FieldValue::Struct(f, s)) => Some(lower_image(f, s)),
         _ => None,
@@ -696,8 +917,14 @@ fn lower_service(name: Ident, mut fields: StructFields, span: Span) -> Service {
         Some(FieldValue::RefList(v)) => v,
         _ => Vec::new(),
     };
-    Service {
-        name,
+    let with = match fields.remove("with") {
+        Some(FieldValue::Struct(mut with_fields, _)) => match with_fields.remove("templates") {
+            Some(FieldValue::TemplateInvocations(v)) => v,
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    ServiceFields {
         image,
         expose,
         restart,
@@ -707,7 +934,85 @@ fn lower_service(name: Ident, mut fields: StructFields, span: Span) -> Service {
         middleware,
         depends_on,
         networks,
+        with,
+    }
+}
+
+fn lower_service(name: Ident, fields: StructFields, span: Span) -> Service {
+    Service {
+        name,
+        fields: lower_service_fields(fields),
         span,
+    }
+}
+
+/// Rewrites every bare-identifier [`Literal`] in `fields` whose text
+/// matches one of `params` into [`Literal::Param`] — see that variant's
+/// doc for why this is scoped to a single template's own body. Recurses
+/// into `fields.with[].args` (nested `with`-invocation argument bodies)
+/// so parameter-forwarding through `with X { y: outer_param }` is
+/// captured too.
+fn mark_template_params(fields: &mut ServiceFields, params: &[Ident]) {
+    let is_param = |text: &str| params.iter().any(|p| p.name == text);
+    if let Some(img) = &mut fields.image
+        && let Some(r) = &mut img.reference
+    {
+        mark_literal(r, &is_param);
+    }
+    if let Some(e) = &mut fields.expose {
+        if let Some(p) = &mut e.port {
+            mark_literal(p, &is_param);
+        }
+        if let Some(h) = &mut e.host {
+            mark_literal(h, &is_param);
+        }
+    }
+    if let Some(r) = &mut fields.restart
+        && let Some(p) = &mut r.policy
+    {
+        mark_literal(p, &is_param);
+    }
+    for v in &mut fields.volumes.entries {
+        mark_literal(&mut v.host, &is_param);
+        mark_literal(&mut v.container, &is_param);
+    }
+    for e in &mut fields.env.entries {
+        mark_literal(&mut e.key, &is_param);
+        mark_literal(&mut e.value, &is_param);
+    }
+    for entry in &mut fields.raw.entries {
+        mark_literal(&mut entry.key, &is_param);
+        mark_raw_value(&mut entry.value, &is_param);
+    }
+    for inv in &mut fields.with {
+        for entry in &mut inv.args.entries {
+            mark_literal(&mut entry.key, &is_param);
+            mark_raw_value(&mut entry.value, &is_param);
+        }
+    }
+}
+
+fn mark_literal(lit: &mut Literal, is_param: &impl Fn(&str) -> bool) {
+    if let Literal::Ident(text, span) = lit
+        && is_param(text)
+    {
+        *lit = Literal::Param(std::mem::take(text), *span);
+    }
+}
+
+fn mark_raw_value(value: &mut RawValue, is_param: &impl Fn(&str) -> bool) {
+    match value {
+        RawValue::Literal(lit) => mark_literal(lit, is_param),
+        RawValue::List(items, _) => {
+            for item in items {
+                mark_raw_value(item, is_param);
+            }
+        }
+        RawValue::Map(entries, _) => {
+            for (_, v) in entries {
+                mark_raw_value(v, is_param);
+            }
+        }
     }
 }
 
