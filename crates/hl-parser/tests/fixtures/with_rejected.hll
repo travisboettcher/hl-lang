@@ -1,0 +1,8 @@
+# Isolates the `with`-as-a-field error from the top-level `template`-token
+# error: this file has no `template` declaration at all, so parsing must
+# fail specifically on encountering `with` inside the service body.
+
+service syncthing {
+  with internal_web { port: 8384 }, authenticated
+  image "lscr.io/linuxserver/syncthing:latest"
+}

@@ -213,15 +213,19 @@ service syncthing {
    `(`/`)`, `,`, and `#` line comments. Everything else is just an
    identifier to the lexer; meaning comes from the schema table during
    parsing.
-2. **Parser** (not yet implemented) — one generic block parser, not one
-   function per keyword: parse `<type> [<n>]`, then either a bare-value/list
-   (primary-field shorthand) or a `{ field: value, ... }` body, recursing
-   into nested blocks. A schema table drives both parsing and validation.
-   `template` declarations are the one bespoke production, adding a new row
-   to that table at parse time.
+2. **Parser** (implemented, `crates/hl-parser`) — one generic block parser,
+   not one function per keyword: parse `<type> [<n>]`, then either a
+   bare-value/list (primary-field shorthand) or a `{ field: value, ... }`
+   body, recursing into nested blocks. A schema table drives both parsing
+   and validation. **Scope note:** this milestone covers only the built-in
+   types (`network`, `service`, `image`, `expose`, `volume`, `env`,
+   `restart`, `raw`); `template` declarations and the `with` field are
+   rejected with a clear "not yet supported" parse error rather than
+   parsed — template/`with` composition is a fast-follow milestone.
 3. **AST → codegen** (not yet implemented) — walk the AST, emit two
    artifacts per service: a Compose service block, and Traefik labels
    (router rule, entrypoint, TLS resolver).
-4. **CLI** (`crates/hl-cli`) — currently a lexer-only stub that prints a
-   file's token stream; will grow into `hl-cli build up.hll` /
-   `hl-cli build ./services/` once codegen exists.
+4. **CLI** (`crates/hl-cli`) — `hl-cli <file.hll>` lexes and prints tokens;
+   `hl-cli --parse <file.hll>` parses and pretty-prints the AST. Will grow
+   into `hl-cli build up.hll` / `hl-cli build ./services/` once codegen
+   exists.

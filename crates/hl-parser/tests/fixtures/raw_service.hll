@@ -1,0 +1,11 @@
+# A service leaning on `raw` for fields the compiler has no opinion
+# about, per docs/DESIGN.md's `raw` passthrough example.
+
+service cadvisor {
+  image "gcr.io/cadvisor/cadvisor:latest"
+  raw {
+    privileged: true
+    devices: ["/dev/kmsg"]
+    security_opt: { seccomp: "unconfined" }
+  }
+}

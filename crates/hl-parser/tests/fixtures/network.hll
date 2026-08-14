@@ -1,0 +1,8 @@
+# A network declared external (referencing something Docker already
+# manages, e.g. the shared reverse-proxy network) and one that isn't.
+
+network traefik-net {
+  external
+}
+
+network internal {}

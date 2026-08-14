@@ -110,11 +110,19 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "hl-lexer",
+ "hl-parser",
 ]
 
 [[package]]
 name = "hl-lexer"
 version = "0.1.0"
+
+[[package]]
+name = "hl-parser"
+version = "0.1.0"
+dependencies = [
+ "hl-lexer",
+]
 
 [[package]]
 name = "is_terminal_polyfill"
