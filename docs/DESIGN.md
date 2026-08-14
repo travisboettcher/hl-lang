@@ -186,7 +186,7 @@ Templates composed onto a service with `with`:
 template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
-  expose port as "{{name}}.internal.techdebtor.io"
+  expose port as "{{name}}.internal.techdebtor.io" entrypoint: "web-secure"
   middleware local-ipwhitelist
 }
 
