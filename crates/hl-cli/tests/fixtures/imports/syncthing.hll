@@ -1,0 +1,14 @@
+# Same service as hl-parser's tests/fixtures/syncthing.hll, split across
+# network.hll/templates.hll/syncthing.hll — proves the split-and-linked
+# version produces identical Compose output to the original one-file
+# version. syncthing.hll never itself `use`s network.hll directly (only
+# templates.hll does); it only reaches `traefik-net` indirectly through
+# the templates it invokes.
+
+use "templates.hll" as common
+
+service syncthing {
+  with common.internal_web { port: 8384 }, common.authenticated, common.linuxserver_app { puid: 1000, pgid: 100 }
+  image "lscr.io/linuxserver/syncthing:latest"
+  volume "syncthing-config" -> "/config"
+}

@@ -12,6 +12,10 @@ use hl_cli::{Cli, run};
 
 const SYNCTHING_HLL: &str = include_str!("../../hl-parser/tests/fixtures/syncthing.hll");
 
+const IMPORTS_NETWORK_HLL: &str = include_str!("fixtures/imports/network.hll");
+const IMPORTS_TEMPLATES_HLL: &str = include_str!("fixtures/imports/templates.hll");
+const IMPORTS_SYNCTHING_HLL: &str = include_str!("fixtures/imports/syncthing.hll");
+
 /// A scratch directory under the target dir, unique per test process, so
 /// parallel test runs don't collide — avoids adding a `tempfile`
 /// dev-dependency for what's otherwise a one-off need.
@@ -81,6 +85,54 @@ fn build_directory_writes_one_file_per_hll_input() {
     );
 
     fs::remove_dir_all(&dir).ok();
+}
+
+/// `crates/hl-cli/tests/fixtures/imports/` splits the same service
+/// `SYNCTHING_HLL` declares into `network.hll` + `templates.hll` +
+/// `syncthing.hll`, connected by real `use` decls. Building the split
+/// version through a real on-disk `use` graph (not `hl-linker`'s own
+/// `InMemoryLoader`-backed unit tests) should produce byte-identical
+/// output to building the original one-file version.
+#[test]
+fn build_directory_of_hll_files_with_use_imports_between_them() {
+    let dir = scratch_dir("imports");
+    fs::write(dir.join("network.hll"), IMPORTS_NETWORK_HLL).unwrap();
+    fs::write(dir.join("templates.hll"), IMPORTS_TEMPLATES_HLL).unwrap();
+    let input = dir.join("syncthing.hll");
+    fs::write(&input, IMPORTS_SYNCTHING_HLL).unwrap();
+    let out = dir.join("docker-compose.yml");
+
+    let code = run(Cli {
+        file: input,
+        parse: false,
+        build: true,
+        out: Some(out.clone()),
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let imported_yaml = fs::read_to_string(&out).unwrap();
+
+    let single_file_dir = scratch_dir("imports-baseline");
+    let single_file_input = single_file_dir.join("syncthing.hll");
+    fs::write(&single_file_input, SYNCTHING_HLL).unwrap();
+    let single_file_out = single_file_dir.join("docker-compose.yml");
+    let code = run(Cli {
+        file: single_file_input,
+        parse: false,
+        build: true,
+        out: Some(single_file_out.clone()),
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+    let baseline_yaml = fs::read_to_string(&single_file_out).unwrap();
+
+    assert_eq!(
+        imported_yaml, baseline_yaml,
+        "splitting syncthing.hll across network.hll/templates.hll/syncthing.hll \
+         should produce identical Compose output to the original one-file version"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&single_file_dir).ok();
 }
 
 #[test]
