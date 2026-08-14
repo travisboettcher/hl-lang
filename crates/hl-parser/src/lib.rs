@@ -41,10 +41,12 @@ pub mod schema;
 
 pub use ast::{
     EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Program, RawEntry, RawMap, RawValue,
-    Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl,
+    Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, UseDecl,
     VolumeEntry, VolumeMap,
 };
-pub use compose::{ComposeError, ComposedProgram, compose};
+pub use compose::{
+    ComposeError, ComposedProgram, MapKeyCollision, SymbolResolver, compose, compose_with_resolver,
+};
 pub use error::{Expected, ParseError};
 pub use hl_lexer::Span;
 pub use parser::parse;

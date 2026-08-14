@@ -82,15 +82,19 @@ fn number_leading_zeros() {
 }
 
 #[test]
-fn number_immediately_followed_by_dot_errors() {
-    // No float support: '8096' is a complete Number, then '.' is its own
-    // unexpected-character error on the next call.
-    let mut lexer = Lexer::new("8096.5");
-    let first = lexer.next_token().unwrap();
-    assert_eq!(first.kind, TokenKind::Number);
-    assert_eq!(first.lexeme, "8096");
-    let err = lexer.next_token().unwrap_err();
-    assert!(matches!(err, LexError::UnexpectedChar { ch: '.', .. }));
+fn number_immediately_followed_by_dot_is_not_a_float() {
+    // No float support: '8096' is a complete Number, '.' is its own Dot
+    // token (used for qualified references, not decimals), and '5' is a
+    // second, separate Number — never one float literal.
+    assert_eq!(
+        kinds("8096.5"),
+        vec![
+            TokenKind::Number,
+            TokenKind::Dot,
+            TokenKind::Number,
+            TokenKind::Eof
+        ]
+    );
 }
 
 // --- strings ---
@@ -151,9 +155,44 @@ fn string_cannot_contain_literal_quote() {
 fn all_punctuation_sequence() {
     use TokenKind::*;
     let expected = vec![
-        LBrace, RBrace, LBracket, RBracket, LParen, RParen, Colon, Equals, Arrow, Comma, Eof,
+        LBrace, RBrace, LBracket, RBracket, LParen, RParen, Colon, Equals, Arrow, Comma, Dot, Eof,
     ];
-    assert_eq!(kinds("{ } [ ] ( ) : = -> ,"), expected);
+    assert_eq!(kinds("{ } [ ] ( ) : = -> , ."), expected);
+}
+
+#[test]
+fn dot_token() {
+    let tok = single_token(".");
+    assert_eq!(tok.kind, TokenKind::Dot);
+    assert_eq!(tok.lexeme, ".");
+}
+
+#[test]
+fn qualified_reference_tokenizes_as_ident_dot_ident() {
+    assert_eq!(
+        kinds("traefik.traefik-net"),
+        vec![
+            TokenKind::Ident,
+            TokenKind::Dot,
+            TokenKind::Ident,
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn dot_does_not_interact_with_number_scanning() {
+    // NUMBER is integer-only (no decimal point) — a `.` next to digits
+    // is just an ordinary Dot token, not part of the number.
+    assert_eq!(
+        kinds("1.5"),
+        vec![
+            TokenKind::Number,
+            TokenKind::Dot,
+            TokenKind::Number,
+            TokenKind::Eof
+        ]
+    );
 }
 
 #[test]
@@ -265,15 +304,6 @@ fn unexpected_char_errors() {
             other => panic!("expected UnexpectedChar for {ch:?}, got {other:?}"),
         }
     }
-}
-
-#[test]
-fn unexpected_char_dot() {
-    let mut lexer = Lexer::new(".");
-    assert!(matches!(
-        lexer.next_token(),
-        Err(LexError::UnexpectedChar { ch: '.', .. })
-    ));
 }
 
 // --- spans ---

@@ -14,6 +14,23 @@ pub enum TopDecl {
     Network(Network),
     Service(Box<Service>),
     Template(Box<TemplateDecl>),
+    Use(UseDecl),
+}
+
+/// `use "path/to/file.hll" as alias` — imports another file's top-level
+/// `network`/`template` declarations under a local alias, referenced
+/// elsewhere as `alias.name` (see [`Reference::qualifier`] and
+/// [`TemplateInvocation::qualifier`]). Purely syntactic: `parse()` never
+/// touches the filesystem or validates that `path` resolves to anything
+/// real — resolving the path and loading the target file is a later
+/// stage's job.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UseDecl {
+    /// Always `Literal::Str` once parsed — `use`'s path must be a quoted
+    /// string, since `IDENT`'s grammar can't represent `.`/`/` at all.
+    pub path: Literal,
+    pub alias: Ident,
+    pub span: Span,
 }
 
 /// A literal value as written in source. The kind (string/number/bare
@@ -75,7 +92,15 @@ impl Literal {
 /// milestone).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reference {
+    /// The `alias` in `alias.name`, from a `use`-imported file; `None`
+    /// for a bare, same-file reference — the overwhelmingly common case,
+    /// and the only kind that existed before imports.
+    pub qualifier: Option<Ident>,
     pub name: String,
+    /// The span of just the trailing `name` segment (after the `.`, if
+    /// any). `span` below covers the whole reference including the
+    /// qualifier.
+    pub name_span: Span,
     pub span: Span,
 }
 
@@ -216,6 +241,9 @@ impl RawValue {
 /// whose values may themselves be literals, lists, or nested maps.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TemplateInvocation {
+    /// The `alias` in `with alias.name { ... }`, from a `use`-imported
+    /// file; `None` for a bare, same-file template name.
+    pub qualifier: Option<Ident>,
     pub name: Ident,
     pub args: RawMap,
     pub span: Span,
