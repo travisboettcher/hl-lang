@@ -1,5 +1,7 @@
 # hl-lang
 
+[![CI](https://github.com/travisboettcher/hl-lang/actions/workflows/ci.yml/badge.svg)](https://github.com/travisboettcher/hl-lang/actions/workflows/ci.yml)
+
 `hl-lang` is a small declarative DSL that transpiles to Docker Compose YAML
 plus Traefik labels, so that standing up a new homelab service doesn't mean
 rewriting a near-identical Compose block + label set every time. It's a
