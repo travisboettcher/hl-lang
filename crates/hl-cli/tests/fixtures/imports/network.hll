@@ -1,0 +1,6 @@
+# The shared Traefik network, imported by templates.hll.
+
+network traefik-net {
+  external
+  name: "docker_default"
+}

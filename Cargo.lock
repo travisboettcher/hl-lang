@@ -123,6 +123,7 @@ dependencies = [
  "clap",
  "hl-codegen",
  "hl-lexer",
+ "hl-linker",
  "hl-parser",
  "serde_yaml",
 ]

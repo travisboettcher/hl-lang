@@ -7,6 +7,7 @@ edition = "2024"
 hl-lexer = { path = "../hl-lexer" }
 hl-parser = { path = "../hl-parser" }
 hl-codegen = { path = "../hl-codegen" }
+hl-linker = { path = "../hl-linker" }
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]

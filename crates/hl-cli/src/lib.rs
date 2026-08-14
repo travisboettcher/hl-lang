@@ -170,22 +170,25 @@ fn run_build(path: &Path, out: Option<&Path>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Parses, composes, and generates Compose YAML for one `.hll` file.
+/// Loads `path`'s whole `use` graph and generates Compose YAML for it.
+///
+/// Errors are printed bare (`eprintln!("{err}")`), not wrapped with
+/// `path`'s own display like every other error site in this file:
+/// `hl_linker::LinkError`'s `Io`/`Parse`/`DuplicateAlias` variants
+/// already self-prefix with *their own* correct path, which may be an
+/// imported file rather than `path` itself, and both `LinkError::Compose`
+/// and `hl_codegen::CodegenError` only ever carry a `{line}:{col}`
+/// location with no file — accurate for a single file, but a composed
+/// service's fields can now originate from any file in the graph, so
+/// guessing `path` here would misattribute an error that actually came
+/// from an imported template.
 fn build_yaml(path: &Path) -> Result<String, ExitCode> {
-    let source = fs::read_to_string(path).map_err(|err| {
-        eprintln!("{}: {err}", path.display());
-        ExitCode::FAILURE
-    })?;
-    let program = hl_parser::parse(&source).map_err(|err| {
-        eprintln!("{}: {err}", path.display());
-        ExitCode::FAILURE
-    })?;
-    let composed = hl_parser::compose(program).map_err(|err| {
-        eprintln!("{}: {err}", path.display());
+    let composed = hl_linker::link(path, &hl_linker::FsLoader).map_err(|err| {
+        eprintln!("{err}");
         ExitCode::FAILURE
     })?;
     let generated = hl_codegen::generate(composed).map_err(|err| {
-        eprintln!("{}: {err}", path.display());
+        eprintln!("{err}");
         ExitCode::FAILURE
     })?;
     Ok(generated.yaml)
