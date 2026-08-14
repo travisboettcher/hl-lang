@@ -10,12 +10,16 @@ use std::process::ExitCode;
 use clap::Parser;
 use hl_lexer::Lexer;
 
-/// Lex an hl-lang (`.hll`) source file and print its token stream.
+/// Lex (or, with `--parse`, parse) an hl-lang (`.hll`) source file and
+/// print the result.
 #[derive(Debug, Parser)]
 #[command(name = "hl-cli", version, about)]
 pub struct Cli {
-    /// Path to an .hll source file to lex.
+    /// Path to an .hll source file.
     pub file: PathBuf,
+    /// Parse the file and pretty-print its AST instead of just lexing.
+    #[arg(long)]
+    pub parse: bool,
 }
 
 /// Runs the CLI for an already-parsed [`Cli`] invocation.
@@ -29,6 +33,19 @@ pub fn run(cli: Cli) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    if cli.parse {
+        return match hl_parser::parse(&source) {
+            Ok(program) => {
+                println!("{program:#?}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("{}: {err}", path.display());
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     for result in Lexer::new(&source) {
         match result {

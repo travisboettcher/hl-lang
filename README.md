@@ -14,9 +14,12 @@ and worked examples.
 
 ## Status
 
-**Lexer milestone only.** The lexer (`crates/hl-lexer`) and a thin CLI stub
-that prints its token stream (`crates/hl-cli`) exist; the parser, AST, and
-codegen stages described in the design doc are not implemented yet.
+**Lexer + parser (built-in types only).** The lexer (`crates/hl-lexer`) and
+parser (`crates/hl-parser`) are implemented, plus a CLI (`crates/hl-cli`)
+that can lex or parse a file. The parser covers `network`, `service`,
+`image`, `expose`, `volume`, `env`, `restart`, and `raw` — `template`/`with`
+composition is a fast-follow milestone, not implemented yet. AST → codegen
+is also not implemented yet.
 
 ## Layout
 
@@ -24,7 +27,8 @@ codegen stages described in the design doc are not implemented yet.
 hl-lang/
   crates/
     hl-lexer/   # the lexer: source text -> Token stream
-    hl-cli/     # `hl-cli <file.hll>` — lexes a file and prints its tokens
+    hl-parser/  # the parser: Token stream -> AST (built-in types only)
+    hl-cli/     # `hl-cli <file.hll>` lexes; `hl-cli --parse <file.hll>` parses
 ```
 
 ## Building & testing
@@ -40,8 +44,9 @@ Try the CLI against an `.hll` file:
 
 ```sh
 cargo run -p hl-cli -- crates/hl-lexer/tests/fixtures/jellyfin.hll
+cargo run -p hl-cli -- --parse crates/hl-parser/tests/fixtures/jellyfin.hll
 ```
 
-See [`docs/DESIGN.md`](docs/DESIGN.md) for the language's grammar, and
-`crates/hl-lexer/src/lib.rs` for the lexer's rustdoc (token kinds, span
-semantics, error types).
+See [`docs/DESIGN.md`](docs/DESIGN.md) for the language's grammar, and each
+crate's rustdoc (`crates/hl-lexer/src/lib.rs`, `crates/hl-parser/src/lib.rs`)
+for implementation details (token/AST shapes, span semantics, error types).
