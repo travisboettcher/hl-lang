@@ -1,13 +1,13 @@
 //! Integration tests: parse the design doc's worked examples end-to-end
 //! and assert the resulting AST's content field-by-field.
 
-use hl_parser::{ParseError, TopDecl, parse};
+use hl_parser::{ComposeError, Literal, TopDecl, compose, parse};
 
 const JELLYFIN: &str = include_str!("fixtures/jellyfin.hll");
 const SYNCTHING: &str = include_str!("fixtures/syncthing.hll");
 const NETWORK: &str = include_str!("fixtures/network.hll");
 const RAW_SERVICE: &str = include_str!("fixtures/raw_service.hll");
-const WITH_REJECTED: &str = include_str!("fixtures/with_rejected.hll");
+const UNKNOWN_TEMPLATE: &str = include_str!("fixtures/unknown_template.hll");
 
 #[test]
 fn jellyfin_fixture_parses_to_expected_ast() {
@@ -18,54 +18,117 @@ fn jellyfin_fixture_parses_to_expected_ast() {
     };
     assert_eq!(service.name.name, "jellyfin");
 
-    let image = service.image.as_ref().expect("image field set");
+    let image = service.fields.image.as_ref().expect("image field set");
     assert_eq!(
         image.reference.as_ref().unwrap().text(),
         "jellyfin/jellyfin:latest"
     );
 
-    let expose = service.expose.as_ref().expect("expose field set");
+    let expose = service.fields.expose.as_ref().expect("expose field set");
     assert_eq!(expose.port.as_ref().unwrap().text(), "8096");
     assert_eq!(expose.host.as_ref().unwrap().text(), "media.techdebtor.io");
 
-    assert_eq!(service.volumes.entries.len(), 1);
-    assert_eq!(service.volumes.entries[0].host.text(), "/mnt/media");
-    assert_eq!(service.volumes.entries[0].container.text(), "/data");
+    assert_eq!(service.fields.volumes.entries.len(), 1);
+    assert_eq!(service.fields.volumes.entries[0].host.text(), "/mnt/media");
+    assert_eq!(service.fields.volumes.entries[0].container.text(), "/data");
 
-    assert_eq!(service.env.entries.len(), 1);
-    assert_eq!(service.env.entries[0].key.text(), "PUID");
-    assert_eq!(service.env.entries[0].value.text(), "1000");
+    assert_eq!(service.fields.env.entries.len(), 1);
+    assert_eq!(service.fields.env.entries[0].key.text(), "PUID");
+    assert_eq!(service.fields.env.entries[0].value.text(), "1000");
 
-    let restart = service.restart.as_ref().expect("restart field set");
+    let restart = service.fields.restart.as_ref().expect("restart field set");
     assert_eq!(restart.policy.as_ref().unwrap().text(), "unless-stopped");
 
-    assert!(service.raw.entries.is_empty());
-    assert!(service.middleware.is_empty());
-    assert!(service.depends_on.is_empty());
-    assert!(service.networks.is_empty());
+    assert!(service.fields.raw.entries.is_empty());
+    assert!(service.fields.middleware.is_empty());
+    assert!(service.fields.depends_on.is_empty());
+    assert!(service.fields.networks.is_empty());
+    assert!(service.fields.with.is_empty());
 }
 
-/// This fixture uses `template`/`with` composition, which this milestone
-/// deliberately does not support (see docs/DESIGN.md's Pipeline section).
-/// It's now the golden "not yet supported" case rather than a golden AST
-/// — parsing must fail at the very first `template` token, not panic or
-/// silently produce a partial AST.
+/// The design doc's canonical composition worked example: three
+/// templates (`internal_web`, `authenticated`, `linuxserver_app`) merged
+/// onto `service syncthing` via `with`. Parses, then composes, and
+/// checks the fully-resolved service field-by-field — including that
+/// argument substitution preserves the *argument's* literal kind (the
+/// template body writes `env PUID = puid` with a bare identifier, but
+/// the resolved value is a `Literal::Number`, since that's what
+/// `puid: 1000` supplied) and that middleware/networks accumulate in
+/// with-list left-to-right order.
 #[test]
-fn syncthing_fixture_is_template_not_supported_error() {
-    let err =
-        parse(SYNCTHING).expect_err("syncthing.hll uses templates, which aren't supported yet");
-    match err {
-        ParseError::TemplatesNotSupported {
-            what: "template declaration",
-            span,
-        } => {
-            // The fixture's first non-comment line is the first `template` block.
-            assert_eq!(span.line, 4);
-        }
-        other => {
-            panic!("expected TemplatesNotSupported at the first `template` token, got {other:?}")
-        }
-    }
+fn syncthing_fixture_composes_to_expected_service() {
+    let program = parse(SYNCTHING).expect("syncthing.hll should parse");
+    let composed = compose(program).expect("syncthing.hll should compose");
+    assert_eq!(composed.services.len(), 1);
+    let service = &composed.services[0];
+    assert_eq!(service.name.name, "syncthing");
+
+    // Own body always wins: image/volume are set directly on the
+    // service, not by any template.
+    let image = service.fields.image.as_ref().expect("image field set");
+    assert_eq!(
+        image.reference.as_ref().unwrap().text(),
+        "lscr.io/linuxserver/syncthing:latest"
+    );
+    assert_eq!(service.fields.volumes.entries.len(), 1);
+    assert_eq!(
+        service.fields.volumes.entries[0].host.text(),
+        "syncthing-config"
+    );
+    assert_eq!(
+        service.fields.volumes.entries[0].container.text(),
+        "/config"
+    );
+
+    // `internal_web`'s contributions.
+    let expose = service.fields.expose.as_ref().expect("expose field set");
+    let port = expose.port.as_ref().unwrap();
+    assert_eq!(port.text(), "8384");
+    assert!(
+        matches!(port, Literal::Number { .. }),
+        "expose.port should be substituted with the invocation's Number argument, got {port:?}"
+    );
+    assert_eq!(
+        expose.host.as_ref().unwrap().text(),
+        "{{name}}.internal.techdebtor.io"
+    );
+    let restart = service.fields.restart.as_ref().expect("restart field set");
+    assert_eq!(restart.policy.as_ref().unwrap().text(), "unless-stopped");
+    assert_eq!(
+        service
+            .fields
+            .networks
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["traefik-net"]
+    );
+
+    // `internal_web` then `authenticated`, left-to-right.
+    assert_eq!(
+        service
+            .fields
+            .middleware
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["local-ipwhitelist", "forwardAuth-authentik"]
+    );
+
+    // `linuxserver_app`'s contributions: PUID/PGID values were written
+    // as bare parameter references (`puid`/`pgid`) in the template body
+    // but must come out as the Number arguments the invocation supplied.
+    assert_eq!(service.fields.env.entries.len(), 2);
+    let puid = &service.fields.env.entries[0];
+    assert_eq!(puid.key.text(), "PUID");
+    assert_eq!(puid.value.text(), "1000");
+    assert!(matches!(puid.value, Literal::Number { .. }));
+    let pgid = &service.fields.env.entries[1];
+    assert_eq!(pgid.key.text(), "PGID");
+    assert_eq!(pgid.value.text(), "100");
+    assert!(matches!(pgid.value, Literal::Number { .. }));
+
+    assert!(service.fields.with.is_empty());
 }
 
 #[test]
@@ -93,34 +156,37 @@ fn raw_service_fixture_parses_to_expected_ast() {
         panic!("expected a Service decl")
     };
     assert_eq!(service.name.name, "cadvisor");
-    assert_eq!(service.raw.entries.len(), 3);
+    assert_eq!(service.fields.raw.entries.len(), 3);
 
-    let keys: Vec<&str> = service.raw.entries.iter().map(|e| e.key.text()).collect();
+    let keys: Vec<&str> = service
+        .fields
+        .raw
+        .entries
+        .iter()
+        .map(|e| e.key.text())
+        .collect();
     assert_eq!(keys, vec!["privileged", "devices", "security_opt"]);
 
-    match &service.raw.entries[1].value {
+    match &service.fields.raw.entries[1].value {
         hl_parser::RawValue::List(items, _) => assert_eq!(items.len(), 1),
         other => panic!("expected `devices` to be a raw list, got {other:?}"),
     }
-    match &service.raw.entries[2].value {
+    match &service.fields.raw.entries[2].value {
         hl_parser::RawValue::Map(entries, _) => assert_eq!(entries.len(), 1),
         other => panic!("expected `security_opt` to be a nested raw map, got {other:?}"),
     }
 }
 
-/// Isolates the `with`-as-a-field error from the top-level `template`
-/// token error: this fixture has no top-level `template` declaration at
-/// all, so the error must come specifically from `with` being used as a
-/// field inside the service body.
+/// This fixture has no top-level `template` declaration at all, so its
+/// `with`-list references templates that don't exist anywhere in the
+/// program. Parsing must succeed (`with` is ordinary syntax now) —
+/// composition is what must fail.
 #[test]
-fn with_rejected_fixture_is_not_supported_error() {
-    let err =
-        parse(WITH_REJECTED).expect_err("with_rejected.hll uses `with`, which isn't supported yet");
+fn unknown_template_fixture_fails_compose_with_unknown_template() {
+    let program = parse(UNKNOWN_TEMPLATE).expect("unknown_template.hll should parse");
+    let err = compose(program).expect_err("unknown_template.hll should fail to compose");
     assert!(matches!(
         err,
-        ParseError::TemplatesNotSupported {
-            what: "the `with` field",
-            ..
-        }
+        ComposeError::UnknownTemplate { name, .. } if name == "internal_web"
     ));
 }

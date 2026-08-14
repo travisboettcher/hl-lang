@@ -1,0 +1,407 @@
+//! Integration tests for template/`with` composition (`hl_parser::compose`),
+//! covering docs/DESIGN.md's Composition section's merge/conflict rules
+//! beyond the single canonical worked example already covered end-to-end
+//! in `examples.rs`.
+
+use hl_parser::schema::MapSide;
+use hl_parser::{ComposeError, ComposedProgram, Literal, RawValue, Service, compose, parse};
+
+fn compose_ok(source: &str) -> ComposedProgram {
+    let program = parse(source).unwrap_or_else(|err| panic!("unexpected parse error: {err}"));
+    compose(program).unwrap_or_else(|err| panic!("unexpected compose error: {err}"))
+}
+
+fn compose_err(source: &str) -> ComposeError {
+    let program = parse(source).unwrap_or_else(|err| panic!("unexpected parse error: {err}"));
+    compose(program).expect_err("expected a compose error")
+}
+
+fn single_service(program: &ComposedProgram) -> &Service {
+    assert_eq!(program.services.len(), 1, "expected exactly one service");
+    &program.services[0]
+}
+
+fn raw_text(value: &RawValue) -> &str {
+    match value {
+        RawValue::Literal(lit) => lit.text(),
+        other => panic!("expected a literal raw value, got {other:?}"),
+    }
+}
+
+// --- defaults tier ---
+
+#[test]
+fn defaults_is_overridden_by_explicit_template_silently() {
+    let composed = compose_ok(
+        "template defaults {\n  restart unless-stopped\n}\n\
+         template override_restart {\n  restart always\n}\n\
+         service s {\n  with override_restart\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        service
+            .fields
+            .restart
+            .as_ref()
+            .unwrap()
+            .policy
+            .as_ref()
+            .unwrap()
+            .text(),
+        "always"
+    );
+}
+
+#[test]
+fn defaults_map_entries_survive_untouched_but_service_body_overrides_others() {
+    let composed = compose_ok(
+        "template defaults {\n  env FOO = \"default\"\n  env BAR = \"default-bar\"\n}\n\
+         service s {\n  image \"x\"\n  env FOO = \"own\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries = &service.fields.env.entries;
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].key.text(), "FOO");
+    assert_eq!(entries[0].value.text(), "own");
+    assert_eq!(entries[1].key.text(), "BAR");
+    assert_eq!(entries[1].value.text(), "default-bar");
+}
+
+// --- explicit-vs-explicit collisions ---
+
+#[test]
+fn explicit_templates_scalar_collision_is_error() {
+    let err = compose_err(
+        "template a {\n  image \"a-image\"\n}\n\
+         template b {\n  image \"b-image\"\n}\n\
+         service s {\n  with a, b\n}\n",
+    );
+    match err {
+        ComposeError::FieldCollision {
+            field: "image",
+            first_template,
+            second_template,
+            ..
+        } => {
+            assert_eq!(first_template, "a");
+            assert_eq!(second_template, "b");
+        }
+        other => panic!("expected FieldCollision, got {other:?}"),
+    }
+}
+
+#[test]
+fn explicit_templates_env_key_collision_is_error() {
+    let err = compose_err(
+        "template a {\n  env FOO = \"a\"\n}\n\
+         template b {\n  env FOO = \"b\"\n}\n\
+         service s {\n  with a, b\n}\n",
+    );
+    match err {
+        ComposeError::MapKeyCollision(details) => {
+            assert_eq!(details.field, "env");
+            assert_eq!(details.side, MapSide::Key);
+            assert_eq!(details.key, "FOO");
+            assert_eq!(details.first_template, "a");
+            assert_eq!(details.second_template, "b");
+        }
+        other => panic!("expected MapKeyCollision, got {other:?}"),
+    }
+}
+
+#[test]
+fn explicit_templates_volume_container_path_collision_is_error() {
+    let err = compose_err(
+        "template a {\n  volume \"h1\" -> \"/data\"\n}\n\
+         template b {\n  volume \"h2\" -> \"/data\"\n}\n\
+         service s {\n  with a, b\n}\n",
+    );
+    match err {
+        ComposeError::MapKeyCollision(details) => {
+            assert_eq!(details.field, "volume");
+            assert_eq!(details.side, MapSide::Value);
+            assert_eq!(details.key, "/data");
+        }
+        other => panic!("expected MapKeyCollision, got {other:?}"),
+    }
+}
+
+// --- non-colliding merges ---
+
+#[test]
+fn non_colliding_map_entries_from_different_templates_merge() {
+    let composed = compose_ok(
+        "template a {\n  env FOO = \"a\"\n}\n\
+         template b {\n  env BAR = \"b\"\n}\n\
+         service s {\n  with a, b\n}\n",
+    );
+    let service = single_service(&composed);
+    let keys: Vec<&str> = service
+        .fields
+        .env
+        .entries
+        .iter()
+        .map(|e| e.key.text())
+        .collect();
+    assert_eq!(keys, vec!["FOO", "BAR"]);
+}
+
+#[test]
+fn service_body_overrides_inherited_map_entry_unconditionally() {
+    let composed = compose_ok(
+        "template a {\n  volume \"h1\" -> \"/data\"\n}\n\
+         service s {\n  with a\n  volume \"h2\" -> \"/data\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(service.fields.volumes.entries.len(), 1);
+    assert_eq!(service.fields.volumes.entries[0].host.text(), "h2");
+    assert_eq!(service.fields.volumes.entries[0].container.text(), "/data");
+}
+
+#[test]
+fn raw_concatenates_across_tiers_with_repeated_key_no_error() {
+    let composed = compose_ok(
+        "template a {\n  raw { key: \"a\" }\n}\n\
+         template b {\n  raw { key: \"b\" }\n}\n\
+         service s {\n  with a, b\n  raw { key: \"c\" }\n}\n",
+    );
+    let service = single_service(&composed);
+    let values: Vec<&str> = service
+        .fields
+        .raw
+        .entries
+        .iter()
+        .map(|e| raw_text(&e.value))
+        .collect();
+    assert_eq!(values, vec!["a", "b", "c"]);
+}
+
+#[test]
+fn list_fields_concatenate_in_priority_order() {
+    let composed = compose_ok(
+        "template defaults {\n  middleware d1\n}\n\
+         template a {\n  middleware a1\n}\n\
+         template b {\n  middleware b1\n}\n\
+         service s {\n  with a, b\n  middleware own1\n}\n",
+    );
+    let service = single_service(&composed);
+    let names: Vec<&str> = service
+        .fields
+        .middleware
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["d1", "a1", "b1", "own1"]);
+}
+
+// --- cycles ---
+
+#[test]
+fn template_cycle_two_hop_is_error() {
+    let err = compose_err(
+        "template a {\n  with b\n}\n\
+         template b {\n  with a\n}\n\
+         service s {\n  with a\n}\n",
+    );
+    match err {
+        ComposeError::TemplateCycle { chain, .. } => {
+            assert_eq!(chain, vec!["a", "b", "a"]);
+        }
+        other => panic!("expected TemplateCycle, got {other:?}"),
+    }
+}
+
+#[test]
+fn template_cycle_three_hop_is_error() {
+    let err = compose_err(
+        "template a {\n  with b\n}\n\
+         template b {\n  with c\n}\n\
+         template c {\n  with a\n}\n\
+         service s {\n  with a\n}\n",
+    );
+    match err {
+        ComposeError::TemplateCycle { chain, .. } => {
+            assert_eq!(chain, vec!["a", "b", "c", "a"]);
+        }
+        other => panic!("expected TemplateCycle, got {other:?}"),
+    }
+}
+
+// --- unknown template / argument validation ---
+
+#[test]
+fn unknown_template_in_with_is_error() {
+    let err = compose_err("service s {\n  with nonexistent\n}\n");
+    assert!(matches!(
+        err,
+        ComposeError::UnknownTemplate { name, .. } if name == "nonexistent"
+    ));
+}
+
+#[test]
+fn unknown_template_argument_is_error() {
+    let err = compose_err(
+        "template t(a) {\n  env A = a\n}\n\
+         service s {\n  with t { a: 1, b: 2 }\n}\n",
+    );
+    match err {
+        ComposeError::UnknownTemplateArgument {
+            template, argument, ..
+        } => {
+            assert_eq!(template, "t");
+            assert_eq!(argument, "b");
+        }
+        other => panic!("expected UnknownTemplateArgument, got {other:?}"),
+    }
+}
+
+#[test]
+fn missing_template_argument_is_error() {
+    let err = compose_err(
+        "template t(a, b) {\n  env A = a\n}\n\
+         service s {\n  with t { a: 1 }\n}\n",
+    );
+    match err {
+        ComposeError::MissingTemplateArgument {
+            template, param, ..
+        } => {
+            assert_eq!(template, "t");
+            assert_eq!(param, "b");
+        }
+        other => panic!("expected MissingTemplateArgument, got {other:?}"),
+    }
+}
+
+#[test]
+fn duplicate_template_argument_is_error() {
+    let err = compose_err(
+        "template t(a) {\n  env A = a\n}\n\
+         service s {\n  with t { a: 1, a: 2 }\n}\n",
+    );
+    match err {
+        ComposeError::DuplicateTemplateArgument {
+            template, argument, ..
+        } => {
+            assert_eq!(template, "t");
+            assert_eq!(argument, "a");
+        }
+        other => panic!("expected DuplicateTemplateArgument, got {other:?}"),
+    }
+}
+
+#[test]
+fn template_argument_not_scalar_is_error() {
+    let err = compose_err(
+        "template t(a) {\n  env A = a\n}\n\
+         service s {\n  with t { a: [1, 2] }\n}\n",
+    );
+    match err {
+        ComposeError::TemplateArgumentNotScalar {
+            template, param, ..
+        } => {
+            assert_eq!(template, "t");
+            assert_eq!(param, "a");
+        }
+        other => panic!("expected TemplateArgumentNotScalar, got {other:?}"),
+    }
+}
+
+// --- nested template composition / parameter forwarding ---
+
+#[test]
+fn nested_template_composition_forwards_parameters() {
+    let composed = compose_ok(
+        "template inner(y) {\n  env Y = y\n}\n\
+         template outer(x) {\n  with inner { y: x }\n}\n\
+         service s {\n  with outer { x: 42 }\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(service.fields.env.entries.len(), 1);
+    assert_eq!(service.fields.env.entries[0].key.text(), "Y");
+    let value = &service.fields.env.entries[0].value;
+    assert_eq!(value.text(), "42");
+    assert!(matches!(value, Literal::Number { .. }));
+}
+
+#[test]
+fn composed_service_never_contains_unsubstituted_param() {
+    let composed = compose_ok(
+        "template inner(y) {\n  env Y = y\n  expose y\n}\n\
+         template outer(x) {\n  with inner { y: x }\n}\n\
+         service s {\n  with outer { x: 42 }\n  image \"img\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_no_params(service);
+}
+
+fn assert_no_params(service: &Service) {
+    let fields = &service.fields;
+    assert!(fields.with.is_empty(), "with should be fully resolved");
+    if let Some(img) = &fields.image
+        && let Some(r) = &img.reference
+    {
+        assert_not_param(r);
+    }
+    if let Some(e) = &fields.expose {
+        if let Some(p) = &e.port {
+            assert_not_param(p);
+        }
+        if let Some(h) = &e.host {
+            assert_not_param(h);
+        }
+    }
+    if let Some(r) = &fields.restart
+        && let Some(p) = &r.policy
+    {
+        assert_not_param(p);
+    }
+    for v in &fields.volumes.entries {
+        assert_not_param(&v.host);
+        assert_not_param(&v.container);
+    }
+    for e in &fields.env.entries {
+        assert_not_param(&e.key);
+        assert_not_param(&e.value);
+    }
+    for entry in &fields.raw.entries {
+        assert_not_param(&entry.key);
+        assert_raw_value_no_param(&entry.value);
+    }
+}
+
+fn assert_not_param(lit: &Literal) {
+    assert!(
+        !matches!(lit, Literal::Param(_, _)),
+        "found unsubstituted Literal::Param: {lit:?}"
+    );
+}
+
+fn assert_raw_value_no_param(value: &RawValue) {
+    match value {
+        RawValue::Literal(lit) => assert_not_param(lit),
+        RawValue::List(items, _) => {
+            for item in items {
+                assert_raw_value_no_param(item);
+            }
+        }
+        RawValue::Map(entries, _) => {
+            for (_, v) in entries {
+                assert_raw_value_no_param(v);
+            }
+        }
+    }
+}
+
+// --- template symbol table ---
+
+#[test]
+fn duplicate_top_level_template_name_is_error() {
+    let err = compose_err(
+        "template t {\n  image \"a\"\n}\n\
+         template t {\n  image \"b\"\n}\n",
+    );
+    assert!(matches!(
+        err,
+        ComposeError::DuplicateTemplateName { name, .. } if name == "t"
+    ));
+}

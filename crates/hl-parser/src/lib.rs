@@ -1,4 +1,6 @@
-//! Parser for hl-lang: turns a token stream from `hl-lexer` into an AST.
+//! Parser for hl-lang: turns a token stream from `hl-lexer` into an AST,
+//! and (via [`compose`]) resolves `template`/`with` composition into
+//! fully-merged services.
 //!
 //! The parser is one generic, schema-table-driven engine — not one
 //! function per keyword. A [`schema::TypeSchema`] table (in `schema.rs`)
@@ -9,12 +11,12 @@
 //! code. See `docs/DESIGN.md` in the repo root for the full grammar this
 //! implements.
 //!
-//! **Scope of this milestone:** only the built-in types are supported —
-//! `network`, `service`, `image`, `expose`, `volume`, `env`, `restart`,
-//! `raw`, plus the reference-list fields `middleware`/`depends_on`/
-//! `networks`. `template` declarations and the `with` field are rejected
-//! with [`ParseError::TemplatesNotSupported`] rather than parsed —
-//! template/`with` composition is a fast-follow milestone.
+//! [`parse`] is purely syntactic — it enforces known fields, correct
+//! kinds, and no illegal duplicates, but doesn't resolve `template`/
+//! `with` composition. [`compose::compose`] is a separate pass, run on
+//! `parse`'s output, that resolves every `with`-list (per docs/DESIGN.md's
+//! Composition section) into fully-merged services with no templates or
+//! unresolved parameters left.
 //!
 //! # Example
 //!
@@ -32,14 +34,17 @@
 //! ```
 
 mod ast;
+pub mod compose;
 mod error;
 mod parser;
 pub mod schema;
 
 pub use ast::{
     EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Program, RawEntry, RawMap, RawValue,
-    Reference, Restart, Service, TopDecl, VolumeEntry, VolumeMap,
+    Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl,
+    VolumeEntry, VolumeMap,
 };
+pub use compose::{ComposeError, ComposedProgram, compose};
 pub use error::{Expected, ParseError};
 pub use hl_lexer::Span;
 pub use parser::parse;

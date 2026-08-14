@@ -70,15 +70,16 @@ pub enum ParseError {
         first: Span,
         second: Span,
     },
-    /// Emitted both for a top-level `template` declaration and for `with`
-    /// used as a field name — templates/composition are a fast-follow
-    /// milestone, not implemented here. `what` is a short human-readable
-    /// description of what was rejected (e.g. `"template declaration"`
-    /// or `"the \`with\` field"`).
-    TemplatesNotSupported { what: &'static str, span: Span },
     /// `NUMBER` is unbounded at the lexical level (`[0-9]+`), but the AST
     /// stores parsed values as `u64`.
     NumberOutOfRange { text: String, span: Span },
+    /// A `template`'s `param_list` named the same parameter twice, e.g.
+    /// `template foo(a, a) { ... }`.
+    DuplicateTemplateParam {
+        param: String,
+        first: Span,
+        second: Span,
+    },
 }
 
 impl From<LexError> for ParseError {
@@ -99,8 +100,8 @@ impl ParseError {
             | ParseError::UnknownField { span, .. }
             | ParseError::DuplicateField { second: span, .. }
             | ParseError::DuplicateMapKey { second: span, .. }
-            | ParseError::TemplatesNotSupported { span, .. }
-            | ParseError::NumberOutOfRange { span, .. } => *span,
+            | ParseError::NumberOutOfRange { span, .. }
+            | ParseError::DuplicateTemplateParam { second: span, .. } => *span,
         }
     }
 }
@@ -163,13 +164,6 @@ impl fmt::Display for ParseError {
                     span.line, span.col, first.line, first.col
                 )
             }
-            ParseError::TemplatesNotSupported { what, .. } => {
-                write!(
-                    f,
-                    "{}:{}: {what} is not supported yet (templates are a fast-follow milestone)",
-                    span.line, span.col
-                )
-            }
             ParseError::NumberOutOfRange { text, .. } => {
                 write!(
                     f,
@@ -177,6 +171,11 @@ impl fmt::Display for ParseError {
                     span.line, span.col
                 )
             }
+            ParseError::DuplicateTemplateParam { param, first, .. } => write!(
+                f,
+                "{}:{}: duplicate parameter `{param}` (first declared at {}:{})",
+                span.line, span.col, first.line, first.col
+            ),
         }
     }
 }

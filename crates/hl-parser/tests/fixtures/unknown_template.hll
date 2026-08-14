@@ -1,0 +1,9 @@
+# This file has no `template` declaration at all, so `with`'s referenced
+# templates (`internal_web`, `authenticated`) don't exist anywhere in the
+# program. Parsing succeeds (`with` is ordinary syntax now) — composition
+# is what must fail, with ComposeError::UnknownTemplate.
+
+service syncthing {
+  with internal_web { port: 8384 }, authenticated
+  image "lscr.io/linuxserver/syncthing:latest"
+}
