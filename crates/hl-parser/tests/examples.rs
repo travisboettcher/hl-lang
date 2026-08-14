@@ -92,6 +92,7 @@ fn syncthing_fixture_composes_to_expected_service() {
         expose.host.as_ref().unwrap().text(),
         "{{name}}.internal.techdebtor.io"
     );
+    assert_eq!(expose.entrypoint.as_ref().unwrap().text(), "web-secure");
     let restart = service.fields.restart.as_ref().expect("restart field set");
     assert_eq!(restart.policy.as_ref().unwrap().text(), "unless-stopped");
     assert_eq!(

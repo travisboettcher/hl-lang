@@ -183,6 +183,35 @@ fn network_needs_name() {
 }
 
 #[test]
+fn network_real_name_field() {
+    let program = parse_ok("network traefik-net {\n  external\n  name: \"docker_default\"\n}\n");
+    let network = as_network(&program.decls[0]);
+    assert_eq!(network.real_name.as_ref().unwrap().text(), "docker_default");
+}
+
+#[test]
+fn network_without_real_name_field_is_none() {
+    let program = parse_ok("network internal {}\n");
+    let network = as_network(&program.decls[0]);
+    assert!(network.real_name.is_none());
+}
+
+#[test]
+fn expose_entrypoint_field() {
+    let program = parse_ok("service s {\n  expose 8096 entrypoint: \"web-secure\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    let expose = service.fields.expose.as_ref().unwrap();
+    assert_eq!(expose.entrypoint.as_ref().unwrap().text(), "web-secure");
+}
+
+#[test]
+fn expose_without_entrypoint_field_is_none() {
+    let program = parse_ok("service s {\n  expose 8096\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(service.fields.expose.as_ref().unwrap().entrypoint.is_none());
+}
+
+#[test]
 fn bool_flag_rejects_explicit_value() {
     let err = parse("network n {\n  external: true\n}\n").unwrap_err();
     assert!(matches!(err, ParseError::UnexpectedToken { .. }));

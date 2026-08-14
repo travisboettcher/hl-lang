@@ -856,9 +856,14 @@ fn lower_network(name: Ident, mut fields: StructFields, span: Span) -> Network {
         Some(FieldValue::Flag(s)) => Some(s),
         _ => None,
     };
+    let real_name = match fields.remove("name") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
     Network {
         name,
         external,
+        real_name,
         span,
     }
 }
@@ -1033,7 +1038,16 @@ fn lower_expose(mut fields: StructFields, span: Span) -> Expose {
         Some(FieldValue::Scalar(lit)) => Some(lit),
         _ => None,
     };
-    Expose { port, host, span }
+    let entrypoint = match fields.remove("entrypoint") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
+    Expose {
+        port,
+        host,
+        entrypoint,
+        span,
+    }
 }
 
 fn lower_restart(mut fields: StructFields, span: Span) -> Restart {

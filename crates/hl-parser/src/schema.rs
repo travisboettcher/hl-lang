@@ -107,7 +107,13 @@ pub static IMAGE: TypeSchema = TypeSchema {
     schema_free: false,
 };
 
-/// `expose 8096 as "host"` / `expose { port: 8096, host: "host" }`.
+/// `expose 8096 as "host"` / `expose { port: 8096, host: "host", entrypoint: "web-secure" }`.
+/// `entrypoint` names a Traefik entry point (e.g. `"web-secure"`) — left
+/// unset, codegen omits the `entrypoints=` label entirely rather than
+/// defaulting to any specific value, matching Traefik's own real
+/// behavior ("no entry points" attaches to all of them) since any one
+/// entry-point name is specific to a given homelab's own `traefik.yml`,
+/// not a generic default the compiler should assume.
 pub static EXPOSE: TypeSchema = TypeSchema {
     type_name: "expose",
     kind: SchemaKind::Struct,
@@ -118,6 +124,10 @@ pub static EXPOSE: TypeSchema = TypeSchema {
         },
         FieldSchema {
             name: "host",
+            kind: FieldKind::Scalar,
+        },
+        FieldSchema {
+            name: "entrypoint",
             kind: FieldKind::Scalar,
         },
     ],
@@ -188,14 +198,26 @@ pub static RAW: TypeSchema = TypeSchema {
     schema_free: true,
 };
 
-/// A top-level `network name { ... }` declaration.
+/// A top-level `network name { ... }` declaration. `name` (the field, not
+/// the declaration's own identifier) is the real underlying Docker
+/// network name, when it differs from the declaration's own identifier —
+/// e.g. `network traefik-net { external, name: "docker_default" }`,
+/// needed because Compose's own auto-derived network names are specific
+/// to one homelab's directory layout and can't be assumed by the
+/// compiler (see [`crate::ast::Network::real_name`]).
 pub static NETWORK: TypeSchema = TypeSchema {
     type_name: "network",
     kind: SchemaKind::Struct,
-    fields: &[FieldSchema {
-        name: "external",
-        kind: FieldKind::BoolFlag,
-    }],
+    fields: &[
+        FieldSchema {
+            name: "external",
+            kind: FieldKind::BoolFlag,
+        },
+        FieldSchema {
+            name: "name",
+            kind: FieldKind::Scalar,
+        },
+    ],
     primary_field: None,
     map_separator: None,
     uniqueness: None,

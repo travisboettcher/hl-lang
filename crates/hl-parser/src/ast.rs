@@ -94,6 +94,13 @@ pub struct Network {
     /// otherwise (there is no way to write `external: false` this
     /// milestone — the field is bare-presence only).
     pub external: Option<Span>,
+    /// The real underlying Docker network name, set via the `name`
+    /// field (`network traefik-net { name: "docker_default" }`), when it
+    /// differs from `name.name` above. `None` means "use `name.name`
+    /// verbatim" — codegen, not the parser, applies that default,
+    /// mirroring how [`Image::reference`] staying `Option` defers
+    /// "required" enforcement to a later stage.
+    pub real_name: Option<Literal>,
     pub span: Span,
 }
 
@@ -115,6 +122,11 @@ pub struct Expose {
     /// Settable either via the canonical `host: "..."` field or the
     /// `as "..."` bare-keyword alias sugar; both produce this same slot.
     pub host: Option<Literal>,
+    /// The Traefik entry point to route through (e.g. `"web-secure"`).
+    /// `None` means the generated router gets no `entrypoints=` label at
+    /// all — Traefik's own default of attaching to every entry point —
+    /// rather than the parser guessing a homelab-specific value.
+    pub entrypoint: Option<Literal>,
     pub span: Span,
 }
 
