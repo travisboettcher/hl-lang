@@ -131,6 +131,18 @@ pub enum ComposeError {
         alias: String,
         span: Span,
     },
+    /// A qualified `networks [alias.name]` entry's `alias` resolved to a
+    /// real imported scope, but no `network` named `name` exists there.
+    /// Distinct from [`Self::UnknownAlias`] (the alias itself didn't
+    /// resolve) — [`SingleFileResolver`] never raises this, since every
+    /// qualified lookup there is unconditionally `UnknownAlias` (a lone
+    /// [`Program`] has no valid aliases at all); a real cross-file
+    /// resolver is the first place this becomes reachable.
+    UnknownQualifiedNetwork {
+        alias: String,
+        name: String,
+        span: Span,
+    },
 }
 
 /// Details for [`ComposeError::MapKeyCollision`], boxed out of the enum
@@ -161,7 +173,8 @@ impl ComposeError {
             | ComposeError::TemplateArgumentNotScalar { span, .. }
             | ComposeError::FieldCollision { second: span, .. }
             | ComposeError::UnknownAlias { span, .. }
-            | ComposeError::UnsupportedQualifiedReference { span, .. } => *span,
+            | ComposeError::UnsupportedQualifiedReference { span, .. }
+            | ComposeError::UnknownQualifiedNetwork { span, .. } => *span,
             ComposeError::MapKeyCollision(details) => details.second,
         }
     }
@@ -252,6 +265,11 @@ impl fmt::Display for ComposeError {
             ComposeError::UnsupportedQualifiedReference { field, alias, .. } => write!(
                 f,
                 "{}:{}: `{field}` doesn't support a qualified reference yet (`{alias}.` ...)",
+                span.line, span.col
+            ),
+            ComposeError::UnknownQualifiedNetwork { alias, name, .. } => write!(
+                f,
+                "{}:{}: no network `{name}` in `{alias}`",
                 span.line, span.col
             ),
         }

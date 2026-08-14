@@ -142,6 +142,13 @@ name = "hl-lexer"
 version = "0.1.0"
 
 [[package]]
+name = "hl-linker"
+version = "0.1.0"
+dependencies = [
+ "hl-parser",
+]
+
+[[package]]
 name = "hl-parser"
 version = "0.1.0"
 dependencies = [
