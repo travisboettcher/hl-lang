@@ -142,11 +142,15 @@ mod tests {
             }),
             middleware: vec![
                 Reference {
+                    qualifier: None,
                     name: "local-ipwhitelist".to_string(),
+                    name_span: span(),
                     span: span(),
                 },
                 Reference {
+                    qualifier: None,
                     name: "forwardAuth-authentik".to_string(),
+                    name_span: span(),
                     span: span(),
                 },
             ],

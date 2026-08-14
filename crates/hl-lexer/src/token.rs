@@ -30,6 +30,11 @@ pub enum TokenKind {
     /// `->`, always a single token — never two separate `-`/`>` tokens.
     Arrow,
     Comma,
+    /// `.` — separates an import alias from the name it qualifies, e.g.
+    /// `traefik.traefik-net`. Never appears anywhere else in the
+    /// grammar (`NUMBER` is integer-only, so there's no decimal-point
+    /// ambiguity to resolve).
+    Dot,
     /// Emitted exactly once, at the end of input.
     Eof,
 }

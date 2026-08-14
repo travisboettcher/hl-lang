@@ -4,7 +4,7 @@ use hl_lexer::{Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
     EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Program, RawEntry, RawMap, RawValue,
-    Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl,
+    Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, UseDecl,
     VolumeEntry, VolumeMap,
 };
 use crate::error::{Expected, ParseError};
@@ -163,10 +163,36 @@ impl<'src> Parser<'src> {
         }
     }
 
+    /// `reference ::= key ( "." IDENT )?` — the trailing `.IDENT` names an
+    /// import alias's declaration (`traefik.traefik-net`). Only a plain
+    /// `IDENT` key can be qualified this way — a `STRING` key's content
+    /// is just string content, never followed by a structural `.`.
     fn parse_reference(&mut self) -> Result<Reference, ParseError> {
         let key = self.parse_key()?;
+        if matches!(key, Literal::Ident(_, _)) && self.peek().kind == TokenKind::Dot {
+            self.bump();
+            let name_tok = self.expect(TokenKind::Ident)?;
+            let qualifier = Ident {
+                name: key.text().to_string(),
+                span: key.span(),
+            };
+            let span = Span {
+                start: qualifier.span.start,
+                end: name_tok.span.end,
+                line: qualifier.span.line,
+                col: qualifier.span.col,
+            };
+            return Ok(Reference {
+                qualifier: Some(qualifier),
+                name: name_tok.lexeme.to_string(),
+                name_span: name_tok.span,
+                span,
+            });
+        }
         Ok(Reference {
+            qualifier: None,
             name: key.text().to_string(),
+            name_span: key.span(),
             span: key.span(),
         })
     }
@@ -212,18 +238,38 @@ impl<'src> Parser<'src> {
 
     // ---- template invocations (`with`'s `templates` field) ----
 
-    /// `IDENT ( "{" raw_entry* "}" )?` — one `with`-list item. A
-    /// zero-arg invocation (`authenticated`) needs no `{ }`; its `args`
-    /// is an empty [`RawMap`]. The name must be a plain `IDENT` (not the
-    /// more general `parse_key`, which also accepts `STRING`) — a
-    /// `template_decl` can only ever be named by an `IDENT`, so a string
-    /// here could never resolve to a real template.
+    /// `IDENT ( "." IDENT )? ( "{" raw_entry* "}" )?` — one `with`-list
+    /// item. A zero-arg invocation (`authenticated`) needs no `{ }`; its
+    /// `args` is an empty [`RawMap`]. The name (and optional qualifier)
+    /// must be plain `IDENT`s (not the more general `parse_key`, which
+    /// also accepts `STRING`) — a `template_decl` or `use` alias can only
+    /// ever be named by an `IDENT`, so a string here could never resolve
+    /// to a real template.
     fn parse_template_invocation(&mut self) -> Result<TemplateInvocation, ParseError> {
-        let name_tok = self.expect(TokenKind::Ident)?;
-        let name = Ident {
-            name: name_tok.lexeme.to_string(),
-            span: name_tok.span,
+        let first_tok = self.expect(TokenKind::Ident)?;
+        let (qualifier, name) = if self.peek().kind == TokenKind::Dot {
+            self.bump();
+            let name_tok = self.expect(TokenKind::Ident)?;
+            (
+                Some(Ident {
+                    name: first_tok.lexeme.to_string(),
+                    span: first_tok.span,
+                }),
+                Ident {
+                    name: name_tok.lexeme.to_string(),
+                    span: name_tok.span,
+                },
+            )
+        } else {
+            (
+                None,
+                Ident {
+                    name: first_tok.lexeme.to_string(),
+                    span: first_tok.span,
+                },
+            )
         };
+        let start_span = qualifier.as_ref().map_or(name.span, |q| q.span);
         let mut end = name.span.end;
         let args = if self.peek().kind == TokenKind::LBrace {
             let raw = self.parse_raw_body()?;
@@ -233,12 +279,17 @@ impl<'src> Parser<'src> {
             RawMap::default()
         };
         let span = Span {
-            start: name.span.start,
+            start: start_span.start,
             end,
-            line: name.span.line,
-            col: name.span.col,
+            line: start_span.line,
+            col: start_span.col,
         };
-        Ok(TemplateInvocation { name, args, span })
+        Ok(TemplateInvocation {
+            qualifier,
+            name,
+            args,
+            span,
+        })
     }
 
     fn parse_bare_template_invocation_list(
@@ -692,6 +743,9 @@ impl<'src> Parser<'src> {
         if self.peek().kind == TokenKind::Template {
             return Ok(TopDecl::Template(Box::new(self.parse_template_decl()?)));
         }
+        if self.peek().kind == TokenKind::Ident && self.peek().lexeme == "use" {
+            return Ok(TopDecl::Use(self.parse_use_decl()?));
+        }
 
         let type_tok = self.expect(TokenKind::Ident)?;
         let schema = schema::top_level_type(type_tok.lexeme).ok_or_else(|| {
@@ -722,6 +776,34 @@ impl<'src> Parser<'src> {
             )))),
             _ => unreachable!("top_level_type only ever returns the network/service schemas"),
         }
+    }
+
+    /// `use_decl ::= "use" STRING "as" IDENT`. Neither `use` nor `as` is
+    /// lexically reserved — both are ordinary `Ident`s recognized here by
+    /// lexeme only, matching `with`/`as`/`external`'s existing precedent
+    /// of keeping the reserved-word list as small as possible. `use`'s
+    /// path must be a quoted `STRING`: `IDENT`'s grammar can't represent
+    /// `.`/`/` at all, so a bare path isn't lexable.
+    fn parse_use_decl(&mut self) -> Result<UseDecl, ParseError> {
+        let use_tok = self.expect(TokenKind::Ident)?; // lexeme == "use", already peeked
+        let path_tok = self.expect(TokenKind::Str)?;
+        let path = Literal::Str(path_tok.lexeme.to_string(), path_tok.span);
+        if self.peek().kind != TokenKind::Ident || self.peek().lexeme != "as" {
+            return Err(self.unexpected(Expected::Description("`as`")));
+        }
+        self.bump();
+        let alias_tok = self.expect(TokenKind::Ident)?;
+        let alias = Ident {
+            name: alias_tok.lexeme.to_string(),
+            span: alias_tok.span,
+        };
+        let span = Span {
+            start: use_tok.span.start,
+            end: alias.span.end,
+            line: use_tok.span.line,
+            col: use_tok.span.col,
+        };
+        Ok(UseDecl { path, alias, span })
     }
 
     /// `template_decl ::= "template" IDENT param_list? ( body | "=" statement )`.

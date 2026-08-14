@@ -405,3 +405,23 @@ fn duplicate_top_level_template_name_is_error() {
         ComposeError::DuplicateTemplateName { name, .. } if name == "t"
     ));
 }
+
+// --- imports (Stage 1: no real file loading yet) ---
+
+#[test]
+fn qualified_network_reference_with_no_use_decls_is_unknown_alias() {
+    let err = compose_err("service s {\n  image \"x\"\n  networks [traefik.traefik-net]\n}\n");
+    assert!(matches!(
+        err,
+        ComposeError::UnknownAlias { alias, .. } if alias == "traefik"
+    ));
+}
+
+#[test]
+fn qualified_template_invocation_with_no_use_decls_is_unknown_alias() {
+    let err = compose_err("service s {\n  with common.internal_web\n  image \"x\"\n}\n");
+    assert!(matches!(
+        err,
+        ComposeError::UnknownAlias { alias, .. } if alias == "common"
+    ));
+}

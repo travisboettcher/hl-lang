@@ -7,6 +7,15 @@
 //! purely syntactic (known fields, correct kinds, no illegal
 //! duplicates), while template resolution — a semantic concern, same as
 //! "required fields" already being deferred past `parse()` — lives here.
+//!
+//! The merge engine itself ([`compose_with_resolver`] and everything
+//! below it) is generalized over a [`SymbolResolver`], so it can resolve
+//! both same-file names (the plain [`compose`] entry point, via
+//! [`SingleFileResolver`]) and cross-file `alias.name` references (a
+//! future linker, over its own module graph) with one implementation —
+//! see [`SymbolResolver`]'s own doc for the scoping contract that makes
+//! a template's own references always resolve in the scope it was
+//! *declared* in, not the scope it's invoked from.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -14,7 +23,7 @@ use std::fmt;
 use hl_lexer::Span;
 
 use crate::ast::{
-    EnvEntry, EnvMap, Expose, Image, Literal, Network, Program, RawMap, RawValue, Reference,
+    EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Program, RawMap, RawValue, Reference,
     Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, VolumeEntry,
     VolumeMap,
 };
@@ -106,6 +115,22 @@ pub enum ComposeError {
     /// this is by far `ComposeError`'s largest variant (five owned
     /// fields) and every other variant is much smaller.
     MapKeyCollision(Box<MapKeyCollision>),
+    /// An `alias.name` reference's `alias` doesn't resolve to anything —
+    /// either no `use ... as alias` was ever in scope, or (this
+    /// milestone specifically) the reference was resolved by
+    /// [`SingleFileResolver`], which has no aliases at all: a lone
+    /// [`Program`] has no imports by definition.
+    UnknownAlias { alias: String, span: Span },
+    /// A qualified reference (`alias.name`) was used on `middleware` or
+    /// `depends_on` — neither has a coherent cross-file meaning yet
+    /// (`depends_on` names a same-file sibling service; `middleware`
+    /// isn't resolved against anything at all today), so this is
+    /// rejected rather than silently accepted or silently dropped.
+    UnsupportedQualifiedReference {
+        field: &'static str,
+        alias: String,
+        span: Span,
+    },
 }
 
 /// Details for [`ComposeError::MapKeyCollision`], boxed out of the enum
@@ -134,7 +159,9 @@ impl ComposeError {
             | ComposeError::MissingTemplateArgument { span, .. }
             | ComposeError::DuplicateTemplateArgument { second: span, .. }
             | ComposeError::TemplateArgumentNotScalar { span, .. }
-            | ComposeError::FieldCollision { second: span, .. } => *span,
+            | ComposeError::FieldCollision { second: span, .. }
+            | ComposeError::UnknownAlias { span, .. }
+            | ComposeError::UnsupportedQualifiedReference { span, .. } => *span,
             ComposeError::MapKeyCollision(details) => details.second,
         }
     }
@@ -219,21 +246,134 @@ impl fmt::Display for ComposeError {
                     details.second_template,
                 )
             }
+            ComposeError::UnknownAlias { alias, .. } => {
+                write!(f, "{}:{}: unknown alias `{alias}`", span.line, span.col)
+            }
+            ComposeError::UnsupportedQualifiedReference { field, alias, .. } => write!(
+                f,
+                "{}:{}: `{field}` doesn't support a qualified reference yet (`{alias}.` ...)",
+                span.line, span.col
+            ),
         }
     }
 }
 
 impl std::error::Error for ComposeError {}
 
-/// Resolves every `template`/`with` composition in `program`. Templates
-/// are collected into a whole-program symbol table first (so `with` can
-/// reference a template declared anywhere in the file, not just earlier
-/// in it), then each service's `with`-list is merged per
-/// docs/DESIGN.md's 3-tier priority: the implicit `defaults` template (if
-/// declared) at the lowest tier, each explicit `with`-listed template
-/// left-to-right above that (collisions between two of these are
-/// errors), and the service's own body on top (always wins,
-/// unconditionally). Resolution stops at the first error, matching
+/// Resolves names against a whole-program symbol table, generalized over
+/// an opaque `Scope` so the same merge engine ([`compose_with_resolver`])
+/// works both for a single already-parsed [`Program`] (via
+/// [`SingleFileResolver`], `Scope = ()`) and, in a future milestone, a
+/// whole module graph of cross-file `use` imports (`Scope` = a module
+/// identity).
+///
+/// **Scoping contract** (this is what makes docs/DESIGN.md's import
+/// scoping rule work: a template's own references resolve relative to
+/// the file/scope it's *declared* in, never the scope of whoever
+/// eventually invokes it): [`Self::resolve_template`] returns the
+/// target's *own* declaring scope alongside the declaration. Callers
+/// must resolve that declaration's own body using the *returned* scope,
+/// never the scope the lookup was performed from.
+pub trait SymbolResolver {
+    type Scope: Copy + Eq + std::hash::Hash;
+
+    /// Resolves an explicit `with`-list invocation's target template.
+    /// `qualifier` is `Some` for `with alias.name`, `None` for a bare
+    /// `with name`. Always an error if nothing matches — unlike
+    /// [`Self::resolve_defaults`], every call here corresponds to an
+    /// explicit, user-written invocation.
+    fn resolve_template(
+        &self,
+        scope: Self::Scope,
+        qualifier: Option<&Ident>,
+        name: &str,
+        span: Span,
+    ) -> Result<(Self::Scope, &TemplateDecl), ComposeError>;
+
+    /// Looks up the implicit `defaults` template in `scope`. `None`, not
+    /// an error, if none is declared — unlike [`Self::resolve_template`],
+    /// this never corresponds to an explicit invocation the user wrote.
+    fn resolve_defaults(&self, scope: Self::Scope) -> Option<(Self::Scope, &TemplateDecl)>;
+
+    /// Resolves a *qualified* `networks [alias.name]` entry. Never called
+    /// for a bare/unqualified entry — those are left completely
+    /// untouched, exactly as before imports existed.
+    fn resolve_qualified_network(
+        &self,
+        scope: Self::Scope,
+        qualifier: &Ident,
+        name: &str,
+        span: Span,
+    ) -> Result<&Network, ComposeError>;
+}
+
+/// The [`SymbolResolver`] backing the plain [`compose`] entry point: a
+/// single already-parsed [`Program`]'s own template symbol table, no
+/// imports at all. Its `Scope` is `()` since there's only ever one scope
+/// to resolve within. Any *qualified* reference is answered with
+/// [`ComposeError::UnknownAlias`] — correct and honest, not a
+/// placeholder: a lone `Program` has no imports by definition, so no
+/// alias can ever be valid here.
+struct SingleFileResolver {
+    templates: HashMap<String, TemplateDecl>,
+}
+
+impl SymbolResolver for SingleFileResolver {
+    type Scope = ();
+
+    fn resolve_template(
+        &self,
+        _scope: (),
+        qualifier: Option<&Ident>,
+        name: &str,
+        span: Span,
+    ) -> Result<((), &TemplateDecl), ComposeError> {
+        if let Some(q) = qualifier {
+            return Err(ComposeError::UnknownAlias {
+                alias: q.name.clone(),
+                span: q.span,
+            });
+        }
+        self.templates
+            .get(name)
+            .map(|decl| ((), decl))
+            .ok_or_else(|| ComposeError::UnknownTemplate {
+                name: name.to_string(),
+                span,
+            })
+    }
+
+    fn resolve_defaults(&self, _scope: ()) -> Option<((), &TemplateDecl)> {
+        self.templates.get("defaults").map(|decl| ((), decl))
+    }
+
+    fn resolve_qualified_network(
+        &self,
+        _scope: (),
+        qualifier: &Ident,
+        _name: &str,
+        _span: Span,
+    ) -> Result<&Network, ComposeError> {
+        Err(ComposeError::UnknownAlias {
+            alias: qualifier.name.clone(),
+            span: qualifier.span,
+        })
+    }
+}
+
+/// Resolves every `template`/`with` composition in `program`, using only
+/// `program`'s own top-level declarations — no cross-file imports are
+/// followed (see [`SingleFileResolver`]'s doc: a `use` declaration
+/// parses, but any *qualified* reference it enables errors with
+/// [`ComposeError::UnknownAlias`], since a lone `Program` has nowhere to
+/// resolve it). Templates are collected into a whole-program symbol
+/// table first (so `with` can reference a template declared anywhere in
+/// the file, not just earlier in it), then each service's `with`-list is
+/// merged per docs/DESIGN.md's 3-tier priority: the implicit `defaults`
+/// template (if declared) at the lowest tier, each explicit
+/// `with`-listed template left-to-right above that (collisions between
+/// two of these are errors), and the service's own body on top (always
+/// wins, unconditionally). Resolution stops at the first error, matching
 /// [`crate::parse`]'s own no-error-recovery precedent.
 pub fn compose(program: Program) -> Result<ComposedProgram, ComposeError> {
     let mut networks = Vec::new();
@@ -254,41 +394,88 @@ pub fn compose(program: Program) -> Result<ComposedProgram, ComposeError> {
                 }
                 templates.insert(t.name.name.clone(), *t);
             }
+            // A `use` declaration is inert here — same as an unused
+            // `network`/`template` decl, it's only meaningful if
+            // something actually references it, and a lone `Program`
+            // has no way to follow it regardless (see
+            // `SingleFileResolver`'s doc).
+            TopDecl::Use(_) => {}
         }
     }
 
-    let mut cache: HashMap<String, ServiceFields> = HashMap::new();
+    let resolver = SingleFileResolver { templates };
+    compose_with_resolver(networks, services, (), &resolver)
+}
+
+/// The generalized merge engine: composes `services` (plus whatever
+/// `networks` their qualified `networks [...]` entries additionally
+/// resolve to) by resolving every name through `resolver`, starting from
+/// `entry_scope`. See [`SymbolResolver`]'s doc for the scoping contract
+/// this implements.
+pub fn compose_with_resolver<R: SymbolResolver>(
+    networks: Vec<Network>,
+    services: Vec<Service>,
+    entry_scope: R::Scope,
+    resolver: &R,
+) -> Result<ComposedProgram, ComposeError> {
+    let mut cache: HashMap<(R::Scope, String), ServiceFields> = HashMap::new();
+    let mut extra_networks: Vec<Network> = Vec::new();
     let mut composed = Vec::with_capacity(services.len());
     for service in services {
-        composed.push(compose_service(service, &templates, &mut cache)?);
+        composed.push(compose_service(
+            service,
+            entry_scope,
+            resolver,
+            &mut cache,
+            &mut extra_networks,
+        )?);
     }
 
+    let mut all_networks = networks;
+    all_networks.extend(extra_networks);
     Ok(ComposedProgram {
-        networks,
+        networks: all_networks,
         services: composed,
     })
 }
 
-fn compose_service(
+fn compose_service<R: SymbolResolver>(
     service: Service,
-    templates: &HashMap<String, TemplateDecl>,
-    cache: &mut HashMap<String, ServiceFields>,
+    scope: R::Scope,
+    resolver: &R,
+    cache: &mut HashMap<(R::Scope, String), ServiceFields>,
+    extra_networks: &mut Vec<Network>,
 ) -> Result<Service, ComposeError> {
     let mut acc = MergeAcc::default();
     let mut in_progress = Vec::new();
 
-    if let Some(defaults_decl) = templates.get("defaults") {
-        let resolved = resolve_template(defaults_decl, templates, cache, &mut in_progress)?;
+    if let Some((defaults_scope, defaults_decl)) = resolver.resolve_defaults(scope) {
+        let resolved = resolve_template(
+            defaults_decl,
+            defaults_scope,
+            resolver,
+            cache,
+            &mut in_progress,
+            extra_networks,
+        )?;
         merge_tier(&mut acc, resolved, &Tier::Defaults)?;
     }
 
     for inv in &service.fields.with {
-        let resolved = resolve_invocation(inv, templates, cache, &mut in_progress)?;
+        let resolved = resolve_invocation(
+            inv,
+            scope,
+            resolver,
+            cache,
+            &mut in_progress,
+            extra_networks,
+        )?;
         merge_tier(&mut acc, resolved, &Tier::Explicit(inv.name.name.clone()))?;
     }
 
     let mut own = service.fields;
     own.with.clear();
+    resolve_qualified_networks(&mut own, scope, resolver, extra_networks)?;
     merge_tier(&mut acc, own, &Tier::Own)?;
 
     Ok(Service {
@@ -303,64 +490,72 @@ fn compose_service(
 /// (always winning over its own `with`-list — the same rule as a
 /// service's own body, minus `defaults`, which is confirmed to apply
 /// only at the final service-level merge, never inside template-internal
-/// resolution). The result is cached by template name — still in
+/// resolution). The result is cached by `(scope, name)` — still in
 /// *parameterized* form (any `Literal::Param` the template's own body
 /// declared is left untouched) — since the same template can be invoked
 /// multiple times with different concrete arguments; substitution always
 /// happens on a fresh clone in [`resolve_invocation`], never mutating the
-/// cache.
-fn resolve_template(
-    decl: &TemplateDecl,
-    templates: &HashMap<String, TemplateDecl>,
-    cache: &mut HashMap<String, ServiceFields>,
-    in_progress: &mut Vec<String>,
+/// cache. Keying by `scope` as well as `name` (not just `name`) is
+/// required, not optional: two different scopes each declaring a
+/// same-named template must resolve completely independently.
+fn resolve_template<'r, R: SymbolResolver>(
+    decl: &'r TemplateDecl,
+    scope: R::Scope,
+    resolver: &'r R,
+    cache: &mut HashMap<(R::Scope, String), ServiceFields>,
+    in_progress: &mut Vec<(R::Scope, String)>,
+    extra_networks: &mut Vec<Network>,
 ) -> Result<ServiceFields, ComposeError> {
     let name = &decl.name.name;
-    if let Some(fields) = cache.get(name) {
+    let cache_key = (scope, name.clone());
+    if let Some(fields) = cache.get(&cache_key) {
         return Ok(fields.clone());
     }
-    if in_progress.iter().any(|n| n == name) {
-        let mut chain = in_progress.clone();
+    if in_progress.iter().any(|(s, n)| *s == scope && n == name) {
+        let mut chain: Vec<String> = in_progress.iter().map(|(_, n)| n.clone()).collect();
         chain.push(name.clone());
         return Err(ComposeError::TemplateCycle {
             chain,
             span: decl.name.span,
         });
     }
-    in_progress.push(name.clone());
+    in_progress.push((scope, name.clone()));
 
     let mut acc = MergeAcc::default();
     for inv in &decl.fields.with {
-        let resolved = resolve_invocation(inv, templates, cache, in_progress)?;
+        let resolved =
+            resolve_invocation(inv, scope, resolver, cache, in_progress, extra_networks)?;
         merge_tier(&mut acc, resolved, &Tier::Explicit(inv.name.name.clone()))?;
     }
     let mut own = decl.fields.clone();
     own.with.clear();
+    resolve_qualified_networks(&mut own, scope, resolver, extra_networks)?;
     merge_tier(&mut acc, own, &Tier::Own)?;
 
     in_progress.pop();
     let result = acc.into_service_fields();
-    cache.insert(name.clone(), result.clone());
+    cache.insert(cache_key, result.clone());
     Ok(result)
 }
 
-/// Resolves one `with`-list item: validates its arguments against the
-/// target template's declared parameters (exact match — DESIGN.md's
-/// "fully applied at each call, no partial application"), resolves the
-/// template itself, then substitutes every `Literal::Param` the
-/// resolution produced with the bound concrete argument value.
-fn resolve_invocation(
+/// Resolves one `with`-list item: looks up its (possibly alias-qualified)
+/// target template, validates its arguments against the target's
+/// declared parameters (exact match — DESIGN.md's "fully applied at each
+/// call, no partial application"), resolves the template itself — using
+/// the target's *own* declaring scope, per [`SymbolResolver`]'s scoping
+/// contract, not `scope` (the scope `inv` was written in) — then
+/// substitutes every `Literal::Param` the resolution produced with the
+/// bound concrete argument value.
+fn resolve_invocation<R: SymbolResolver>(
     inv: &TemplateInvocation,
-    templates: &HashMap<String, TemplateDecl>,
-    cache: &mut HashMap<String, ServiceFields>,
-    in_progress: &mut Vec<String>,
+    scope: R::Scope,
+    resolver: &R,
+    cache: &mut HashMap<(R::Scope, String), ServiceFields>,
+    in_progress: &mut Vec<(R::Scope, String)>,
+    extra_networks: &mut Vec<Network>,
 ) -> Result<ServiceFields, ComposeError> {
-    let decl = templates
-        .get(&inv.name.name)
-        .ok_or_else(|| ComposeError::UnknownTemplate {
-            name: inv.name.name.clone(),
-            span: inv.span,
-        })?;
+    let (target_scope, decl) =
+        resolver.resolve_template(scope, inv.qualifier.as_ref(), &inv.name.name, inv.span)?;
 
     let mut seen: HashMap<&str, Span> = HashMap::new();
     let mut args: HashMap<&str, &RawValue> = HashMap::new();
@@ -394,9 +589,58 @@ fn resolve_invocation(
         }
     }
 
-    let mut fields = resolve_template(decl, templates, cache, in_progress)?;
+    let mut fields = resolve_template(
+        decl,
+        target_scope,
+        resolver,
+        cache,
+        in_progress,
+        extra_networks,
+    )?;
     substitute_params(&mut fields, &args, &decl.name.name)?;
     Ok(fields)
+}
+
+/// Resolves every *qualified* `networks [alias.name]` entry in `fields`
+/// against `scope` (rewriting it to an unqualified, resolved bare
+/// reference so [`merge_tier`] never needs to know imports exist), and
+/// rejects a qualified `middleware`/`depends_on` entry outright — see
+/// [`ComposeError::UnsupportedQualifiedReference`]'s doc for why those
+/// two have no cross-file meaning yet. Runs exactly once per scope, at
+/// the point that scope's own directly-written fields are merged (its
+/// `Tier::Own` step in [`compose_service`]/[`resolve_template`]) — by
+/// induction, every `ServiceFields` [`merge_tier`] ever sees has already
+/// passed through this, transitively, since a `with`-list target's own
+/// qualified references were already resolved when *it* was resolved.
+fn resolve_qualified_networks<R: SymbolResolver>(
+    fields: &mut ServiceFields,
+    scope: R::Scope,
+    resolver: &R,
+    extra_networks: &mut Vec<Network>,
+) -> Result<(), ComposeError> {
+    for r in &mut fields.networks {
+        if let Some(qualifier) = r.qualifier.take() {
+            let network = resolver.resolve_qualified_network(scope, &qualifier, &r.name, r.span)?;
+            r.name = network.name.name.clone();
+            extra_networks.push(network.clone());
+        }
+    }
+    reject_qualified(&fields.middleware, "middleware")?;
+    reject_qualified(&fields.depends_on, "depends_on")?;
+    Ok(())
+}
+
+fn reject_qualified(refs: &[Reference], field: &'static str) -> Result<(), ComposeError> {
+    for r in refs {
+        if let Some(q) = &r.qualifier {
+            return Err(ComposeError::UnsupportedQualifiedReference {
+                field,
+                alias: q.name.clone(),
+                span: r.span,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Walks every `Literal`/`RawValue` slot in `fields` (mirroring
@@ -518,6 +762,15 @@ fn substitute_raw_value(value: &mut RawValue, args: &HashMap<&str, &RawValue>) {
 }
 
 // ---- merge engine ----
+//
+// Everything below here is completely unaware imports exist: it always
+// operates on already-resolved `ServiceFields` (any qualified
+// `networks` entry has already been rewritten to a plain resolved
+// reference by `resolve_qualified_networks`, and a qualified
+// `middleware`/`depends_on` entry can never reach here at all, having
+// already been rejected). Kept byte-for-byte the same as before imports
+// existed, deliberately, since it's the single largest, most-tested
+// piece of this module.
 
 /// Which priority tier a value came from, per docs/DESIGN.md's Composition
 /// section: `Defaults` < `Explicit(template_name)` (left-to-right among

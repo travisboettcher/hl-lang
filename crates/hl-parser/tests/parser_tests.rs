@@ -1,5 +1,5 @@
 use hl_parser::schema::MapSide;
-use hl_parser::{Literal, ParseError, TemplateDecl, TopDecl, parse};
+use hl_parser::{Literal, ParseError, TemplateDecl, TopDecl, UseDecl, parse};
 
 fn parse_ok(source: &str) -> hl_parser::Program {
     parse(source).unwrap_or_else(|err| panic!("unexpected parse error: {err}"))
@@ -23,6 +23,13 @@ fn as_template(decl: &TopDecl) -> &TemplateDecl {
     match decl {
         TopDecl::Template(t) => t,
         other => panic!("expected a Template decl, got {other:?}"),
+    }
+}
+
+fn as_use(decl: &TopDecl) -> &UseDecl {
+    match decl {
+        TopDecl::Use(u) => u,
+        other => panic!("expected a Use decl, got {other:?}"),
     }
 }
 
@@ -630,4 +637,106 @@ fn unexpected_token_reports_position() {
 fn number_literal_overflow_is_error() {
     let err = parse("service s {\n  expose 999999999999999999999999\n}\n").unwrap_err();
     assert!(matches!(err, ParseError::NumberOutOfRange { .. }));
+}
+
+// --- use / qualified references ---
+
+#[test]
+fn use_decl_parses() {
+    let program = parse_ok("use \"../docker/docker.hll\" as traefik\n");
+    let u = as_use(&program.decls[0]);
+    assert_eq!(u.path.text(), "../docker/docker.hll");
+    assert_eq!(u.alias.name, "traefik");
+}
+
+#[test]
+fn use_decl_missing_as_is_error() {
+    let err = parse("use \"x.hll\" traefik\n").unwrap_err();
+    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+}
+
+#[test]
+fn use_decl_requires_string_path() {
+    // A bare/unquoted path isn't lexable as one token (IDENT can't
+    // contain '.'/'/'), so this must fail expecting a STRING, not
+    // silently accept "docker" as a (wrong) path.
+    let err = parse("use docker as traefik\n").unwrap_err();
+    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+}
+
+#[test]
+fn use_decl_missing_alias_is_error() {
+    let err = parse("use \"x.hll\" as\n").unwrap_err();
+    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+}
+
+#[test]
+fn program_with_use_and_service() {
+    let program =
+        parse_ok("use \"../docker/docker.hll\" as traefik\nservice s {\n  image \"x\"\n}\n");
+    assert_eq!(program.decls.len(), 2);
+    assert!(matches!(program.decls[0], TopDecl::Use(_)));
+    assert!(matches!(program.decls[1], TopDecl::Service(_)));
+}
+
+#[test]
+fn qualified_reference_in_networks_field() {
+    let program = parse_ok("service s {\n  image \"x\"\n  networks [traefik.traefik-net]\n}\n");
+    let service = as_service(&program.decls[0]);
+    let r = &service.fields.networks[0];
+    assert_eq!(r.qualifier.as_ref().unwrap().name, "traefik");
+    assert_eq!(r.name, "traefik-net");
+}
+
+#[test]
+fn unqualified_reference_has_no_qualifier() {
+    let program = parse_ok("service s {\n  image \"x\"\n  networks [traefik-net]\n}\n");
+    let service = as_service(&program.decls[0]);
+    let r = &service.fields.networks[0];
+    assert!(r.qualifier.is_none());
+    assert_eq!(r.name, "traefik-net");
+}
+
+#[test]
+fn qualified_reference_bare_comma_form() {
+    let program = parse_ok("service s {\n  image \"x\"\n  networks common.traefik-net\n}\n");
+    let service = as_service(&program.decls[0]);
+    let r = &service.fields.networks[0];
+    assert_eq!(r.qualifier.as_ref().unwrap().name, "common");
+    assert_eq!(r.name, "traefik-net");
+}
+
+#[test]
+fn qualified_template_invocation_in_with() {
+    let program =
+        parse_ok("service s {\n  with common.internal_web { port: 8384 }\n  image \"x\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    let inv = &service.fields.with[0];
+    assert_eq!(inv.qualifier.as_ref().unwrap().name, "common");
+    assert_eq!(inv.name.name, "internal_web");
+    assert_eq!(inv.args.entries.len(), 1);
+}
+
+#[test]
+fn qualified_zero_arg_template_invocation() {
+    let program = parse_ok("service s {\n  with common.authenticated\n  image \"x\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    let inv = &service.fields.with[0];
+    assert_eq!(inv.qualifier.as_ref().unwrap().name, "common");
+    assert_eq!(inv.name.name, "authenticated");
+    assert!(inv.args.entries.is_empty());
+}
+
+#[test]
+fn qualified_middleware_reference_parses() {
+    // Parsing accepts a qualified reference on any Reference-typed
+    // field, including middleware/depends_on — compose() is what
+    // rejects it as unsupported (schema-agnostic parser, per the
+    // codebase's existing "don't special-case field identity in the
+    // parser" precedent).
+    let program = parse_ok("service s {\n  image \"x\"\n  middleware common.forwardAuth\n}\n");
+    let service = as_service(&program.decls[0]);
+    let r = &service.fields.middleware[0];
+    assert_eq!(r.qualifier.as_ref().unwrap().name, "common");
+    assert_eq!(r.name, "forwardAuth");
 }
