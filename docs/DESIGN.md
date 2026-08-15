@@ -101,10 +101,37 @@ literal        ::= STRING | NUMBER | IDENT
 `statement` is the whole language: a `named_decl` is one particular shape of
 it (mandatory second name, mandatory body); every field inside a `service`,
 every `template` invocation, every leaf like `image "foo"` is the same
-`statement` production, applied recursively. Statements need no separator
-token — a trailing comma continues a comma-list, its absence unambiguously
-ends the current statement, so newline-separated bodies parse correctly with
-a single token of lookahead.
+`statement` production, applied recursively.
+
+The grammar above is deliberately silent on layout, but layout isn't actually
+free — two rules govern how statements are separated, neither expressible in
+a plain context-free grammar (both depend on source position/line, not just
+token identity):
+
+- **Different fields in a struct-kind body are separated by a newline, never
+  a comma.** `service`/`template`/`network`'s own top-level body, and a
+  nested struct-kind type's canonical `{ }` form (`image { ... }`, `expose {
+  ... }`, `restart { ... }`), all require this: `image "x"` and `restart
+  unless-stopped` must be on separate lines, and a comma between them (`image
+  "x", restart unless-stopped`) is a compile error, not a tolerated
+  no-op — a comma is reserved exclusively for continuing a *single* field's
+  own comma-list (see below), never for marking the boundary between two
+  unrelated fields. A single-statement body needs nothing to separate
+  (`{ image "x" }` on one line is fine); the rule only applies from the
+  second statement on.
+- **A comma-list's trailing comma is mandatory, not optional, to continue
+  it.** A bracket list (`[a, b, c]`), a bare `with`-list (`with a, b, c`),
+  and a primary-shorthand's own secondary fields (rule 3, below) all follow
+  "trailing comma continues, its absence ends the statement" — but the
+  comma itself is never optional when there *is* a next item; bare
+  adjacency with no comma at all no longer implies continuation.
+
+Map-kind bodies (`raw { }`, and a `with`-invocation's own argument body,
+which reuses `raw`'s entry parsing) are exempt from the newline rule — their
+entries are conceptually key-value pairs in a dictionary, not named struct
+fields, and the compact one-line style (`{ puid: 1000, pgid: 100 }`) used
+throughout this doc's own worked examples stays valid, comma-separated, on
+one line.
 
 ### Desugaring rules
 
@@ -116,14 +143,29 @@ a single token of lookahead.
    desugars to a one-entry map, where `<sep>` is a per-type schema choice
    (`env` uses `=`, `volume` uses `->`). Both desugar to the same canonical
    `:`-separated map form internally.
-3. **Secondary-field bare shorthand** — after a primary value, additional
-   bare `key: value`/`key` statements set other non-primary struct fields
-   of the same type. A boolean struct field can always be set bare with no
-   value, implying `true` (e.g. `external` on `network`). Field-init
-   shorthand (`{ port }` standing in for `{ port: port }`, borrowed from
-   Rust) and a bare zero-field template invocation (`authenticated` with no
-   `{ }`) are the same grammar production as this rule, disambiguated only
-   by schema lookup.
+3. **Secondary-field bare shorthand** — after a primary value, a type's
+   schema-configured `bare_keyword_alias` (if it has one — `as` is the one
+   built-in case, aliasing to `expose`'s `host` field) may fuse onto it
+   directly with **no comma**: `expose port as "host"`. This is a one-shot
+   continuation, not a list — it cannot itself be followed by anything
+   else, comma or no comma; `expose port as "host", entrypoint: "..."` is a
+   compile error. Beyond that, additional explicit `key: value`/`key`
+   fields may follow, each preceded by a **mandatory comma** (the same
+   "trailing comma continues, its absence ends the statement" rule as any
+   other comma-list, including exempting the alias keyword itself — `as`
+   isn't a valid target of this comma-continuation, only of the immediate
+   no-comma fusion above): `expose port, host: "...", entrypoint: "..."`.
+   A boolean struct field can always be set bare with no value, implying
+   `true` (e.g. `external` on `network`). Field-init shorthand (`{ port }`
+   standing in for `{ port: port }`, borrowed from Rust) and a bare
+   zero-field template invocation (`authenticated` with no `{ }`) are the
+   same grammar production as the comma-continuation case, disambiguated
+   only by schema lookup — one token of lookahead past the comma confirms
+   the next key genuinely names one of the nested type's own fields before
+   consuming it as part of this value; otherwise the comma (and whatever
+   follows) is left for the *enclosing* body, where a bare comma is never a
+   valid statement start and now correctly errors instead of silently
+   reattaching elsewhere.
 4. **Repeatable-field accumulation** (semantic, not part of the CFG) —
    writing `volume`, `env`, `middleware`, or `depends_on` more than once in
    one body appends, since those fields are list/map-kinded. Writing
@@ -185,7 +227,7 @@ repeating them; two explicit templates only collide if they set the
 
 ```
 template internal_web(port) {
-  expose port entrypoint: "web-secure"
+  expose port, entrypoint: "web-secure"
 }
 
 service it-tools {
@@ -258,7 +300,7 @@ network traefik-net {
 template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
-  expose port as "{{name}}.internal.techdebtor.io" entrypoint: "web-secure"
+  expose port, host: "{{name}}.internal.techdebtor.io", entrypoint: "web-secure"
   middleware local-ipwhitelist
 }
 
@@ -295,7 +337,7 @@ use "network.hll" as net
 template internal_web(port) {
   networks [net.traefik-net]
   restart unless-stopped
-  expose port as "{{name}}.internal.techdebtor.io" entrypoint: "web-secure"
+  expose port, host: "{{name}}.internal.techdebtor.io", entrypoint: "web-secure"
   middleware local-ipwhitelist
 }
 

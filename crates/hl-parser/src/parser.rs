@@ -349,17 +349,24 @@ impl<'src> Parser<'src> {
     ) -> Result<(StructFields, Span), ParseError> {
         let open = self.expect(TokenKind::LBrace)?;
         let mut fields = StructFields::new();
+        let mut first = true;
         while self.peek().kind != TokenKind::RBrace {
-            self.parse_statement_into(schema, &mut fields)?;
-            // Per docs/DESIGN.md: "a trailing comma continues a
-            // comma-list, its absence unambiguously ends the current
-            // statement" — a body's statements need no separator, but an
-            // optional comma between them is tolerated too (e.g. a
-            // `with`-invocation's argument body: `{ puid: 1000, pgid:
-            // 100 }`).
-            if self.peek().kind == TokenKind::Comma {
-                self.bump();
+            // Different fields in a struct-kind body are separated by a
+            // newline, never a comma — a comma belongs exclusively to a
+            // single field's own comma-list (a bracket list, a `with`
+            // invocation list, or a primary-shorthand's own secondary
+            // fields; see `parse_struct_primary_shorthand`), never to
+            // marking the boundary between two unrelated fields. Only
+            // checked from the second field on: a single-statement body
+            // (`{ image "foo" }`) needs nothing to separate.
+            if !first && self.tokens[self.pos.saturating_sub(1)].span.line == self.peek().span.line
+            {
+                return Err(
+                    self.unexpected(Expected::Description("a newline before the next field"))
+                );
             }
+            first = false;
+            self.parse_statement_into(schema, &mut fields)?;
         }
         let close = self.expect(TokenKind::RBrace)?;
         let span = Span {
@@ -372,13 +379,27 @@ impl<'src> Parser<'src> {
     }
 
     /// The primary-value-shorthand form of a nested struct-kind field,
-    /// e.g. `expose 8096 as "host"` instead of `expose { port: 8096, host:
-    /// "host" }`. After the primary value, it continues accumulating
-    /// trailing bare statements (docs/DESIGN.md's desugaring rule 3) using
-    /// pure one-token lookahead: peek the next key, and only consume it
-    /// as part of this nested value if the nested schema actually
-    /// resolves it to a real field/alias — otherwise stop and let the
-    /// enclosing body parse it as its own next statement.
+    /// e.g. `expose 8096, as: "host"` instead of `expose { port: 8096,
+    /// host: "host" }`. After the primary value, it continues
+    /// accumulating trailing secondary fields (docs/DESIGN.md's
+    /// desugaring rule 3) exactly like any other comma-list: a leading
+    /// comma is required to continue, and after it, the next key must
+    /// resolve to a real field of the nested type via one-token
+    /// lookahead — otherwise stop and let the enclosing body parse
+    /// whatever follows (comma included) as its own next statement,
+    /// where — since a bare comma never starts a valid field name — it
+    /// now correctly errors instead of silently reattaching elsewhere.
+    ///
+    /// A comma is mandatory here, not optional: unlike an ordinary
+    /// top-level field (which is separated from its neighbors by a
+    /// newline, never a comma — see `parse_struct_body`), a *secondary*
+    /// field is continuing the *same* statement's own value, so it
+    /// follows the same "trailing comma continues the list" rule as a
+    /// bracket list or a `with`-invocation list, not the "different
+    /// fields never share a comma" rule those neighbors follow. Schema
+    /// lookup (not the comma alone) is still what confirms the comma
+    /// belongs to *this* value rather than to whatever the enclosing body
+    /// writes next.
     ///
     /// The primary field is usually `Scalar` (one literal), but
     /// docs/DESIGN.md's desugaring rule 1 also anticipates a list-typed
@@ -419,17 +440,62 @@ impl<'src> Parser<'src> {
             }
         };
 
-        loop {
-            let continues = match self.peek().kind {
-                TokenKind::Ident | TokenKind::Str => !matches!(
-                    schema::resolve_field(nested, self.peek().lexeme),
-                    FieldResolution::Unknown
-                ),
-                _ => false,
+        // `nested.bare_keyword_alias` (e.g. `as`) may fuse directly onto
+        // the primary value with no comma and no further continuation —
+        // `expose port as "host"` is one self-contained unit, not the
+        // start of a list. It's deliberately a dead end: if a service
+        // needs more than the primary value plus this one aliased field,
+        // it must say so explicitly (`expose port, host: "...",
+        // entrypoint: "..."`, or the canonical `expose { ... }` body)
+        // rather than mixing the alias sugar with further comma-continued
+        // fields — `expose port as "host", entrypoint: "..."` no longer
+        // parses.
+        if let Some((keyword, _)) = nested.bare_keyword_alias
+            && self.peek().kind == TokenKind::Ident
+            && self.peek().lexeme == keyword
+        {
+            self.parse_statement_into(nested, &mut fields)?;
+            let last_end = self.tokens[self.pos.saturating_sub(1)].span.end;
+            let span = Span {
+                start: start_span.start,
+                end: last_end,
+                line: start_span.line,
+                col: start_span.col,
             };
+            return Ok((fields, span));
+        }
+
+        // Beyond that, zero or more explicit secondary fields — the same
+        // "trailing comma continues, its absence ends the statement" rule
+        // every other comma-list in the grammar follows: a comma is
+        // required before each one, and one-token lookahead past it
+        // confirms the next key genuinely names one of the nested type's
+        // own fields (excluding the alias keyword, whose only valid
+        // position is the immediate, comma-free one above) before
+        // consuming it as part of this value — otherwise the comma (and
+        // whatever follows it) is left for the enclosing body, where a
+        // bare comma is never a valid statement start and now correctly
+        // errors instead of silently reattaching elsewhere.
+        loop {
+            if self.peek().kind != TokenKind::Comma {
+                break;
+            }
+            let lookahead = &self.tokens[self.pos + 1];
+            let is_alias_keyword = nested
+                .bare_keyword_alias
+                .is_some_and(|(keyword, _)| lookahead.lexeme == keyword);
+            let continues = !is_alias_keyword
+                && match lookahead.kind {
+                    TokenKind::Ident | TokenKind::Str => !matches!(
+                        schema::resolve_field(nested, lookahead.lexeme),
+                        FieldResolution::Unknown
+                    ),
+                    _ => false,
+                };
             if !continues {
                 break;
             }
+            self.bump();
             self.parse_statement_into(nested, &mut fields)?;
         }
 

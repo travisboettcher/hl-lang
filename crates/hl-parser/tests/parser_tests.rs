@@ -148,15 +148,20 @@ fn expose_as_sugar_aliases_to_host() {
 
 #[test]
 fn expose_host_explicit_field_form() {
-    let program = parse_ok("service s {\n  expose 8096 host: \"host.example.com\"\n}\n");
+    let program = parse_ok("service s {\n  expose 8096, host: \"host.example.com\"\n}\n");
     let service = as_service(&program.decls[0]);
     let expose = service.fields.expose.as_ref().unwrap();
     assert_eq!(expose.host.as_ref().unwrap().text(), "host.example.com");
 }
 
+/// `as` is a one-shot fusion onto the primary value (no comma, no further
+/// continuation) — a duplicate `host` can only be triggered through the
+/// explicit comma-separated field form now, never by mixing `as` with a
+/// trailing `host:`, since that combination no longer parses at all (see
+/// `alias_sugar_cannot_be_followed_by_further_secondary_fields`).
 #[test]
-fn expose_duplicate_host_via_as_and_field_is_error() {
-    let err = parse("service s {\n  expose 8096 as \"a\" host: \"b\"\n}\n").unwrap_err();
+fn expose_duplicate_host_via_explicit_fields_is_error() {
+    let err = parse("service s {\n  expose 8096, host: \"a\", host: \"b\"\n}\n").unwrap_err();
     assert!(matches!(
         err,
         ParseError::DuplicateField {
@@ -165,6 +170,21 @@ fn expose_duplicate_host_via_as_and_field_is_error() {
             ..
         }
     ));
+}
+
+/// `as` fuses onto the primary value as one self-contained unit (docs/
+/// DESIGN.md's desugaring rule 3) — it cannot be followed by further
+/// secondary fields, comma or no comma. If a service needs more than
+/// `as` alone provides, it must use the explicit comma-separated field
+/// form instead (`expose port, host: "...", entrypoint: "..."`) or the
+/// canonical `expose { ... }` body.
+#[test]
+fn alias_sugar_cannot_be_followed_by_further_secondary_fields() {
+    let err = parse(
+        "service s {\n  expose 8096 as \"host.example.com\", entrypoint: \"web-secure\"\n}\n",
+    )
+    .unwrap_err();
+    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
 }
 
 // --- bool flag ---
@@ -205,10 +225,45 @@ fn network_without_real_name_field_is_none() {
 
 #[test]
 fn expose_entrypoint_field() {
-    let program = parse_ok("service s {\n  expose 8096 entrypoint: \"web-secure\"\n}\n");
+    let program = parse_ok("service s {\n  expose 8096, entrypoint: \"web-secure\"\n}\n");
     let service = as_service(&program.decls[0]);
     let expose = service.fields.expose.as_ref().unwrap();
     assert_eq!(expose.entrypoint.as_ref().unwrap().text(), "web-secure");
+}
+
+/// `host`/`entrypoint` together, via the explicit comma-separated field
+/// form rather than `as` — the shape `docs/DESIGN.md`'s `internal_web`
+/// template now uses, since `as` can't be combined with anything else
+/// (see `alias_sugar_cannot_be_followed_by_further_secondary_fields`).
+/// Exercised inside a `template` body specifically, matching that real
+/// worked example.
+#[test]
+fn expose_host_and_entrypoint_fields_in_template_body() {
+    let program = parse_ok(
+        "template internal_web(port) {\n  \
+           expose port, host: \"{{name}}.internal.techdebtor.io\", entrypoint: \"web-secure\"\n  \
+           middleware local-ipwhitelist\n\
+         }\n",
+    );
+    let template = as_template(&program.decls[0]);
+    let expose = template.fields.expose.as_ref().unwrap();
+    assert_eq!(
+        expose.host.as_ref().unwrap().text(),
+        "{{name}}.internal.techdebtor.io"
+    );
+    assert_eq!(expose.entrypoint.as_ref().unwrap().text(), "web-secure");
+    assert_eq!(template.fields.middleware.len(), 1);
+}
+
+/// Two different fields joined by a comma, with no newline between them,
+/// is now a hard error rather than being silently split into two
+/// statements — `image` was never a field of `expose`, so this used to
+/// parse as `expose 8096` followed by a separate `image "..."` statement;
+/// now a comma may only ever continue the *same* statement's own value.
+#[test]
+fn different_fields_joined_by_comma_on_one_line_is_error() {
+    let err = parse("service s {\n  expose 8096, image \"foo/bar:latest\"\n}\n").unwrap_err();
+    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
 }
 
 #[test]
@@ -368,6 +423,80 @@ fn raw_preserves_nested_structure() {
 fn raw_no_uniqueness_check() {
     let program =
         parse_ok("service s {\n  raw {\n    key: \"a\"\n  }\n  raw {\n    key: \"b\"\n  }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.raw.entries.len(), 2);
+}
+
+// --- statement separation: newline between struct-body fields ---
+
+/// Two different fields in a struct-kind body (`service`/`template`/
+/// `network`, or a nested type's own canonical `{ }` form) must be on
+/// separate lines — this is the general form of
+/// `different_fields_joined_by_comma_on_one_line_is_error` above, minus
+/// the comma: no separator at all between two fields sharing a line is
+/// just as invalid as a comma between them.
+#[test]
+fn two_fields_on_one_line_with_no_separator_is_error() {
+    let err = parse("service s {\n  image \"x\" restart unless-stopped\n}\n").unwrap_err();
+    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+}
+
+#[test]
+fn two_fields_on_one_line_in_network_body_is_error() {
+    let err = parse("network n {\n  external name: \"docker_default\"\n}\n").unwrap_err();
+    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+}
+
+/// A single-statement body needs nothing to separate — the newline
+/// requirement only applies *between* two or more fields.
+#[test]
+fn single_statement_body_on_one_line_is_ok() {
+    let program = parse_ok("service s { image \"x\" }\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(
+        service
+            .fields
+            .image
+            .as_ref()
+            .unwrap()
+            .reference
+            .as_ref()
+            .unwrap()
+            .text(),
+        "x"
+    );
+}
+
+/// Fields on separate lines remain valid with no separator at all —
+/// this is the everyday case, confirming the newline requirement didn't
+/// accidentally start requiring a comma too.
+#[test]
+fn fields_on_separate_lines_need_no_comma() {
+    let program = parse_ok("service s {\n  image \"x\"\n  restart unless-stopped\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(service.fields.image.is_some());
+    assert!(service.fields.restart.is_some());
+}
+
+/// Map/raw-kind bodies (here, a `with`-invocation's own argument body,
+/// which reuses `raw`'s entry parsing) are *not* struct-kind bodies, so
+/// the newline-between-fields rule doesn't apply to them — the
+/// compact, comma-separated one-liner style (`{ puid: 1000, pgid: 100
+/// }`) used throughout docs/DESIGN.md's worked examples stays valid.
+#[test]
+fn with_invocation_argument_body_keeps_compact_comma_style() {
+    let program = parse_ok(
+        "service s {\n  with linuxserver_app { puid: 1000, pgid: 100 }\n  image \"x\"\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let inv = &service.fields.with[0];
+    assert_eq!(inv.args.entries.len(), 2);
+}
+
+/// Same exemption for `raw`'s own body.
+#[test]
+fn raw_body_keeps_compact_comma_style() {
+    let program = parse_ok("service s {\n  raw { key1: \"a\", key2: \"b\" }\n}\n");
     let service = as_service(&program.decls[0]);
     assert_eq!(service.fields.raw.entries.len(), 2);
 }
