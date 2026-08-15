@@ -29,6 +29,11 @@ pub(crate) struct NetworkDoc {
 pub(crate) struct ComposeServiceDoc {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// Unlike every other optional field here, always populated —
+    /// codegen defaults it to the service's own name when `.hll` doesn't
+    /// set one explicitly, matching real-world hand-written Compose
+    /// files (see `hl_codegen::generate_service`).
+    pub container_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

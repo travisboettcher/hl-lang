@@ -256,6 +256,18 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
         name: "image",
         kind: FieldKind::Nested(&IMAGE),
     },
+    // `container_name "uptime-kuma"` / `container_name: "uptime-kuma"`.
+    // A plain scalar field directly on `service`/`template` (not a
+    // nested struct type like `image`/`expose`/`restart` — it's a
+    // single Compose value with no secondary fields of its own).
+    // Unset means "default to the service's own name" per
+    // docs/DESIGN.md's Composition section — the same deferred-default
+    // pattern as `ast::Network::real_name`, applied at codegen time
+    // rather than here or during composition.
+    FieldSchema {
+        name: "container_name",
+        kind: FieldKind::Scalar,
+    },
     FieldSchema {
         name: "expose",
         kind: FieldKind::Nested(&EXPOSE),

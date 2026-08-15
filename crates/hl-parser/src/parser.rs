@@ -1032,6 +1032,10 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         Some(FieldValue::Struct(f, s)) => Some(lower_restart(f, s)),
         _ => None,
     };
+    let container_name = match fields.remove("container_name") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
     let volumes = match fields.remove("volume") {
         Some(FieldValue::LiteralMap(entries)) => VolumeMap {
             entries: entries
@@ -1092,6 +1096,7 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         depends_on,
         networks,
         dns,
+        container_name,
         with,
     }
 }
@@ -1129,6 +1134,9 @@ fn mark_template_params(fields: &mut ServiceFields, params: &[Ident]) {
         && let Some(p) = &mut r.policy
     {
         mark_literal(p, &is_param);
+    }
+    if let Some(cn) = &mut fields.container_name {
+        mark_literal(cn, &is_param);
     }
     for v in &mut fields.volumes.entries {
         mark_literal(&mut v.host, &is_param);

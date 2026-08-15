@@ -153,6 +153,60 @@ fn explicit_templates_volume_container_path_collision_is_error() {
     }
 }
 
+// --- container_name (#17) ---
+
+/// `container_name` merges like any other scalar field: the service's
+/// own body wins over an inherited template value. Whether it defaults
+/// to the service's own name when unset entirely is a codegen concern
+/// (see `hl-codegen`'s tests), not composition's — composition just
+/// leaves it `None` if nothing ever set it.
+#[test]
+fn service_own_container_name_overrides_template() {
+    let composed = compose_ok(
+        "template a {\n  container_name \"from-template\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n  container_name \"own\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        service.fields.container_name.as_ref().unwrap().text(),
+        "own"
+    );
+}
+
+#[test]
+fn container_name_inherited_from_template_when_service_unset() {
+    let composed = compose_ok(
+        "template a {\n  container_name \"from-template\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        service.fields.container_name.as_ref().unwrap().text(),
+        "from-template"
+    );
+}
+
+#[test]
+fn explicit_templates_container_name_collision_is_error() {
+    let err = compose_err(
+        "template a {\n  container_name \"a-name\"\n}\n\
+         template b {\n  container_name \"b-name\"\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::FieldCollision {
+            field: "container_name",
+            first_template,
+            second_template,
+            ..
+        } => {
+            assert_eq!(first_template, "a");
+            assert_eq!(second_template, "b");
+        }
+        other => panic!("expected FieldCollision on container_name, got {other:?}"),
+    }
+}
+
 // --- expose sub-field merge (#10) ---
 
 /// The exact scenario from the issue report: a service overriding just

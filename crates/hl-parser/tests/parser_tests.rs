@@ -273,6 +273,49 @@ fn expose_without_entrypoint_field_is_none() {
     assert!(service.fields.expose.as_ref().unwrap().entrypoint.is_none());
 }
 
+// --- container_name ---
+
+#[test]
+fn container_name_bare_shorthand() {
+    let program = parse_ok("service s {\n  container_name \"uptime-kuma\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(
+        service.fields.container_name.as_ref().unwrap().text(),
+        "uptime-kuma"
+    );
+}
+
+#[test]
+fn container_name_colon_form() {
+    let program = parse_ok("service s {\n  container_name: \"uptime-kuma\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(
+        service.fields.container_name.as_ref().unwrap().text(),
+        "uptime-kuma"
+    );
+}
+
+#[test]
+fn container_name_unset_is_none() {
+    let program = parse_ok("service s {\n  image \"x\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(service.fields.container_name.is_none());
+}
+
+#[test]
+fn duplicate_container_name_field_is_error() {
+    let err =
+        parse("service s {\n  container_name \"a\"\n  container_name \"b\"\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::DuplicateField {
+            type_name: "service",
+            field: "container_name",
+            ..
+        }
+    ));
+}
+
 #[test]
 fn bool_flag_rejects_explicit_value() {
     let err = parse("network n {\n  external: true\n}\n").unwrap_err();

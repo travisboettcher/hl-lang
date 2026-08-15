@@ -52,6 +52,7 @@ fn syncthing_matches_real_deployed_service() {
 services:
   syncthing:
     image: lscr.io/linuxserver/syncthing:latest
+    container_name: syncthing
     restart: unless-stopped
     environment:
       - PUID=1000
@@ -94,6 +95,7 @@ fn cadvisor_raw_passthrough_matches_real_service() {
 services:
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
     privileged: true
     devices:
       - /dev/kmsg
@@ -114,6 +116,7 @@ fn jellyfin_plain_service_produces_minimal_doc() {
 services:
   jellyfin:
     image: jellyfin/jellyfin:latest
+    container_name: jellyfin
     restart: unless-stopped
     environment:
       - PUID=1000
@@ -125,6 +128,35 @@ services:
       - "traefik.http.routers.jellyfin.rule=Host(`media.techdebtor.io`)"
       - "traefik.http.services.jellyfin.loadbalancer.server.port=8096"
 "#,
+    );
+}
+
+/// `container_name` (#17): defaults to the service's own name when
+/// unset, so the common case — matching the syncthing/jellyfin/cadvisor
+/// fixtures above — needs nothing written at all.
+#[test]
+fn container_name_defaults_to_service_name() {
+    let yaml = generate_from("service uptime-kuma {\n  image \"louislam/uptime-kuma:latest\"\n}\n");
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+    assert_eq!(
+        parsed["services"]["uptime-kuma"]["container_name"],
+        serde_yaml::Value::String("uptime-kuma".to_string())
+    );
+}
+
+/// An explicit `container_name` overrides the default — the "subdomain
+/// shorter than the service name" style case the issue calls out
+/// (`it-tools` -> a shorter container name), mirrored here with a
+/// differently-named container.
+#[test]
+fn explicit_container_name_overrides_default() {
+    let yaml = generate_from(
+        "service it-tools {\n  image \"corentinth/it-tools:latest\"\n  container_name \"tools\"\n}\n",
+    );
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+    assert_eq!(
+        parsed["services"]["it-tools"]["container_name"],
+        serde_yaml::Value::String("tools".to_string())
     );
 }
 
@@ -145,6 +177,7 @@ fn dns_field_emits_dns_compose_key() {
 services:
   uptime-kuma:
     image: louislam/uptime-kuma:latest
+    container_name: uptime-kuma
     dns:
       - 192.168.50.182
 "#,

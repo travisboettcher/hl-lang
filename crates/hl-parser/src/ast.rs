@@ -282,6 +282,13 @@ pub struct ServiceFields {
     /// `IDENT`'s grammar can't contain a `.`) can never carry a
     /// qualifier anyway.
     pub dns: Vec<Reference>,
+    /// Docker's own `container_name:` key. `None` means "default to the
+    /// service's own name" (via the same `{{name}}` interpolation
+    /// binding `expose`'s `as`-sugar already uses) — codegen, not the
+    /// parser or composition, applies that default, mirroring how
+    /// [`Network::real_name`] staying `Option` defers its own default to
+    /// a later stage.
+    pub container_name: Option<Literal>,
     /// Unresolved template invocations pulled in via `with`. Always
     /// empty after [`crate::compose::compose`] runs — composition's job
     /// is precisely to merge each of these away.

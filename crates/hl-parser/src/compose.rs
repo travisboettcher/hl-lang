@@ -688,6 +688,9 @@ fn substitute_params(
     {
         substitute_literal(p, args, template_name)?;
     }
+    if let Some(cn) = &mut fields.container_name {
+        substitute_literal(cn, args, template_name)?;
+    }
     for v in &mut fields.volumes.entries {
         substitute_literal(&mut v.host, args, template_name)?;
         substitute_literal(&mut v.container, args, template_name)?;
@@ -822,7 +825,7 @@ impl Spanned for EnvEntry {
 ///
 /// `scalars` holds every single-value collision point in the language —
 /// `image`, `expose.port`/`expose.host`/`expose.entrypoint`, `restart`,
-/// and any future one — keyed generically by name (dotted only where a
+/// `container_name`, and any future one — keyed generically by name (dotted only where a
 /// struct has more than one sub-field needing disambiguation, e.g.
 /// `expose`'s three; a single-field struct like `image`/`restart` is
 /// keyed under its own bare name) instead of one dedicated `MergeAcc`
@@ -887,10 +890,12 @@ impl MergeAcc {
             span: v.span(),
             policy: Some(v),
         });
+        let container_name = self.scalars.remove("container_name").map(|(v, _)| v);
         ServiceFields {
             image,
             expose,
             restart,
+            container_name,
             volumes: VolumeMap {
                 entries: self.volumes.into_iter().map(|(v, _)| v).collect(),
             },
@@ -955,6 +960,9 @@ fn merge_tier(
 ) -> Result<(), ComposeError> {
     for (field, value) in scalar_fields_of(incoming.image, incoming.expose, incoming.restart) {
         merge_scalar(&mut acc.scalars, field, value, tier)?;
+    }
+    if let Some(cn) = incoming.container_name {
+        merge_scalar(&mut acc.scalars, "container_name", cn, tier)?;
     }
     merge_map(
         &mut acc.volumes,
