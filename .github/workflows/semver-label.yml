@@ -20,6 +20,16 @@ permissions:
 jobs:
   check-semver-label:
     name: require exactly one semver-* label
+    # release.yml's own "chore(release): vX [release-bump]" PR never
+    # carries a semver-* label (it only reads one off the *original* PR
+    # to compute the bump) — without this exemption, making this job a
+    # required status check would leave that auto-generated PR forever
+    # failing it, and its `gh pr merge --auto` would never fire. The
+    # author + title-marker check together mean an external contributor
+    # can't spoof this by naming their own PR the same way.
+    if: |
+      !(github.event.pull_request.user.login == 'github-actions[bot]' &&
+        contains(github.event.pull_request.title, '[release-bump]'))
     runs-on: ubuntu-latest
     steps:
       - name: Check labels
