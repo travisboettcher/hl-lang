@@ -3,6 +3,7 @@ name = "hl-codegen"
 version = "0.1.1"
 edition = "2024"
 publish = false
+license.workspace = true
 
 [dependencies]
 hl-parser = { path = "../hl-parser" }

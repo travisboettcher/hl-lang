@@ -3,6 +3,7 @@ name = "hl-cli"
 version = "0.1.1"
 edition = "2024"
 publish = false
+license.workspace = true
 
 [[bin]]
 name = "hllc"
