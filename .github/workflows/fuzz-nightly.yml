@@ -46,7 +46,8 @@ jobs:
           cp crates/hl-parser/tests/fixtures/*.hll fuzz/corpus/${{ matrix.target }}/ 2>/dev/null || true
 
       - name: cargo fuzz run (10 min)
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=600
+        # See ci.yml's fuzz-smoke job for why --target is pinned here.
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target }} -- -max_total_time=600
 
       - name: Upload crash artifacts
         if: failure()
