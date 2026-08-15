@@ -434,9 +434,28 @@ readability choice, not a different construct.
    the AST; `hllc --build <file.hll> [--out <path>]` runs the full
    pipeline (link → compose → codegen) and writes (or, with no `--out`,
    prints) the resulting Compose YAML. `--build` also accepts a
-   directory: every `.hll` file directly inside it (non-recursive) is
-   built as its own independent entry point with its own `use` graph,
-   each writing to `<out>/<stem>/docker-compose.yml`.
+   directory, in either of two shapes:
+   - **Flat**: every `.hll` file directly inside the directory is its own
+     independent entry point with its own `use` graph, each writing to
+     `<out>/<stem>/docker-compose.yml`. `--out` is required here — with
+     potentially many files' output, there's no single meaningful default
+     location.
+   - **Co-located** (chosen automatically when the directory holds no
+     `.hll` files of its own, but at least one immediate subdirectory
+     that does): recurses exactly one level, and each such subdirectory's
+     single `.hll` file builds in place, right back into that same
+     subdirectory by default (`<subdir>/docker-compose.yml`) — no `--out`
+     needed. An explicit `--out <dir>` still remaps the whole tree, the
+     same way it does for the flat case, keyed by each subdirectory's own
+     name (`<out>/<subdir-name>/docker-compose.yml`) rather than a file
+     stem. This is the shape a real homelab tends to use in practice —
+     `it_tools/it_tools.hll` alongside `it_tools/docker-compose.yml`,
+     rather than every service's `.hll` file living in one flat
+     directory — so a service's `.hll` source stays next to its other
+     files (`.env`, bind-mounted config) instead of splitting them across
+     two locations. A subdirectory with more than one `.hll` file is a
+     hard error (ambiguous which one's output belongs directly in that
+     subdirectory), not a silent guess.
 
 ## Future work
 

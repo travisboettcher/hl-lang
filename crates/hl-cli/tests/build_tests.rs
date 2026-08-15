@@ -150,3 +150,115 @@ fn build_directory_without_out_is_error() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+/// #12: a root directory whose immediate children are themselves
+/// directories (not `.hll` files) — the real homelab-infrastructure
+/// layout, `<service>/<service>.hll` next to `<service>/docker-compose.yml`
+/// — builds each child's `.hll` file in place, with no `--out` needed.
+#[test]
+fn build_colocated_service_directories_writes_in_place_with_no_out() {
+    let dir = scratch_dir("colocated");
+    let syncthing_dir = dir.join("syncthing");
+    fs::create_dir_all(&syncthing_dir).unwrap();
+    fs::write(syncthing_dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: None,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let generated = syncthing_dir.join("docker-compose.yml");
+    assert!(
+        generated.exists(),
+        "expected {} to exist",
+        generated.display()
+    );
+    let yaml = fs::read_to_string(&generated).unwrap();
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(&yaml).expect("output should be valid YAML");
+    assert!(
+        value
+            .get("services")
+            .and_then(|s| s.get("syncthing"))
+            .is_some()
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// Same co-located layout, but with `--out` given — remaps the whole
+/// tree the same way flat mode's `--out` already does, just keyed by
+/// each subdirectory's own name.
+#[test]
+fn build_colocated_service_directories_with_out_remaps_tree() {
+    let dir = scratch_dir("colocated-out");
+    let syncthing_dir = dir.join("syncthing");
+    fs::create_dir_all(&syncthing_dir).unwrap();
+    fs::write(syncthing_dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+    let out_dir = dir.join("out");
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: Some(out_dir.clone()),
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let generated = out_dir.join("syncthing").join("docker-compose.yml");
+    assert!(
+        generated.exists(),
+        "expected {} to exist",
+        generated.display()
+    );
+    assert!(
+        !syncthing_dir.join("docker-compose.yml").exists(),
+        "with --out given, output should go there instead of in place"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// A co-located service directory with more than one `.hll` file is
+/// ambiguous (which one's output is "that same directory"'s
+/// `docker-compose.yml`?) — an explicit error, not a silent guess.
+#[test]
+fn build_colocated_directory_with_multiple_hll_files_is_error() {
+    let dir = scratch_dir("colocated-ambiguous");
+    let service_dir = dir.join("syncthing");
+    fs::create_dir_all(&service_dir).unwrap();
+    fs::write(service_dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+    fs::write(service_dir.join("extra.hll"), SYNCTHING_HLL).unwrap();
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: None,
+    });
+    assert_eq!(code, ExitCode::FAILURE);
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// A root directory with neither `.hll` files nor any subdirectory
+/// containing them builds nothing and still succeeds — matching the
+/// existing flat case's behavior when it finds zero `.hll` files.
+#[test]
+fn build_directory_with_no_hll_files_anywhere_is_a_no_op_success() {
+    let dir = scratch_dir("empty");
+    fs::create_dir_all(dir.join("not-a-service")).unwrap();
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: None,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    fs::remove_dir_all(&dir).ok();
+}
