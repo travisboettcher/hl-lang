@@ -24,11 +24,14 @@ jobs:
     # carries a semver-* label (it only reads one off the *original* PR
     # to compute the bump) — without this exemption, making this job a
     # required status check would leave that auto-generated PR forever
-    # failing it, and its `gh pr merge --auto` would never fire. The
-    # author + title-marker check together mean an external contributor
-    # can't spoof this by naming their own PR the same way.
+    # failing it, and its `gh pr merge --auto` would never fire. It's
+    # opened via a RELEASE_PLZ_TOKEN PAT owned by the repo owner (see
+    # release.yml's own comment on why it's not GITHUB_TOKEN), so the
+    # author check is against `repository_owner`, not `github-actions
+    # [bot]`. The author + title-marker check together mean an external
+    # contributor can't spoof this by naming their own PR the same way.
     if: |
-      !(github.event.pull_request.user.login == 'github-actions[bot]' &&
+      !(github.event.pull_request.user.login == github.repository_owner &&
         contains(github.event.pull_request.title, '[release-bump]'))
     runs-on: ubuntu-latest
     steps:
