@@ -278,6 +278,189 @@ impl fmt::Display for ComposeError {
 
 impl std::error::Error for ComposeError {}
 
+#[cfg(test)]
+mod error_display_tests {
+    use super::*;
+
+    fn span(line: u32, col: u32) -> Span {
+        Span {
+            start: 0,
+            end: 0,
+            line,
+            col,
+        }
+    }
+
+    #[test]
+    fn unknown_template_display() {
+        let err = ComposeError::UnknownTemplate {
+            name: "base".to_string(),
+            span: span(3, 2),
+        };
+        assert_eq!(err.to_string(), "3:2: unknown template `base`");
+    }
+
+    #[test]
+    fn duplicate_template_name_display() {
+        let err = ComposeError::DuplicateTemplateName {
+            name: "base".to_string(),
+            first: span(1, 1),
+            second: span(4, 1),
+        };
+        assert_eq!(
+            err.to_string(),
+            "4:1: duplicate template `base` (first declared at 1:1)"
+        );
+    }
+
+    #[test]
+    fn template_cycle_display() {
+        let err = ComposeError::TemplateCycle {
+            chain: vec!["a".to_string(), "b".to_string(), "a".to_string()],
+            span: span(2, 3),
+        };
+        assert_eq!(
+            err.to_string(),
+            "2:3: template composition cycle: a -> b -> a"
+        );
+    }
+
+    #[test]
+    fn unknown_template_argument_display() {
+        let err = ComposeError::UnknownTemplateArgument {
+            template: "t".to_string(),
+            argument: "bogus".to_string(),
+            span: span(5, 1),
+        };
+        assert_eq!(
+            err.to_string(),
+            "5:1: unknown argument `bogus` for template `t`"
+        );
+    }
+
+    #[test]
+    fn missing_template_argument_display() {
+        let err = ComposeError::MissingTemplateArgument {
+            template: "t".to_string(),
+            param: "name".to_string(),
+            span: span(6, 1),
+        };
+        assert_eq!(
+            err.to_string(),
+            "6:1: missing required argument `name` for template `t`"
+        );
+    }
+
+    #[test]
+    fn duplicate_template_argument_display() {
+        let err = ComposeError::DuplicateTemplateArgument {
+            template: "t".to_string(),
+            argument: "name".to_string(),
+            first: span(1, 5),
+            second: span(1, 10),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:10: duplicate argument `name` for template `t` (first set at 1:5)"
+        );
+    }
+
+    #[test]
+    fn template_argument_not_scalar_display() {
+        let err = ComposeError::TemplateArgumentNotScalar {
+            template: "t".to_string(),
+            param: "name".to_string(),
+            span: span(2, 2),
+        };
+        assert_eq!(
+            err.to_string(),
+            "2:2: argument `name` for template `t` must be a scalar value (a list/map can't fill a single-value field)"
+        );
+    }
+
+    #[test]
+    fn field_collision_display() {
+        let err = ComposeError::FieldCollision {
+            field: "image",
+            first_template: "a".to_string(),
+            second_template: "b".to_string(),
+            first: span(1, 1),
+            second: span(2, 1),
+        };
+        assert_eq!(
+            err.to_string(),
+            "2:1: field `image` set by both template `a` (at 1:1) and template `b` — explicit templates must not conflict"
+        );
+    }
+
+    #[test]
+    fn map_key_collision_display_key_side() {
+        let err = ComposeError::MapKeyCollision(Box::new(MapKeyCollision {
+            field: "env",
+            side: MapSide::Key,
+            key: "FOO".to_string(),
+            first_template: "a".to_string(),
+            second_template: "b".to_string(),
+            first: span(1, 1),
+            second: span(2, 1),
+        }));
+        assert_eq!(
+            err.to_string(),
+            "2:1: `env` key \"FOO\" set by both template `a` (at 1:1) and template `b` — explicit templates must not conflict"
+        );
+    }
+
+    #[test]
+    fn map_key_collision_display_value_side() {
+        let err = ComposeError::MapKeyCollision(Box::new(MapKeyCollision {
+            field: "volume",
+            side: MapSide::Value,
+            key: "/data".to_string(),
+            first_template: "a".to_string(),
+            second_template: "b".to_string(),
+            first: span(1, 1),
+            second: span(2, 1),
+        }));
+        assert_eq!(
+            err.to_string(),
+            "2:1: `volume` value \"/data\" set by both template `a` (at 1:1) and template `b` — explicit templates must not conflict"
+        );
+    }
+
+    #[test]
+    fn unknown_alias_display() {
+        let err = ComposeError::UnknownAlias {
+            alias: "traefik".to_string(),
+            span: span(1, 3),
+        };
+        assert_eq!(err.to_string(), "1:3: unknown alias `traefik`");
+    }
+
+    #[test]
+    fn unsupported_qualified_reference_display() {
+        let err = ComposeError::UnsupportedQualifiedReference {
+            field: "middleware",
+            alias: "traefik".to_string(),
+            span: span(1, 3),
+        }
+        .to_string();
+        assert_eq!(
+            err,
+            "1:3: `middleware` doesn't support a qualified reference yet (`traefik.` ...)"
+        );
+    }
+
+    #[test]
+    fn unknown_qualified_network_display() {
+        let err = ComposeError::UnknownQualifiedNetwork {
+            alias: "traefik".to_string(),
+            name: "proxy".to_string(),
+            span: span(2, 2),
+        };
+        assert_eq!(err.to_string(), "2:2: no network `proxy` in `traefik`");
+    }
+}
+
 /// Resolves names against a whole-program symbol table, generalized over
 /// an opaque `Scope` so the same merge engine ([`compose_with_resolver`])
 /// works both for a single already-parsed [`Program`] (via

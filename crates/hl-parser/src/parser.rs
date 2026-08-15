@@ -509,6 +509,16 @@ impl<'src> Parser<'src> {
         Ok((fields, span))
     }
 
+    /// **Termination invariant** (for [`Self::parse_struct_body`]'s `while
+    /// self.peek().kind != TokenKind::RBrace` loop, the sole caller):
+    /// every path through this function either bumps at least one token
+    /// (via the leading [`Self::parse_key`] call below, on success) or
+    /// returns `Err` and unwinds out of the caller's loop entirely via
+    /// `?` — so each loop iteration is guaranteed to make progress or
+    /// stop. A mutation that replaces this whole function with a no-op
+    /// `Ok(())` breaks that: the loop's condition never changes and it
+    /// spins forever on any non-empty struct body, which `cargo mutants`
+    /// reports as a timeout rather than a normal caught/missed mutant.
     fn parse_statement_into(
         &mut self,
         schema: &'static TypeSchema,

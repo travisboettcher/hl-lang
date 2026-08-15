@@ -1,5 +1,6 @@
+use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
-use hl_parser::{Literal, ParseError, TemplateDecl, TopDecl, UseDecl, parse};
+use hl_parser::{Expected, Literal, ParseError, TemplateDecl, TopDecl, UseDecl, parse};
 
 fn parse_ok(source: &str) -> hl_parser::Program {
     parse(source).unwrap_or_else(|err| panic!("unexpected parse error: {err}"))
@@ -90,6 +91,22 @@ fn duplicate_image_field_is_error() {
             ..
         }
     ));
+}
+
+#[test]
+fn image_with_no_value_and_no_brace_reports_expected_value_or_brace() {
+    let err = parse("service s {\n  image\n}\n").unwrap_err();
+    match err {
+        ParseError::UnexpectedToken {
+            expected,
+            found_kind,
+            ..
+        } => {
+            assert_eq!(expected, Expected::Description("a value or `{`"));
+            assert_eq!(found_kind, TokenKind::RBrace);
+        }
+        other => panic!("expected UnexpectedToken, got {other:?}"),
+    }
 }
 
 #[test]
@@ -437,6 +454,18 @@ fn raw_allows_arbitrary_keys() {
 }
 
 #[test]
+fn raw_allows_a_quoted_string_key() {
+    let program = parse_ok("service s {\n  raw {\n    \"custom-key\": \"value\"\n  }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.raw.entries.len(), 1);
+    assert_eq!(service.fields.raw.entries[0].key.text(), "custom-key");
+    assert!(matches!(
+        service.fields.raw.entries[0].key,
+        Literal::Str(_, _)
+    ));
+}
+
+#[test]
 fn raw_preserves_nested_structure() {
     let program = parse_ok(
         "service s {\n  raw {\n    devices: [\"/dev/kmsg\"]\n    opts: { level: \"high\" }\n  }\n}\n",
@@ -774,6 +803,19 @@ fn with_canonical_struct_form_parses() {
 }
 
 #[test]
+fn with_canonical_struct_form_bare_list_parses() {
+    let program = parse_ok("service s {\n  with { templates: a, b }\n}\n");
+    let service = as_service(&program.decls[0]);
+    let names: Vec<&str> = service
+        .fields
+        .with
+        .iter()
+        .map(|inv| inv.name.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["a", "b"]);
+}
+
+#[test]
 fn with_zero_arg_invocation_has_empty_args() {
     let program = parse_ok("service s {\n  with authenticated\n}\n");
     let service = as_service(&program.decls[0]);
@@ -859,6 +901,28 @@ fn use_decl_parses() {
 fn use_decl_missing_as_is_error() {
     let err = parse("use \"x.hll\" traefik\n").unwrap_err();
     assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+}
+
+#[test]
+fn use_decl_wrong_keyword_instead_of_as_is_error() {
+    // A real ident that isn't literally `as` right after the path must
+    // still error — not be silently accepted as if it were `as` just
+    // because a further, unrelated ident happens to follow it (which
+    // would otherwise parse as a plausible-looking alias).
+    let err = parse("use \"x.hll\" typo alias\n").unwrap_err();
+    match err {
+        ParseError::UnexpectedToken {
+            expected,
+            found_kind,
+            found_lexeme,
+            ..
+        } => {
+            assert_eq!(expected, Expected::Description("`as`"));
+            assert_eq!(found_kind, TokenKind::Ident);
+            assert_eq!(found_lexeme, "typo");
+        }
+        other => panic!("expected UnexpectedToken, got {other:?}"),
+    }
 }
 
 #[test]

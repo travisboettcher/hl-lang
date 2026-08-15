@@ -58,6 +58,22 @@ impl<'src> Lexer<'src> {
     /// 1; any other character (including `\r`, which never appears alone
     /// as a token) just bumps `col` — so a `\r\n` pair increments `line`
     /// exactly once, matching LF-only input.
+    ///
+    /// **Termination invariant**: this is the *only* place `self.chars`
+    /// is ever advanced. Every unbounded loop in this module (this
+    /// function's own callers in [`Self::skip_trivia`] and
+    /// [`Self::next_token`]'s identifier/number scanning) relies on each
+    /// iteration eventually calling `bump` to make real progress through
+    /// `self.chars`, so the loop is bounded by `source`'s finite length.
+    /// A mutation that makes `bump` stop actually consuming from
+    /// `self.chars` (e.g. always returning `None`, or a fixed value
+    /// without calling `self.chars.next()`) breaks that invariant and
+    /// hangs those callers forever on any input reaching the affected
+    /// loop — `cargo mutants` reports exactly that as a timeout rather
+    /// than a normal caught/missed mutant; see
+    /// `comment_at_eof_no_trailing_newline`/`comment_only_file` in
+    /// `tests/lexer_tests.rs` for the adversarial inputs that exercise
+    /// this loop all the way to a real `Eof`.
     fn bump(&mut self) -> Option<(usize, char)> {
         let next = self.chars.next();
         if let Some((_, c)) = next {
@@ -73,6 +89,17 @@ impl<'src> Lexer<'src> {
 
     /// Skips whitespace and `#`-to-end-of-line comments. Neither produces
     /// a token.
+    ///
+    /// Terminates because every branch that stays in a loop (the `#`
+    /// comment body, and the outer `loop` re-checking after it) also
+    /// calls [`Self::bump`], which strictly advances `self.chars` — see
+    /// `bump`'s own doc for the invariant this depends on and what a
+    /// mutation here (e.g. flipping the comment loop's `c == '\n'` check)
+    /// does to it: `c == '\n'` breaking on the *first* comment char
+    /// (`'#'` itself) instead of the real newline leaves `'#'`
+    /// unconsumed, so the outer `loop` immediately re-matches `Some('#')`
+    /// and repeats without ever calling `bump` — an infinite loop on any
+    /// `#` comment, caught by `cargo mutants` as a timeout.
     fn skip_trivia(&mut self) {
         loop {
             match self.peek_char() {

@@ -50,3 +50,41 @@ impl fmt::Display for LexError {
 }
 
 impl std::error::Error for LexError {}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    fn span() -> Span {
+        Span {
+            start: 0,
+            end: 0,
+            line: 2,
+            col: 4,
+        }
+    }
+
+    #[test]
+    fn unterminated_string_display() {
+        let err = LexError::UnterminatedString { span: span() };
+        assert_eq!(err.to_string(), "2:4: unterminated string literal");
+    }
+
+    #[test]
+    fn unexpected_char_display() {
+        let err = LexError::UnexpectedChar {
+            ch: '$',
+            span: span(),
+        };
+        assert_eq!(err.to_string(), "2:4: unexpected character '$'");
+    }
+
+    #[test]
+    fn dangling_dash_display() {
+        let err = LexError::DanglingDash { span: span() };
+        assert_eq!(
+            err.to_string(),
+            "2:4: unexpected '-' (expected '->' or an identifier)"
+        );
+    }
+}

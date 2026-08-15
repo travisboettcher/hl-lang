@@ -67,6 +67,20 @@ fn defaults_map_entries_survive_untouched_but_service_body_overrides_others() {
     assert_eq!(entries[1].value.text(), "default-bar");
 }
 
+#[test]
+fn defaults_map_entry_is_silently_overridden_by_explicit_template() {
+    let composed = compose_ok(
+        "template defaults {\n  env FOO = \"default\"\n}\n\
+         template t {\n  env FOO = \"explicit\"\n}\n\
+         service s {\n  image \"x\"\n  with t\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries = &service.fields.env.entries;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key.text(), "FOO");
+    assert_eq!(entries[0].value.text(), "explicit");
+}
+
 // --- explicit-vs-explicit collisions ---
 
 #[test]
@@ -503,6 +517,40 @@ fn nested_template_composition_forwards_parameters() {
 }
 
 #[test]
+fn template_param_is_substituted_inside_raw_scalar_list_and_map() {
+    let composed = compose_ok(
+        "template t(p) {\n  raw { plain: p, items: [p, \"x\"], nested: { k: p } }\n}\n\
+         service s {\n  with t { p: \"val\" }\n  image \"img\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let raw = &service.fields.raw.entries;
+    assert_eq!(raw.len(), 3);
+
+    let plain = raw.iter().find(|e| e.key.text() == "plain").unwrap();
+    assert_eq!(raw_text(&plain.value), "val");
+
+    let items = raw.iter().find(|e| e.key.text() == "items").unwrap();
+    match &items.value {
+        RawValue::List(elems, _) => {
+            assert_eq!(elems.len(), 2);
+            assert_eq!(raw_text(&elems[0]), "val");
+            assert_eq!(raw_text(&elems[1]), "x");
+        }
+        other => panic!("expected a list raw value, got {other:?}"),
+    }
+
+    let nested = raw.iter().find(|e| e.key.text() == "nested").unwrap();
+    match &nested.value {
+        RawValue::Map(entries, _) => {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].0.text(), "k");
+            assert_eq!(raw_text(&entries[0].1), "val");
+        }
+        other => panic!("expected a map raw value, got {other:?}"),
+    }
+}
+
+#[test]
 fn composed_service_never_contains_unsubstituted_param() {
     let composed = compose_ok(
         "template inner(y) {\n  env Y = y\n  expose y\n}\n\
@@ -603,4 +651,42 @@ fn qualified_template_invocation_with_no_use_decls_is_unknown_alias() {
         err,
         ComposeError::UnknownAlias { alias, .. } if alias == "common"
     ));
+}
+
+#[test]
+fn qualified_middleware_reference_is_rejected() {
+    let err = compose_err("service s {\n  image \"x\"\n  middleware [traefik.auth]\n}\n");
+    assert!(matches!(
+        err,
+        ComposeError::UnsupportedQualifiedReference { field: "middleware", alias, .. } if alias == "traefik"
+    ));
+}
+
+#[test]
+fn qualified_depends_on_reference_is_rejected() {
+    let err = compose_err("service s {\n  image \"x\"\n  depends_on [other.db]\n}\n");
+    assert!(matches!(
+        err,
+        ComposeError::UnsupportedQualifiedReference { field: "depends_on", alias, .. } if alias == "other"
+    ));
+}
+
+#[test]
+fn qualified_dns_reference_is_rejected() {
+    let err = compose_err("service s {\n  image \"x\"\n  dns [other.resolver]\n}\n");
+    assert!(matches!(
+        err,
+        ComposeError::UnsupportedQualifiedReference { field: "dns", alias, .. } if alias == "other"
+    ));
+}
+
+#[test]
+fn unqualified_middleware_depends_on_dns_are_accepted() {
+    let composed = compose_ok(
+        "service s {\n  image \"x\"\n  middleware [auth]\n  depends_on [db]\n  dns [resolver]\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(service.fields.middleware.len(), 1);
+    assert_eq!(service.fields.depends_on.len(), 1);
+    assert_eq!(service.fields.dns.len(), 1);
 }

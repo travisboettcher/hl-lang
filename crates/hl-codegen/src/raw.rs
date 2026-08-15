@@ -107,6 +107,20 @@ mod tests {
     }
 
     #[test]
+    fn false_ident_becomes_bool() {
+        let lit = Literal::Ident("false".to_string(), span());
+        let yaml = to_yaml(&RawValue::Literal(lit), &bindings()).unwrap();
+        assert_eq!(yaml, serde_yaml::Value::Bool(false));
+    }
+
+    #[test]
+    fn other_ident_stays_string_not_bool() {
+        let lit = Literal::Ident("unconfined".to_string(), span());
+        let yaml = to_yaml(&RawValue::Literal(lit), &bindings()).unwrap();
+        assert_eq!(yaml, serde_yaml::Value::String("unconfined".to_string()));
+    }
+
+    #[test]
     fn quoted_true_stays_string() {
         let lit = Literal::Str("true".to_string(), span());
         let yaml = to_yaml(&RawValue::Literal(lit), &bindings()).unwrap();

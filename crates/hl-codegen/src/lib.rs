@@ -290,3 +290,61 @@ fn resolve_networks(
 
     Ok((compose_networks, docs, docker_network))
 }
+
+#[cfg(test)]
+mod error_display_tests {
+    use super::*;
+
+    fn span() -> Span {
+        Span {
+            start: 0,
+            end: 0,
+            line: 3,
+            col: 5,
+        }
+    }
+
+    #[test]
+    fn unknown_network_display() {
+        let err = CodegenError::UnknownNetwork {
+            service: "web".to_string(),
+            network: "proxy".to_string(),
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: service `web` references undeclared network `proxy`"
+        );
+    }
+
+    #[test]
+    fn ambiguous_external_network_display() {
+        let err = CodegenError::AmbiguousExternalNetwork {
+            service: "web".to_string(),
+            candidates: vec!["a".to_string(), "b".to_string()],
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: service `web` declares more than one external network (a, b) — which real network name should `traefik.docker.network` use?"
+        );
+    }
+
+    #[test]
+    fn unknown_interpolation_display() {
+        let err = CodegenError::UnknownInterpolation {
+            binding: "port".to_string(),
+            span: span(),
+        };
+        assert_eq!(err.to_string(), "3:5: unknown interpolation `{{port}}`");
+    }
+
+    #[test]
+    fn missing_image_display() {
+        let err = CodegenError::MissingImage {
+            service: "web".to_string(),
+            span: span(),
+        };
+        assert_eq!(err.to_string(), "3:5: service `web` has no `image` set");
+    }
+}

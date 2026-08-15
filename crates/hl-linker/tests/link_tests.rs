@@ -129,6 +129,33 @@ fn template_qualified_reference_resolves_in_its_own_declaring_file_not_the_invok
 }
 
 #[test]
+fn implicit_defaults_template_applies_through_the_module_graph() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "service.hll",
+        "template defaults {\n  restart unless-stopped\n}\n\
+         service s {\n  image \"x\"\n}\n",
+    );
+
+    let composed = link(Path::new("service.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+
+    assert_eq!(
+        composed.services[0]
+            .fields
+            .restart
+            .as_ref()
+            .unwrap()
+            .policy
+            .as_ref()
+            .unwrap()
+            .text(),
+        "unless-stopped",
+        "the module's own `defaults` template should apply even though `s` never `with`s it explicitly"
+    );
+}
+
+#[test]
 fn imports_are_not_transitive() {
     let mut loader = InMemoryLoader::default();
     loader.add("docker.hll", "network traefik-net {\n  external\n}\n");

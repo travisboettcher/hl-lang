@@ -1,0 +1,18 @@
+# Configuration for `cargo mutants` (see .github/workflows/ci.yml's
+# `mutation-test` job, and https://github.com/travisboettcher/hl-lang/issues/29).
+#
+# Every exclusion here must be a deliberate, justified call, not a
+# default — see issue #29.
+
+exclude_globs = [
+    # `main()` is a one-line wrapper (`run(Cli::parse())`) with no
+    # branching or logic of its own — everything it calls (`Cli::parse`,
+    # `hl_cli::run`) is already covered by hl-cli's own unit/integration
+    # tests. It can't be meaningfully exercised by `cargo test` at all:
+    # it's the process entry point, never called by test code, so no
+    # test could ever observe a mutated `main` returning a different
+    # `ExitCode` without actually spawning the built binary as a
+    # subprocess — a level of test infrastructure disproportionate to
+    # a function with zero logic to protect.
+    "crates/hl-cli/src/main.rs",
+]

@@ -55,6 +55,35 @@ fn build_single_file_writes_yaml_to_out_path() {
 }
 
 #[test]
+fn build_single_file_creates_missing_out_parent_directories() {
+    let dir = scratch_dir("single-file-nested-out");
+    let input = dir.join("syncthing.hll");
+    fs::write(&input, SYNCTHING_HLL).unwrap();
+    let out = dir.join("nested").join("deeper").join("docker-compose.yml");
+    assert!(!out.parent().unwrap().exists());
+
+    let code = run(Cli {
+        file: input,
+        parse: false,
+        build: true,
+        out: Some(out.clone()),
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let yaml = fs::read_to_string(&out).unwrap();
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(&yaml).expect("output should be valid YAML");
+    assert!(
+        value
+            .get("services")
+            .and_then(|s| s.get("syncthing"))
+            .is_some()
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn build_directory_writes_one_file_per_hll_input() {
     let dir = scratch_dir("directory");
     fs::write(dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
