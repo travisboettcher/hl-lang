@@ -40,6 +40,26 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
 
+CI also gates on coverage and runs fuzz and mutation testing:
+
+```sh
+# Coverage gate: CI fails if workspace-wide line coverage drops below 80%.
+cargo install cargo-llvm-cov --locked
+cargo llvm-cov --workspace --html --fail-under-lines 80
+
+# Fuzz testing (lexer, parser, and the full parse -> compose -> codegen
+# pipeline) — requires nightly. CI runs a 60s smoke test per target on
+# every PR, plus a longer nightly scheduled run.
+cargo install cargo-fuzz --locked
+cargo +nightly fuzz run fuzz_lex -- -max_total_time=60
+cargo +nightly fuzz run fuzz_parse -- -max_total_time=60
+cargo +nightly fuzz run fuzz_pipeline -- -max_total_time=60
+
+# Mutation testing — informational, non-blocking in CI.
+cargo install cargo-mutants --locked
+cargo mutants --workspace
+```
+
 Try the CLI against an `.hll` file:
 
 ```sh
