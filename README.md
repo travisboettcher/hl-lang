@@ -14,21 +14,32 @@ and worked examples.
 
 ## Status
 
-**Lexer + parser (built-in types only).** The lexer (`crates/hl-lexer`) and
-parser (`crates/hl-parser`) are implemented, plus a CLI (`crates/hl-cli`)
-that can lex or parse a file. The parser covers `network`, `service`,
-`image`, `expose`, `volume`, `env`, `restart`, and `raw` — `template`/`with`
-composition is a fast-follow milestone, not implemented yet. AST → codegen
-is also not implemented yet.
+**The full pipeline is implemented**: lexer → parser → template/`with`
+composition → cross-file `use` imports → codegen → CLI. A `.hll` file can
+declare `network`/`service`/`image`/`expose`/`volume`/`env`/`restart`/`raw`,
+compose reusable `template`s onto a service via `with`, and `use` another
+`.hll` file under a local alias to reuse its templates/networks across
+files (`use "docker.hll" as traefik`, then e.g.
+`networks [traefik.traefik-net]`) — see docs/DESIGN.md's Composition and
+Imports sections. `hl-cli --build` runs the whole pipeline end to end and
+writes real Compose YAML.
 
 ## Layout
 
 ```
 hl-lang/
   crates/
-    hl-lexer/   # the lexer: source text -> Token stream
-    hl-parser/  # the parser: Token stream -> AST (built-in types only)
-    hl-cli/     # `hl-cli <file.hll>` lexes; `hl-cli --parse <file.hll>` parses
+    hl-lexer/    # the lexer: source text -> Token stream
+    hl-parser/   # the parser (Token stream -> AST) and compose (AST ->
+                 # fully-merged ComposedProgram, resolving template/`with`
+                 # and, given a SymbolResolver, cross-file `use` imports)
+    hl-linker/   # loads a real `use` graph off disk (or, for tests, an
+                 # in-memory map) and implements hl-parser's SymbolResolver
+                 # over it
+    hl-codegen/  # ComposedProgram -> Docker Compose YAML + Traefik labels
+    hl-cli/      # `hl-cli <file.hll>` lexes; `--parse` parses and prints
+                 # the AST; `--build [--out <path>]` runs the full
+                 # pipeline (link -> compose -> codegen)
 ```
 
 ## Building & testing
@@ -45,8 +56,20 @@ Try the CLI against an `.hll` file:
 ```sh
 cargo run -p hl-cli -- crates/hl-lexer/tests/fixtures/jellyfin.hll
 cargo run -p hl-cli -- --parse crates/hl-parser/tests/fixtures/jellyfin.hll
+cargo run -p hl-cli -- --build crates/hl-parser/tests/fixtures/syncthing.hll
+```
+
+`--build` also resolves real cross-file `use` imports — try it against
+the split-file example in `crates/hl-cli/tests/fixtures/imports/`
+(`network.hll` + `templates.hll` + `syncthing.hll`, connected by `use`
+decls), which produces byte-identical output to the single-file version
+above:
+
+```sh
+cargo run -p hl-cli -- --build crates/hl-cli/tests/fixtures/imports/syncthing.hll
 ```
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the language's grammar, and each
-crate's rustdoc (`crates/hl-lexer/src/lib.rs`, `crates/hl-parser/src/lib.rs`)
-for implementation details (token/AST shapes, span semantics, error types).
+crate's rustdoc (`crates/hl-lexer/src/lib.rs`, `crates/hl-parser/src/lib.rs`,
+`crates/hl-linker/src/lib.rs`, `crates/hl-codegen/src/lib.rs`) for
+implementation details (token/AST shapes, span semantics, error types).

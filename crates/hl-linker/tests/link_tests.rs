@@ -248,3 +248,24 @@ fn unknown_qualified_network_is_error() {
             if alias == "traefik" && name == "nonexistent"
     ));
 }
+
+/// The template-side counterpart to `unknown_qualified_network_is_error`:
+/// the alias resolves to a real imported module, but that module has no
+/// template by the invoked name.
+#[test]
+fn unknown_qualified_template_is_error() {
+    let mut loader = InMemoryLoader::default();
+    loader.add("templates.hll", "template web {\n  image \"x\"\n}\n");
+    loader.add(
+        "service.hll",
+        "use \"templates.hll\" as common\n\
+         service s {\n  with common.nonexistent\n}\n",
+    );
+
+    let err = link(Path::new("service.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        err,
+        LinkError::Compose(ComposeError::UnknownTemplate { name, .. })
+            if name == "nonexistent"
+    ));
+}

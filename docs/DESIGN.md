@@ -226,6 +226,11 @@ service jellyfin {
 Templates composed onto a service with `with`:
 
 ```
+network traefik-net {
+  external
+  name: "docker_default"
+}
+
 template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
@@ -249,8 +254,9 @@ service syncthing {
 }
 ```
 
-The same templates, split across files via `use` instead of copy-pasted
-into every service that needs them:
+The exact same templates, split across files via `use` instead of
+copy-pasted into every service that needs them (this is
+`crates/hl-cli/tests/fixtures/imports/` verbatim):
 
 ```
 # network.hll
@@ -269,11 +275,20 @@ template internal_web(port) {
   middleware local-ipwhitelist
 }
 
+template authenticated {
+  middleware forwardAuth-authentik
+}
+
+template linuxserver_app(puid, pgid) {
+  env PUID = puid
+  env PGID = pgid
+}
+
 # syncthing.hll
 use "templates.hll" as common
 
 service syncthing {
-  with common.internal_web { port: 8384 }
+  with common.internal_web { port: 8384 }, common.authenticated, common.linuxserver_app { puid: 1000, pgid: 100 }
   image "lscr.io/linuxserver/syncthing:latest"
   volume "syncthing-config" -> "/config"
 }
