@@ -687,6 +687,9 @@ fn substitute_params(
     {
         substitute_literal(p, args, template_name)?;
     }
+    if let Some(cn) = &mut fields.container_name {
+        substitute_literal(cn, args, template_name)?;
+    }
     for v in &mut fields.volumes.entries {
         substitute_literal(&mut v.host, args, template_name)?;
         substitute_literal(&mut v.container, args, template_name)?;
@@ -838,6 +841,7 @@ struct MergeAcc {
     image: Option<(Image, Tier)>,
     expose: Option<(Expose, Tier)>,
     restart: Option<(Restart, Tier)>,
+    container_name: Option<(Literal, Tier)>,
     volumes: Vec<(VolumeEntry, Tier)>,
     env: Vec<(EnvEntry, Tier)>,
     raw: RawMap,
@@ -852,6 +856,7 @@ impl MergeAcc {
             image: self.image.map(|(v, _)| v),
             expose: self.expose.map(|(v, _)| v),
             restart: self.restart.map(|(v, _)| v),
+            container_name: self.container_name.map(|(v, _)| v),
             volumes: VolumeMap {
                 entries: self.volumes.into_iter().map(|(v, _)| v).collect(),
             },
@@ -886,6 +891,9 @@ fn merge_tier(
     if let Some(r) = incoming.restart {
         merge_single(&mut acc.restart, "restart", r, tier)?;
     }
+    if let Some(cn) = incoming.container_name {
+        merge_scalar_literal(&mut acc.container_name, "container_name", cn, tier)?;
+    }
     merge_map(
         &mut acc.volumes,
         "volume",
@@ -916,6 +924,42 @@ fn merge_single<T: Spanned>(
     slot: &mut Option<(T, Tier)>,
     field: &'static str,
     value: T,
+    tier: &Tier,
+) -> Result<(), ComposeError> {
+    match slot.take() {
+        None => {
+            *slot = Some((value, tier.clone()));
+        }
+        Some((existing, existing_tier)) => match (&existing_tier, tier) {
+            (_, Tier::Own) => {
+                *slot = Some((value, Tier::Own));
+            }
+            (Tier::Defaults, _) => {
+                *slot = Some((value, tier.clone()));
+            }
+            (Tier::Explicit(first), Tier::Explicit(second)) => {
+                return Err(ComposeError::FieldCollision {
+                    field,
+                    first_template: first.clone(),
+                    second_template: second.clone(),
+                    first: existing.span(),
+                    second: value.span(),
+                });
+            }
+            _ => unreachable!("Own is always merged last; Defaults is always merged first"),
+        },
+    }
+    Ok(())
+}
+
+/// Same tier rules as [`merge_single`], specialized to a bare [`Literal`]
+/// slot (`container_name`) instead of a `Spanned`-bounded struct — kept
+/// as its own small function rather than widening [`merge_single`]'s
+/// bound, since [`Literal`] already carries its own inherent `span()`.
+fn merge_scalar_literal(
+    slot: &mut Option<(Literal, Tier)>,
+    field: &'static str,
+    value: Literal,
     tier: &Tier,
 ) -> Result<(), ComposeError> {
     match slot.take() {
