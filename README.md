@@ -44,6 +44,22 @@ hl-lang/
                  # pipeline (link -> compose -> codegen)
 ```
 
+## Installing
+
+Every merge to main cuts a new [tagged release](https://github.com/travisboettcher/hl-lang/releases)
+with a prebuilt `hllc` Linux x86-64 binary attached — download it,
+`chmod +x`, and put it on your `PATH`, no Rust toolchain required:
+
+```sh
+curl -Lo hllc https://github.com/travisboettcher/hl-lang/releases/latest/download/hllc-linux-x86_64
+chmod +x hllc
+./hllc --build <file.hll>
+```
+
+Consumers (CI, a local deploy step) should pin to a specific tag rather than
+`latest` for reproducibility. See "Building & testing" below to build from
+source instead — e.g. for a platform with no release binary.
+
 ## Building & testing
 
 ```sh
@@ -94,6 +110,17 @@ above:
 ```sh
 cargo run -p hl-cli -- --build crates/hl-cli/tests/fixtures/imports/syncthing.hll
 ```
+
+## Releasing
+
+Releases are fully automated (`.github/workflows/release.yml`) — there's no
+manual tag to push. Every PR into main must carry exactly one of the
+`semver-major`/`semver-minor`/`semver-patch` labels (enforced by
+`semver-label.yml` as a required check); merging bumps every crate's version
+accordingly, opens and auto-merges a small `chore(release)` PR with that
+change, and that merge cuts the actual tagged release with a rebuilt `hllc`
+binary attached. See `release-plz.toml` and the workflow's own comments for
+how the pieces fit together.
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the language's grammar, and each
 crate's rustdoc (`crates/hl-lexer/src/lib.rs`, `crates/hl-parser/src/lib.rs`,

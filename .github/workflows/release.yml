@@ -1,0 +1,154 @@
+name: Release
+
+# Every merge to main is a release: no separate manual tag push. The
+# `open-version-bump-pr` job reads the `semver-major`/`semver-minor`/
+# `semver-patch` label off the PR that just merged (enforced present by
+# semver-label.yml), computes the next version from it, writes that
+# version into every crate's Cargo.toml via `release-plz set-version`,
+# and opens+auto-merges a small bot PR with that change. Its merge is
+# itself a push to main, which re-triggers this workflow — that second
+# run is recognized by the `[release-bump]` marker in the squash commit
+# message and runs `publish-release` instead: `release-plz release` tags
+# and creates the GitHub Release (a no-op if that version's tag already
+# exists, so this can never double-release), then the actual `hllc`
+# binary is built and attached to it.
+#
+# The version bump lands via a real PR merge rather than a direct push
+# to main so this keeps working under branch protection that requires
+# PRs/status checks — it just never needs a human to click merge.
+
+on:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  open-version-bump-pr:
+    name: open version-bump PR
+    if: ${{ !contains(github.event.head_commit.message, '[release-bump]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find the semver label on the merged PR
+        id: label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          pr_json=$(gh api "/repos/${{ github.repository }}/commits/${{ github.sha }}/pulls")
+          pr_number=$(jq -r '.[0].number // empty' <<<"$pr_json")
+          labels=$(jq -r '.[0].labels[]?.name // empty' <<<"$pr_json")
+          bump=""
+          if grep -qx "semver-major" <<<"$labels"; then bump=major
+          elif grep -qx "semver-minor" <<<"$labels"; then bump=minor
+          elif grep -qx "semver-patch" <<<"$labels"; then bump=patch
+          fi
+          if [ -z "$bump" ]; then
+            echo "No semver-major/minor/patch label found on PR #${pr_number:-?} (or no associated PR) — skipping release for this merge."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "bump=$bump" >> "$GITHUB_OUTPUT"
+            echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust
+        if: steps.label.outputs.skip == 'false'
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.label.outputs.skip == 'false'
+
+      - name: Install release-plz
+        if: steps.label.outputs.skip == 'false'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: release-plz
+
+      - name: Compute next version and bump every crate
+        if: steps.label.outputs.skip == 'false'
+        id: version
+        run: |
+          set -euo pipefail
+          current=$(grep -m1 '^version' crates/hl-cli/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          IFS='.' read -r major minor patch <<<"$current"
+          case "${{ steps.label.outputs.bump }}" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          next="$major.$minor.$patch"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          release-plz set-version \
+            "hl-lexer@$next" "hl-parser@$next" "hl-codegen@$next" \
+            "hl-linker@$next" "hl-cli@$next"
+          # Refreshes Cargo.lock's own copy of each bumped crate's version
+          # (cargo rewrites it for any local path package on any build/check
+          # invocation) so it doesn't drift from Cargo.toml.
+          cargo check --workspace --quiet
+
+      - name: Open the version-bump PR and auto-merge it
+        if: steps.label.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          next="${{ steps.version.outputs.next }}"
+          bump="${{ steps.label.outputs.bump }}"
+          branch="release/v$next"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add -A
+          git commit -m "chore(release): v$next [release-bump]"
+          git push -u origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "chore(release): v$next [release-bump]" \
+            --body "Automated $bump version bump to v$next, from #${{ steps.label.outputs.pr_number }}'s \`semver-$bump\` label. Auto-merges once CI passes; merging cuts the v$next release."
+          gh pr merge "$branch" --auto --squash
+
+  publish-release:
+    name: tag, create GitHub Release, attach hllc binary
+    if: ${{ contains(github.event.head_commit.message, '[release-bump]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: release-plz release (tag + GitHub Release, idempotent)
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: cargo build --release
+        run: cargo build --workspace --release
+
+      - name: Attach the hllc binary to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 '^version' crates/hl-cli/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          cp target/release/hllc hllc-linux-x86_64
+          gh release upload "v$version" hllc-linux-x86_64 --clobber

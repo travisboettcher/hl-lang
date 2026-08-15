@@ -1,0 +1,36 @@
+name: Semver label
+
+# Every merge to main automatically cuts a release (release.yml), and the
+# size of the version bump is read off whichever `semver-major`/
+# `semver-minor`/`semver-patch` label is on the merged PR — there's no
+# commit-message convention to fall back on. This is the enforcement
+# side: block any PR into main that doesn't carry exactly one of those
+# three labels, so release.yml never finds itself trying to release a PR
+# with no bump size to apply. Mark this job as a required status check
+# in the repo's branch protection settings for main.
+
+on:
+  pull_request:
+    types: [opened, labeled, unlabeled, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check-semver-label:
+    name: require exactly one semver-* label
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check labels
+        env:
+          LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
+        run: |
+          set -euo pipefail
+          count=$(jq '[.[] | select(.name | startswith("semver-"))] | length' <<<"$LABELS_JSON")
+          if [ "$count" -ne 1 ]; then
+            echo "::error::This PR must carry exactly one of semver-major, semver-minor, or semver-patch (found $count) — release.yml uses it to compute the version bump when this PR merges to main."
+            exit 1
+          fi
+          name=$(jq -r '[.[] | select(.name | startswith("semver-"))][0].name' <<<"$LABELS_JSON")
+          echo "OK: $name"
