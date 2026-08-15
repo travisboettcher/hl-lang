@@ -16,6 +16,17 @@ name: Release
 # The version bump lands via a real PR merge rather than a direct push
 # to main so this keeps working under branch protection that requires
 # PRs/status checks — it just never needs a human to click merge.
+#
+# `open-version-bump-pr` authenticates as a `RELEASE_PLZ_TOKEN` PAT
+# (fine-grained, this repo only, Contents + Pull requests: read/write)
+# instead of the default GITHUB_TOKEN: GitHub blocks the default token
+# from both creating PRs (unless "Allow GitHub Actions to create and
+# approve pull requests" is on) and from letting that PR's own checks
+# run without a maintainer's manual approval — a guardrail against a
+# workflow opening a PR, passing its own CI, and self-merging unwatched.
+# A PAT is attributed to a real account, so the PR it opens behaves like
+# any other PR. `publish-release` doesn't create PRs, so it stays on
+# GITHUB_TOKEN.
 
 on:
   push:
@@ -41,11 +52,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
       - name: Find the semver label on the merged PR
         id: label
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
         run: |
           set -euo pipefail
           pr_json=$(gh api "/repos/${{ github.repository }}/commits/${{ github.sha }}/pulls")
@@ -103,7 +115,7 @@ jobs:
       - name: Open the version-bump PR and auto-merge it
         if: steps.label.outputs.skip == 'false'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
         run: |
           set -euo pipefail
           next="${{ steps.version.outputs.next }}"
