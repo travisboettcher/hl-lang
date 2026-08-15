@@ -270,6 +270,18 @@ pub struct ServiceFields {
     pub middleware: Vec<Reference>,
     pub depends_on: Vec<Reference>,
     pub networks: Vec<Reference>,
+    /// A per-service DNS resolver override (Compose's own `dns:` key,
+    /// e.g. a LAN resolver IP) — a plain generic Compose key like
+    /// `volume`/`env`/`expose`, not homelab-specific itself even though
+    /// any one entry's value always is. List-typed and reference-list
+    /// shaped like `middleware`/`depends_on`/`networks` (accumulates
+    /// across repeats, never duplicate-checked), even though its entries
+    /// are ordinary literal values (IP addresses) rather than references
+    /// to another declaration — reusing [`Reference`] costs nothing here
+    /// since a `STRING` entry (the only realistic way to write an IP,
+    /// `IDENT`'s grammar can't contain a `.`) can never carry a
+    /// qualifier anyway.
+    pub dns: Vec<Reference>,
     /// Docker's own `container_name:` key. `None` means "default to the
     /// service's own name" (via the same `{{name}}` interpolation
     /// binding `expose`'s `as`-sugar already uses) — codegen, not the

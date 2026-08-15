@@ -43,6 +43,8 @@ pub(crate) struct ComposeServiceDoc {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub networks: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dns: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub expose: Vec<serde_yaml::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,

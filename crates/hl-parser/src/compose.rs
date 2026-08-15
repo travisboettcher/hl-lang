@@ -645,6 +645,7 @@ fn resolve_qualified_networks<R: SymbolResolver>(
     }
     reject_qualified(&fields.middleware, "middleware")?;
     reject_qualified(&fields.depends_on, "depends_on")?;
+    reject_qualified(&fields.dns, "dns")?;
     Ok(())
 }
 
@@ -806,21 +807,6 @@ enum Tier {
 trait Spanned {
     fn span(&self) -> Span;
 }
-impl Spanned for Image {
-    fn span(&self) -> Span {
-        self.span
-    }
-}
-impl Spanned for Expose {
-    fn span(&self) -> Span {
-        self.span
-    }
-}
-impl Spanned for Restart {
-    fn span(&self) -> Span {
-        self.span
-    }
-}
 impl Spanned for VolumeEntry {
     fn span(&self) -> Span {
         self.span
@@ -833,30 +819,83 @@ impl Spanned for EnvEntry {
 }
 
 /// The accumulator a field-bag's tiers merge into, tracking which tier
-/// last set each field so [`merge_single`]/[`merge_map`] can tell
+/// last set each value so [`merge_scalar`]/[`merge_map`] can tell
 /// "explicit-vs-explicit" (an error) apart from "defaults-vs-anything"
 /// or "anything-vs-own" (silent overrides).
+///
+/// `scalars` holds every single-value collision point in the language —
+/// `image`, `expose.port`/`expose.host`/`expose.entrypoint`, `restart`,
+/// `container_name`, and any future one — keyed generically by name (dotted only where a
+/// struct has more than one sub-field needing disambiguation, e.g.
+/// `expose`'s three; a single-field struct like `image`/`restart` is
+/// keyed under its own bare name) instead of one dedicated `MergeAcc`
+/// field per collision point.
+/// Earlier this milestone, `expose`'s three sub-fields each got their
+/// own named `Option<(Literal, Tier)>` field here (mirroring `image`/
+/// `restart`'s own single-field `Option<(Image, Tier)>`/`Option<(Restart,
+/// Tier)>` slots) — that doesn't scale: every new struct sub-field (or
+/// new bare scalar field) meant a new named `MergeAcc` field, a new
+/// `merge_single` call site in [`merge_tier`], and a new line in
+/// [`MergeAcc::into_service_fields`]. A single `HashMap<&'static str,
+/// (Literal, Tier)>` collapses all of that to one shared merge routine
+/// ([`merge_scalar`]) plus one line each in [`scalar_fields_of`] (how to
+/// find a tier's scalar values) and [`MergeAcc::into_service_fields`]
+/// (how to put them back) — the only two places that need to know
+/// `ServiceFields`'s concrete shape at all. `image`/`restart` moved onto
+/// this same map for consistency (a single-field struct is just a
+/// struct whose one sub-field never has to share a table row with a
+/// sibling), which is also why the `Spanned`-generic `merge_single` and
+/// its `Image`/`Restart` impls are gone: every scalar collision point is
+/// a bare `Literal`, which already has its own inherent `span()`.
 #[derive(Default)]
 struct MergeAcc {
-    image: Option<(Image, Tier)>,
-    expose: Option<(Expose, Tier)>,
-    restart: Option<(Restart, Tier)>,
-    container_name: Option<(Literal, Tier)>,
+    scalars: HashMap<&'static str, (Literal, Tier)>,
     volumes: Vec<(VolumeEntry, Tier)>,
     env: Vec<(EnvEntry, Tier)>,
     raw: RawMap,
     middleware: Vec<Reference>,
     depends_on: Vec<Reference>,
     networks: Vec<Reference>,
+    dns: Vec<Reference>,
 }
 
 impl MergeAcc {
-    fn into_service_fields(self) -> ServiceFields {
+    fn into_service_fields(mut self) -> ServiceFields {
+        let image = self.scalars.remove("image").map(|(v, _)| Image {
+            span: v.span(),
+            reference: Some(v),
+        });
+        let port = self.scalars.remove("expose.port");
+        let host = self.scalars.remove("expose.host");
+        let entrypoint = self.scalars.remove("expose.entrypoint");
+        // The merged `Expose`'s own span is cosmetic — nothing
+        // downstream reads it for anything but existence, since codegen
+        // and `substitute_params` both work off the individual
+        // sub-field spans instead — so this just picks whichever
+        // sub-field was set, preferring `port` since it's the primary
+        // field. `None` only when no sub-field was ever set, meaning
+        // `expose` itself should stay unset.
+        let expose_span = port
+            .as_ref()
+            .or(host.as_ref())
+            .or(entrypoint.as_ref())
+            .map(|(v, _)| v.span());
+        let expose = expose_span.map(|span| Expose {
+            port: port.map(|(v, _)| v),
+            host: host.map(|(v, _)| v),
+            entrypoint: entrypoint.map(|(v, _)| v),
+            span,
+        });
+        let restart = self.scalars.remove("restart").map(|(v, _)| Restart {
+            span: v.span(),
+            policy: Some(v),
+        });
+        let container_name = self.scalars.remove("container_name").map(|(v, _)| v);
         ServiceFields {
-            image: self.image.map(|(v, _)| v),
-            expose: self.expose.map(|(v, _)| v),
-            restart: self.restart.map(|(v, _)| v),
-            container_name: self.container_name.map(|(v, _)| v),
+            image,
+            expose,
+            restart,
+            container_name,
             volumes: VolumeMap {
                 entries: self.volumes.into_iter().map(|(v, _)| v).collect(),
             },
@@ -867,32 +906,63 @@ impl MergeAcc {
             middleware: self.middleware,
             depends_on: self.depends_on,
             networks: self.networks,
+            dns: self.dns,
             with: Vec::new(),
         }
     }
 }
 
+/// Flattens one tier's scalar collision points — `image`,
+/// `expose.port`/`.host`/`.entrypoint`, `restart` — out of the
+/// concrete `Image`/`Expose`/`Restart` structs that held them, into
+/// `(canonical key, value)` pairs [`merge_scalar`] can merge generically.
+/// The one place in the merge engine that needs to know
+/// `ServiceFields`'s actual struct shape (its mirror image,
+/// [`MergeAcc::into_service_fields`], is the only other one) — adding a
+/// future scalar collision point (a new struct sub-field, or a new bare
+/// scalar field) means adding one line here and one there, not a new
+/// `MergeAcc` field plus its own merge call site.
+fn scalar_fields_of(
+    image: Option<Image>,
+    expose: Option<Expose>,
+    restart: Option<Restart>,
+) -> Vec<(&'static str, Literal)> {
+    let mut out = Vec::new();
+    if let Some(v) = image.and_then(|i| i.reference) {
+        out.push(("image", v));
+    }
+    if let Some(e) = expose {
+        if let Some(v) = e.port {
+            out.push(("expose.port", v));
+        }
+        if let Some(v) = e.host {
+            out.push(("expose.host", v));
+        }
+        if let Some(v) = e.entrypoint {
+            out.push(("expose.entrypoint", v));
+        }
+    }
+    if let Some(v) = restart.and_then(|r| r.policy) {
+        out.push(("restart", v));
+    }
+    out
+}
+
 /// Merges one tier's [`ServiceFields`] into `acc`. List fields
-/// (`raw`/`middleware`/`depends_on`/`networks`) always concatenate — see
-/// [`ComposeError::MapKeyCollision`]'s doc for why `raw` in particular is
-/// never collision-checked, consistent with its existing intra-body
-/// no-uniqueness behavior.
+/// (`raw`/`middleware`/`depends_on`/`networks`/`dns`) always concatenate
+/// — see [`ComposeError::MapKeyCollision`]'s doc for why `raw` in
+/// particular is never collision-checked, consistent with its existing
+/// intra-body no-uniqueness behavior.
 fn merge_tier(
     acc: &mut MergeAcc,
     incoming: ServiceFields,
     tier: &Tier,
 ) -> Result<(), ComposeError> {
-    if let Some(img) = incoming.image {
-        merge_single(&mut acc.image, "image", img, tier)?;
-    }
-    if let Some(e) = incoming.expose {
-        merge_single(&mut acc.expose, "expose", e, tier)?;
-    }
-    if let Some(r) = incoming.restart {
-        merge_single(&mut acc.restart, "restart", r, tier)?;
+    for (field, value) in scalar_fields_of(incoming.image, incoming.expose, incoming.restart) {
+        merge_scalar(&mut acc.scalars, field, value, tier)?;
     }
     if let Some(cn) = incoming.container_name {
-        merge_scalar_literal(&mut acc.container_name, "container_name", cn, tier)?;
+        merge_scalar(&mut acc.scalars, "container_name", cn, tier)?;
     }
     merge_map(
         &mut acc.volumes,
@@ -914,64 +984,33 @@ fn merge_tier(
     acc.middleware.extend(incoming.middleware);
     acc.depends_on.extend(incoming.depends_on);
     acc.networks.extend(incoming.networks);
+    acc.dns.extend(incoming.dns);
     Ok(())
 }
 
-/// Merges one scalar/struct-kind field slot. `Own` always wins
-/// unconditionally; `Defaults` is silently overridden by anything;
-/// two `Explicit` tiers setting the same field is a compile error.
-fn merge_single<T: Spanned>(
-    slot: &mut Option<(T, Tier)>,
-    field: &'static str,
-    value: T,
-    tier: &Tier,
-) -> Result<(), ComposeError> {
-    match slot.take() {
-        None => {
-            *slot = Some((value, tier.clone()));
-        }
-        Some((existing, existing_tier)) => match (&existing_tier, tier) {
-            (_, Tier::Own) => {
-                *slot = Some((value, Tier::Own));
-            }
-            (Tier::Defaults, _) => {
-                *slot = Some((value, tier.clone()));
-            }
-            (Tier::Explicit(first), Tier::Explicit(second)) => {
-                return Err(ComposeError::FieldCollision {
-                    field,
-                    first_template: first.clone(),
-                    second_template: second.clone(),
-                    first: existing.span(),
-                    second: value.span(),
-                });
-            }
-            _ => unreachable!("Own is always merged last; Defaults is always merged first"),
-        },
-    }
-    Ok(())
-}
-
-/// Same tier rules as [`merge_single`], specialized to a bare [`Literal`]
-/// slot (`container_name`) instead of a `Spanned`-bounded struct — kept
-/// as its own small function rather than widening [`merge_single`]'s
-/// bound, since [`Literal`] already carries its own inherent `span()`.
-fn merge_scalar_literal(
-    slot: &mut Option<(Literal, Tier)>,
+/// Merges one scalar collision point, keyed by `field` (e.g.
+/// `"expose.host"`), into `acc`. `Own` always wins unconditionally;
+/// `Defaults` is silently overridden by anything; two `Explicit` tiers
+/// setting the same key is a compile error. The single merge routine
+/// every scalar field in the language goes through — see [`MergeAcc`]'s
+/// own doc for why this replaced the old `Spanned`-generic, one-slot-
+/// per-field `merge_single`.
+fn merge_scalar(
+    acc: &mut HashMap<&'static str, (Literal, Tier)>,
     field: &'static str,
     value: Literal,
     tier: &Tier,
 ) -> Result<(), ComposeError> {
-    match slot.take() {
+    match acc.remove(field) {
         None => {
-            *slot = Some((value, tier.clone()));
+            acc.insert(field, (value, tier.clone()));
         }
         Some((existing, existing_tier)) => match (&existing_tier, tier) {
             (_, Tier::Own) => {
-                *slot = Some((value, Tier::Own));
+                acc.insert(field, (value, Tier::Own));
             }
             (Tier::Defaults, _) => {
-                *slot = Some((value, tier.clone()));
+                acc.insert(field, (value, tier.clone()));
             }
             (Tier::Explicit(first), Tier::Explicit(second)) => {
                 return Err(ComposeError::FieldCollision {

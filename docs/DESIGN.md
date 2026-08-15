@@ -41,7 +41,7 @@ Punctuation: { } [ ] ( ) : = -> , .
 
 - `template` is the *only* reserved word in the entire language. Everything
   else that looks like a keyword (`service`, `network`, `image`, `volume`,
-  `env`, `restart`, `expose`, `middleware`, `depends_on`, `networks`,
+  `env`, `restart`, `expose`, `middleware`, `depends_on`, `networks`, `dns`,
   `container_name`, `with`, `as`, `external`, `use`, `raw`, `defaults`,
   ...) is an ordinary `IDENT`,
   resolved against a schema table at parse time — not a lexer-level
@@ -102,10 +102,37 @@ literal        ::= STRING | NUMBER | IDENT
 `statement` is the whole language: a `named_decl` is one particular shape of
 it (mandatory second name, mandatory body); every field inside a `service`,
 every `template` invocation, every leaf like `image "foo"` is the same
-`statement` production, applied recursively. Statements need no separator
-token — a trailing comma continues a comma-list, its absence unambiguously
-ends the current statement, so newline-separated bodies parse correctly with
-a single token of lookahead.
+`statement` production, applied recursively.
+
+The grammar above is deliberately silent on layout, but layout isn't actually
+free — two rules govern how statements are separated, neither expressible in
+a plain context-free grammar (both depend on source position/line, not just
+token identity):
+
+- **Different fields in a struct-kind body are separated by a newline, never
+  a comma.** `service`/`template`/`network`'s own top-level body, and a
+  nested struct-kind type's canonical `{ }` form (`image { ... }`, `expose {
+  ... }`, `restart { ... }`), all require this: `image "x"` and `restart
+  unless-stopped` must be on separate lines, and a comma between them (`image
+  "x", restart unless-stopped`) is a compile error, not a tolerated
+  no-op — a comma is reserved exclusively for continuing a *single* field's
+  own comma-list (see below), never for marking the boundary between two
+  unrelated fields. A single-statement body needs nothing to separate
+  (`{ image "x" }` on one line is fine); the rule only applies from the
+  second statement on.
+- **A comma-list's trailing comma is mandatory, not optional, to continue
+  it.** A bracket list (`[a, b, c]`), a bare `with`-list (`with a, b, c`),
+  and a primary-shorthand's own secondary fields (rule 3, below) all follow
+  "trailing comma continues, its absence ends the statement" — but the
+  comma itself is never optional when there *is* a next item; bare
+  adjacency with no comma at all no longer implies continuation.
+
+Map-kind bodies (`raw { }`, and a `with`-invocation's own argument body,
+which reuses `raw`'s entry parsing) are exempt from the newline rule — their
+entries are conceptually key-value pairs in a dictionary, not named struct
+fields, and the compact one-line style (`{ puid: 1000, pgid: 100 }`) used
+throughout this doc's own worked examples stays valid, comma-separated, on
+one line.
 
 ### Desugaring rules
 
@@ -117,14 +144,29 @@ a single token of lookahead.
    desugars to a one-entry map, where `<sep>` is a per-type schema choice
    (`env` uses `=`, `volume` uses `->`). Both desugar to the same canonical
    `:`-separated map form internally.
-3. **Secondary-field bare shorthand** — after a primary value, additional
-   bare `key: value`/`key` statements set other non-primary struct fields
-   of the same type. A boolean struct field can always be set bare with no
-   value, implying `true` (e.g. `external` on `network`). Field-init
-   shorthand (`{ port }` standing in for `{ port: port }`, borrowed from
-   Rust) and a bare zero-field template invocation (`authenticated` with no
-   `{ }`) are the same grammar production as this rule, disambiguated only
-   by schema lookup.
+3. **Secondary-field bare shorthand** — after a primary value, a type's
+   schema-configured `bare_keyword_alias` (if it has one — `as` is the one
+   built-in case, aliasing to `expose`'s `host` field) may fuse onto it
+   directly with **no comma**: `expose port as "host"`. This is a one-shot
+   continuation, not a list — it cannot itself be followed by anything
+   else, comma or no comma; `expose port as "host", entrypoint: "..."` is a
+   compile error. Beyond that, additional explicit `key: value`/`key`
+   fields may follow, each preceded by a **mandatory comma** (the same
+   "trailing comma continues, its absence ends the statement" rule as any
+   other comma-list, including exempting the alias keyword itself — `as`
+   isn't a valid target of this comma-continuation, only of the immediate
+   no-comma fusion above): `expose port, host: "...", entrypoint: "..."`.
+   A boolean struct field can always be set bare with no value, implying
+   `true` (e.g. `external` on `network`). Field-init shorthand (`{ port }`
+   standing in for `{ port: port }`, borrowed from Rust) and a bare
+   zero-field template invocation (`authenticated` with no `{ }`) are the
+   same grammar production as the comma-continuation case, disambiguated
+   only by schema lookup — one token of lookahead past the comma confirms
+   the next key genuinely names one of the nested type's own fields before
+   consuming it as part of this value; otherwise the comma (and whatever
+   follows) is left for the *enclosing* body, where a bare comma is never a
+   valid statement start and now correctly errors instead of silently
+   reattaching elsewhere.
 4. **Repeatable-field accumulation** (semantic, not part of the CFG) —
    writing `volume`, `env`, `middleware`, or `depends_on` more than once in
    one body appends, since those fields are list/map-kinded. Writing
@@ -145,20 +187,25 @@ a single token of lookahead.
 | `with` | struct | `templates` (list of nested instantiations) | — | — | no |
 | `raw` | map | — | `:` | none (schema-free, passthrough) | no |
 
-`middleware`, `depends_on`, and `networks` are not rows in this table —
-they're plain list-of-reference fields directly on `service`/`template`.
-`container_name` isn't a row either, for the opposite reason: it's a
-plain *scalar* field directly on `service`/`template` (`container_name
-"uptime-kuma"` / `container_name: "uptime-kuma"`) rather than a nested
-struct type — it has no secondary fields of its own to give it a
-primary-field/separator shape worth a table row. Unset, it defaults to
-the service's own name (via the same `{{name}}` interpolation binding
-`expose`'s `as`-sugar already uses), applied at codegen time — the same
-"parser leaves it unset, a later stage supplies the default" pattern
-`network`'s own `name` field already uses. `template` isn't a row
-either — it's the mechanism for adding new rows to this table at parse
-time. `defaults` is likewise not a row — it's an ordinary template,
-semantically special only in that it's implicitly applied (see
+`middleware`, `depends_on`, `networks`, and `dns` are not rows in this
+table — they're plain list-of-reference fields directly on
+`service`/`template` (`dns ["192.168.50.182"]`: a per-service DNS
+resolver override, Compose's own `dns:` key — the field itself is
+generic, only a given entry's IP is homelab-specific, same reasoning as
+`volume`'s host path or an `env` entry's value already being
+homelab-specific without the field itself being one). `container_name`
+isn't a row either, for the opposite reason: it's a plain *scalar* field
+directly on `service`/`template` (`container_name "uptime-kuma"` /
+`container_name: "uptime-kuma"`) rather than a nested struct type — it
+has no secondary fields of its own to give it a primary-field/separator
+shape worth a table row. Unset, it defaults to the service's own name
+(via the same `{{name}}` interpolation binding `expose`'s `as`-sugar
+already uses), applied at codegen time — the same "parser leaves it
+unset, a later stage supplies the default" pattern `network`'s own
+`name` field already uses. `template` isn't a row either — it's the
+mechanism for adding new rows to this table at parse time. `defaults` is
+likewise not a row — it's an ordinary template, semantically special
+only in that it's implicitly applied (see
 Composition, below).
 
 ## Composition: templates and `with`
@@ -182,8 +229,30 @@ Merge priority, lowest to highest:
 3. the service's own body — always wins over everything
 
 List fields concatenate (no collision possible); map fields merge
-key-by-key (or value-by-value for `volume`); struct/scalar fields error on
-collision among explicit templates only.
+key-by-key (or value-by-value for `volume`); scalar fields (`image`,
+`restart`) error on collision among explicit templates only. `expose`,
+the one built-in struct field with more than one sub-field, merges
+per sub-field (`port`/`host`/`entrypoint` independently) rather than as
+one indivisible unit — the same key-by-key reasoning as a map field,
+applied to a struct's named fields instead of a map's keys. This means a
+service's own body can override just `expose.host` while still
+inheriting `port`/`entrypoint` from a `with`-listed template, without
+repeating them; two explicit templates only collide if they set the
+*same* `expose` sub-field, not merely the same `expose` field overall.
+
+```
+template internal_web(port) {
+  expose port, entrypoint: "web-secure"
+}
+
+service it-tools {
+  with internal_web { port: 8080 }
+  image "corentinth/it-tools:latest"
+  # overrides just expose.host — port and entrypoint still come from
+  # internal_web above
+  expose { host: "tools.internal.techdebtor.io" }
+}
+```
 
 ## Imports
 
@@ -246,7 +315,7 @@ network traefik-net {
 template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
-  expose port as "{{name}}.internal.techdebtor.io" entrypoint: "web-secure"
+  expose port, host: "{{name}}.internal.techdebtor.io", entrypoint: "web-secure"
   middleware local-ipwhitelist
 }
 
@@ -283,7 +352,7 @@ use "network.hll" as net
 template internal_web(port) {
   networks [net.traefik-net]
   restart unless-stopped
-  expose port as "{{name}}.internal.techdebtor.io" entrypoint: "web-secure"
+  expose port, host: "{{name}}.internal.techdebtor.io", entrypoint: "web-secure"
   middleware local-ipwhitelist
 }
 
@@ -311,6 +380,25 @@ does — yet `internal_web`'s own `networks [net.traefik-net]` still
 resolves correctly no matter which service ends up invoking it, since it
 always resolves against `templates.hll`'s own alias table, never the
 caller's.
+
+A `with` list composing several templates reads as one long line once it
+grows past two or three — per the Syntactic grammar section above, "a
+trailing comma continues a comma-list," so the same `with` line can be
+wrapped across multiple lines instead, one template per line, as long as
+every line but the last ends with a trailing comma:
+
+```
+service syncthing {
+  with common.internal_web { port: 8384 },
+       common.authenticated,
+       common.linuxserver_app { puid: 1000, pgid: 100 }
+  image "lscr.io/linuxserver/syncthing:latest"
+  volume "syncthing-config" -> "/config"
+}
+```
+
+This parses identically to the single-line form above — it's purely a
+readability choice, not a different construct.
 
 ## Pipeline
 
@@ -365,3 +453,9 @@ caller's.
   fill-in-the-blanks placeholder (DNS provider/credentials, domain, IP
   ranges) — see "Design principle: generic core, specific templates,"
   above.
+- **`hllfmt`** — an auto-formatter that would wrap a long `with` list past
+  some line length (see the multiline `with` example above) with
+  consistent indentation, instead of that being a manual per-file
+  judgment call. Not yet designed: the line-length threshold, and whether
+  formatting is opinionated/non-configurable (à la `gofmt`/`rustfmt`) or
+  takes any settings at all.

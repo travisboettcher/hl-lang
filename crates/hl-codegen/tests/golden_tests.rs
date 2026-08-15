@@ -160,6 +160,30 @@ fn explicit_container_name_overrides_default() {
     );
 }
 
+/// `dns` (#14): a per-service resolver override, uptime_kuma/dashy's
+/// real-world use case, now has a dedicated schema row instead of
+/// routing through `raw`.
+#[test]
+fn dns_field_emits_dns_compose_key() {
+    let yaml = generate_from(
+        "service uptime-kuma {\n  \
+           image \"louislam/uptime-kuma:latest\"\n  \
+           dns \"192.168.50.182\"\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma:latest
+    container_name: uptime-kuma
+    dns:
+      - 192.168.50.182
+"#,
+    );
+}
+
 #[test]
 fn unknown_network_reference_is_error() {
     let err = generate_err("service s {\n  image \"x\"\n  networks [nonexistent]\n}\n");
