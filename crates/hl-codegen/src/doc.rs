@@ -5,13 +5,15 @@
 use indexmap::IndexMap;
 use serde::Serialize;
 
+/// `volumes` is deliberately not a field here — see
+/// `hl_codegen::render_volumes_section`'s doc for why the top-level
+/// `volumes:` section is built and appended separately instead of going
+/// through this derive.
 #[derive(Serialize)]
 pub(crate) struct ComposeDoc {
     pub services: IndexMap<String, ComposeServiceDoc>,
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub networks: IndexMap<String, NetworkDoc>,
-    #[serde(skip_serializing_if = "IndexMap::is_empty")]
-    pub volumes: IndexMap<String, Option<()>>,
 }
 
 #[derive(Serialize)]

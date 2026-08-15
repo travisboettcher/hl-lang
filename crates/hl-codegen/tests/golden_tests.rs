@@ -147,6 +147,20 @@ fn driverless_named_volume_emits_bare_key_not_explicit_null() {
     );
 }
 
+/// A volume name that would otherwise be misread as a different YAML
+/// type (a bool, here) still needs quoting even in the bare `name:`
+/// form — confirms `render_volumes_section` reuses `serde_yaml`'s own
+/// key-escaping (via a real `Mapping`) rather than hand-rolling it, so
+/// this isn't lost by building the section outside the normal derive.
+#[test]
+fn volume_name_needing_yaml_quoting_still_gets_quoted() {
+    let yaml = generate_from("service s {\n  image \"x\"\n  volume \"true\" -> \"/data\"\n}\n");
+    assert!(
+        yaml.contains("volumes:\n  'true':\n") || yaml.trim_end().ends_with("'true':"),
+        "expected the volume name `true` to stay quoted even without an explicit `null`, got:\n{yaml}"
+    );
+}
+
 #[test]
 fn unknown_network_reference_is_error() {
     let err = generate_err("service s {\n  image \"x\"\n  networks [nonexistent]\n}\n");

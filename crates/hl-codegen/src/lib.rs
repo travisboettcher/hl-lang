@@ -121,7 +121,12 @@ impl std::error::Error for CodegenError {}
 pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenError> {
     let mut services = IndexMap::new();
     let mut networks: IndexMap<String, doc::NetworkDoc> = IndexMap::new();
-    let mut volumes: IndexMap<String, Option<()>> = IndexMap::new();
+    // Insertion-ordered, deduplicated named-volume names — an `IndexMap`
+    // keyed on the name with a throwaway `()` value gets us "insert once,
+    // preserve first-seen order" for free, matching `services`/`networks`'
+    // own dedup convention, without needing a value type at all (unlike
+    // those two, a driver-less volume has no per-entry document to merge).
+    let mut volumes: IndexMap<String, ()> = IndexMap::new();
 
     for service in &program.services {
         let (service_doc, network_docs, named_volumes) =
@@ -130,45 +135,58 @@ pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenErr
             networks.entry(net_name).or_insert(net_doc);
         }
         for vol_name in named_volumes {
-            volumes.entry(vol_name).or_insert(None);
+            volumes.entry(vol_name).or_insert(());
         }
         services.insert(service.name.name.clone(), service_doc);
     }
 
-    let compose_doc = doc::ComposeDoc {
-        services,
-        networks,
-        volumes,
-    };
-    let yaml = serde_yaml::to_string(&compose_doc)
+    let compose_doc = doc::ComposeDoc { services, networks };
+    let mut yaml = serde_yaml::to_string(&compose_doc)
         .expect("ComposeDoc only contains strings/maps/numbers; serialization cannot fail");
-    Ok(GeneratedProgram {
-        yaml: bare_named_volume_keys(yaml),
-    })
+    yaml.push_str(&render_volumes_section(volumes.keys()));
+    Ok(GeneratedProgram { yaml })
 }
 
-/// A driver-less named volume (`volumes: { name: None }` in
-/// [`doc::ComposeDoc`]) has nothing else to say about it, but `serde_yaml`
-/// has no way to serialize "key present, value absent" other than as an
-/// explicit `null` scalar — there's no serde concept between "field
-/// present" and "field omitted." Hand-written Compose files (and this
-/// homelab's own) instead write the bare `name:` form, so this rewrites
-/// every line serde_yaml wrote as `<key>: null` into just `<key>:`,
-/// matching that convention and avoiding diff-noise against hand-written
-/// files. Safe as a blind string rewrite: nothing else in a generated
-/// document ever produces a YAML `null` scalar (`raw`'s own transcription
-/// in `raw::literal_to_yaml` never emits one), so every `: null` line is
-/// necessarily one of these.
-fn bare_named_volume_keys(yaml: String) -> String {
-    yaml.split_inclusive('\n')
-        .map(|line| match line.strip_suffix(" null\n") {
-            Some(stripped) => [stripped, "\n"].concat(),
-            None => match line.strip_suffix(" null") {
-                Some(stripped) => stripped.to_string(),
-                None => line.to_string(),
-            },
-        })
-        .collect()
+/// Renders the top-level `volumes:` section (empty string if `names` is
+/// empty, matching every other section's `skip_serializing_if`-driven
+/// omit-when-empty behavior) for every driver-less named volume — nothing
+/// in `.hll`'s schema can attach driver options to a volume yet, so there
+/// is never anything to say about one beyond its own name.
+///
+/// Deliberately *not* a field on [`doc::ComposeDoc`] serialized through
+/// the ordinary derive: `serde_yaml` has no way to serialize "key
+/// present, value absent" other than an explicit `null` scalar — there's
+/// no serde concept between "field present" and "field omitted," and
+/// hand-written Compose files (including this homelab's own) instead
+/// write the bare `name:` form. Rather than post-processing the *whole*
+/// generated document to strip `: null` after the fact (fragile — it'd
+/// depend on staying true forever that nothing else in the document ever
+/// legitimately produces a YAML `null`, silently miscorrecting the day
+/// that stops holding), this builds and rewrites *only* the small,
+/// self-contained `Mapping` it constructs right here, where every single
+/// line is known by construction to be exactly `<name>: null` — nothing
+/// else in the generated document is ever touched.
+fn render_volumes_section<'a>(names: impl Iterator<Item = &'a String>) -> String {
+    let mut mapping = serde_yaml::Mapping::new();
+    for name in names {
+        mapping.insert(
+            serde_yaml::Value::String(name.clone()),
+            serde_yaml::Value::Null,
+        );
+    }
+    if mapping.is_empty() {
+        return String::new();
+    }
+    let rendered = serde_yaml::to_string(&mapping)
+        .expect("volume names are plain strings; serialization cannot fail");
+
+    let mut out = String::from("volumes:\n");
+    for line in rendered.lines() {
+        out.push_str("  ");
+        out.push_str(line.strip_suffix(" null").unwrap_or(line));
+        out.push('\n');
+    }
+    out
 }
 
 fn generate_service(
