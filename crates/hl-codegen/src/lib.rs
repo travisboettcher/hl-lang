@@ -202,6 +202,7 @@ fn generate_service(
     let labels = labels::compute(name, fields, docker_network.as_deref(), &bindings)?;
 
     let depends_on = fields.depends_on.iter().map(|r| r.name.clone()).collect();
+    let dns = fields.dns.iter().map(|r| r.name.clone()).collect();
 
     let mut raw_map = IndexMap::new();
     for entry in &fields.raw.entries {
@@ -215,6 +216,7 @@ fn generate_service(
         environment,
         volumes: volume_entries,
         networks: compose_networks,
+        dns,
         expose,
         depends_on,
         labels,

@@ -41,13 +41,13 @@ Punctuation: { } [ ] ( ) : = -> , .
 
 - `template` is the *only* reserved word in the entire language. Everything
   else that looks like a keyword (`service`, `network`, `image`, `volume`,
-  `env`, `restart`, `expose`, `middleware`, `depends_on`, `networks`, `with`,
-  `as`, `external`, `use`, `raw`, `defaults`, ...) is an ordinary `IDENT`,
-  resolved against a schema table at parse time — not a lexer-level
-  keyword. `with`, `as`, `external`, and `use` are *contextual* keywords,
-  meaningful only in the grammar position expected (the same technique as
-  C#'s `var`/`async`/`await`/`yield`), not globally off-limits as
-  identifiers.
+  `env`, `restart`, `expose`, `middleware`, `depends_on`, `networks`, `dns`,
+  `with`, `as`, `external`, `use`, `raw`, `defaults`, ...) is an ordinary
+  `IDENT`, resolved against a schema table at parse time — not a
+  lexer-level keyword. `with`, `as`, `external`, and `use` are *contextual*
+  keywords, meaningful only in the grammar position expected (the same
+  technique as C#'s `var`/`async`/`await`/`yield`), not globally
+  off-limits as identifiers.
 - `.` separates an import alias from the name it qualifies (`alias.name`,
   see Imports, below) and never appears anywhere else in the grammar —
   `NUMBER` is integer-only, so there's no decimal-point ambiguity to
@@ -144,12 +144,17 @@ a single token of lookahead.
 | `with` | struct | `templates` (list of nested instantiations) | — | — | no |
 | `raw` | map | — | `:` | none (schema-free, passthrough) | no |
 
-`middleware`, `depends_on`, and `networks` are not rows in this table —
-they're plain list-of-reference fields directly on `service`/`template`.
-`template` isn't a row either — it's the mechanism for adding new rows to
-this table at parse time. `defaults` is likewise not a row — it's an
-ordinary template, semantically special only in that it's implicitly
-applied (see Composition, below).
+`middleware`, `depends_on`, `networks`, and `dns` are not rows in this
+table — they're plain list-of-reference fields directly on
+`service`/`template` (`dns ["192.168.50.182"]`: a per-service DNS
+resolver override, Compose's own `dns:` key — the field itself is
+generic, only a given entry's IP is homelab-specific, same reasoning as
+`volume`'s host path or an `env` entry's value already being
+homelab-specific without the field itself being one). `template` isn't a
+row either — it's the mechanism for adding new rows to this table at
+parse time. `defaults` is likewise not a row — it's an ordinary
+template, semantically special only in that it's implicitly applied (see
+Composition, below).
 
 ## Composition: templates and `with`
 

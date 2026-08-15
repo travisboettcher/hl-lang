@@ -289,6 +289,10 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
         kind: FieldKind::ReferenceList,
     },
     FieldSchema {
+        name: "dns",
+        kind: FieldKind::ReferenceList,
+    },
+    FieldSchema {
         name: "with",
         kind: FieldKind::Nested(&WITH),
     },

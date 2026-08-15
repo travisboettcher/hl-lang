@@ -194,6 +194,19 @@ fn list_fields_concatenate_in_priority_order() {
     assert_eq!(names, vec!["d1", "a1", "b1", "own1"]);
 }
 
+/// `dns` is list-typed just like `middleware`/`depends_on`/`networks` —
+/// it concatenates across tiers rather than colliding.
+#[test]
+fn dns_concatenates_across_tiers() {
+    let composed = compose_ok(
+        "template a {\n  dns \"192.168.50.182\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n  dns \"192.168.50.183\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries: Vec<&str> = service.fields.dns.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(entries, vec!["192.168.50.182", "192.168.50.183"]);
+}
+
 // --- cycles ---
 
 #[test]
