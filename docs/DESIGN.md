@@ -1,10 +1,12 @@
-# hl-lang design
+# hll design
 
-`hl-lang` is a small declarative DSL that transpiles to Docker Compose YAML
-plus Traefik labels. It is a transpiler, not an interpreter — no evaluation,
-no closures, no runtime. This document is the language's spec: grammar,
-semantics, and worked examples. It's the source of truth the lexer, parser,
-and codegen implementations are built against.
+`hll` (pronounced "hell" — short for **H**ome**L**ab **L**anguage) is a
+small declarative DSL that transpiles to Docker Compose YAML plus Traefik
+labels. It is a transpiler, not an interpreter — no evaluation, no closures,
+no runtime. This document is the language's spec: grammar, semantics, and
+worked examples. It's the source of truth the lexer, parser, and codegen
+implementations are built against. Source files use the `.hll` extension;
+the CLI binary is `hllc`.
 
 ## Motivation
 
@@ -34,17 +36,22 @@ STRING  ::= '"' [^"\n]* '"'
 COMMENT ::= '#' [^\n]*        # to end of line; not part of the token stream
 
 Reserved (not usable as IDENT): "template"
-Punctuation: { } [ ] ( ) : = -> ,
+Punctuation: { } [ ] ( ) : = -> , .
 ```
 
 - `template` is the *only* reserved word in the entire language. Everything
   else that looks like a keyword (`service`, `network`, `image`, `volume`,
   `env`, `restart`, `expose`, `middleware`, `depends_on`, `networks`, `with`,
-  `as`, `external`, `raw`, `defaults`, ...) is an ordinary `IDENT`, resolved
-  against a schema table at parse time — not a lexer-level keyword. `with`,
-  `as`, and `external` are *contextual* keywords, meaningful only in the
-  grammar position expected (the same technique as C#'s `var`/`async`/
-  `await`/`yield`), not globally off-limits as identifiers.
+  `as`, `external`, `use`, `raw`, `defaults`, ...) is an ordinary `IDENT`,
+  resolved against a schema table at parse time — not a lexer-level
+  keyword. `with`, `as`, `external`, and `use` are *contextual* keywords,
+  meaningful only in the grammar position expected (the same technique as
+  C#'s `var`/`async`/`await`/`yield`), not globally off-limits as
+  identifiers.
+- `.` separates an import alias from the name it qualifies (`alias.name`,
+  see Imports, below) and never appears anywhere else in the grammar —
+  `NUMBER` is integer-only, so there's no decimal-point ambiguity to
+  resolve.
 - `NUMBER` is integer-only: `[0-9]+`, no sign, no decimal point, no exponent.
 - `STRING` is double-quoted with no escape sequences, and cannot contain a
   literal `"` or a newline — an unterminated string is a lex error.
@@ -63,11 +70,13 @@ Punctuation: { } [ ] ( ) : = -> ,
 ```
 program        ::= top_decl*
 
-top_decl       ::= named_decl | template_decl
+top_decl       ::= named_decl | template_decl | use_decl
 
 named_decl     ::= IDENT IDENT body
 
 template_decl  ::= "template" IDENT param_list? ( body | "=" statement )
+
+use_decl       ::= "use" STRING "as" IDENT
 
 param_list     ::= "(" ( IDENT ( "," IDENT )* )? ")"
 
@@ -166,6 +175,42 @@ List fields concatenate (no collision possible); map fields merge
 key-by-key (or value-by-value for `volume`); struct/scalar fields error on
 collision among explicit templates only.
 
+## Imports
+
+Real-world templates and network declarations are meant to be shared
+across many service files, not copy-pasted into each one. `use` imports
+another `.hll` file under a local alias; `alias.name` then references
+anything that file declares at its top level.
+
+```
+use "docker.hll" as traefik
+```
+
+- `use`'s path is always a quoted `STRING` — `IDENT`'s grammar
+  (`[A-Za-z_][A-Za-z0-9_-]*`) can't represent `.`/`/` at all, so a bare
+  path isn't lexable. It's resolved relative to the *importing file's
+  own location*, never the entry file's location or the working
+  directory the compiler was invoked from.
+- `alias.name` qualifies any reference that would otherwise be a bare
+  `IDENT`: a `networks [...]` entry (`networks [traefik.traefik-net]`)
+  or a `with` invocation's target (`with common.internal_web { ... }`).
+  `middleware`/`depends_on` don't support a qualified form — neither has
+  a coherent cross-file meaning (`depends_on` names a same-file sibling
+  service; `middleware` isn't resolved against anything at all).
+- **Templates are lexically scoped, not dynamically scoped.** If a
+  template declared in `templates.hll` writes
+  `networks [traefik.traefik-net]`, that `traefik` resolves against
+  *`templates.hll`'s own* `use` declarations — never whichever file
+  happens to invoke the template with `with`. A template's references
+  always resolve relative to where it was *written*, not where it was
+  *called from*.
+- **Imports are not transitive.** `use`-ing a file only makes *that
+  file's* own top-level declarations available under your alias — not
+  anything *it* in turn `use`s. If `service.hll` uses `templates.hll`,
+  and `templates.hll` uses `docker.hll`, `service.hll` cannot write
+  `docker.hll`'s alias itself; only `templates.hll`'s own template
+  bodies can (via the lexical-scoping rule above).
+
 ## Worked examples
 
 A plain service, no templates:
@@ -183,6 +228,11 @@ service jellyfin {
 Templates composed onto a service with `with`:
 
 ```
+network traefik-net {
+  external
+  name: "docker_default"
+}
+
 template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
@@ -206,26 +256,102 @@ service syncthing {
 }
 ```
 
+The exact same templates, split across files via `use` instead of
+copy-pasted into every service that needs them (this is
+`crates/hl-cli/tests/fixtures/imports/` verbatim):
+
+```
+# network.hll
+network traefik-net {
+  external
+  name: "docker_default"
+}
+
+# templates.hll
+use "network.hll" as net
+
+template internal_web(port) {
+  networks [net.traefik-net]
+  restart unless-stopped
+  expose port as "{{name}}.internal.techdebtor.io" entrypoint: "web-secure"
+  middleware local-ipwhitelist
+}
+
+template authenticated {
+  middleware forwardAuth-authentik
+}
+
+template linuxserver_app(puid, pgid) {
+  env PUID = puid
+  env PGID = pgid
+}
+
+# syncthing.hll
+use "templates.hll" as common
+
+service syncthing {
+  with common.internal_web { port: 8384 }, common.authenticated, common.linuxserver_app { puid: 1000, pgid: 100 }
+  image "lscr.io/linuxserver/syncthing:latest"
+  volume "syncthing-config" -> "/config"
+}
+```
+
+`syncthing.hll` never itself `use`s `network.hll` — only `templates.hll`
+does — yet `internal_web`'s own `networks [net.traefik-net]` still
+resolves correctly no matter which service ends up invoking it, since it
+always resolves against `templates.hll`'s own alias table, never the
+caller's.
+
 ## Pipeline
 
-1. **Lexer** (implemented, `crates/hl-lexer`) — one reserved word
-   (`template`), string/number literals, `{`/`}`/`[`/`]`, `->`, `:`, `=`,
-   `(`/`)`, `,`, and `#` line comments. Everything else is just an
-   identifier to the lexer; meaning comes from the schema table during
-   parsing.
-2. **Parser** (implemented, `crates/hl-parser`) — one generic block parser,
-   not one function per keyword: parse `<type> [<n>]`, then either a
+1. **Lexer** (`crates/hl-lexer`) — one reserved word (`template`),
+   string/number literals, `{`/`}`/`[`/`]`/`.`, `->`, `:`, `=`, `(`/`)`,
+   `,`, and `#` line comments. Everything else is just an identifier to
+   the lexer; meaning comes from the schema table during parsing.
+2. **Parser** (`crates/hl-parser`) — one generic block parser, not one
+   function per keyword: parse `<type> [<n>]`, then either a
    bare-value/list (primary-field shorthand) or a `{ field: value, ... }`
    body, recursing into nested blocks. A schema table drives both parsing
-   and validation. **Scope note:** this milestone covers only the built-in
-   types (`network`, `service`, `image`, `expose`, `volume`, `env`,
-   `restart`, `raw`); `template` declarations and the `with` field are
-   rejected with a clear "not yet supported" parse error rather than
-   parsed — template/`with` composition is a fast-follow milestone.
-3. **AST → codegen** (not yet implemented) — walk the AST, emit two
-   artifacts per service: a Compose service block, and Traefik labels
-   (router rule, entrypoint, TLS resolver).
-4. **CLI** (`crates/hl-cli`) — `hl-cli <file.hll>` lexes and prints tokens;
-   `hl-cli --parse <file.hll>` parses and pretty-prints the AST. Will grow
-   into `hl-cli build up.hll` / `hl-cli build ./services/` once codegen
-   exists.
+   and validation. Covers every built-in type (`network`, `service`,
+   `image`, `expose`, `volume`, `env`, `restart`, `raw`), full
+   `template`/`with` composition, and `use`/alias-qualified references
+   (see Composition and Imports, above) — purely syntactic, no name
+   resolution.
+3. **Compose** (`crates/hl-parser`'s `compose` module) — resolves every
+   `with`-list into a fully-merged `Service` with no templates or
+   unresolved parameters left, per the Composition section's 3-tier merge
+   rules. Generalized over a `SymbolResolver` trait so the same merge
+   engine resolves both a single file's own templates (`compose`, no
+   imports) and a whole `use` graph (`compose_with_resolver`, driven by
+   the linker below).
+4. **Linker** (`crates/hl-linker`) — loads a `use` graph off disk (or, for
+   tests, an in-memory map) into a module graph, and implements
+   `SymbolResolver` over it so `compose_with_resolver` can resolve
+   cross-file `alias.name` references — see Imports, above.
+5. **Codegen** (`crates/hl-codegen`) — walks a composed program and emits
+   one Compose YAML document per input file (which may hold multiple
+   services), with Traefik labels on each service's own `labels:` list.
+6. **CLI** (`crates/hl-cli`, binary name `hllc`) — `hllc <file.hll>` lexes
+   and prints tokens; `hllc --parse <file.hll>` parses and pretty-prints
+   the AST; `hllc --build <file.hll> [--out <path>]` runs the full
+   pipeline (link → compose → codegen) and writes (or, with no `--out`,
+   prints) the resulting Compose YAML. `--build` also accepts a
+   directory: every `.hll` file directly inside it (non-recursive) is
+   built as its own independent entry point with its own `use` graph,
+   each writing to `<out>/<stem>/docker-compose.yml`.
+
+## Future work
+
+- **`bootstrap` scaffold** — generate a brand-new homelab's starting
+  `.hll` files from a template: a `docker.hll` declaring the shared
+  network plus a `traefik` service (HTTPS termination, a
+  certificate-resolver placeholder, the `web-secure`/`web` entrypoints),
+  and a `templates.hll` with common reusable templates in the same shape
+  as this doc's own worked examples — so starting a new homelab doesn't
+  mean hand-writing the reverse-proxy service from scratch. Not yet
+  designed: exactly where the line falls between what's generic enough to
+  belong in the scaffold (entrypoints, the shape of a certificate
+  resolver) versus what's homelab-specific and should stay a
+  fill-in-the-blanks placeholder (DNS provider/credentials, domain, IP
+  ranges) — see "Design principle: generic core, specific templates,"
+  above.

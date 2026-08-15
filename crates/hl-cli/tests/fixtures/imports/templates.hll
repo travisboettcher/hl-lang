@@ -1,0 +1,23 @@
+# Reusable templates, imported by service files — split out of
+# hl-parser's syncthing.hll fixture to exercise a real cross-file `use`
+# graph. `net.traefik-net` below resolves against *this file's own*
+# `use`, per docs/DESIGN.md's Imports section, regardless of which
+# service file ends up invoking these templates.
+
+use "network.hll" as net
+
+template internal_web(port) {
+  networks [net.traefik-net]
+  restart unless-stopped
+  expose port as "{{name}}.internal.techdebtor.io" entrypoint: "web-secure"
+  middleware local-ipwhitelist
+}
+
+template authenticated {
+  middleware forwardAuth-authentik
+}
+
+template linuxserver_app(puid, pgid) {
+  env PUID = puid
+  env PGID = pgid
+}
