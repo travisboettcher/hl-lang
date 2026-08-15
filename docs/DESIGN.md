@@ -123,7 +123,15 @@ a single token of lookahead.
    shorthand (`{ port }` standing in for `{ port: port }`, borrowed from
    Rust) and a bare zero-field template invocation (`authenticated` with no
    `{ }`) are the same grammar production as this rule, disambiguated only
-   by schema lookup.
+   by schema lookup. An optional comma between the primary value (or a
+   preceding secondary field) and the next secondary field is tolerated
+   and means the same thing as no comma at all — `expose port as "host",
+   entrypoint: "web-secure"` and `expose port as "host" entrypoint:
+   "web-secure"` desugar identically. Schema lookup is what makes this
+   safe rather than ambiguous: the comma is only ever consumed as part of
+   the nested value when what follows it actually names one of the
+   nested type's own fields; otherwise it's left for the *enclosing*
+   body, exactly as if the primary shorthand had never looked at it.
 4. **Repeatable-field accumulation** (semantic, not part of the CFG) —
    writing `volume`, `env`, `middleware`, or `depends_on` more than once in
    one body appends, since those fields are list/map-kinded. Writing

@@ -375,10 +375,25 @@ impl<'src> Parser<'src> {
     /// e.g. `expose 8096 as "host"` instead of `expose { port: 8096, host:
     /// "host" }`. After the primary value, it continues accumulating
     /// trailing bare statements (docs/DESIGN.md's desugaring rule 3) using
-    /// pure one-token lookahead: peek the next key, and only consume it
+    /// pure two-token lookahead: peek the next key (skipping one optional
+    /// comma first), and only consume it — comma included, if present —
     /// as part of this nested value if the nested schema actually
     /// resolves it to a real field/alias — otherwise stop and let the
-    /// enclosing body parse it as its own next statement.
+    /// enclosing body parse it (and, if present, the comma before it) as
+    /// its own next statement.
+    ///
+    /// The optional-comma lookahead matters because a comma there reads
+    /// as the natural way to visually separate a sugared primary value
+    /// from a trailing secondary field (`expose port as "host", entrypoint:
+    /// "web-secure"`), but a comma is *also* how the enclosing body's own
+    /// next statement can be separated from this one — nothing in the
+    /// grammar marks which statement a trailing comma belongs to. Schema
+    /// lookup resolves the ambiguity the same way the no-comma case
+    /// already does: if what follows genuinely names one of this type's
+    /// own fields, the comma belongs here too, rather than silently
+    /// detaching the field onto the enclosing block (where it either
+    /// misparses as an unrelated statement or fails with a confusing
+    /// "unknown field" error that doesn't point at the comma).
     ///
     /// The primary field is usually `Scalar` (one literal), but
     /// docs/DESIGN.md's desugaring rule 1 also anticipates a list-typed
@@ -420,15 +435,24 @@ impl<'src> Parser<'src> {
         };
 
         loop {
-            let continues = match self.peek().kind {
+            let after_comma = self.peek().kind == TokenKind::Comma;
+            let lookahead = if after_comma {
+                &self.tokens[self.pos + 1]
+            } else {
+                self.peek()
+            };
+            let continues = match lookahead.kind {
                 TokenKind::Ident | TokenKind::Str => !matches!(
-                    schema::resolve_field(nested, self.peek().lexeme),
+                    schema::resolve_field(nested, lookahead.lexeme),
                     FieldResolution::Unknown
                 ),
                 _ => false,
             };
             if !continues {
                 break;
+            }
+            if after_comma {
+                self.bump();
             }
             self.parse_statement_into(nested, &mut fields)?;
         }

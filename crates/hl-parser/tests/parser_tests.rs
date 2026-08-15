@@ -211,6 +211,75 @@ fn expose_entrypoint_field() {
     assert_eq!(expose.entrypoint.as_ref().unwrap().text(), "web-secure");
 }
 
+/// Regression test for the exact bug report: a comma between `expose`'s
+/// sugared `as`-clause and a trailing `entrypoint:` secondary field used
+/// to detach `entrypoint:` from `expose` entirely, reparsing it as a new
+/// (unknown) top-level field on the enclosing `template`/`service`. A
+/// comma there should read the same as no comma at all.
+#[test]
+fn expose_entrypoint_field_after_comma_still_attaches_to_expose() {
+    let program = parse_ok(
+        "service s {\n  expose 8096 as \"host.example.com\", entrypoint: \"web-secure\"\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let expose = service.fields.expose.as_ref().unwrap();
+    assert_eq!(expose.host.as_ref().unwrap().text(), "host.example.com");
+    assert_eq!(expose.entrypoint.as_ref().unwrap().text(), "web-secure");
+}
+
+/// Same fix, exercised inside a `template` body — the shape from the
+/// original bug report (`docs/DESIGN.md`'s own `internal_web` template),
+/// which used to fail with a confusing `unknown field "entrypoint" on
+/// template` error rather than any indication the comma was the problem.
+#[test]
+fn expose_entrypoint_field_after_comma_in_template_body() {
+    let program = parse_ok(
+        "template internal_web(port) {\n  \
+           expose port as \"{{name}}.internal.techdebtor.io\", entrypoint: \"web-secure\"\n  \
+           middleware local-ipwhitelist\n\
+         }\n",
+    );
+    let template = as_template(&program.decls[0]);
+    let expose = template.fields.expose.as_ref().unwrap();
+    assert_eq!(expose.entrypoint.as_ref().unwrap().text(), "web-secure");
+    assert_eq!(template.fields.middleware.len(), 1);
+}
+
+/// A comma after a sugared primary value still belongs to the *enclosing*
+/// body when what follows isn't actually one of the nested type's own
+/// fields — `image` is not a field of `expose`, so this must parse as two
+/// separate statements, not attempt (and fail) to attach `image` onto
+/// `expose`.
+#[test]
+fn comma_after_primary_shorthand_still_separates_unrelated_enclosing_statements() {
+    let program = parse_ok("service s {\n  expose 8096, image \"foo/bar:latest\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(
+        service
+            .fields
+            .expose
+            .as_ref()
+            .unwrap()
+            .port
+            .as_ref()
+            .unwrap()
+            .text(),
+        "8096"
+    );
+    assert_eq!(
+        service
+            .fields
+            .image
+            .as_ref()
+            .unwrap()
+            .reference
+            .as_ref()
+            .unwrap()
+            .text(),
+        "foo/bar:latest"
+    );
+}
+
 #[test]
 fn expose_without_entrypoint_field_is_none() {
     let program = parse_ok("service s {\n  expose 8096\n}\n");
