@@ -9,7 +9,7 @@ network traefik-net {
 template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
-  expose port as "{{name}}.internal.techdebtor.io" entrypoint: "web-secure"
+  expose port, host: "{{name}}.internal.techdebtor.io", entrypoint: "web-secure"
   middleware local-ipwhitelist
 }
 
