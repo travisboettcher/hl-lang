@@ -1,10 +1,12 @@
-# hl-lang design
+# hll design
 
-`hl-lang` is a small declarative DSL that transpiles to Docker Compose YAML
-plus Traefik labels. It is a transpiler, not an interpreter — no evaluation,
-no closures, no runtime. This document is the language's spec: grammar,
-semantics, and worked examples. It's the source of truth the lexer, parser,
-and codegen implementations are built against.
+`hll` (pronounced "hell" — short for **H**ome**L**ab **L**anguage) is a
+small declarative DSL that transpiles to Docker Compose YAML plus Traefik
+labels. It is a transpiler, not an interpreter — no evaluation, no closures,
+no runtime. This document is the language's spec: grammar, semantics, and
+worked examples. It's the source of truth the lexer, parser, and codegen
+implementations are built against. Source files use the `.hll` extension;
+the CLI binary is `hllc`.
 
 ## Motivation
 
@@ -329,11 +331,27 @@ caller's.
 5. **Codegen** (`crates/hl-codegen`) — walks a composed program and emits
    one Compose YAML document per input file (which may hold multiple
    services), with Traefik labels on each service's own `labels:` list.
-6. **CLI** (`crates/hl-cli`) — `hl-cli <file.hll>` lexes and prints
-   tokens; `hl-cli --parse <file.hll>` parses and pretty-prints the AST;
-   `hl-cli --build <file.hll> [--out <path>]` runs the full pipeline
-   (link → compose → codegen) and writes (or, with no `--out`, prints)
-   the resulting Compose YAML. `--build` also accepts a directory: every
-   `.hll` file directly inside it (non-recursive) is built as its own
-   independent entry point with its own `use` graph, each writing to
-   `<out>/<stem>/docker-compose.yml`.
+6. **CLI** (`crates/hl-cli`, binary name `hllc`) — `hllc <file.hll>` lexes
+   and prints tokens; `hllc --parse <file.hll>` parses and pretty-prints
+   the AST; `hllc --build <file.hll> [--out <path>]` runs the full
+   pipeline (link → compose → codegen) and writes (or, with no `--out`,
+   prints) the resulting Compose YAML. `--build` also accepts a
+   directory: every `.hll` file directly inside it (non-recursive) is
+   built as its own independent entry point with its own `use` graph,
+   each writing to `<out>/<stem>/docker-compose.yml`.
+
+## Future work
+
+- **`bootstrap` scaffold** — generate a brand-new homelab's starting
+  `.hll` files from a template: a `docker.hll` declaring the shared
+  network plus a `traefik` service (HTTPS termination, a
+  certificate-resolver placeholder, the `web-secure`/`web` entrypoints),
+  and a `templates.hll` with common reusable templates in the same shape
+  as this doc's own worked examples — so starting a new homelab doesn't
+  mean hand-writing the reverse-proxy service from scratch. Not yet
+  designed: exactly where the line falls between what's generic enough to
+  belong in the scaffold (entrypoints, the shape of a certificate
+  resolver) versus what's homelab-specific and should stay a
+  fill-in-the-blanks placeholder (DNS provider/credentials, domain, IP
+  ranges) — see "Design principle: generic core, specific templates,"
+  above.

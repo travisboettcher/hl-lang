@@ -3,6 +3,10 @@ name = "hl-cli"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "hllc"
+path = "src/main.rs"
+
 [dependencies]
 hl-lexer = { path = "../hl-lexer" }
 hl-parser = { path = "../hl-parser" }

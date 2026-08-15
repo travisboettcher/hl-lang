@@ -14,7 +14,7 @@ use hl_lexer::Lexer;
 /// hl-lang (`.hll`) source file or, in `--build`'s case, a directory of
 /// them.
 #[derive(Debug, Parser)]
-#[command(name = "hl-cli", version, about)]
+#[command(name = "hllc", version, about)]
 pub struct Cli {
     /// Path to an .hll source file, or (with `--build`) a directory of them.
     pub file: PathBuf,

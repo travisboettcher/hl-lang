@@ -2,12 +2,14 @@
 
 [![CI](https://github.com/travisboettcher/hl-lang/actions/workflows/ci.yml/badge.svg)](https://github.com/travisboettcher/hl-lang/actions/workflows/ci.yml)
 
-`hl-lang` is a small declarative DSL that transpiles to Docker Compose YAML
-plus Traefik labels, so that standing up a new homelab service doesn't mean
-rewriting a near-identical Compose block + label set every time. It's a
-transpiler, not an interpreter — no evaluation, no closures, no runtime —
-and doubles as a "learn to write a language" project covering the
-lexer → parser → AST → codegen pipeline.
+`hll` (pronounced "hell" — short for **H**ome**L**ab **L**anguage) is a
+small declarative DSL that transpiles to Docker Compose YAML plus Traefik
+labels, so that standing up a new homelab service doesn't mean rewriting a
+near-identical Compose block + label set every time. It's a transpiler, not
+an interpreter — no evaluation, no closures, no runtime — and doubles as a
+"learn to write a language" project covering the lexer → parser → AST →
+codegen pipeline. Source files use the `.hll` extension; the CLI binary is
+`hllc`.
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the language's motivation, grammar,
 and worked examples.
@@ -51,13 +53,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-Try the CLI against an `.hll` file:
+Try the CLI (`hllc`) against an `.hll` file — `cargo run -p hl-cli --` runs
+it straight from source without a separate install step:
 
 ```sh
 cargo run -p hl-cli -- crates/hl-lexer/tests/fixtures/jellyfin.hll
 cargo run -p hl-cli -- --parse crates/hl-parser/tests/fixtures/jellyfin.hll
 cargo run -p hl-cli -- --build crates/hl-parser/tests/fixtures/syncthing.hll
 ```
+
+(`cargo build -p hl-cli` / `cargo install --path crates/hl-cli` produce the
+`hllc` binary directly, usable the same way: `hllc --build <file.hll>`.)
 
 `--build` also resolves real cross-file `use` imports — try it against
 the split-file example in `crates/hl-cli/tests/fixtures/imports/`
