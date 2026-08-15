@@ -128,6 +128,25 @@ services:
     );
 }
 
+/// [`assert_yaml_eq`] compares *parsed* YAML, so it can't tell a bare
+/// `name:` apart from an explicit `name: null` — both parse to the same
+/// value. This checks the actual generated text instead, since the whole
+/// point of emitting the bare form is avoiding a byte-level diff against
+/// hand-written Compose files.
+#[test]
+fn driverless_named_volume_emits_bare_key_not_explicit_null() {
+    let yaml = generate_from(SYNCTHING);
+    assert!(
+        yaml.contains("volumes:\n  syncthing-config:\n")
+            || yaml.trim_end().ends_with("syncthing-config:"),
+        "expected a bare `syncthing-config:` key with no explicit `null`, got:\n{yaml}"
+    );
+    assert!(
+        !yaml.contains("syncthing-config: null"),
+        "generated YAML should never spell out `: null` for a driver-less named volume, got:\n{yaml}"
+    );
+}
+
 #[test]
 fn unknown_network_reference_is_error() {
     let err = generate_err("service s {\n  image \"x\"\n  networks [nonexistent]\n}\n");

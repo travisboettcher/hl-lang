@@ -142,7 +142,33 @@ pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenErr
     };
     let yaml = serde_yaml::to_string(&compose_doc)
         .expect("ComposeDoc only contains strings/maps/numbers; serialization cannot fail");
-    Ok(GeneratedProgram { yaml })
+    Ok(GeneratedProgram {
+        yaml: bare_named_volume_keys(yaml),
+    })
+}
+
+/// A driver-less named volume (`volumes: { name: None }` in
+/// [`doc::ComposeDoc`]) has nothing else to say about it, but `serde_yaml`
+/// has no way to serialize "key present, value absent" other than as an
+/// explicit `null` scalar — there's no serde concept between "field
+/// present" and "field omitted." Hand-written Compose files (and this
+/// homelab's own) instead write the bare `name:` form, so this rewrites
+/// every line serde_yaml wrote as `<key>: null` into just `<key>:`,
+/// matching that convention and avoiding diff-noise against hand-written
+/// files. Safe as a blind string rewrite: nothing else in a generated
+/// document ever produces a YAML `null` scalar (`raw`'s own transcription
+/// in `raw::literal_to_yaml` never emits one), so every `: null` line is
+/// necessarily one of these.
+fn bare_named_volume_keys(yaml: String) -> String {
+    yaml.split_inclusive('\n')
+        .map(|line| match line.strip_suffix(" null\n") {
+            Some(stripped) => [stripped, "\n"].concat(),
+            None => match line.strip_suffix(" null") {
+                Some(stripped) => stripped.to_string(),
+                None => line.to_string(),
+            },
+        })
+        .collect()
 }
 
 fn generate_service(
