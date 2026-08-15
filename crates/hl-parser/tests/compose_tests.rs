@@ -90,6 +90,33 @@ fn explicit_templates_scalar_collision_is_error() {
     }
 }
 
+/// `restart` goes through the same generic scalar-merge path as `image`
+/// (see `compose.rs`'s `MergeAcc`/`merge_scalar`) — no test previously
+/// exercised an explicit-vs-explicit collision on it specifically, only
+/// `image`'s. Added alongside the merge engine's generalization to
+/// confirm every scalar collision point still gets caught, not just the
+/// one the old per-field `MergeAcc` slots happened to have a test for.
+#[test]
+fn explicit_templates_restart_collision_is_error() {
+    let err = compose_err(
+        "template a {\n  restart always\n}\n\
+         template b {\n  restart unless-stopped\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::FieldCollision {
+            field: "restart",
+            first_template,
+            second_template,
+            ..
+        } => {
+            assert_eq!(first_template, "a");
+            assert_eq!(second_template, "b");
+        }
+        other => panic!("expected FieldCollision on restart, got {other:?}"),
+    }
+}
+
 #[test]
 fn explicit_templates_env_key_collision_is_error() {
     let err = compose_err(
