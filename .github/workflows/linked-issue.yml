@@ -1,0 +1,59 @@
+name: Linked issue
+
+# GitHub has no native "require a linked issue" branch-protection toggle,
+# so this is the enforcement side, same pattern as semver-label.yml: block
+# any PR into main that isn't linked to an issue. Reads the PR's real
+# "Development" panel links via GraphQL closingIssuesReferences — which is
+# exactly what a `Closes #123`/`Fixes #123`/`Resolves #123` keyword in the
+# PR body (or a manual sidebar link) populates — rather than regexing the
+# body text ourselves. Mark this job as a required status check in the
+# repo's branch protection settings for main, alongside ci.yml's test job
+# and semver-label.yml's check-semver-label job.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  pull-requests: read
+  issues: read
+
+jobs:
+  check-linked-issue:
+    name: require a linked issue
+    # release.yml's own "chore(release): vX [release-bump]" PR closes no
+    # issue — it's a mechanical version bump, not a fix. Without this
+    # exemption, making this job a required status check would leave that
+    # auto-generated PR forever failing it, and its `gh pr merge --auto`
+    # would never fire. Same author + title-marker exemption as
+    # semver-label.yml, so an external contributor can't spoof it.
+    if: |
+      !(github.event.pull_request.user.login == 'github-actions[bot]' &&
+        contains(github.event.pull_request.title, '[release-bump]'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for a closing issue reference
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          count=$(gh api graphql -f query='
+            query($owner: String!, $repo: String!, $pr: Int!) {
+              repository(owner: $owner, name: $repo) {
+                pullRequest(number: $pr) {
+                  closingIssuesReferences {
+                    totalCount
+                  }
+                }
+              }
+            }' -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUMBER" \
+            --jq '.data.repository.pullRequest.closingIssuesReferences.totalCount')
+          if [ "$count" -eq 0 ]; then
+            echo "::error::This PR isn't linked to an issue. Add \`Closes #<issue>\` (or Fixes/Resolves) to the PR description, or link one via the Development panel."
+            exit 1
+          fi
+          echo "OK: linked to $count issue(s)"
