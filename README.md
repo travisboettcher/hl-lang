@@ -84,7 +84,7 @@ cargo +nightly fuzz run fuzz_lex -- -max_total_time=60
 cargo +nightly fuzz run fuzz_parse -- -max_total_time=60
 cargo +nightly fuzz run fuzz_pipeline -- -max_total_time=60
 
-# Mutation testing — informational, non-blocking in CI.
+# Mutation testing — CI fails on any missed mutant.
 cargo install cargo-mutants --locked
 cargo mutants --workspace
 ```

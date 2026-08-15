@@ -67,9 +67,8 @@ jobs:
           if-no-files-found: error
 
   mutation-test:
-    name: mutation testing (cargo-mutants, non-blocking)
+    name: mutation testing (cargo-mutants)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
