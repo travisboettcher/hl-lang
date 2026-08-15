@@ -1,0 +1,49 @@
+# Configuration for `release-plz` (https://release-plz.dev), used by
+# .github/workflows/release.yml. This is a private tool, never published
+# to crates.io — a "release" here means a git tag plus a GitHub Release
+# carrying a prebuilt `hllc` binary, not a crates.io publish. The actual
+# version number isn't computed by release-plz's own conventional-commit
+# heuristic (see release.yml): the workflow bumps every crate's `version`
+# itself, based on the `semver-major`/`semver-minor`/`semver-patch` label
+# required on every PR into main, then hands that already-decided version
+# to `release-plz set-version` / `release-plz release` to write it out and
+# cut the release. `git_only` makes release-plz determine "already
+# released" from git tags instead of querying crates.io, since nothing is
+# ever published there.
+[workspace]
+publish = false
+git_only = true
+
+# All five workspace crates are really one product (the `hllc` compiler);
+# `version_group` keeps their version numbers in lockstep so there's a
+# single number to reason about instead of five independently-drifting
+# ones. Only `hl-cli` — the crate that actually produces the `hllc`
+# binary consumers download — gets a user-facing GitHub Release; the
+# other four still get tagged (release-plz needs that to track "already
+# released" per crate) but not surfaced as their own Release entries.
+
+[[package]]
+name = "hl-lexer"
+version_group = "hl-lang"
+git_release_enable = false
+
+[[package]]
+name = "hl-parser"
+version_group = "hl-lang"
+git_release_enable = false
+
+[[package]]
+name = "hl-codegen"
+version_group = "hl-lang"
+git_release_enable = false
+
+[[package]]
+name = "hl-linker"
+version_group = "hl-lang"
+git_release_enable = false
+
+[[package]]
+name = "hl-cli"
+version_group = "hl-lang"
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
