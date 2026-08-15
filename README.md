@@ -127,6 +127,12 @@ crate's rustdoc (`crates/hl-lexer/src/lib.rs`, `crates/hl-parser/src/lib.rs`,
 `crates/hl-linker/src/lib.rs`, `crates/hl-codegen/src/lib.rs`) for
 implementation details (token/AST shapes, span semantics, error types).
 
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the PR workflow (linked
+issue + semver label required) and local checks to run before requesting
+review.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
