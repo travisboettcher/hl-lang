@@ -126,3 +126,8 @@ See [`docs/DESIGN.md`](docs/DESIGN.md) for the language's grammar, and each
 crate's rustdoc (`crates/hl-lexer/src/lib.rs`, `crates/hl-parser/src/lib.rs`,
 `crates/hl-linker/src/lib.rs`, `crates/hl-codegen/src/lib.rs`) for
 implementation details (token/AST shapes, span semantics, error types).
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
