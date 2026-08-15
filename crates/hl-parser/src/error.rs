@@ -181,3 +181,146 @@ impl fmt::Display for ParseError {
 }
 
 impl std::error::Error for ParseError {}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    fn span(line: u32, col: u32) -> Span {
+        Span {
+            start: 0,
+            end: 0,
+            line,
+            col,
+        }
+    }
+
+    #[test]
+    fn expected_token_display() {
+        assert_eq!(Expected::Token(TokenKind::Colon).to_string(), "Colon");
+    }
+
+    #[test]
+    fn expected_one_of_display() {
+        assert_eq!(
+            Expected::OneOf(&[TokenKind::Colon, TokenKind::Equals]).to_string(),
+            "one of Colon, Equals"
+        );
+    }
+
+    #[test]
+    fn expected_description_display() {
+        assert_eq!(Expected::Description("a value").to_string(), "a value");
+    }
+
+    #[test]
+    fn lex_display() {
+        let err = ParseError::Lex(LexError::DanglingDash { span: span(1, 1) });
+        assert_eq!(
+            err.to_string(),
+            "1:1: unexpected '-' (expected '->' or an identifier)"
+        );
+    }
+
+    #[test]
+    fn unexpected_token_display() {
+        let err = ParseError::UnexpectedToken {
+            expected: Expected::Token(TokenKind::Colon),
+            found_kind: TokenKind::Equals,
+            found_lexeme: "=".to_string(),
+            span: span(3, 5),
+        };
+        assert_eq!(err.to_string(), "3:5: expected Colon, found Equals \"=\"");
+    }
+
+    #[test]
+    fn unknown_top_level_type_display() {
+        let err = ParseError::UnknownTopLevelType {
+            name: "widget".to_string(),
+            span: span(2, 1),
+        };
+        assert_eq!(
+            err.to_string(),
+            "2:1: unknown type \"widget\" (expected `network` or `service`)"
+        );
+    }
+
+    #[test]
+    fn unknown_field_display() {
+        let err = ParseError::UnknownField {
+            type_name: "service",
+            field: "bogus".to_string(),
+            span: span(4, 2),
+        };
+        assert_eq!(err.to_string(), "4:2: unknown field \"bogus\" on `service`");
+    }
+
+    #[test]
+    fn duplicate_field_display() {
+        let err = ParseError::DuplicateField {
+            type_name: "service",
+            field: "image",
+            first: span(1, 3),
+            second: span(4, 2),
+        };
+        assert_eq!(
+            err.to_string(),
+            "4:2: duplicate field `image` on `service` (first set at 1:3)"
+        );
+    }
+
+    #[test]
+    fn duplicate_map_key_display_key_side() {
+        let err = ParseError::DuplicateMapKey {
+            type_name: "env",
+            side: MapSide::Key,
+            value: "FOO".to_string(),
+            first: span(1, 1),
+            second: span(2, 1),
+        };
+        assert_eq!(
+            err.to_string(),
+            "2:1: duplicate `env` entry: key \"FOO\" already set at 1:1"
+        );
+    }
+
+    #[test]
+    fn duplicate_map_key_display_value_side() {
+        let err = ParseError::DuplicateMapKey {
+            type_name: "env",
+            side: MapSide::Value,
+            value: "FOO".to_string(),
+            first: span(1, 1),
+            second: span(2, 1),
+        };
+        assert_eq!(
+            err.to_string(),
+            "2:1: duplicate `env` entry: value \"FOO\" already set at 1:1"
+        );
+    }
+
+    #[test]
+    fn number_out_of_range_display() {
+        let err = ParseError::NumberOutOfRange {
+            text: "99999999999999999999".to_string(),
+            span: span(5, 5),
+        };
+        assert_eq!(
+            err.to_string(),
+            "5:5: number \"99999999999999999999\" is out of range"
+        );
+    }
+
+    #[test]
+    fn duplicate_template_param_display() {
+        let err = ParseError::DuplicateTemplateParam {
+            param: "name".to_string(),
+            first: span(1, 10),
+            second: span(1, 15),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:15: duplicate parameter `name` (first declared at 1:10)"
+        );
+    }
+}

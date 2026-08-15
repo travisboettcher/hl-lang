@@ -57,3 +57,68 @@ impl fmt::Display for LinkError {
 }
 
 impl std::error::Error for LinkError {}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    use hl_parser::ComposeError;
+
+    fn span(line: u32, col: u32) -> Span {
+        Span {
+            start: 0,
+            end: 0,
+            line,
+            col,
+        }
+    }
+
+    #[test]
+    fn io_display() {
+        let err = LinkError::Io {
+            path: PathBuf::from("services/web.hll"),
+            message: "No such file or directory (os error 2)".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "services/web.hll: No such file or directory (os error 2)"
+        );
+    }
+
+    #[test]
+    fn parse_display() {
+        let err = LinkError::Parse {
+            path: PathBuf::from("services/web.hll"),
+            source: ParseError::NumberOutOfRange {
+                text: "99999999999999999999".to_string(),
+                span: span(2, 4),
+            },
+        };
+        assert_eq!(
+            err.to_string(),
+            "services/web.hll: 2:4: number \"99999999999999999999\" is out of range"
+        );
+    }
+
+    #[test]
+    fn duplicate_alias_display() {
+        let err = LinkError::DuplicateAlias {
+            path: PathBuf::from("services/web.hll"),
+            alias: "db".to_string(),
+            first: span(1, 1),
+            second: span(5, 3),
+        };
+        assert_eq!(
+            err.to_string(),
+            "services/web.hll:5:3: duplicate alias `db` (first declared at 1:1)"
+        );
+    }
+
+    #[test]
+    fn compose_display() {
+        let err = LinkError::Compose(ComposeError::UnknownTemplate {
+            name: "base".to_string(),
+            span: span(7, 2),
+        });
+        assert_eq!(err.to_string(), "7:2: unknown template `base`");
+    }
+}
