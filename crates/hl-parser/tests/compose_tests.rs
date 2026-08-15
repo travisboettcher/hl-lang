@@ -162,7 +162,7 @@ fn explicit_templates_volume_container_path_collision_is_error() {
 fn service_own_body_can_override_just_expose_host() {
     let composed = compose_ok(
         "template internal_web(port) {\n  \
-           expose port entrypoint: \"web-secure\"\n\
+           expose port, entrypoint: \"web-secure\"\n\
          }\n\
          service it-tools {\n  \
            with internal_web { port: 8080 }\n  \
@@ -228,7 +228,7 @@ fn explicit_templates_setting_same_expose_subfield_still_collide() {
 #[test]
 fn defaults_expose_subfield_is_overridden_but_others_survive() {
     let composed = compose_ok(
-        "template defaults {\n  expose 1234 entrypoint: \"web\"\n}\n\
+        "template defaults {\n  expose 1234, entrypoint: \"web\"\n}\n\
          template real {\n  expose 8080\n}\n\
          service s {\n  with real\n  image \"x\"\n}\n",
     );

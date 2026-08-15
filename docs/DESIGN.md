@@ -227,7 +227,7 @@ repeating them; two explicit templates only collide if they set the
 
 ```
 template internal_web(port) {
-  expose port entrypoint: "web-secure"
+  expose port, entrypoint: "web-secure"
 }
 
 service it-tools {
