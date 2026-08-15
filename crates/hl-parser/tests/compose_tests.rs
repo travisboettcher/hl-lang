@@ -126,6 +126,91 @@ fn explicit_templates_volume_container_path_collision_is_error() {
     }
 }
 
+// --- expose sub-field merge (#10) ---
+
+/// The exact scenario from the issue report: a service overriding just
+/// `expose.host` while still inheriting `port`/`entrypoint` from a
+/// `with`-listed template, without repeating them.
+#[test]
+fn service_own_body_can_override_just_expose_host() {
+    let composed = compose_ok(
+        "template internal_web(port) {\n  \
+           expose port entrypoint: \"web-secure\"\n\
+         }\n\
+         service it-tools {\n  \
+           with internal_web { port: 8080 }\n  \
+           image \"corentinth/it-tools:latest\"\n  \
+           expose { host: \"tools.internal.techdebtor.io\" }\n\
+         }\n",
+    );
+    let service = single_service(&composed);
+    let expose = service.fields.expose.as_ref().expect("expose set");
+    assert_eq!(expose.port.as_ref().unwrap().text(), "8080");
+    assert_eq!(
+        expose.host.as_ref().unwrap().text(),
+        "tools.internal.techdebtor.io"
+    );
+    assert_eq!(expose.entrypoint.as_ref().unwrap().text(), "web-secure");
+}
+
+/// Two explicit templates each setting a *different* `expose` sub-field
+/// don't collide — only docs/DESIGN.md's "same field" collision rule
+/// applies, and `port`/`host` are different fields now that `expose`
+/// merges per sub-field instead of as one whole struct.
+#[test]
+fn explicit_templates_setting_different_expose_subfields_do_not_collide() {
+    let composed = compose_ok(
+        "template a {\n  expose 8080\n}\n\
+         template b {\n  expose { host: \"x.example.com\" }\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let expose = service.fields.expose.as_ref().expect("expose set");
+    assert_eq!(expose.port.as_ref().unwrap().text(), "8080");
+    assert_eq!(expose.host.as_ref().unwrap().text(), "x.example.com");
+}
+
+/// Two explicit templates setting the *same* `expose` sub-field still
+/// collide — the per-sub-field merge narrows the granularity of the
+/// existing collision rule, it doesn't remove it.
+#[test]
+fn explicit_templates_setting_same_expose_subfield_still_collide() {
+    let err = compose_err(
+        "template a {\n  expose 8080\n}\n\
+         template b {\n  expose 9090\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::FieldCollision {
+            field: "expose.port",
+            first_template,
+            second_template,
+            ..
+        } => {
+            assert_eq!(first_template, "a");
+            assert_eq!(second_template, "b");
+        }
+        other => panic!("expected FieldCollision on expose.port, got {other:?}"),
+    }
+}
+
+/// A `defaults` template setting one `expose` sub-field is silently
+/// overridden only on that sub-field — the other sub-fields an explicit
+/// template sets still come through, matching how `env`/`volume` map
+/// entries already behave per-key.
+#[test]
+fn defaults_expose_subfield_is_overridden_but_others_survive() {
+    let composed = compose_ok(
+        "template defaults {\n  expose 1234 entrypoint: \"web\"\n}\n\
+         template real {\n  expose 8080\n}\n\
+         service s {\n  with real\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let expose = service.fields.expose.as_ref().expect("expose set");
+    assert_eq!(expose.port.as_ref().unwrap().text(), "8080");
+    assert_eq!(expose.entrypoint.as_ref().unwrap().text(), "web");
+}
+
 // --- non-colliding merges ---
 
 #[test]

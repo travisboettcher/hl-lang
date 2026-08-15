@@ -808,11 +808,6 @@ impl Spanned for Image {
         self.span
     }
 }
-impl Spanned for Expose {
-    fn span(&self) -> Span {
-        self.span
-    }
-}
 impl Spanned for Restart {
     fn span(&self) -> Span {
         self.span
@@ -828,15 +823,34 @@ impl Spanned for EnvEntry {
         self.span
     }
 }
+impl Spanned for Literal {
+    fn span(&self) -> Span {
+        Literal::span(self)
+    }
+}
 
 /// The accumulator a field-bag's tiers merge into, tracking which tier
 /// last set each field so [`merge_single`]/[`merge_map`] can tell
 /// "explicit-vs-explicit" (an error) apart from "defaults-vs-anything"
 /// or "anything-vs-own" (silent overrides).
+///
+/// `expose` is tracked per sub-field (`port`/`host`/`entrypoint`), not as
+/// one `Option<(Expose, Tier)>` slot like `image`/`restart` — unlike
+/// those two (each a single scalar field, so whole-struct and
+/// per-field merging coincide), `expose` has three, and per
+/// docs/DESIGN.md's Composition section only *map* fields were meant to
+/// "merge key-by-key"; treating a struct field as one indivisible unit
+/// meant a service overriding just `expose.host` had to repeat
+/// `port`/`entrypoint` too, or lose them entirely. Merging each
+/// sub-field independently (same tier rules as everything else) fixes
+/// that without changing `image`/`restart`'s existing observable
+/// behavior at all.
 #[derive(Default)]
 struct MergeAcc {
     image: Option<(Image, Tier)>,
-    expose: Option<(Expose, Tier)>,
+    expose_port: Option<(Literal, Tier)>,
+    expose_host: Option<(Literal, Tier)>,
+    expose_entrypoint: Option<(Literal, Tier)>,
     restart: Option<(Restart, Tier)>,
     volumes: Vec<(VolumeEntry, Tier)>,
     env: Vec<(EnvEntry, Tier)>,
@@ -848,9 +862,20 @@ struct MergeAcc {
 
 impl MergeAcc {
     fn into_service_fields(self) -> ServiceFields {
+        let expose = expose_span(
+            &self.expose_port,
+            &self.expose_host,
+            &self.expose_entrypoint,
+        )
+        .map(|span| Expose {
+            port: self.expose_port.map(|(v, _)| v),
+            host: self.expose_host.map(|(v, _)| v),
+            entrypoint: self.expose_entrypoint.map(|(v, _)| v),
+            span,
+        });
         ServiceFields {
             image: self.image.map(|(v, _)| v),
-            expose: self.expose.map(|(v, _)| v),
+            expose,
             restart: self.restart.map(|(v, _)| v),
             volumes: VolumeMap {
                 entries: self.volumes.into_iter().map(|(v, _)| v).collect(),
@@ -867,6 +892,23 @@ impl MergeAcc {
     }
 }
 
+/// The merged `Expose`'s own span is cosmetic (nothing downstream reads
+/// it for anything but existence — codegen and `substitute_params` both
+/// work off the individual sub-field spans instead), so this just picks
+/// whichever sub-field was set, preferring `port` since it's the primary
+/// field. `None` only when no sub-field was ever set, meaning `expose`
+/// itself should stay unset.
+fn expose_span(
+    port: &Option<(Literal, Tier)>,
+    host: &Option<(Literal, Tier)>,
+    entrypoint: &Option<(Literal, Tier)>,
+) -> Option<Span> {
+    port.as_ref()
+        .or(host.as_ref())
+        .or(entrypoint.as_ref())
+        .map(|(lit, _)| lit.span())
+}
+
 /// Merges one tier's [`ServiceFields`] into `acc`. List fields
 /// (`raw`/`middleware`/`depends_on`/`networks`) always concatenate — see
 /// [`ComposeError::MapKeyCollision`]'s doc for why `raw` in particular is
@@ -881,7 +923,20 @@ fn merge_tier(
         merge_single(&mut acc.image, "image", img, tier)?;
     }
     if let Some(e) = incoming.expose {
-        merge_single(&mut acc.expose, "expose", e, tier)?;
+        if let Some(port) = e.port {
+            merge_single(&mut acc.expose_port, "expose.port", port, tier)?;
+        }
+        if let Some(host) = e.host {
+            merge_single(&mut acc.expose_host, "expose.host", host, tier)?;
+        }
+        if let Some(entrypoint) = e.entrypoint {
+            merge_single(
+                &mut acc.expose_entrypoint,
+                "expose.entrypoint",
+                entrypoint,
+                tier,
+            )?;
+        }
     }
     if let Some(r) = incoming.restart {
         merge_single(&mut acc.restart, "restart", r, tier)?;

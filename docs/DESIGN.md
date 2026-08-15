@@ -172,8 +172,30 @@ Merge priority, lowest to highest:
 3. the service's own body — always wins over everything
 
 List fields concatenate (no collision possible); map fields merge
-key-by-key (or value-by-value for `volume`); struct/scalar fields error on
-collision among explicit templates only.
+key-by-key (or value-by-value for `volume`); scalar fields (`image`,
+`restart`) error on collision among explicit templates only. `expose`,
+the one built-in struct field with more than one sub-field, merges
+per sub-field (`port`/`host`/`entrypoint` independently) rather than as
+one indivisible unit — the same key-by-key reasoning as a map field,
+applied to a struct's named fields instead of a map's keys. This means a
+service's own body can override just `expose.host` while still
+inheriting `port`/`entrypoint` from a `with`-listed template, without
+repeating them; two explicit templates only collide if they set the
+*same* `expose` sub-field, not merely the same `expose` field overall.
+
+```
+template internal_web(port) {
+  expose port entrypoint: "web-secure"
+}
+
+service it-tools {
+  with internal_web { port: 8080 }
+  image "corentinth/it-tools:latest"
+  # overrides just expose.host — port and entrypoint still come from
+  # internal_web above
+  expose { host: "tools.internal.techdebtor.io" }
+}
+```
 
 ## Imports
 
