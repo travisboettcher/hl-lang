@@ -302,6 +302,25 @@ resolves correctly no matter which service ends up invoking it, since it
 always resolves against `templates.hll`'s own alias table, never the
 caller's.
 
+A `with` list composing several templates reads as one long line once it
+grows past two or three — per the Syntactic grammar section above, "a
+trailing comma continues a comma-list," so the same `with` line can be
+wrapped across multiple lines instead, one template per line, as long as
+every line but the last ends with a trailing comma:
+
+```
+service syncthing {
+  with common.internal_web { port: 8384 },
+       common.authenticated,
+       common.linuxserver_app { puid: 1000, pgid: 100 }
+  image "lscr.io/linuxserver/syncthing:latest"
+  volume "syncthing-config" -> "/config"
+}
+```
+
+This parses identically to the single-line form above — it's purely a
+readability choice, not a different construct.
+
 ## Pipeline
 
 1. **Lexer** (`crates/hl-lexer`) — one reserved word (`template`),
@@ -355,3 +374,9 @@ caller's.
   fill-in-the-blanks placeholder (DNS provider/credentials, domain, IP
   ranges) — see "Design principle: generic core, specific templates,"
   above.
+- **`hllfmt`** — an auto-formatter that would wrap a long `with` list past
+  some line length (see the multiline `with` example above) with
+  consistent indentation, instead of that being a manual per-file
+  judgment call. Not yet designed: the line-length threshold, and whether
+  formatting is opinionated/non-configurable (à la `gofmt`/`rustfmt`) or
+  takes any settings at all.

@@ -541,6 +541,24 @@ fn with_bare_comma_list_with_args_parses() {
     assert!(service.fields.with[1].args.entries.is_empty());
 }
 
+/// docs/DESIGN.md notes that a trailing comma continues a comma-list
+/// across lines, so a long `with` list can be wrapped for readability —
+/// see its worked-examples section. Checked here against the same
+/// invocation list as `with_bare_comma_list_with_args_parses`, just
+/// split across lines, to confirm the two forms parse identically.
+#[test]
+fn with_bare_comma_list_across_multiple_lines_parses_same_as_one_line() {
+    let program =
+        parse_ok("service s {\n  with internal_web { port: 8384 },\n       authenticated\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.with.len(), 2);
+    assert_eq!(service.fields.with[0].name.name, "internal_web");
+    assert_eq!(service.fields.with[0].args.entries.len(), 1);
+    assert_eq!(service.fields.with[0].args.entries[0].key.text(), "port");
+    assert_eq!(service.fields.with[1].name.name, "authenticated");
+    assert!(service.fields.with[1].args.entries.is_empty());
+}
+
 #[test]
 fn with_bracket_list_form_parses() {
     let program = parse_ok("service s {\n  with [a, b { x: 1 }]\n}\n");
