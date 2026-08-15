@@ -542,6 +542,22 @@ fn networks_comma_sugar_form() {
     assert_eq!(names, vec!["a", "b"]);
 }
 
+#[test]
+fn dns_bracket_list_form() {
+    let program = parse_ok("service s {\n  dns [\"192.168.50.182\"]\n}\n");
+    let service = as_service(&program.decls[0]);
+    let entries: Vec<&str> = service.fields.dns.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(entries, vec!["192.168.50.182"]);
+}
+
+#[test]
+fn dns_repeats_accumulate() {
+    let program = parse_ok("service s {\n  dns \"192.168.50.182\"\n  dns \"192.168.50.183\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    let entries: Vec<&str> = service.fields.dns.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(entries, vec!["192.168.50.182", "192.168.50.183"]);
+}
+
 // --- template declarations ---
 
 #[test]

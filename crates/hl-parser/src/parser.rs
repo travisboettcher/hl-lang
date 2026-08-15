@@ -31,7 +31,7 @@ enum FieldValue {
     LiteralMap(Vec<(Literal, Literal, Span)>),
     /// An accumulating nested schema-free map-kind field (raw).
     Raw(RawMap),
-    /// An accumulating reference-list field (middleware/depends_on/networks).
+    /// An accumulating reference-list field (middleware/depends_on/networks/dns).
     RefList(Vec<Reference>),
     /// An accumulating template-invocation-list field (`with`'s `templates`).
     TemplateInvocations(Vec<TemplateInvocation>),
@@ -1070,6 +1070,10 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         Some(FieldValue::RefList(v)) => v,
         _ => Vec::new(),
     };
+    let dns = match fields.remove("dns") {
+        Some(FieldValue::RefList(v)) => v,
+        _ => Vec::new(),
+    };
     let with = match fields.remove("with") {
         Some(FieldValue::Struct(mut with_fields, _)) => match with_fields.remove("templates") {
             Some(FieldValue::TemplateInvocations(v)) => v,
@@ -1087,6 +1091,7 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         middleware,
         depends_on,
         networks,
+        dns,
         with,
     }
 }

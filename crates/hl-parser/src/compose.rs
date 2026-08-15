@@ -645,6 +645,7 @@ fn resolve_qualified_networks<R: SymbolResolver>(
     }
     reject_qualified(&fields.middleware, "middleware")?;
     reject_qualified(&fields.depends_on, "depends_on")?;
+    reject_qualified(&fields.dns, "dns")?;
     Ok(())
 }
 
@@ -852,6 +853,7 @@ struct MergeAcc {
     middleware: Vec<Reference>,
     depends_on: Vec<Reference>,
     networks: Vec<Reference>,
+    dns: Vec<Reference>,
 }
 
 impl MergeAcc {
@@ -899,6 +901,7 @@ impl MergeAcc {
             middleware: self.middleware,
             depends_on: self.depends_on,
             networks: self.networks,
+            dns: self.dns,
             with: Vec::new(),
         }
     }
@@ -941,10 +944,10 @@ fn scalar_fields_of(
 }
 
 /// Merges one tier's [`ServiceFields`] into `acc`. List fields
-/// (`raw`/`middleware`/`depends_on`/`networks`) always concatenate — see
-/// [`ComposeError::MapKeyCollision`]'s doc for why `raw` in particular is
-/// never collision-checked, consistent with its existing intra-body
-/// no-uniqueness behavior.
+/// (`raw`/`middleware`/`depends_on`/`networks`/`dns`) always concatenate
+/// — see [`ComposeError::MapKeyCollision`]'s doc for why `raw` in
+/// particular is never collision-checked, consistent with its existing
+/// intra-body no-uniqueness behavior.
 fn merge_tier(
     acc: &mut MergeAcc,
     incoming: ServiceFields,
@@ -973,6 +976,7 @@ fn merge_tier(
     acc.middleware.extend(incoming.middleware);
     acc.depends_on.extend(incoming.depends_on);
     acc.networks.extend(incoming.networks);
+    acc.dns.extend(incoming.dns);
     Ok(())
 }
 
