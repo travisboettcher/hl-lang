@@ -214,8 +214,30 @@ Merge priority, lowest to highest:
 3. the service's own body — always wins over everything
 
 List fields concatenate (no collision possible); map fields merge
-key-by-key (or value-by-value for `volume`); struct/scalar fields error on
-collision among explicit templates only.
+key-by-key (or value-by-value for `volume`); scalar fields (`image`,
+`restart`) error on collision among explicit templates only. `expose`,
+the one built-in struct field with more than one sub-field, merges
+per sub-field (`port`/`host`/`entrypoint` independently) rather than as
+one indivisible unit — the same key-by-key reasoning as a map field,
+applied to a struct's named fields instead of a map's keys. This means a
+service's own body can override just `expose.host` while still
+inheriting `port`/`entrypoint` from a `with`-listed template, without
+repeating them; two explicit templates only collide if they set the
+*same* `expose` sub-field, not merely the same `expose` field overall.
+
+```
+template internal_web(port) {
+  expose port entrypoint: "web-secure"
+}
+
+service it-tools {
+  with internal_web { port: 8080 }
+  image "corentinth/it-tools:latest"
+  # overrides just expose.host — port and entrypoint still come from
+  # internal_web above
+  expose { host: "tools.internal.techdebtor.io" }
+}
+```
 
 ## Imports
 
@@ -344,6 +366,25 @@ resolves correctly no matter which service ends up invoking it, since it
 always resolves against `templates.hll`'s own alias table, never the
 caller's.
 
+A `with` list composing several templates reads as one long line once it
+grows past two or three — per the Syntactic grammar section above, "a
+trailing comma continues a comma-list," so the same `with` line can be
+wrapped across multiple lines instead, one template per line, as long as
+every line but the last ends with a trailing comma:
+
+```
+service syncthing {
+  with common.internal_web { port: 8384 },
+       common.authenticated,
+       common.linuxserver_app { puid: 1000, pgid: 100 }
+  image "lscr.io/linuxserver/syncthing:latest"
+  volume "syncthing-config" -> "/config"
+}
+```
+
+This parses identically to the single-line form above — it's purely a
+readability choice, not a different construct.
+
 ## Pipeline
 
 1. **Lexer** (`crates/hl-lexer`) — one reserved word (`template`),
@@ -397,3 +438,9 @@ caller's.
   fill-in-the-blanks placeholder (DNS provider/credentials, domain, IP
   ranges) — see "Design principle: generic core, specific templates,"
   above.
+- **`hllfmt`** — an auto-formatter that would wrap a long `with` list past
+  some line length (see the multiline `with` example above) with
+  consistent indentation, instead of that being a manual per-file
+  judgment call. Not yet designed: the line-length threshold, and whether
+  formatting is opinionated/non-configurable (à la `gofmt`/`rustfmt`) or
+  takes any settings at all.
