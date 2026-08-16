@@ -1007,12 +1007,18 @@ impl Spanned for EnvEntry {
 /// or "anything-vs-own" (silent overrides).
 ///
 /// `scalars` holds every single-value collision point in the language —
-/// `image`, `expose.port`/`expose.host`/`expose.entrypoint`, `restart`,
-/// `container_name`, and any future one — keyed generically by name (dotted only where a
-/// struct has more than one sub-field needing disambiguation, e.g.
-/// `expose`'s three; a single-field struct like `image`/`restart` is
-/// keyed under its own bare name) instead of one dedicated `MergeAcc`
-/// field per collision point.
+/// `image.ref`, `expose.port`/`expose.host`/`expose.entrypoint`,
+/// `restart.policy`, `container_name`, and any future one — keyed
+/// generically by name, always the fully-dotted canonical path down to
+/// the concrete sub-field (`expose`'s three sub-fields; `image`/
+/// `restart`'s one apiece), never a struct's own bare name, so a field's
+/// key is a stable function of its own identity rather than how many
+/// siblings its struct happens to have today (see #27: keying a
+/// single-field struct under its bare name meant the key would have to
+/// change out from under `image.ref`/`restart.policy` the moment either
+/// struct grew a second field). A bare field with no enclosing struct at
+/// all, like `container_name`, is keyed under its own name — there's no
+/// sub-field path to be dotted onto.
 /// Earlier this milestone, `expose`'s three sub-fields each got their
 /// own named `Option<(Literal, Tier)>` field here (mirroring `image`/
 /// `restart`'s own single-field `Option<(Image, Tier)>`/`Option<(Restart,
@@ -1025,11 +1031,10 @@ impl Spanned for EnvEntry {
 /// find a tier's scalar values) and [`MergeAcc::into_service_fields`]
 /// (how to put them back) — the only two places that need to know
 /// `ServiceFields`'s concrete shape at all. `image`/`restart` moved onto
-/// this same map for consistency (a single-field struct is just a
-/// struct whose one sub-field never has to share a table row with a
-/// sibling), which is also why the `Spanned`-generic `merge_single` and
-/// its `Image`/`Restart` impls are gone: every scalar collision point is
-/// a bare `Literal`, which already has its own inherent `span()`.
+/// this same map for consistency, which is also why the `Spanned`-
+/// generic `merge_single` and its `Image`/`Restart` impls are gone:
+/// every scalar collision point is a bare `Literal`, which already has
+/// its own inherent `span()`.
 #[derive(Default)]
 struct MergeAcc {
     scalars: HashMap<&'static str, (Literal, Tier)>,
@@ -1044,7 +1049,7 @@ struct MergeAcc {
 
 impl MergeAcc {
     fn into_service_fields(mut self) -> ServiceFields {
-        let image = self.scalars.remove("image").map(|(v, _)| Image {
+        let image = self.scalars.remove("image.ref").map(|(v, _)| Image {
             span: v.span(),
             reference: Some(v),
         });
@@ -1069,7 +1074,7 @@ impl MergeAcc {
             entrypoint: entrypoint.map(|(v, _)| v),
             span,
         });
-        let restart = self.scalars.remove("restart").map(|(v, _)| Restart {
+        let restart = self.scalars.remove("restart.policy").map(|(v, _)| Restart {
             span: v.span(),
             policy: Some(v),
         });
@@ -1112,7 +1117,7 @@ fn scalar_fields_of(
 ) -> Vec<(&'static str, Literal)> {
     let mut out = Vec::new();
     if let Some(v) = image.and_then(|i| i.reference) {
-        out.push(("image", v));
+        out.push(("image.ref", v));
     }
     if let Some(e) = expose {
         if let Some(v) = e.port {
@@ -1126,7 +1131,7 @@ fn scalar_fields_of(
         }
     }
     if let Some(v) = restart.and_then(|r| r.policy) {
-        out.push(("restart", v));
+        out.push(("restart.policy", v));
     }
     out
 }
