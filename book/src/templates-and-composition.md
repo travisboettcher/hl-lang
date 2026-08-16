@@ -73,7 +73,7 @@ A template named exactly `defaults` is special-cased: if one is declared
 in a file, it's applied to every service in that file automatically —
 no `with defaults` needed:
 
-```hll
+```hll,build
 template defaults {
   restart unless-stopped
 }
@@ -144,7 +144,7 @@ service it-tools {
 Putting it together — a network, three templates, and a service that
 composes all three:
 
-```hll
+```hll,build
 network traefik-net {
   external
   name: "docker_default"

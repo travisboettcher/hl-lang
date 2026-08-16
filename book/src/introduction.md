@@ -36,7 +36,7 @@ rather than BNF.
 
 ## A quick taste
 
-```hll
+```hll,build
 service jellyfin {
   image "jellyfin/jellyfin:latest"
   expose 8096 as "media.example.com"

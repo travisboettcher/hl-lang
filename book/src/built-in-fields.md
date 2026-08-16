@@ -42,7 +42,7 @@ Primary field: `ref`.
 |---|---|---|
 | `ref` | string | *(required — no default)* |
 
-```hll
+```hll,fragment
 image "jellyfin/jellyfin:latest"
 ```
 
@@ -59,16 +59,19 @@ Primary field: `port`. Secondary-field shorthand: `as` aliases to `host`.
 | `host` | string | unset (no router rule generated) |
 | `entrypoint` | string | unset (label omitted; Traefik attaches the router to every entry point) |
 
-```hll
+```hll,fragment
 expose 8096 as "media.example.com"
 # same as:
 # expose {
 #   port: 8096
 #   host: "media.example.com"
 # }
+```
 
-# `as` is a one-shot fusion, not a list — it can't be followed by more
-# fields. To also set entrypoint, name `host` explicitly instead:
+`as` is a one-shot fusion, not a list — it can't be followed by more
+fields. To also set `entrypoint`, name `host` explicitly instead:
+
+```hll,fragment
 expose 8096, host: "media.example.com", entrypoint: "web-secure"
 ```
 
@@ -86,7 +89,7 @@ path). Uniqueness is checked on the **container path** (the value side)
 — Docker itself refuses two mounts at the same container path, but
 allows the same host path mounted more than once.
 
-```hll
+```hll,fragment
 volume "/mnt/media" -> "/data"        # bind mount
 volume "syncthing-config" -> "/config" # named volume
 ```
@@ -101,7 +104,7 @@ automatically.
 Map-kind. Bare-entry separator: `=` (key = value). Uniqueness is checked
 on the **key** — two `env` entries can't set the same variable.
 
-```hll
+```hll,fragment
 env PUID = "1000"
 env PGID = "100"
 ```
@@ -116,7 +119,7 @@ Primary field: `policy`.
 |---|---|---|
 | `policy` | bare word or string | unset (Compose's own default — no automatic restart) |
 
-```hll
+```hll,fragment
 restart unless-stopped
 ```
 
@@ -131,7 +134,7 @@ All four are plain reference-list fields directly on `service`/`template`
 learn for them; write a bare identifier, a bracketed list, or repeat the
 field:
 
-```hll
+```hll,fragment
 middleware local-ipwhitelist
 middleware forwardAuth-authentik   # repeating accumulates
 
@@ -164,7 +167,7 @@ there's no collision to check since list fields can only ever grow.
 A plain scalar field directly on `service`/`template` (not a nested
 struct type):
 
-```hll
+```hll,fragment
 container_name "uptime-kuma"
 ```
 
@@ -179,7 +182,7 @@ checked against a fixed field list, and values pass straight through to
 the generated YAML. This is the escape hatch for any Compose key `hll`
 doesn't have a dedicated field for yet:
 
-```hll
+```hll,fragment
 raw {
   privileged: true,
   cap_add: ["NET_ADMIN"]

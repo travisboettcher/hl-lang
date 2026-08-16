@@ -29,7 +29,7 @@ The templates from the [previous chapter's example](./templates-and-composition.
 split across three files, `use`-connected instead of copy-pasted into
 every service:
 
-```hll
+```hll,file=network.hll,group=imports-example
 # network.hll
 network traefik-net {
   external
@@ -37,7 +37,7 @@ network traefik-net {
 }
 ```
 
-```hll
+```hll,file=templates.hll,group=imports-example
 # templates.hll
 use "network.hll" as net
 
@@ -58,7 +58,7 @@ template linuxserver_app(puid: Number, pgid: Number) {
 }
 ```
 
-```hll
+```hll,file=syncthing.hll,group=imports-example,entry
 # syncthing.hll
 use "templates.hll" as common
 

@@ -22,7 +22,7 @@ kinds:
 
 A body is a `{ }`-delimited list of statements, one per line:
 
-```hll
+```hll,build
 service jellyfin {
   image "jellyfin/jellyfin:latest"
   expose 8096 as "media.example.com"
@@ -61,7 +61,7 @@ field is more ceremony than the information deserves. Any type with a
 **primary field** lets you skip the field name and the braces, and just
 write the value directly after the type name:
 
-```hll
+```hll,fragment
 image "jellyfin/jellyfin:latest"
 # same as: image { ref: "jellyfin/jellyfin:latest" }
 
@@ -81,7 +81,7 @@ form (a canonical `{ }` body, each field on its own line — see [Layout
 rules](#layout-rules) below), one specific shorthand lets a second field
 fuse directly onto the primary value with no comma:
 
-```hll
+```hll,fragment
 expose 8096 as "media.example.com"
 # same as:
 # expose {
@@ -98,7 +98,7 @@ itself be followed by anything else, comma or no comma —
 name `host` explicitly instead; from there, further `key: value` fields
 are allowed, each one preceded by a comma:
 
-```hll
+```hll,fragment
 expose 8096, host: "media.example.com", entrypoint: "web-secure"
 ```
 
@@ -108,7 +108,7 @@ Two types — `volume` and `env` — are conceptually key/value maps rather
 than named struct fields, and each has its own natural-looking separator
 instead of a colon:
 
-```hll
+```hll,fragment
 volume "/mnt/media" -> "/data"     # host path -> container path
 env PUID = "1000"                  # key = value
 ```
@@ -163,7 +163,7 @@ A `#` starts a line comment, running to the end of the line. It's only
 recognized between tokens — a `#` inside a string is just a literal
 character, not a comment:
 
-```hll
+```hll,build
 # Media server
 service jellyfin {
   image "jellyfin/jellyfin:latest"  # pin this before upgrading

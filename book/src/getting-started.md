@@ -26,7 +26,7 @@ source, see the main repository's README.
 
 Create a file called `jellyfin.hll`:
 
-```hll
+```hll,build
 service jellyfin {
   image "jellyfin/jellyfin:latest"
   expose 8096 as "media.example.com"
@@ -70,7 +70,7 @@ homelab will usually want several. Add a second service to the same file,
 or start a new one — either works, since `hllc --build` treats one input
 file as one Compose document that may hold multiple services:
 
-```hll
+```hll,build
 service jellyfin {
   image "jellyfin/jellyfin:latest"
   expose 8096 as "media.example.com"
@@ -95,7 +95,7 @@ Traefik network, the same forward-auth middleware, the same
 `PUID`/`PGID` pair. That repetition is what `template` and `with` are
 for:
 
-```hll
+```hll,build
 template defaults {
   restart unless-stopped
 }
