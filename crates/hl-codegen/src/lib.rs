@@ -273,9 +273,9 @@ fn generate_service(
         raw_map.insert(key, raw::to_yaml(&entry.value, &bindings)?);
     }
 
-    let service_doc = doc::ComposeServiceDoc {
+    let mut service_doc = doc::ComposeServiceDoc {
         image: Some(image),
-        container_name,
+        container_name: Some(container_name),
         restart,
         environment,
         volumes: volume_entries,
@@ -286,6 +286,9 @@ fn generate_service(
         labels,
         raw: raw_map,
     };
+    // Required, not optional tidying: without it a `raw` key that
+    // shadows a built-in field emits the key twice (#68).
+    service_doc.apply_raw_overrides();
 
     Ok((service_doc, network_docs, named_volumes))
 }
