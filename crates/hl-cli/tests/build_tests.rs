@@ -291,3 +291,86 @@ fn build_directory_with_no_hll_files_anywhere_is_a_no_op_success() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+/// #64: `fs::write` follows symlinks, so a `docker-compose.yml` replaced
+/// by a link to an unrelated file used to have that file truncated and
+/// overwritten by a plain `hllc --build <repo>`. Unix-only: there's no
+/// portable way to create a symlink, and the guard itself is
+/// platform-independent.
+#[cfg(unix)]
+#[test]
+fn build_refuses_to_write_through_a_symlinked_compose_file() {
+    let dir = scratch_dir("symlink-colocated");
+    let victim = dir.join("victim.txt");
+    fs::write(&victim, "precious\n").unwrap();
+    let service_dir = dir.join("syncthing");
+    fs::create_dir_all(&service_dir).unwrap();
+    fs::write(service_dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+    std::os::unix::fs::symlink(&victim, service_dir.join("docker-compose.yml")).unwrap();
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: None,
+    });
+    assert_eq!(code, ExitCode::FAILURE);
+    assert_eq!(
+        fs::read_to_string(&victim).unwrap(),
+        "precious\n",
+        "the symlink's target must not have been written through"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// The same guard on the `--out` path, which names its destination
+/// directly rather than deriving it from a directory scan.
+#[cfg(unix)]
+#[test]
+fn build_refuses_a_symlinked_out_path() {
+    let dir = scratch_dir("symlink-out");
+    let victim = dir.join("victim.txt");
+    fs::write(&victim, "precious\n").unwrap();
+    let input = dir.join("syncthing.hll");
+    fs::write(&input, SYNCTHING_HLL).unwrap();
+    let out = dir.join("docker-compose.yml");
+    std::os::unix::fs::symlink(&victim, &out).unwrap();
+
+    let code = run(Cli {
+        file: input,
+        parse: false,
+        build: true,
+        out: Some(out),
+    });
+    assert_eq!(code, ExitCode::FAILURE);
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "precious\n");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// #64: `Path::new("...hll").file_stem()` is `..`, so joining the stem
+/// onto `--out` used to escape one level above the chosen output
+/// directory.
+#[test]
+fn build_rejects_a_parent_escaping_file_stem() {
+    let dir = scratch_dir("escaping-stem");
+    let inputs = dir.join("inputs");
+    fs::create_dir_all(&inputs).unwrap();
+    fs::write(inputs.join("...hll"), SYNCTHING_HLL).unwrap();
+    let out_dir = dir.join("out");
+
+    let code = run(Cli {
+        file: inputs,
+        parse: false,
+        build: true,
+        out: Some(out_dir.clone()),
+    });
+    assert_eq!(code, ExitCode::FAILURE);
+    assert!(
+        !dir.join("docker-compose.yml").exists(),
+        "output must not have escaped above the --out directory"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
