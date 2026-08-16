@@ -67,7 +67,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: target/llvm-cov/html
@@ -90,7 +90,7 @@ jobs:
         run: cargo build --workspace --release
 
       - name: Upload hllc binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hllc-linux-x86_64
           path: target/release/hllc
@@ -120,7 +120,7 @@ jobs:
 
       - name: Upload mutation report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mutants-report
           path: mutants.out
@@ -166,7 +166,7 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crash-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}
