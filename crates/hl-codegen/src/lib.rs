@@ -64,6 +64,15 @@ pub enum CodegenError {
     /// service block. The parser doesn't enforce this (see
     /// [`hl_parser::Service`]'s doc); codegen must.
     MissingImage { service: String, span: Span },
+    /// A `$param` reference survived composition and reached codegen.
+    /// Composition is supposed to substitute every one of them (see
+    /// [`hl_parser::Literal::Param`]'s doc), so this is a compiler
+    /// invariant rather than an ordinary user error — but it's reported
+    /// as a diagnostic anyway, not a panic: a gap in that invariant
+    /// (`defaults` bypassing argument binding was one, #62) should
+    /// degrade to a located error message the user can act on, never
+    /// take the process down.
+    UnsubstitutedParameter { param: String, span: Span },
 }
 
 impl CodegenError {
@@ -72,7 +81,8 @@ impl CodegenError {
             CodegenError::UnknownNetwork { span, .. }
             | CodegenError::AmbiguousExternalNetwork { span, .. }
             | CodegenError::UnknownInterpolation { span, .. }
-            | CodegenError::MissingImage { span, .. } => *span,
+            | CodegenError::MissingImage { span, .. }
+            | CodegenError::UnsubstitutedParameter { span, .. } => *span,
         }
     }
 }
@@ -107,6 +117,11 @@ impl fmt::Display for CodegenError {
             CodegenError::MissingImage { service, .. } => write!(
                 f,
                 "{}:{}: service `{service}` has no `image` set",
+                span.line, span.col
+            ),
+            CodegenError::UnsubstitutedParameter { param, .. } => write!(
+                f,
+                "{}:{}: template parameter `${param}` was never bound to an argument",
                 span.line, span.col
             ),
         }
@@ -346,5 +361,17 @@ mod error_display_tests {
             span: span(),
         };
         assert_eq!(err.to_string(), "3:5: service `web` has no `image` set");
+    }
+
+    #[test]
+    fn unsubstituted_parameter_display() {
+        let err = CodegenError::UnsubstitutedParameter {
+            param: "puid".to_string(),
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: template parameter `$puid` was never bound to an argument"
+        );
     }
 }

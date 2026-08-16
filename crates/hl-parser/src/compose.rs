@@ -143,6 +143,13 @@ pub enum ComposeError {
         alias: String,
         span: Span,
     },
+    /// The implicit `defaults` template declares parameters. Every other
+    /// template is reached through an explicit `with` invocation, which
+    /// is where arguments are bound; `defaults` has no invocation at all
+    /// (it's applied to every service automatically), so there is
+    /// nowhere for a caller to supply one and nothing to substitute its
+    /// `$param` references with.
+    ParameterizedDefaults { param: String, span: Span },
     /// A qualified `networks [alias.name]` entry's `alias` resolved to a
     /// real imported scope, but no `network` named `name` exists there.
     /// Distinct from [`Self::UnknownAlias`] (the alias itself didn't
@@ -187,6 +194,7 @@ impl ComposeError {
             | ComposeError::FieldCollision { second: span, .. }
             | ComposeError::UnknownAlias { span, .. }
             | ComposeError::UnsupportedQualifiedReference { span, .. }
+            | ComposeError::ParameterizedDefaults { span, .. }
             | ComposeError::UnknownQualifiedNetwork { span, .. } => *span,
             ComposeError::MapKeyCollision(details) => details.second,
         }
@@ -289,6 +297,11 @@ impl fmt::Display for ComposeError {
             ComposeError::UnsupportedQualifiedReference { field, alias, .. } => write!(
                 f,
                 "{}:{}: `{field}` doesn't support a qualified reference yet (`{alias}.` ...)",
+                span.line, span.col
+            ),
+            ComposeError::ParameterizedDefaults { param, .. } => write!(
+                f,
+                "{}:{}: template `defaults` must not declare parameters (`{param}`) — it's applied implicitly to every service, so there's no call site to bind them",
                 span.line, span.col
             ),
             ComposeError::UnknownQualifiedNetwork { alias, name, .. } => write!(
@@ -486,6 +499,18 @@ mod error_display_tests {
         assert_eq!(
             err,
             "1:3: `middleware` doesn't support a qualified reference yet (`traefik.` ...)"
+        );
+    }
+
+    #[test]
+    fn parameterized_defaults_display() {
+        let err = ComposeError::ParameterizedDefaults {
+            param: "x".to_string(),
+            span: span(1, 18),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:18: template `defaults` must not declare parameters (`x`) — it's applied implicitly to every service, so there's no call site to bind them"
         );
     }
 
@@ -690,6 +715,22 @@ fn compose_service<R: SymbolResolver>(
     let mut in_progress = Vec::new();
 
     if let Some((defaults_scope, defaults_decl)) = resolver.resolve_defaults(scope) {
+        // `defaults` is the one template applied without an invocation,
+        // so it reaches `resolve_template` directly rather than through
+        // `resolve_invocation` — which is where arity is checked and
+        // where `Literal::Param`s are substituted. A parameterized
+        // `defaults` would therefore skip both: its `$x` references
+        // would survive composition, reaching codegen either as the
+        // parameter's own *name* emitted as a real Compose value or as
+        // a hard error deep in transcription (#62). Rejecting it up
+        // front is the only coherent answer — there is no call site
+        // that could ever supply the arguments.
+        if let Some(param) = defaults_decl.params.first() {
+            return Err(ComposeError::ParameterizedDefaults {
+                param: param.name.name.clone(),
+                span: param.name.span,
+            });
+        }
         let resolved = resolve_template(
             defaults_decl,
             defaults_scope,

@@ -723,6 +723,82 @@ fn duplicate_top_level_template_name_is_error() {
     ));
 }
 
+/// #62: `defaults` is applied without an invocation, so nothing can
+/// ever bind its parameters — declaring any is rejected rather than
+/// silently leaking the parameter's own name (or panicking in codegen)
+/// into the generated Compose file.
+#[test]
+fn parameterized_defaults_template_is_error() {
+    let err = compose_err(
+        "template defaults(x: String) {\n  restart $x\n}\n\
+         service s {\n  image \"nginx\"\n}\n",
+    );
+    assert!(matches!(
+        err,
+        ComposeError::ParameterizedDefaults { param, .. } if param == "x"
+    ));
+}
+
+/// The same rejection covers a parameter used in a `raw` block, which
+/// is the shape that used to reach codegen's `raw` transcription.
+#[test]
+fn parameterized_defaults_template_with_raw_param_is_error() {
+    let err = compose_err(
+        "template defaults(x: Number) {\n  raw { k: $x }\n}\n\
+         service s {\n  image \"nginx\"\n}\n",
+    );
+    assert!(matches!(
+        err,
+        ComposeError::ParameterizedDefaults { param, .. } if param == "x"
+    ));
+}
+
+/// A parameterless `defaults` is of course still fine — the rejection
+/// keys on the parameter list, not on the name.
+#[test]
+fn parameterless_defaults_template_is_still_accepted() {
+    let composed = compose_ok(
+        "template defaults {\n  restart unless-stopped\n}\n\
+         service s {\n  image \"nginx\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        service
+            .fields
+            .restart
+            .as_ref()
+            .unwrap()
+            .policy
+            .as_ref()
+            .unwrap()
+            .text(),
+        "unless-stopped"
+    );
+}
+
+/// A *non*-`defaults` template may still declare parameters — this is
+/// only about the implicitly-applied one.
+#[test]
+fn parameterized_non_defaults_template_is_unaffected() {
+    let composed = compose_ok(
+        "template based(policy: String) {\n  restart $policy\n}\n\
+         service s {\n  with based { policy: \"always\" }\n  image \"nginx\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        service
+            .fields
+            .restart
+            .as_ref()
+            .unwrap()
+            .policy
+            .as_ref()
+            .unwrap()
+            .text(),
+        "always"
+    );
+}
+
 // --- imports (Stage 1: no real file loading yet) ---
 
 #[test]

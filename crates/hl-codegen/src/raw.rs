@@ -59,7 +59,15 @@ fn literal_to_yaml(
             let resolved = interp::resolve(lit.text(), bindings, *span)?;
             Ok(serde_yaml::Value::String(resolved))
         }
-        Literal::Param(_, _) => unreachable!("Literal::Param never survives compose()"),
+        // Composition is supposed to have substituted this away already,
+        // so reaching here means a hole in that invariant rather than
+        // anything the user wrote wrong — but a compiler bug should
+        // still surface as a located diagnostic, not a panic in the
+        // middle of a build (#62).
+        Literal::Param(name, span) => Err(CodegenError::UnsubstitutedParameter {
+            param: name.clone(),
+            span: *span,
+        }),
     }
 }
 
@@ -125,6 +133,19 @@ mod tests {
         let lit = Literal::Str("true".to_string(), span());
         let yaml = to_yaml(&RawValue::Literal(lit), &bindings()).unwrap();
         assert_eq!(yaml, serde_yaml::Value::String("true".to_string()));
+    }
+
+    /// A `Literal::Param` reaching codegen is a compiler-invariant
+    /// violation, but it degrades to an error rather than the panic it
+    /// used to be (#62).
+    #[test]
+    fn surviving_param_is_an_error_not_a_panic() {
+        let lit = Literal::Param("x".to_string(), span());
+        let err = to_yaml(&RawValue::Literal(lit), &bindings()).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::UnsubstitutedParameter { param, .. } if param == "x"
+        ));
     }
 
     #[test]
