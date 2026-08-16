@@ -1,0 +1,22 @@
+version: 2
+
+updates:
+  # Action versions are pinned by major tag (`@v4`), which floats within
+  # a major but never crosses one — so a major bump needs a PR to land.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+
+  # `fuzz/` is a separate crate with its own Cargo.lock, deliberately
+  # outside the workspace (it needs a nightly toolchain), so it needs its
+  # own entry — the workspace one above does not reach it.
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly

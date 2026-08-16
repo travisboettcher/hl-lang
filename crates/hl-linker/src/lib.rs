@@ -1,6 +1,6 @@
 //! Resolves a real, on-disk `use` graph into one [`ComposedProgram`] —
-//! the same type [`hl_parser::compose`] produces for a single file, so
-//! `hl-codegen` needs no changes to consume either. [`hl_parser::compose`]'s
+//! the same type [`fn@hl_parser::compose`] produces for a single file, so
+//! `hl-codegen` needs no changes to consume either. [`mod@hl_parser::compose`]'s
 //! own doc explains what composition means; this crate is only
 //! responsible for the part `compose()` deliberately doesn't do: turning
 //! `use PATH as ALIAS` declarations into an actual loaded, alias-resolved

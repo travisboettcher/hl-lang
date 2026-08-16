@@ -5,6 +5,11 @@ on:
     - cron: "0 3 * * *"
   workflow_dispatch:
 
+# Read-only: this workflow only builds and fuzzes, and an explicit
+# block keeps a change to the repo default from widening that.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -12,6 +17,10 @@ jobs:
   fuzz-deep:
     name: deep fuzz run (${{ matrix.target }})
     runs-on: ubuntu-latest
+    # 10 minutes of fuzzing per target plus toolchain/cargo-fuzz build;
+    # without a cap a fuzz run that wedges would sit at GitHub's six-hour
+    # default every night.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

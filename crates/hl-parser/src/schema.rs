@@ -41,7 +41,7 @@ pub enum FieldKind {
     ReferenceList,
     /// A list of template invocations (`with`'s `templates` field): each
     /// item is an `IDENT` naming a template, optionally followed by a
-    /// `{ arg: value, ... }` argument body. Parses like [`ReferenceList`]
+    /// `{ arg: value, ... }` argument body. Parses like [`Self::ReferenceList`]
     /// (bracketed list, bare comma-list sugar, accumulates, never
     /// duplicate-checked) except each item can carry an argument body.
     TemplateInvocationList,

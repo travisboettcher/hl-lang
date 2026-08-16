@@ -64,7 +64,7 @@ pub enum Literal {
     /// when it sees the `$` sigil — never by ordinary literal parsing,
     /// and never legal (a parse error) outside a template body, since a
     /// plain `service` isn't parameterized. Composition
-    /// ([`crate::compose`]) substitutes every `Param` with the
+    /// ([`fn@crate::compose`]) substitutes every `Param` with the
     /// invocation's bound argument value; a `Param` surviving composition
     /// would be a bug.
     Param(String, Span),

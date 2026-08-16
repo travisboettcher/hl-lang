@@ -11,7 +11,7 @@
 //! The merge engine itself ([`compose_with_resolver`] and everything
 //! below it) is generalized over a [`SymbolResolver`], so it can resolve
 //! both same-file names (the plain [`compose`] entry point, via
-//! [`SingleFileResolver`]) and cross-file `alias.name` references (a
+//! `SingleFileResolver`) and cross-file `alias.name` references (a
 //! future linker, over its own module graph) with one implementation —
 //! see [`SymbolResolver`]'s own doc for the scoping contract that makes
 //! a template's own references always resolve in the scope it was
@@ -150,7 +150,7 @@ pub enum ComposeError {
     /// An `alias.name` reference's `alias` doesn't resolve to anything —
     /// either no `use ... as alias` was ever in scope, or (this
     /// milestone specifically) the reference was resolved by
-    /// [`SingleFileResolver`], which has no aliases at all: a lone
+    /// `SingleFileResolver`, which has no aliases at all: a lone
     /// [`Program`] has no imports by definition.
     UnknownAlias { alias: String, span: Span },
     /// A qualified reference (`alias.name`) was used on `middleware` or
@@ -173,7 +173,7 @@ pub enum ComposeError {
     /// A qualified `networks [alias.name]` entry's `alias` resolved to a
     /// real imported scope, but no `network` named `name` exists there.
     /// Distinct from [`Self::UnknownAlias`] (the alias itself didn't
-    /// resolve) — [`SingleFileResolver`] never raises this, since every
+    /// resolve) — `SingleFileResolver` never raises this, since every
     /// qualified lookup there is unconditionally `UnknownAlias` (a lone
     /// [`Program`] has no valid aliases at all); a real cross-file
     /// resolver is the first place this becomes reachable.
@@ -586,7 +586,7 @@ mod error_display_tests {
 /// Resolves names against a whole-program symbol table, generalized over
 /// an opaque `Scope` so the same merge engine ([`compose_with_resolver`])
 /// works both for a single already-parsed [`Program`] (via
-/// [`SingleFileResolver`], `Scope = ()`) and, in a future milestone, a
+/// `SingleFileResolver`, `Scope = ()`) and, in a future milestone, a
 /// whole module graph of cross-file `use` imports (`Scope` = a module
 /// identity).
 ///
@@ -686,7 +686,7 @@ impl SymbolResolver for SingleFileResolver {
 
 /// Resolves every `template`/`with` composition in `program`, using only
 /// `program`'s own top-level declarations — no cross-file imports are
-/// followed (see [`SingleFileResolver`]'s doc: a `use` declaration
+/// followed (see `SingleFileResolver`'s doc: a `use` declaration
 /// parses, but any *qualified* reference it enables errors with
 /// [`ComposeError::UnknownAlias`], since a lone `Program` has nowhere to
 /// resolve it). Templates are collected into a whole-program symbol

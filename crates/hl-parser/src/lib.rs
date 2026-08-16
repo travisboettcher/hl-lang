@@ -1,5 +1,5 @@
 //! Parser for hl-lang: turns a token stream from `hl-lexer` into an AST,
-//! and (via [`compose`]) resolves `template`/`with` composition into
+//! and (via [`fn@compose`]) resolves `template`/`with` composition into
 //! fully-merged services.
 //!
 //! The parser is one generic, schema-table-driven engine — not one
