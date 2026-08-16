@@ -46,6 +46,13 @@ examples; each crate's rustdoc (`crates/*/src/lib.rs`) covers
 implementation details for that crate. Skim the relevant one before
 making non-trivial changes to the lexer/parser/codegen pipeline.
 
+`book/` is the user-facing guide published at
+<https://travisboettcher.github.io/hl-lang/> (via `.github/workflows/docs.yml`,
+mdBook). If a change adds or alters user-visible syntax or a built-in
+field, update the relevant `book/src/*.md` page alongside `docs/DESIGN.md`
+rather than letting the two drift apart. Build it locally with `mdbook
+build book` (`cargo install mdbook`) or `mdbook serve book` to preview.
+
 ## License
 
 By contributing, you agree your contribution is licensed under the same

@@ -1,6 +1,7 @@
 # hl-lang
 
 [![CI](https://github.com/travisboettcher/hl-lang/actions/workflows/ci.yml/badge.svg)](https://github.com/travisboettcher/hl-lang/actions/workflows/ci.yml)
+[![Docs](https://github.com/travisboettcher/hl-lang/actions/workflows/docs.yml/badge.svg)](https://travisboettcher.github.io/hl-lang/)
 
 `hll` (pronounced "hell" — short for **H**ome**L**ab **L**anguage) is a
 small declarative DSL that transpiles to Docker Compose YAML plus Traefik
@@ -11,8 +12,11 @@ an interpreter — no evaluation, no closures, no runtime — and doubles as a
 codegen pipeline. Source files use the `.hll` extension; the CLI binary is
 `hllc`.
 
-See [`docs/DESIGN.md`](docs/DESIGN.md) for the language's motivation, grammar,
-and worked examples.
+**[Read the user guide](https://travisboettcher.github.io/hl-lang/)** for
+syntax, every built-in field, templates/composition, imports, and the
+`hllc` CLI, or see [`docs/DESIGN.md`](docs/DESIGN.md) for the language's
+formal grammar and worked examples (the implementer-facing spec the user
+guide is built on top of).
 
 ## Status
 

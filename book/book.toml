@@ -1,0 +1,17 @@
+[book]
+title = "hll"
+description = "User guide for hll, the HomeLab Language that transpiles to Docker Compose + Traefik labels"
+authors = ["hl-lang contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/travisboettcher/hl-lang"
+edit-url-template = "https://github.com/travisboettcher/hl-lang/edit/main/book/{path}"
+site-url = "/hl-lang/"
+default-theme = "light"
+preferred-dark-theme = "navy"
+
+[output.html.search]
+enable = true
+limit-results = 20
