@@ -63,7 +63,9 @@ Primary field: `port`. Secondary-field shorthand: `as` aliases to `host`.
 expose 8096 as "media.example.com"
 # same as: expose { port: 8096, host: "media.example.com" }
 
-expose 8096 as "media.example.com", entrypoint: "web-secure"
+# `as` is a one-shot fusion, not a list — it can't be followed by more
+# fields. To also set entrypoint, name `host` explicitly instead:
+expose 8096, host: "media.example.com", entrypoint: "web-secure"
 ```
 
 `expose.port` becomes Compose's `expose:` entry (the port is reachable
