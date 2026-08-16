@@ -30,9 +30,17 @@ jobs:
     # semver-label.yml (see that file's comment on why it's checked
     # against `repository_owner` rather than `github-actions[bot]`), so
     # an external contributor can't spoof it.
+    #
+    # Dependabot is exempt for the same reason (#96): a dependency bump
+    # legitimately closes no issue. Unlike semver-label.yml, this applies
+    # to *both* ecosystems — the reason that file exempts only
+    # `github-actions` is about whether a release should be cut, which has
+    # no bearing on whether an issue exists to close. `user.login` is set
+    # by GitHub, so a contributor can't spoof it with a lookalike branch.
     if: |
       !(github.event.pull_request.user.login == github.repository_owner &&
-        contains(github.event.pull_request.title, '[release-bump]'))
+        contains(github.event.pull_request.title, '[release-bump]')) &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
