@@ -167,4 +167,13 @@ jobs:
           version=$(grep -m1 '^version' crates/hl-cli/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
           cp target/release/hllc hllc-linux-x86_64
           gh release upload "v$version" hllc-linux-x86_64 --clobber
-          gh release edit "v$version" --draft=false
+          # release-plz's own release body comes from each crate's
+          # CHANGELOG.md, which this workflow never actually updates
+          # (versions are bumped from a PR label, not conventional
+          # commits, so there's nothing to regenerate) — it would just
+          # keep repeating the placeholder seed entry forever. Real
+          # notes come from GitHub's own generate-notes API instead,
+          # which summarizes the PRs merged since the last release.
+          notes=$(gh api "repos/${{ github.repository }}/releases/generate-notes" \
+            -f tag_name="v$version" --jq .body)
+          gh release edit "v$version" --draft=false --notes "$notes"
