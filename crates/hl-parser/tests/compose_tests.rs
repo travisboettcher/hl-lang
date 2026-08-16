@@ -92,7 +92,7 @@ fn explicit_templates_scalar_collision_is_error() {
     );
     match err {
         ComposeError::FieldCollision {
-            field: "image",
+            field: "image.ref",
             first_template,
             second_template,
             ..
@@ -119,7 +119,7 @@ fn explicit_templates_restart_collision_is_error() {
     );
     match err {
         ComposeError::FieldCollision {
-            field: "restart",
+            field: "restart.policy",
             first_template,
             second_template,
             ..
