@@ -155,9 +155,10 @@ fn string_cannot_contain_literal_quote() {
 fn all_punctuation_sequence() {
     use TokenKind::*;
     let expected = vec![
-        LBrace, RBrace, LBracket, RBracket, LParen, RParen, Colon, Equals, Arrow, Comma, Dot, Eof,
+        LBrace, RBrace, LBracket, RBracket, LParen, RParen, Colon, Equals, Arrow, Comma, Dot,
+        Dollar, Eof,
     ];
-    assert_eq!(kinds("{ } [ ] ( ) : = -> , ."), expected);
+    assert_eq!(kinds("{ } [ ] ( ) : = -> , . $"), expected);
 }
 
 #[test]
@@ -165,6 +166,21 @@ fn dot_token() {
     let tok = single_token(".");
     assert_eq!(tok.kind, TokenKind::Dot);
     assert_eq!(tok.lexeme, ".");
+}
+
+#[test]
+fn dollar_token() {
+    let tok = single_token("$");
+    assert_eq!(tok.kind, TokenKind::Dollar);
+    assert_eq!(tok.lexeme, "$");
+}
+
+#[test]
+fn dollar_param_reference_tokenizes_as_dollar_ident() {
+    assert_eq!(
+        kinds("$port"),
+        vec![TokenKind::Dollar, TokenKind::Ident, TokenKind::Eof]
+    );
 }
 
 #[test]

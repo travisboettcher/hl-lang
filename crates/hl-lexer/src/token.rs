@@ -35,6 +35,11 @@ pub enum TokenKind {
     /// grammar (`NUMBER` is integer-only, so there's no decimal-point
     /// ambiguity to resolve).
     Dot,
+    /// `$` — prefixes a template parameter reference (`$port`) inside a
+    /// `template`'s own body. Never appears anywhere else in the
+    /// grammar; the parser (not the lexer) enforces that it's only legal
+    /// in that one context.
+    Dollar,
     /// Emitted exactly once, at the end of input.
     Eof,
 }

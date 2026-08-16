@@ -1,6 +1,6 @@
 use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
-use hl_parser::{Expected, Literal, ParseError, TemplateDecl, TopDecl, UseDecl, parse};
+use hl_parser::{Expected, Literal, ParamType, ParseError, TemplateDecl, TopDecl, UseDecl, parse};
 
 fn parse_ok(source: &str) -> hl_parser::Program {
     parse(source).unwrap_or_else(|err| panic!("unexpected parse error: {err}"))
@@ -257,8 +257,8 @@ fn expose_entrypoint_field() {
 #[test]
 fn expose_host_and_entrypoint_fields_in_template_body() {
     let program = parse_ok(
-        "template internal_web(port) {\n  \
-           expose port, host: \"{{name}}.internal.techdebtor.io\", entrypoint: \"web-secure\"\n  \
+        "template internal_web(port: Number) {\n  \
+           expose $port, host: \"{{name}}.internal.techdebtor.io\", entrypoint: \"web-secure\"\n  \
            middleware local-ipwhitelist\n\
          }\n",
     );
@@ -663,8 +663,30 @@ fn template_decl_empty_parens_same_as_no_parens() {
 fn template_decl_with_params() {
     let program = parse_ok("template t(a, b) {\n  image \"x\"\n}\n");
     let template = as_template(&program.decls[0]);
-    let names: Vec<&str> = template.params.iter().map(|p| p.name.as_str()).collect();
+    let names: Vec<&str> = template
+        .params
+        .iter()
+        .map(|p| p.name.name.as_str())
+        .collect();
     assert_eq!(names, vec!["a", "b"]);
+    assert!(template.params.iter().all(|p| p.ty.is_none()));
+}
+
+#[test]
+fn template_decl_with_typed_params() {
+    let program = parse_ok("template t(a: Number, b: String) {\n  image \"x\"\n}\n");
+    let template = as_template(&program.decls[0]);
+    assert_eq!(template.params[0].ty, Some(ParamType::Number));
+    assert_eq!(template.params[1].ty, Some(ParamType::String));
+}
+
+#[test]
+fn param_list_unknown_type_is_error() {
+    let err = parse("template t(a: Boolean) {\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnknownParamType { name, .. } if name == "Boolean"
+    ));
 }
 
 #[test]
@@ -711,8 +733,8 @@ fn unknown_field_in_template_body_reports_template_type_name() {
 }
 
 #[test]
-fn literal_param_marks_only_matching_bare_idents_inside_own_template() {
-    let program = parse_ok("template t(port) {\n  expose port\n}\n");
+fn dollar_param_reference_resolves_inside_own_template() {
+    let program = parse_ok("template t(port) {\n  expose $port\n}\n");
     let template = as_template(&program.decls[0]);
     let port = template
         .fields
@@ -726,11 +748,29 @@ fn literal_param_marks_only_matching_bare_idents_inside_own_template() {
 }
 
 #[test]
+fn bare_ident_inside_template_body_is_never_treated_as_a_param() {
+    // Without the `$` sigil, a bare identifier that happens to match a
+    // declared parameter's name is still an ordinary `Literal::Ident` —
+    // resolution is driven entirely by the sigil now, never by a
+    // name-matching heuristic.
+    let program = parse_ok("template t(port) {\n  restart port\n}\n");
+    let template = as_template(&program.decls[0]);
+    let policy = template
+        .fields
+        .restart
+        .as_ref()
+        .unwrap()
+        .policy
+        .as_ref()
+        .unwrap();
+    assert!(matches!(policy, Literal::Ident(name, _) if name == "port"));
+}
+
+#[test]
 fn literal_param_does_not_leak_into_unrelated_service() {
     // A service using the bare identifier "port" (unrelated to any
     // template's own parameter list) must still produce a plain
-    // `Literal::Ident`, proving the parameter-marking pass never runs
-    // outside a single template's own body.
+    // `Literal::Ident`.
     let program = parse_ok("service s {\n  restart port\n}\n");
     let service = as_service(&program.decls[0]);
     let policy = service
@@ -742,6 +782,39 @@ fn literal_param_does_not_leak_into_unrelated_service() {
         .as_ref()
         .unwrap();
     assert!(matches!(policy, Literal::Ident(name, _) if name == "port"));
+}
+
+#[test]
+fn dollar_reference_outside_template_body_is_error() {
+    let err = parse("service s {\n  restart $port\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::ParamReferenceOutsideTemplate { name, .. } if name == "port"
+    ));
+}
+
+#[test]
+fn dollar_reference_to_undeclared_param_is_error() {
+    let err = parse("template t(port) {\n  expose $prot\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnknownTemplateParam { name, .. } if name == "prot"
+    ));
+}
+
+#[test]
+fn dollar_reference_forwarded_through_nested_with_invocation() {
+    // `$x` inside a template's own `with`-invocation argument body
+    // resolves against that same enclosing template's declared params —
+    // parameter forwarding, e.g. `template outer(x) { with inner { y: $x } }`.
+    let program = parse_ok("template outer(x) {\n  with inner { y: $x }\n}\n");
+    let template = as_template(&program.decls[0]);
+    let inv = &template.fields.with[0];
+    let value = &inv.args.entries[0].value;
+    assert!(matches!(
+        value,
+        hl_parser::RawValue::Literal(Literal::Param(name, _)) if name == "x"
+    ));
 }
 
 // --- with ---

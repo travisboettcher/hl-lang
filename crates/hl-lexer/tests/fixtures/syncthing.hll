@@ -1,10 +1,10 @@
 # Composable templates + a service that merges them, per the design
 # doc's "Composition" section.
 
-template internal_web(port) {
+template internal_web(port: Number) {
   networks [traefik-net]
   restart unless-stopped
-  expose port as "{{name}}.internal.techdebtor.io"
+  expose $port as "{{name}}.internal.techdebtor.io"
   middleware local-ipwhitelist
 }
 
@@ -12,9 +12,9 @@ template authenticated {
   middleware forwardAuth-authentik
 }
 
-template linuxserver_app(puid, pgid) {
-  env PUID = puid
-  env PGID = pgid
+template linuxserver_app(puid: Number, pgid: Number) {
+  env PUID = $puid
+  env PGID = $pgid
 }
 
 service syncthing {

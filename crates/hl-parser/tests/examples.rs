@@ -51,9 +51,9 @@ fn jellyfin_fixture_parses_to_expected_ast() {
 /// onto `service syncthing` via `with`. Parses, then composes, and
 /// checks the fully-resolved service field-by-field — including that
 /// argument substitution preserves the *argument's* literal kind (the
-/// template body writes `env PUID = puid` with a bare identifier, but
-/// the resolved value is a `Literal::Number`, since that's what
-/// `puid: 1000` supplied) and that middleware/networks accumulate in
+/// template body writes `env PUID = $puid` with a `$`-sigiled parameter
+/// reference, but the resolved value is a `Literal::Number`, since that's
+/// what `puid: 1000` supplied) and that middleware/networks accumulate in
 /// with-list left-to-right order.
 #[test]
 fn syncthing_fixture_composes_to_expected_service() {
@@ -117,8 +117,9 @@ fn syncthing_fixture_composes_to_expected_service() {
     );
 
     // `linuxserver_app`'s contributions: PUID/PGID values were written
-    // as bare parameter references (`puid`/`pgid`) in the template body
-    // but must come out as the Number arguments the invocation supplied.
+    // as `$`-sigiled parameter references (`$puid`/`$pgid`) in the
+    // template body but must come out as the Number arguments the
+    // invocation supplied.
     assert_eq!(service.fields.env.entries.len(), 2);
     let puid = &service.fields.env.entries[0];
     assert_eq!(puid.key.text(), "PUID");

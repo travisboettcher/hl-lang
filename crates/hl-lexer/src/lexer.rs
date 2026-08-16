@@ -170,6 +170,7 @@ impl<'src> Lexer<'src> {
             ',' => single!(TokenKind::Comma),
             '=' => single!(TokenKind::Equals),
             '.' => single!(TokenKind::Dot),
+            '$' => single!(TokenKind::Dollar),
             '-' => {
                 if self.peek_char() == Some('>') {
                     let (idx, c) = self.bump().expect("peeked '>' must be consumable");

@@ -1,3 +1,5 @@
+use std::fmt;
+
 use hl_lexer::Span;
 
 /// A parsed hl-lang source file: a sequence of top-level declarations.
@@ -55,16 +57,16 @@ pub enum Literal {
         span: Span,
     },
     Ident(String, Span),
-    /// A bare identifier inside a `template`'s own body that names one of
-    /// that *same* template's own declared parameters, e.g. `puid` in
-    /// `template linuxserver_app(puid, pgid) { env PUID = puid }`.
-    /// Produced only by a post-parse pass scoped to a single template
-    /// declaration ([`crate::parser`]'s parameter-marking pass) — never
-    /// by ordinary literal parsing, and never present in a plain
-    /// `service`'s own directly-written fields (services aren't
-    /// parameterized). Composition ([`crate::compose`]) substitutes every
-    /// `Param` with the invocation's bound argument value; a `Param`
-    /// surviving composition would be a bug.
+    /// A `$name` parameter reference inside a `template`'s own body,
+    /// naming one of that *same* template's own declared parameters,
+    /// e.g. `$puid` in `template linuxserver_app(puid: Number, pgid:
+    /// Number) { env PUID = $puid }`. Produced directly by the parser
+    /// when it sees the `$` sigil — never by ordinary literal parsing,
+    /// and never legal (a parse error) outside a template body, since a
+    /// plain `service` isn't parameterized. Composition
+    /// ([`crate::compose`]) substitutes every `Param` with the
+    /// invocation's bound argument value; a `Param` surviving composition
+    /// would be a bug.
     Param(String, Span),
 }
 
@@ -84,6 +86,44 @@ impl Literal {
             Literal::Number { span, .. } => *span,
         }
     }
+}
+
+/// A declared template parameter's type. Deliberately small — `Number`
+/// and `String` are the only two kinds a signature can declare this
+/// milestone; bare-`Ident`-typed and list-typed parameters are out of
+/// scope (see docs/DESIGN.md's Composition section).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamType {
+    Number,
+    String,
+}
+
+impl ParamType {
+    /// The type's own name, as written in source (`Number`/`String`) and
+    /// as shown in diagnostics.
+    pub fn name(self) -> &'static str {
+        match self {
+            ParamType::Number => "Number",
+            ParamType::String => "String",
+        }
+    }
+}
+
+impl fmt::Display for ParamType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
+
+/// One declared template parameter: its name, plus an optional `:
+/// Number|String` type annotation. An untyped parameter (`ty: None`)
+/// accepts any literal kind at the call site with no compose-time check —
+/// see [`crate::compose::ComposeError::ArgumentTypeMismatch`] for what a
+/// typed parameter enforces.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Param {
+    pub name: Ident,
+    pub ty: Option<ParamType>,
 }
 
 /// A bare-identifier reference, e.g. an entry in `middleware`/
@@ -311,10 +351,10 @@ pub struct Service {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TemplateDecl {
     pub name: Ident,
-    /// Declared parameter names, in source order. Empty for a
-    /// zero-parameter template (`template foo { ... }` or
-    /// `template foo() { ... }` — both parse to the same empty `Vec`).
-    pub params: Vec<Ident>,
+    /// Declared parameters, in source order. Empty for a zero-parameter
+    /// template (`template foo { ... }` or `template foo() { ... }` —
+    /// both parse to the same empty `Vec`).
+    pub params: Vec<Param>,
     pub fields: ServiceFields,
     pub span: Span,
 }
