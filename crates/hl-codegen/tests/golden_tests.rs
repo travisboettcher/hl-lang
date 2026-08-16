@@ -194,6 +194,43 @@ fn unknown_network_reference_is_error() {
     ));
 }
 
+/// #70: the error used to carry the enclosing service's span, so an
+/// undeclared network on line 4 was reported at `1:1`. It now points at
+/// the offending reference itself.
+#[test]
+fn unknown_network_error_points_at_the_offending_reference() {
+    let err = generate_err(
+        "network known {\n  external\n}\n\
+         service s {\n  image \"x\"\n  networks [known, nope]\n}\n",
+    );
+    let span = err.span();
+    assert_eq!(
+        (span.line, span.col),
+        (6, 20),
+        "expected the span of `nope`, got {}:{}",
+        span.line,
+        span.col
+    );
+}
+
+/// The ambiguity is a property of the service's whole `networks` list —
+/// no one reference is at fault — so this one deliberately keeps
+/// pointing at the service.
+#[test]
+fn ambiguous_external_network_error_points_at_the_service() {
+    let err = generate_err(
+        "network a {\n  external\n}\n\
+         network b {\n  external\n}\n\
+         service s {\n  image \"x\"\n  networks [a, b]\n}\n",
+    );
+    assert!(matches!(
+        err,
+        CodegenError::AmbiguousExternalNetwork { ref service, .. } if service == "s"
+    ));
+    let span = err.span();
+    assert_eq!((span.line, span.col), (7, 1));
+}
+
 #[test]
 fn missing_image_is_error() {
     let err = generate_err("service s {\n}\n");

@@ -278,11 +278,17 @@ fn generate_service(
 /// program's top-level `networks:` section, and — if exactly one
 /// referenced network is `external` — its real name, for the
 /// `traefik.docker.network=` label.
+///
+/// `service_span` is only used for [`CodegenError::AmbiguousExternalNetwork`],
+/// which is a property of the service's whole `networks` list rather
+/// than of any one entry in it — there is no single offending
+/// reference to point at. [`CodegenError::UnknownNetwork`] does have
+/// one, and points at it (#70).
 fn resolve_networks(
     refs: &[Reference],
     declared: &[Network],
     service_name: &str,
-    span: Span,
+    service_span: Span,
 ) -> Result<(Vec<String>, NetworkDocs, Option<String>), CodegenError> {
     let mut compose_networks = Vec::with_capacity(refs.len());
     let mut docs = Vec::with_capacity(refs.len());
@@ -295,7 +301,7 @@ fn resolve_networks(
             .ok_or_else(|| CodegenError::UnknownNetwork {
                 service: service_name.to_string(),
                 network: r.name.clone(),
-                span,
+                span: r.span,
             })?;
         compose_networks.push(decl.name.name.clone());
         let is_external = decl.external.is_some();
@@ -323,7 +329,7 @@ fn resolve_networks(
             return Err(CodegenError::AmbiguousExternalNetwork {
                 service: service_name.to_string(),
                 candidates: many.to_vec(),
-                span,
+                span: service_span,
             });
         }
     };
