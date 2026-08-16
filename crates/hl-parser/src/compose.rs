@@ -1018,23 +1018,12 @@ impl Spanned for EnvEntry {
 /// change out from under `image.ref`/`restart.policy` the moment either
 /// struct grew a second field). A bare field with no enclosing struct at
 /// all, like `container_name`, is keyed under its own name — there's no
-/// sub-field path to be dotted onto.
-/// Earlier this milestone, `expose`'s three sub-fields each got their
-/// own named `Option<(Literal, Tier)>` field here (mirroring `image`/
-/// `restart`'s own single-field `Option<(Image, Tier)>`/`Option<(Restart,
-/// Tier)>` slots) — that doesn't scale: every new struct sub-field (or
-/// new bare scalar field) meant a new named `MergeAcc` field, a new
-/// `merge_single` call site in [`merge_tier`], and a new line in
-/// [`MergeAcc::into_service_fields`]. A single `HashMap<&'static str,
-/// (Literal, Tier)>` collapses all of that to one shared merge routine
-/// ([`merge_scalar`]) plus one line each in [`scalar_fields_of`] (how to
-/// find a tier's scalar values) and [`MergeAcc::into_service_fields`]
-/// (how to put them back) — the only two places that need to know
-/// `ServiceFields`'s concrete shape at all. `image`/`restart` moved onto
-/// this same map for consistency, which is also why the `Spanned`-
-/// generic `merge_single` and its `Image`/`Restart` impls are gone:
-/// every scalar collision point is a bare `Literal`, which already has
-/// its own inherent `span()`.
+/// sub-field path to be dotted onto. Which canonical keys exist, and how
+/// each one's `Literal` slot is read out of/written back into
+/// `ServiceFields`, is entirely described by the [`SCALAR_FIELDS`] table
+/// below — see its doc for why that's what makes a new scalar collision
+/// point a one-line addition rather than a new `MergeAcc` field plus new
+/// hand-written merge/rebuild logic.
 #[derive(Default)]
 struct MergeAcc {
     scalars: HashMap<&'static str, (Literal, Tier)>,
@@ -1049,41 +1038,7 @@ struct MergeAcc {
 
 impl MergeAcc {
     fn into_service_fields(mut self) -> ServiceFields {
-        let image = self.scalars.remove("image.ref").map(|(v, _)| Image {
-            span: v.span(),
-            reference: Some(v),
-        });
-        let port = self.scalars.remove("expose.port");
-        let host = self.scalars.remove("expose.host");
-        let entrypoint = self.scalars.remove("expose.entrypoint");
-        // The merged `Expose`'s own span is cosmetic — nothing
-        // downstream reads it for anything but existence, since codegen
-        // and `substitute_params` both work off the individual
-        // sub-field spans instead — so this just picks whichever
-        // sub-field was set, preferring `port` since it's the primary
-        // field. `None` only when no sub-field was ever set, meaning
-        // `expose` itself should stay unset.
-        let expose_span = port
-            .as_ref()
-            .or(host.as_ref())
-            .or(entrypoint.as_ref())
-            .map(|(v, _)| v.span());
-        let expose = expose_span.map(|span| Expose {
-            port: port.map(|(v, _)| v),
-            host: host.map(|(v, _)| v),
-            entrypoint: entrypoint.map(|(v, _)| v),
-            span,
-        });
-        let restart = self.scalars.remove("restart.policy").map(|(v, _)| Restart {
-            span: v.span(),
-            policy: Some(v),
-        });
-        let container_name = self.scalars.remove("container_name").map(|(v, _)| v);
-        ServiceFields {
-            image,
-            expose,
-            restart,
-            container_name,
+        let mut fields = ServiceFields {
             volumes: VolumeMap {
                 entries: self.volumes.into_iter().map(|(v, _)| v).collect(),
             },
@@ -1095,46 +1050,120 @@ impl MergeAcc {
             depends_on: self.depends_on,
             networks: self.networks,
             dns: self.dns,
-            with: Vec::new(),
+            ..Default::default()
+        };
+        for field in SCALAR_FIELDS {
+            if let Some((value, _)) = self.scalars.remove(field.key) {
+                (field.set)(&mut fields, value);
+            }
         }
+        fields
     }
 }
 
-/// Flattens one tier's scalar collision points — `image`,
-/// `expose.port`/`.host`/`.entrypoint`, `restart` — out of the
-/// concrete `Image`/`Expose`/`Restart` structs that held them, into
-/// `(canonical key, value)` pairs [`merge_scalar`] can merge generically.
-/// The one place in the merge engine that needs to know
-/// `ServiceFields`'s actual struct shape (its mirror image,
-/// [`MergeAcc::into_service_fields`], is the only other one) — adding a
-/// future scalar collision point (a new struct sub-field, or a new bare
-/// scalar field) means adding one line here and one there, not a new
-/// `MergeAcc` field plus its own merge call site.
-fn scalar_fields_of(
-    image: Option<Image>,
-    expose: Option<Expose>,
-    restart: Option<Restart>,
-) -> Vec<(&'static str, Literal)> {
-    let mut out = Vec::new();
-    if let Some(v) = image.and_then(|i| i.reference) {
-        out.push(("image.ref", v));
-    }
-    if let Some(e) = expose {
-        if let Some(v) = e.port {
-            out.push(("expose.port", v));
-        }
-        if let Some(v) = e.host {
-            out.push(("expose.host", v));
-        }
-        if let Some(v) = e.entrypoint {
-            out.push(("expose.entrypoint", v));
-        }
-    }
-    if let Some(v) = restart.and_then(|r| r.policy) {
-        out.push(("restart.policy", v));
-    }
-    out
+/// One scalar collision point in `ServiceFields` — a `Literal` slot that
+/// lives either directly on `ServiceFields` (`container_name`) or inside
+/// one of its `Nested` struct fields (`image.ref`,
+/// `expose.port`/`.host`/`.entrypoint`, `restart.policy`) — described
+/// generically by `key` (the identity-stable, fully-dotted name
+/// [`merge_scalar`]/`ComposeError` key collisions by — see #27) plus a
+/// pair of function pointers for reading the slot out of a tier's
+/// `ServiceFields` (`take`) and writing a merged value back into a
+/// freshly rebuilt one (`set`). This table is what lets [`merge_tier`]
+/// and [`MergeAcc::into_service_fields`] each be one generic loop
+/// instead of the two bespoke, hand-enumerated functions they used to
+/// be (see hl-lang#28) — the only place left that needs to know
+/// `ServiceFields`'s concrete struct shape. Adding a future scalar
+/// collision point (a new struct sub-field, or a new bare scalar field)
+/// means adding one `ScalarField` entry here, not touching either
+/// generic function.
+///
+/// `expose`'s three entries are listed `port`, `host`, `entrypoint` in
+/// that order deliberately: `set`'s `get_or_insert` only stamps a
+/// freshly created `Expose`'s span from the *first* sub-field processed
+/// that's actually present, so this order reproduces the same
+/// port-over-host-over-entrypoint span preference the old hand-written
+/// `into_service_fields` documented (the span itself stays cosmetic —
+/// see [`Expose`]'s doc — nothing downstream reads it for anything but
+/// existence).
+struct ScalarField {
+    key: &'static str,
+    take: fn(&mut ServiceFields) -> Option<Literal>,
+    set: fn(&mut ServiceFields, Literal),
 }
+
+static SCALAR_FIELDS: &[ScalarField] = &[
+    ScalarField {
+        key: "image.ref",
+        take: |f| f.image.take().and_then(|i| i.reference),
+        set: |f, v| {
+            f.image = Some(Image {
+                span: v.span(),
+                reference: Some(v),
+            });
+        },
+    },
+    ScalarField {
+        key: "expose.port",
+        take: |f| f.expose.as_mut().and_then(|e| e.port.take()),
+        set: |f, v| {
+            let span = v.span();
+            f.expose
+                .get_or_insert(Expose {
+                    port: None,
+                    host: None,
+                    entrypoint: None,
+                    span,
+                })
+                .port = Some(v);
+        },
+    },
+    ScalarField {
+        key: "expose.host",
+        take: |f| f.expose.as_mut().and_then(|e| e.host.take()),
+        set: |f, v| {
+            let span = v.span();
+            f.expose
+                .get_or_insert(Expose {
+                    port: None,
+                    host: None,
+                    entrypoint: None,
+                    span,
+                })
+                .host = Some(v);
+        },
+    },
+    ScalarField {
+        key: "expose.entrypoint",
+        take: |f| f.expose.as_mut().and_then(|e| e.entrypoint.take()),
+        set: |f, v| {
+            let span = v.span();
+            f.expose
+                .get_or_insert(Expose {
+                    port: None,
+                    host: None,
+                    entrypoint: None,
+                    span,
+                })
+                .entrypoint = Some(v);
+        },
+    },
+    ScalarField {
+        key: "restart.policy",
+        take: |f| f.restart.take().and_then(|r| r.policy),
+        set: |f, v| {
+            f.restart = Some(Restart {
+                span: v.span(),
+                policy: Some(v),
+            });
+        },
+    },
+    ScalarField {
+        key: "container_name",
+        take: |f| f.container_name.take(),
+        set: |f, v| f.container_name = Some(v),
+    },
+];
 
 /// Merges one tier's [`ServiceFields`] into `acc`. List fields
 /// (`raw`/`middleware`/`depends_on`/`networks`/`dns`) always concatenate
@@ -1143,14 +1172,13 @@ fn scalar_fields_of(
 /// intra-body no-uniqueness behavior.
 fn merge_tier(
     acc: &mut MergeAcc,
-    incoming: ServiceFields,
+    mut incoming: ServiceFields,
     tier: &Tier,
 ) -> Result<(), ComposeError> {
-    for (field, value) in scalar_fields_of(incoming.image, incoming.expose, incoming.restart) {
-        merge_scalar(&mut acc.scalars, field, value, tier)?;
-    }
-    if let Some(cn) = incoming.container_name {
-        merge_scalar(&mut acc.scalars, "container_name", cn, tier)?;
+    for field in SCALAR_FIELDS {
+        if let Some(value) = (field.take)(&mut incoming) {
+            merge_scalar(&mut acc.scalars, field.key, value, tier)?;
+        }
     }
     merge_map(
         &mut acc.volumes,
