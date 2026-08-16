@@ -36,7 +36,7 @@ STRING  ::= '"' [^"\n]* '"'
 COMMENT ::= '#' [^\n]*        # to end of line; not part of the token stream
 
 Reserved (not usable as IDENT): "template"
-Punctuation: { } [ ] ( ) : = -> , .
+Punctuation: { } [ ] ( ) : = -> , . $
 ```
 
 - `template` is the *only* reserved word in the entire language. Everything
@@ -53,6 +53,9 @@ Punctuation: { } [ ] ( ) : = -> , .
   see Imports, below) and never appears anywhere else in the grammar —
   `NUMBER` is integer-only, so there's no decimal-point ambiguity to
   resolve.
+- `$` prefixes a reference to a `template`'s own declared parameter
+  (`$port`), see Composition, below. It's reserved for exactly that one
+  purpose — not a general sigil for anything else.
 - `NUMBER` is integer-only: `[0-9]+`, no sign, no decimal point, no exponent.
 - `STRING` is double-quoted with no escape sequences, and cannot contain a
   literal `"` or a newline — an unterminated string is a lex error.
@@ -79,7 +82,11 @@ template_decl  ::= "template" IDENT param_list? ( body | "=" statement )
 
 use_decl       ::= "use" STRING "as" IDENT
 
-param_list     ::= "(" ( IDENT ( "," IDENT )* )? ")"
+param_list     ::= "(" ( param ( "," param )* )? ")"
+
+param          ::= IDENT ( ":" param_type )?
+
+param_type     ::= "Number" | "String"
 
 body           ::= "{" statement* "}"
 
@@ -96,8 +103,26 @@ value          ::= literal | list | statement
 
 list           ::= "[" ( value ( "," value )* )? "]"
 
-literal        ::= STRING | NUMBER | IDENT
+literal        ::= STRING | NUMBER | IDENT | "$" IDENT
 ```
+
+- A parameter's optional `: param_type` annotation is checked strictly,
+  not coercively: a declared `Number` rejects a quoted string argument
+  even if it's numeric-looking, and a declared `String` rejects a bare
+  number — no implicit coercion between kinds. An untyped parameter (no
+  `:` at all) accepts an argument of any literal kind, with no
+  compose-time check. `Number`/`String` are the only two types this
+  milestone supports — a bare-`IDENT`-typed or list-typed parameter isn't
+  expressible yet.
+- The `"$" IDENT` form of `literal` (a parameter reference, e.g. `$port`)
+  is only legal inside a `template`'s own body — including a nested
+  `with`-invocation argument body written inside that template, where a
+  `$name` forwards the *enclosing* template's own parameter (see
+  Composition, below). Used anywhere else (a plain `service`/`network`
+  body, or a `with`-invocation body written inside one of those), it's a
+  compile error: only a template body has a declared parameter list to
+  resolve `$name` against. This is, like the newline/comma layout rules
+  above, a context-sensitive constraint the plain grammar can't express.
 
 `statement` is the whole language: a `named_decl` is one particular shape of
 it (mandatory second name, mandatory body); every field inside a `service`,
@@ -241,8 +266,8 @@ repeating them; two explicit templates only collide if they set the
 *same* `expose` sub-field, not merely the same `expose` field overall.
 
 ```
-template internal_web(port) {
-  expose port, entrypoint: "web-secure"
+template internal_web(port: Number) {
+  expose $port, entrypoint: "web-secure"
 }
 
 service it-tools {
@@ -312,10 +337,10 @@ network traefik-net {
   name: "docker_default"
 }
 
-template internal_web(port) {
+template internal_web(port: Number) {
   networks [traefik-net]
   restart unless-stopped
-  expose port, host: "{{name}}.internal.techdebtor.io", entrypoint: "web-secure"
+  expose $port, host: "{{name}}.internal.techdebtor.io", entrypoint: "web-secure"
   middleware local-ipwhitelist
 }
 
@@ -323,9 +348,9 @@ template authenticated {
   middleware forwardAuth-authentik
 }
 
-template linuxserver_app(puid, pgid) {
-  env PUID = puid
-  env PGID = pgid
+template linuxserver_app(puid: Number, pgid: Number) {
+  env PUID = $puid
+  env PGID = $pgid
 }
 
 service syncthing {
@@ -349,10 +374,10 @@ network traefik-net {
 # templates.hll
 use "network.hll" as net
 
-template internal_web(port) {
+template internal_web(port: Number) {
   networks [net.traefik-net]
   restart unless-stopped
-  expose port, host: "{{name}}.internal.techdebtor.io", entrypoint: "web-secure"
+  expose $port, host: "{{name}}.internal.techdebtor.io", entrypoint: "web-secure"
   middleware local-ipwhitelist
 }
 
@@ -360,9 +385,9 @@ template authenticated {
   middleware forwardAuth-authentik
 }
 
-template linuxserver_app(puid, pgid) {
-  env PUID = puid
-  env PGID = pgid
+template linuxserver_app(puid: Number, pgid: Number) {
+  env PUID = $puid
+  env PGID = $pgid
 }
 
 # syncthing.hll
@@ -403,9 +428,10 @@ readability choice, not a different construct.
 ## Pipeline
 
 1. **Lexer** (`crates/hl-lexer`) — one reserved word (`template`),
-   string/number literals, `{`/`}`/`[`/`]`/`.`, `->`, `:`, `=`, `(`/`)`,
-   `,`, and `#` line comments. Everything else is just an identifier to
-   the lexer; meaning comes from the schema table during parsing.
+   string/number literals, `{`/`}`/`[`/`]`/`.`/`$`, `->`, `:`, `=`,
+   `(`/`)`, `,`, and `#` line comments. Everything else is just an
+   identifier to the lexer; meaning comes from the schema table during
+   parsing.
 2. **Parser** (`crates/hl-parser`) — one generic block parser, not one
    function per keyword: parse `<type> [<n>]`, then either a
    bare-value/list (primary-field shorthand) or a `{ field: value, ... }`

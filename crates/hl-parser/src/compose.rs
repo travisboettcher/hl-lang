@@ -23,9 +23,9 @@ use std::fmt;
 use hl_lexer::Span;
 
 use crate::ast::{
-    EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Program, RawMap, RawValue, Reference,
-    Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, VolumeEntry,
-    VolumeMap,
+    EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, ParamType, Program, RawMap, RawValue,
+    Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl,
+    VolumeEntry, VolumeMap,
 };
 use crate::schema::MapSide;
 
@@ -93,6 +93,18 @@ pub enum ComposeError {
     TemplateArgumentNotScalar {
         template: String,
         param: String,
+        span: Span,
+    },
+    /// A typed parameter (`port: Number`) was invoked with a scalar
+    /// argument whose own literal kind doesn't match — strict, not
+    /// coercive: `Number` rejects a quoted string even if it's
+    /// numeric-looking, `String` rejects a bare number. Per
+    /// docs/DESIGN.md: no implicit coercion between kinds.
+    ArgumentTypeMismatch {
+        template: String,
+        param: String,
+        expected: ParamType,
+        found: &'static str,
         span: Span,
     },
     /// Two *explicit* `with`-listed templates both set the same
@@ -171,6 +183,7 @@ impl ComposeError {
             | ComposeError::MissingTemplateArgument { span, .. }
             | ComposeError::DuplicateTemplateArgument { second: span, .. }
             | ComposeError::TemplateArgumentNotScalar { span, .. }
+            | ComposeError::ArgumentTypeMismatch { span, .. }
             | ComposeError::FieldCollision { second: span, .. }
             | ComposeError::UnknownAlias { span, .. }
             | ComposeError::UnsupportedQualifiedReference { span, .. }
@@ -228,6 +241,17 @@ impl fmt::Display for ComposeError {
             } => write!(
                 f,
                 "{}:{}: argument `{param}` for template `{template}` must be a scalar value (a list/map can't fill a single-value field)",
+                span.line, span.col
+            ),
+            ComposeError::ArgumentTypeMismatch {
+                template,
+                param,
+                expected,
+                found,
+                ..
+            } => write!(
+                f,
+                "{}:{}: argument `{param}` for template `{template}` must be a {expected} (found {found})",
                 span.line, span.col
             ),
             ComposeError::FieldCollision {
@@ -375,6 +399,21 @@ mod error_display_tests {
         assert_eq!(
             err.to_string(),
             "2:2: argument `name` for template `t` must be a scalar value (a list/map can't fill a single-value field)"
+        );
+    }
+
+    #[test]
+    fn argument_type_mismatch_display() {
+        let err = ComposeError::ArgumentTypeMismatch {
+            template: "t".to_string(),
+            param: "port".to_string(),
+            expected: ParamType::Number,
+            found: "a quoted string",
+            span: span(2, 2),
+        };
+        assert_eq!(
+            err.to_string(),
+            "2:2: argument `port` for template `t` must be a Number (found a quoted string)"
         );
     }
 
@@ -771,7 +810,7 @@ fn resolve_invocation<R: SymbolResolver>(
             });
         }
         seen.insert(key, entry.span);
-        if !decl.params.iter().any(|p| p.name == key) {
+        if !decl.params.iter().any(|p| p.name.name == key) {
             return Err(ComposeError::UnknownTemplateArgument {
                 template: decl.name.name.clone(),
                 argument: key.to_string(),
@@ -781,12 +820,19 @@ fn resolve_invocation<R: SymbolResolver>(
         args.insert(key, &entry.value);
     }
     for param in &decl.params {
-        if !args.contains_key(param.name.as_str()) {
-            return Err(ComposeError::MissingTemplateArgument {
-                template: decl.name.name.clone(),
-                param: param.name.clone(),
-                span: inv.span,
-            });
+        match args.get(param.name.name.as_str()) {
+            None => {
+                return Err(ComposeError::MissingTemplateArgument {
+                    template: decl.name.name.clone(),
+                    param: param.name.name.clone(),
+                    span: inv.span,
+                });
+            }
+            Some(value) => {
+                if let Some(expected) = param.ty {
+                    check_argument_type(value, expected, &decl.name.name, &param.name.name)?;
+                }
+            }
         }
     }
 
@@ -893,6 +939,50 @@ fn substitute_params(
         }
     }
     Ok(())
+}
+
+/// Checks a typed parameter's bound argument against its declared type —
+/// strict, not coercive (see [`ComposeError::ArgumentTypeMismatch`]'s
+/// doc): the argument's own literal kind must match `expected` exactly.
+/// A list/map argument is left alone here — that's
+/// [`ComposeError::TemplateArgumentNotScalar`]'s job, raised only if the
+/// parameter is actually substituted into a scalar `Literal` slot,
+/// independent of whether it's typed at all.
+///
+/// A still-unresolved `Literal::Param` (an outer template forwarding its
+/// *own* parameter into this argument, e.g. `with inner { y: $x }` inside
+/// `template outer(x) { ... }`) is also left unchecked: its concrete
+/// literal kind isn't known until `$x` itself is substituted, which
+/// happens only once `outer` is invoked with a real argument — and *that*
+/// call site is where `x`'s own declared type (if any) gets checked
+/// instead. A mismatch between `inner`'s declared type for `y` and
+/// `outer`'s declared type for `x` (if the two disagree) isn't caught by
+/// this pass — full type propagation through forwarding chains is beyond
+/// this milestone's scope.
+fn check_argument_type(
+    value: &RawValue,
+    expected: ParamType,
+    template_name: &str,
+    param_name: &str,
+) -> Result<(), ComposeError> {
+    let RawValue::Literal(lit) = value else {
+        return Ok(());
+    };
+    let found = match lit {
+        Literal::Number { .. } if expected == ParamType::Number => return Ok(()),
+        Literal::Str(_, _) if expected == ParamType::String => return Ok(()),
+        Literal::Param(_, _) => return Ok(()),
+        Literal::Str(_, _) => "a quoted string",
+        Literal::Number { .. } => "a number",
+        Literal::Ident(_, _) => "a bare identifier",
+    };
+    Err(ComposeError::ArgumentTypeMismatch {
+        template: template_name.to_string(),
+        param: param_name.to_string(),
+        expected,
+        found,
+        span: lit.span(),
+    })
 }
 
 /// Substitutes a single `Literal` slot in place if it's a `Param`. A

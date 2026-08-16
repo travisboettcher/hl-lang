@@ -34,18 +34,20 @@ fn jellyfin_example_lexes_to_expected_token_sequence() {
 fn syncthing_example_lexes_to_expected_token_sequence() {
     use TokenKind::*;
     let expected = vec![
-        // template internal_web(port) {
-        Template, Ident, LParen, Ident, RParen, LBrace, // networks [traefik-net]
+        // template internal_web(port: Number) {
+        Template, Ident, LParen, Ident, Colon, Ident, RParen, LBrace,
+        // networks [traefik-net]
         Ident, LBracket, Ident, RBracket, // restart unless-stopped
-        Ident, Ident, // expose port as "{{name}}.internal.techdebtor.io"
-        Ident, Ident, Ident, Str, // middleware local-ipwhitelist
+        Ident, Ident, // expose $port as "{{name}}.internal.techdebtor.io"
+        Ident, Dollar, Ident, Ident, Str, // middleware local-ipwhitelist
         Ident, Ident, RBrace,
         // template authenticated { middleware forwardAuth-authentik }
         Template, Ident, LBrace, Ident, Ident, RBrace,
-        // template linuxserver_app(puid, pgid) {
-        Template, Ident, LParen, Ident, Comma, Ident, RParen, LBrace, // env PUID = puid
-        Ident, Ident, Equals, Ident, // env PGID = pgid
-        Ident, Ident, Equals, Ident, RBrace, // service syncthing {
+        // template linuxserver_app(puid: Number, pgid: Number) {
+        Template, Ident, LParen, Ident, Colon, Ident, Comma, Ident, Colon, Ident, RParen, LBrace,
+        // env PUID = $puid
+        Ident, Ident, Equals, Dollar, Ident, // env PGID = $pgid
+        Ident, Ident, Equals, Dollar, Ident, RBrace, // service syncthing {
         Ident, Ident, LBrace,
         // with internal_web { port: 8384 }, authenticated, linuxserver_app { puid: 1000, pgid: 100 }
         Ident, Ident, LBrace, Ident, Colon, Number, RBrace, Comma, Ident, Comma, Ident, LBrace,

@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use hl_lexer::{Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
-    EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Program, RawEntry, RawMap, RawValue,
-    Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, UseDecl,
-    VolumeEntry, VolumeMap,
+    EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Param, ParamType, Program, RawEntry,
+    RawMap, RawValue, Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation,
+    TopDecl, UseDecl, VolumeEntry, VolumeMap,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -62,11 +62,25 @@ type StructFields = HashMap<&'static str, FieldValue>;
 struct Parser<'src> {
     tokens: Vec<Token<'src>>,
     pos: usize,
+    /// `Some(params)` while parsing a `template`'s own body (including
+    /// any nested `with`-invocation argument body written inside it) —
+    /// the declared parameter list a `$name` reference is resolved
+    /// against. `None` everywhere else (a plain `service`/`network`
+    /// body, or a `with`-invocation body written inside one of those),
+    /// where a `$name` reference has nothing to resolve against and is a
+    /// parse error. Never nested: `template_decl` is only ever a
+    /// top-level production, so at most one template body is being
+    /// parsed at a time.
+    template_params: Option<Vec<Param>>,
 }
 
 impl<'src> Parser<'src> {
     fn new(tokens: Vec<Token<'src>>) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser {
+            tokens,
+            pos: 0,
+            template_params: None,
+        }
     }
 
     // ---- token primitives ----
@@ -109,7 +123,11 @@ impl<'src> Parser<'src> {
     fn at_value_start(&self) -> bool {
         matches!(
             self.peek().kind,
-            TokenKind::Ident | TokenKind::Str | TokenKind::Number | TokenKind::LBracket
+            TokenKind::Ident
+                | TokenKind::Str
+                | TokenKind::Number
+                | TokenKind::LBracket
+                | TokenKind::Dollar
         )
     }
 
@@ -140,9 +158,39 @@ impl<'src> Parser<'src> {
                     }),
                 }
             }
+            TokenKind::Dollar => self.parse_param_reference(tok),
             _ => Err(self.unexpected(Expected::Description(
                 "a literal (string, number, or identifier)",
             ))),
+        }
+    }
+
+    /// `"$" IDENT` — a template parameter reference. `dollar` is the
+    /// already-peeked `$` token; only called from [`Self::parse_literal`],
+    /// which hasn't consumed it yet. Resolved immediately against
+    /// [`Self::template_params`] rather than deferred to a post-parse
+    /// pass: `None` (no enclosing template body) and "name not declared"
+    /// are both parse errors here, not composition errors, since neither
+    /// depends on anything beyond the current template's own signature.
+    fn parse_param_reference(&mut self, dollar: Token<'src>) -> Result<Literal, ParseError> {
+        self.bump();
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let span = Span {
+            start: dollar.span.start,
+            end: name_tok.span.end,
+            line: dollar.span.line,
+            col: dollar.span.col,
+        };
+        let name = name_tok.lexeme.to_string();
+        match &self.template_params {
+            None => Err(ParseError::ParamReferenceOutsideTemplate { name, span }),
+            Some(params) => {
+                if params.iter().any(|p| p.name.name == name) {
+                    Ok(Literal::Param(name, span))
+                } else {
+                    Err(ParseError::UnknownTemplateParam { name, span })
+                }
+            }
         }
     }
 
@@ -897,6 +945,13 @@ impl<'src> Parser<'src> {
             Vec::new()
         };
 
+        // Every `$name` reference inside the body below (including a
+        // nested `with`-invocation's own argument body) resolves against
+        // this template's own just-parsed `params` — see
+        // `Self::template_params`'s doc. Cleared again once the body is
+        // fully parsed; `template_decl` is never nested, so there's no
+        // outer value to restore instead of `None`.
+        self.template_params = Some(params.clone());
         let (fields_map, body_span) = if self.peek().kind == TokenKind::Equals {
             self.bump();
             let mut fields = StructFields::new();
@@ -917,6 +972,7 @@ impl<'src> Parser<'src> {
         } else {
             return Err(self.unexpected(Expected::Description("`{` or `=`")));
         };
+        self.template_params = None;
 
         let span = Span {
             start: template_tok.span.start,
@@ -925,35 +981,41 @@ impl<'src> Parser<'src> {
             col: template_tok.span.col,
         };
 
-        let mut decl = TemplateDecl {
+        Ok(TemplateDecl {
             name,
             params,
             fields: lower_service_fields(fields_map),
             span,
-        };
-        mark_template_params(&mut decl.fields, &decl.params);
-        Ok(decl)
+        })
     }
 
-    /// `param_list ::= "(" ( IDENT ( "," IDENT )* )? ")"`.
-    fn parse_param_list(&mut self) -> Result<Vec<Ident>, ParseError> {
+    /// `param_list ::= "(" ( param ( "," param )* )? ")"`,
+    /// `param ::= IDENT ( ":" param_type )?`,
+    /// `param_type ::= "Number" | "String"`.
+    fn parse_param_list(&mut self) -> Result<Vec<Param>, ParseError> {
         self.expect(TokenKind::LParen)?;
-        let mut params: Vec<Ident> = Vec::new();
+        let mut params: Vec<Param> = Vec::new();
         if self.peek().kind != TokenKind::RParen {
             loop {
                 let tok = self.expect(TokenKind::Ident)?;
-                let param = Ident {
+                let name = Ident {
                     name: tok.lexeme.to_string(),
                     span: tok.span,
                 };
-                if let Some(existing) = params.iter().find(|p| p.name == param.name) {
+                if let Some(existing) = params.iter().find(|p| p.name.name == name.name) {
                     return Err(ParseError::DuplicateTemplateParam {
-                        param: param.name,
-                        first: existing.span,
-                        second: param.span,
+                        param: name.name,
+                        first: existing.name.span,
+                        second: name.span,
                     });
                 }
-                params.push(param);
+                let ty = if self.peek().kind == TokenKind::Colon {
+                    self.bump();
+                    Some(self.parse_param_type()?)
+                } else {
+                    None
+                };
+                params.push(Param { name, ty });
                 if self.peek().kind == TokenKind::Comma {
                     self.bump();
                 } else {
@@ -963,6 +1025,20 @@ impl<'src> Parser<'src> {
         }
         self.expect(TokenKind::RParen)?;
         Ok(params)
+    }
+
+    /// `param_type ::= "Number" | "String"` — the only two type names a
+    /// parameter's `:` annotation may name this milestone.
+    fn parse_param_type(&mut self) -> Result<ParamType, ParseError> {
+        let tok = self.expect(TokenKind::Ident)?;
+        match tok.lexeme {
+            "Number" => Ok(ParamType::Number),
+            "String" => Ok(ParamType::String),
+            _ => Err(ParseError::UnknownParamType {
+                name: tok.lexeme.to_string(),
+                span: tok.span,
+            }),
+        }
     }
 }
 
@@ -1116,79 +1192,6 @@ fn lower_service(name: Ident, fields: StructFields, span: Span) -> Service {
         name,
         fields: lower_service_fields(fields),
         span,
-    }
-}
-
-/// Rewrites every bare-identifier [`Literal`] in `fields` whose text
-/// matches one of `params` into [`Literal::Param`] — see that variant's
-/// doc for why this is scoped to a single template's own body. Recurses
-/// into `fields.with[].args` (nested `with`-invocation argument bodies)
-/// so parameter-forwarding through `with X { y: outer_param }` is
-/// captured too.
-fn mark_template_params(fields: &mut ServiceFields, params: &[Ident]) {
-    let is_param = |text: &str| params.iter().any(|p| p.name == text);
-    if let Some(img) = &mut fields.image
-        && let Some(r) = &mut img.reference
-    {
-        mark_literal(r, &is_param);
-    }
-    if let Some(e) = &mut fields.expose {
-        if let Some(p) = &mut e.port {
-            mark_literal(p, &is_param);
-        }
-        if let Some(h) = &mut e.host {
-            mark_literal(h, &is_param);
-        }
-    }
-    if let Some(r) = &mut fields.restart
-        && let Some(p) = &mut r.policy
-    {
-        mark_literal(p, &is_param);
-    }
-    if let Some(cn) = &mut fields.container_name {
-        mark_literal(cn, &is_param);
-    }
-    for v in &mut fields.volumes.entries {
-        mark_literal(&mut v.host, &is_param);
-        mark_literal(&mut v.container, &is_param);
-    }
-    for e in &mut fields.env.entries {
-        mark_literal(&mut e.key, &is_param);
-        mark_literal(&mut e.value, &is_param);
-    }
-    for entry in &mut fields.raw.entries {
-        mark_literal(&mut entry.key, &is_param);
-        mark_raw_value(&mut entry.value, &is_param);
-    }
-    for inv in &mut fields.with {
-        for entry in &mut inv.args.entries {
-            mark_literal(&mut entry.key, &is_param);
-            mark_raw_value(&mut entry.value, &is_param);
-        }
-    }
-}
-
-fn mark_literal(lit: &mut Literal, is_param: &impl Fn(&str) -> bool) {
-    if let Literal::Ident(text, span) = lit
-        && is_param(text)
-    {
-        *lit = Literal::Param(std::mem::take(text), *span);
-    }
-}
-
-fn mark_raw_value(value: &mut RawValue, is_param: &impl Fn(&str) -> bool) {
-    match value {
-        RawValue::Literal(lit) => mark_literal(lit, is_param),
-        RawValue::List(items, _) => {
-            for item in items {
-                mark_raw_value(item, is_param);
-            }
-        }
-        RawValue::Map(entries, _) => {
-            for (_, v) in entries {
-                mark_raw_value(v, is_param);
-            }
-        }
     }
 }
 

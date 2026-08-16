@@ -80,6 +80,17 @@ pub enum ParseError {
         first: Span,
         second: Span,
     },
+    /// A parameter's `: TYPE` annotation named something other than
+    /// `Number`/`String` — the only two types this milestone supports.
+    UnknownParamType { name: String, span: Span },
+    /// A `$name` parameter reference appeared outside a `template`'s own
+    /// body (e.g. in a plain `service`), where there's no declared
+    /// parameter list to resolve it against.
+    ParamReferenceOutsideTemplate { name: String, span: Span },
+    /// A `$name` parameter reference appeared inside a template body, but
+    /// `name` doesn't match any of that template's own declared
+    /// parameters.
+    UnknownTemplateParam { name: String, span: Span },
 }
 
 impl From<LexError> for ParseError {
@@ -101,7 +112,10 @@ impl ParseError {
             | ParseError::DuplicateField { second: span, .. }
             | ParseError::DuplicateMapKey { second: span, .. }
             | ParseError::NumberOutOfRange { span, .. }
-            | ParseError::DuplicateTemplateParam { second: span, .. } => *span,
+            | ParseError::DuplicateTemplateParam { second: span, .. }
+            | ParseError::UnknownParamType { span, .. }
+            | ParseError::ParamReferenceOutsideTemplate { span, .. }
+            | ParseError::UnknownTemplateParam { span, .. } => *span,
         }
     }
 }
@@ -175,6 +189,21 @@ impl fmt::Display for ParseError {
                 f,
                 "{}:{}: duplicate parameter `{param}` (first declared at {}:{})",
                 span.line, span.col, first.line, first.col
+            ),
+            ParseError::UnknownParamType { name, .. } => write!(
+                f,
+                "{}:{}: unknown parameter type `{name}` (expected `Number` or `String`)",
+                span.line, span.col
+            ),
+            ParseError::ParamReferenceOutsideTemplate { name, .. } => write!(
+                f,
+                "{}:{}: `${name}` is only valid inside a template body",
+                span.line, span.col
+            ),
+            ParseError::UnknownTemplateParam { name, .. } => write!(
+                f,
+                "{}:{}: `${name}` does not name a declared parameter of this template",
+                span.line, span.col
             ),
         }
     }
@@ -321,6 +350,42 @@ mod display_tests {
         assert_eq!(
             err.to_string(),
             "1:15: duplicate parameter `name` (first declared at 1:10)"
+        );
+    }
+
+    #[test]
+    fn unknown_param_type_display() {
+        let err = ParseError::UnknownParamType {
+            name: "Boolean".to_string(),
+            span: span(1, 20),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:20: unknown parameter type `Boolean` (expected `Number` or `String`)"
+        );
+    }
+
+    #[test]
+    fn param_reference_outside_template_display() {
+        let err = ParseError::ParamReferenceOutsideTemplate {
+            name: "port".to_string(),
+            span: span(2, 3),
+        };
+        assert_eq!(
+            err.to_string(),
+            "2:3: `$port` is only valid inside a template body"
+        );
+    }
+
+    #[test]
+    fn unknown_template_param_display() {
+        let err = ParseError::UnknownTemplateParam {
+            name: "prot".to_string(),
+            span: span(3, 9),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:9: `$prot` does not name a declared parameter of this template"
         );
     }
 }

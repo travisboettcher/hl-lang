@@ -6,10 +6,10 @@ network traefik-net {
   name: "docker_default"
 }
 
-template internal_web(port) {
+template internal_web(port: Number) {
   networks [traefik-net]
   restart unless-stopped
-  expose port, host: "{{name}}.internal.techdebtor.io", entrypoint: "web-secure"
+  expose $port, host: "{{name}}.internal.techdebtor.io", entrypoint: "web-secure"
   middleware local-ipwhitelist
 }
 
@@ -17,9 +17,9 @@ template authenticated {
   middleware forwardAuth-authentik
 }
 
-template linuxserver_app(puid, pgid) {
-  env PUID = puid
-  env PGID = pgid
+template linuxserver_app(puid: Number, pgid: Number) {
+  env PUID = $puid
+  env PGID = $pgid
 }
 
 service syncthing {

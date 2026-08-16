@@ -40,9 +40,9 @@ mod parser;
 pub mod schema;
 
 pub use ast::{
-    EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Program, RawEntry, RawMap, RawValue,
-    Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, UseDecl,
-    VolumeEntry, VolumeMap,
+    EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Param, ParamType, Program, RawEntry,
+    RawMap, RawValue, Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation,
+    TopDecl, UseDecl, VolumeEntry, VolumeMap,
 };
 pub use compose::{
     ComposeError, ComposedProgram, MapKeyCollision, SymbolResolver, compose, compose_with_resolver,

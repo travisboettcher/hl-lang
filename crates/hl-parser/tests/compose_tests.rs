@@ -230,7 +230,7 @@ fn explicit_templates_container_name_collision_is_error() {
 fn service_own_body_can_override_just_expose_host() {
     let composed = compose_ok(
         "template internal_web(port) {\n  \
-           expose port, entrypoint: \"web-secure\"\n\
+           expose $port, entrypoint: \"web-secure\"\n\
          }\n\
          service it-tools {\n  \
            with internal_web { port: 8080 }\n  \
@@ -434,7 +434,7 @@ fn unknown_template_in_with_is_error() {
 #[test]
 fn unknown_template_argument_is_error() {
     let err = compose_err(
-        "template t(a) {\n  env A = a\n}\n\
+        "template t(a) {\n  env A = $a\n}\n\
          service s {\n  with t { a: 1, b: 2 }\n}\n",
     );
     match err {
@@ -451,7 +451,7 @@ fn unknown_template_argument_is_error() {
 #[test]
 fn missing_template_argument_is_error() {
     let err = compose_err(
-        "template t(a, b) {\n  env A = a\n}\n\
+        "template t(a, b) {\n  env A = $a\n}\n\
          service s {\n  with t { a: 1 }\n}\n",
     );
     match err {
@@ -468,7 +468,7 @@ fn missing_template_argument_is_error() {
 #[test]
 fn duplicate_template_argument_is_error() {
     let err = compose_err(
-        "template t(a) {\n  env A = a\n}\n\
+        "template t(a) {\n  env A = $a\n}\n\
          service s {\n  with t { a: 1, a: 2 }\n}\n",
     );
     match err {
@@ -485,7 +485,7 @@ fn duplicate_template_argument_is_error() {
 #[test]
 fn template_argument_not_scalar_is_error() {
     let err = compose_err(
-        "template t(a) {\n  env A = a\n}\n\
+        "template t(a) {\n  env A = $a\n}\n\
          service s {\n  with t { a: [1, 2] }\n}\n",
     );
     match err {
@@ -499,13 +499,103 @@ fn template_argument_not_scalar_is_error() {
     }
 }
 
+// --- typed parameters ---
+
+#[test]
+fn number_typed_param_rejects_string_argument() {
+    let err = compose_err(
+        "template t(port: Number) {\n  expose $port\n}\n\
+         service s {\n  with t { port: \"8080\" }\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentTypeMismatch {
+            template,
+            param,
+            expected,
+            ..
+        } => {
+            assert_eq!(template, "t");
+            assert_eq!(param, "port");
+            assert_eq!(expected, hl_parser::ParamType::Number);
+        }
+        other => panic!("expected ArgumentTypeMismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn string_typed_param_rejects_number_argument() {
+    let err = compose_err(
+        "template t(policy: String) {\n  restart $policy\n}\n\
+         service s {\n  with t { policy: 1000 }\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentTypeMismatch {
+            template,
+            param,
+            expected,
+            ..
+        } => {
+            assert_eq!(template, "t");
+            assert_eq!(param, "policy");
+            assert_eq!(expected, hl_parser::ParamType::String);
+        }
+        other => panic!("expected ArgumentTypeMismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_param_accepts_matching_argument_kind() {
+    let composed = compose_ok(
+        "template t(port: Number, policy: String) {\n  \
+           expose $port\n  restart $policy\n\
+         }\n\
+         service s {\n  with t { port: 8080, policy: \"always\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        service
+            .fields
+            .expose
+            .as_ref()
+            .unwrap()
+            .port
+            .as_ref()
+            .unwrap()
+            .text(),
+        "8080"
+    );
+    assert_eq!(
+        service
+            .fields
+            .restart
+            .as_ref()
+            .unwrap()
+            .policy
+            .as_ref()
+            .unwrap()
+            .text(),
+        "always"
+    );
+}
+
+#[test]
+fn untyped_param_accepts_any_literal_kind() {
+    let composed = compose_ok(
+        "template t(x) {\n  env X = $x\n}\n\
+         service s {\n  with t { x: bare-ident }\n  image \"i\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let value = &service.fields.env.entries[0].value;
+    assert!(matches!(value, Literal::Ident(name, _) if name == "bare-ident"));
+}
+
 // --- nested template composition / parameter forwarding ---
 
 #[test]
 fn nested_template_composition_forwards_parameters() {
     let composed = compose_ok(
-        "template inner(y) {\n  env Y = y\n}\n\
-         template outer(x) {\n  with inner { y: x }\n}\n\
+        "template inner(y) {\n  env Y = $y\n}\n\
+         template outer(x) {\n  with inner { y: $x }\n}\n\
          service s {\n  with outer { x: 42 }\n}\n",
     );
     let service = single_service(&composed);
@@ -519,7 +609,7 @@ fn nested_template_composition_forwards_parameters() {
 #[test]
 fn template_param_is_substituted_inside_raw_scalar_list_and_map() {
     let composed = compose_ok(
-        "template t(p) {\n  raw { plain: p, items: [p, \"x\"], nested: { k: p } }\n}\n\
+        "template t(p) {\n  raw { plain: $p, items: [$p, \"x\"], nested: { k: $p } }\n}\n\
          service s {\n  with t { p: \"val\" }\n  image \"img\"\n}\n",
     );
     let service = single_service(&composed);
@@ -553,8 +643,8 @@ fn template_param_is_substituted_inside_raw_scalar_list_and_map() {
 #[test]
 fn composed_service_never_contains_unsubstituted_param() {
     let composed = compose_ok(
-        "template inner(y) {\n  env Y = y\n  expose y\n}\n\
-         template outer(x) {\n  with inner { y: x }\n}\n\
+        "template inner(y) {\n  env Y = $y\n  expose $y\n}\n\
+         template outer(x) {\n  with inner { y: $x }\n}\n\
          service s {\n  with outer { x: 42 }\n  image \"img\"\n}\n",
     );
     let service = single_service(&composed);
