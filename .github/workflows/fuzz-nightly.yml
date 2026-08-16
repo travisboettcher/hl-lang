@@ -26,7 +26,7 @@ jobs:
       matrix:
         target: [fuzz_lex, fuzz_parse, fuzz_pipeline]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust (nightly)
         uses: dtolnay/rust-toolchain@nightly
@@ -41,7 +41,7 @@ jobs:
           tool: cargo-fuzz
 
       - name: Restore corpus cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}

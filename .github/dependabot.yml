@@ -1,5 +1,27 @@
 version: 2
 
+# On the `semver-patch` labels below, and why only the cargo entries have
+# them: every PR into `main` must carry exactly one `semver-*` label
+# (semver-label.yml), because release.yml reads it off the merged PR to
+# size the version bump. Dependabot can't pick that label itself, so it's
+# configured here per ecosystem — and the two ecosystems genuinely differ:
+#
+#   * A `cargo` bump changes what gets compiled into the shipped `hllc`
+#     binary, so it warrants a patch release. It's labelled here, which
+#     also means it still has to satisfy semver-label.yml on its own —
+#     deliberately not exempted there, so that if this labelling ever
+#     silently stops working, the required check catches it rather than a
+#     binary-affecting change merging with no release cut.
+#   * A `github-actions` bump only changes CI configuration and can't
+#     affect the binary, so releasing for it would publish a new version
+#     with byte-identical contents. Those PRs stay unlabelled and are
+#     exempted in semver-label.yml instead; release.yml's own "no
+#     semver-* label found" path then skips the release for that merge.
+#
+# Only labels that already exist in the repo are listed: Dependabot
+# applies pre-existing labels but won't create missing ones, so naming a
+# label that doesn't exist would silently apply nothing.
+
 updates:
   # Action versions are pinned by major tag (`@v4`), which floats within
   # a major but never crosses one — so a major bump needs a PR to land.
@@ -7,16 +29,51 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # One PR per run instead of one per action. Every entry here is
+    # grouped, majors included: because actions are pinned by major tag,
+    # essentially *every* update in this ecosystem is a major bump, so
+    # excluding them would mean no grouping at all. The trade is that one
+    # red PR can hold several independently-breaking bumps — if that
+    # happens, the fix is to close it and let Dependabot reopen the
+    # bumps individually rather than to ungroup permanently.
+    groups:
+      actions:
+        patterns: ["*"]
 
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
+    labels: ["dependencies", "semver-patch"]
+    # Unlike actions, cargo majors are left ungrouped: these change what
+    # is compiled into the shipped binary, a major is where a real
+    # behavioral break would arrive, and an individual PR keeps it
+    # reviewable and revertable on its own. Minor/patch bumps are
+    # routine, so they travel together.
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   # `fuzz/` is a separate crate with its own Cargo.lock, deliberately
   # outside the workspace (it needs a nightly toolchain), so it needs its
   # own entry — the workspace one above does not reach it.
+  #
+  # `fuzz/` is never shipped, so a bump here can't affect the binary — but
+  # it's labelled `semver-patch` anyway rather than exempted, because
+  # telling the two cargo entries apart in semver-label.yml would mean
+  # matching on the branch's directory suffix, and a spurious patch
+  # release is a much cheaper failure than a check that silently stops
+  # gating the workspace bumps it exists to gate.
   - package-ecosystem: cargo
     directory: /fuzz
     schedule:
       interval: weekly
+    labels: ["dependencies", "semver-patch"]
+    # Grouping is per update entry, not per ecosystem, so this can't
+    # share a PR with the workspace cargo entry above — different
+    # directory, different Cargo.lock. Same major-stays-separate rule.
+    groups:
+      fuzz-cargo:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
