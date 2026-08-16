@@ -29,12 +29,31 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # One PR per run instead of one per action. Every entry here is
+    # grouped, majors included: because actions are pinned by major tag,
+    # essentially *every* update in this ecosystem is a major bump, so
+    # excluding them would mean no grouping at all. The trade is that one
+    # red PR can hold several independently-breaking bumps — if that
+    # happens, the fix is to close it and let Dependabot reopen the
+    # bumps individually rather than to ungroup permanently.
+    groups:
+      actions:
+        patterns: ["*"]
 
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
     labels: ["dependencies", "semver-patch"]
+    # Unlike actions, cargo majors are left ungrouped: these change what
+    # is compiled into the shipped binary, a major is where a real
+    # behavioral break would arrive, and an individual PR keeps it
+    # reviewable and revertable on its own. Minor/patch bumps are
+    # routine, so they travel together.
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   # `fuzz/` is a separate crate with its own Cargo.lock, deliberately
   # outside the workspace (it needs a nightly toolchain), so it needs its
@@ -51,3 +70,10 @@ updates:
     schedule:
       interval: weekly
     labels: ["dependencies", "semver-patch"]
+    # Grouping is per update entry, not per ecosystem, so this can't
+    # share a PR with the workspace cargo entry above — different
+    # directory, different Cargo.lock. Same major-stays-separate rule.
+    groups:
+      fuzz-cargo:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

@@ -42,7 +42,9 @@ jobs:
     # stops working, this check catches it instead of a binary-affecting
     # change merging with no release. The ecosystem is read off the
     # branch name, which Dependabot always prefixes
-    # `dependabot/<ecosystem>/`; `user.login` is set by GitHub and can't
+    # `dependabot/<ecosystem>/` — grouped runs included, since those only
+    # change what follows the prefix (`.../actions-<hash>` rather than
+    # `.../actions/checkout-7`). `user.login` is set by GitHub and can't
     # be spoofed by a contributor branch named to look the same way.
     if: |
       !(github.event.pull_request.user.login == github.repository_owner &&
