@@ -5,6 +5,20 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only by default: nothing in this workflow writes to the
+# repository, and an explicit block means a change to the org/repo
+# default can't silently widen what CI can do.
+permissions:
+  contents: read
+
+# Superseded PR runs are cancelled — a push that obsoletes an in-flight
+# run makes its result irrelevant. Runs on `main` are deliberately *not*
+# cancelled: main's CI history is the record of which commits were
+# actually green, and a cancelled run leaves a hole in it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -12,6 +26,11 @@ jobs:
   test:
     name: fmt, clippy, test, coverage
     runs-on: ubuntu-latest
+    # Every job sets a timeout: the GitHub default is six hours, and
+    # `.cargo/mutants.toml` documents mutants that hang rather than
+    # fail, so an unbounded job can burn a whole day of runner minutes
+    # before anyone notices.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -36,6 +55,16 @@ jobs:
       - name: cargo test (coverage gate, >= 80% lines)
         run: cargo llvm-cov --workspace --html --fail-under-lines 80
 
+      # cargo-llvm-cov excludes doctests by default, so the doctests in
+      # the crates' own rustdoc would otherwise never run in CI at all.
+      - name: cargo test --doc
+        run: cargo test --workspace --doc
+
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v4
@@ -48,6 +77,7 @@ jobs:
     name: build (release)
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -69,6 +99,9 @@ jobs:
   mutation-test:
     name: mutation testing (cargo-mutants)
     runs-on: ubuntu-latest
+    # The most generous budget here: cargo-mutants runs the whole test
+    # suite once per mutant.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -96,6 +129,8 @@ jobs:
   fuzz-smoke:
     name: fuzz smoke test (${{ matrix.target }})
     runs-on: ubuntu-latest
+    # 60s of fuzzing plus a nightly toolchain and cargo-fuzz build.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

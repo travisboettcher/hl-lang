@@ -41,7 +41,7 @@ pub enum FieldKind {
     ReferenceList,
     /// A list of template invocations (`with`'s `templates` field): each
     /// item is an `IDENT` naming a template, optionally followed by a
-    /// `{ arg: value, ... }` argument body. Parses like [`ReferenceList`]
+    /// `{ arg: value, ... }` argument body. Parses like [`Self::ReferenceList`]
     /// (bracketed list, bare comma-list sugar, accumulates, never
     /// duplicate-checked) except each item can carry an argument body.
     TemplateInvocationList,
@@ -107,9 +107,13 @@ pub static IMAGE: TypeSchema = TypeSchema {
     schema_free: false,
 };
 
-/// `expose 8096 as "host"` / `expose { port: 8096, host: "host", entrypoint: "web-secure" }`.
-/// `entrypoint` names a Traefik entry point (e.g. `"web-secure"`) — left
-/// unset, codegen omits the `entrypoints=` label entirely rather than
+/// `expose 8096 as "host"` / `expose { port: 8096, host: "host", entrypoint: web-secure }`.
+/// `entrypoint` is a reference *list* of Traefik entry-point names
+/// (`entrypoint web, web-secure`), spelled exactly like `middleware`,
+/// because Traefik's `entrypoints=` label is itself comma-separated —
+/// modelling that as a list keeps the comma codegen's to write rather
+/// than the user's, so no label value has to permit one. Left empty,
+/// codegen omits the `entrypoints=` label entirely rather than
 /// defaulting to any specific value, matching Traefik's own real
 /// behavior ("no entry points" attaches to all of them) since any one
 /// entry-point name is specific to a given homelab's own `traefik.yml`,
@@ -128,7 +132,7 @@ pub static EXPOSE: TypeSchema = TypeSchema {
         },
         FieldSchema {
             name: "entrypoint",
-            kind: FieldKind::Scalar,
+            kind: FieldKind::ReferenceList,
         },
     ],
     primary_field: Some("port"),

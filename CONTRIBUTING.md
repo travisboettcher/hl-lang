@@ -21,12 +21,21 @@ Run the same checks CI runs:
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo test --workspace --doc
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
-Coverage is gated at 80% workspace-wide line coverage
-(`cargo llvm-cov --workspace --fail-under-lines 80`); if you're adding a
-new code path, add tests alongside it rather than relying on existing
-coverage margin.
+Coverage is gated at 80% workspace-wide line coverage. CI runs it as
+
+```sh
+cargo llvm-cov --workspace --html --fail-under-lines 80
+```
+
+which is also what replaces the plain `cargo test --workspace` step
+there. Note that `cargo-llvm-cov` skips doctests, which is why
+`cargo test --workspace --doc` is listed separately above and run as its
+own CI step. If you're adding a new code path, add tests alongside it
+rather than relying on existing coverage margin.
 
 If you're touching the lexer, parser, or codegen, consider whether the
 fuzz targets in `fuzz/` need a new corpus seed or cover the change
@@ -63,8 +72,11 @@ that test file's own doc comment for the full list): default
 statement in a throwaway `service { }` first; `,build` also runs the
 full link/compose/codegen pipeline, for a complete worked example;
 `,file=NAME,group=ID[,entry]` links multiple blocks together as one
-multi-file `use` example. A new example needs one of these, not just
-prose describing it.
+multi-file `use` example; `,ignore` excludes the block from validation
+entirely, for a snippet that's deliberately invalid (illustrating an
+error message, say). A new example needs one of these, not just prose
+describing it — and reach for `,ignore` only when the block genuinely
+can't compile, since an ignored block is exactly the kind that rots.
 
 ## License
 

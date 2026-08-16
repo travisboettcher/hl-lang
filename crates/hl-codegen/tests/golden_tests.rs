@@ -194,6 +194,43 @@ fn unknown_network_reference_is_error() {
     ));
 }
 
+/// #70: the error used to carry the enclosing service's span, so an
+/// undeclared network on line 4 was reported at `1:1`. It now points at
+/// the offending reference itself.
+#[test]
+fn unknown_network_error_points_at_the_offending_reference() {
+    let err = generate_err(
+        "network known {\n  external\n}\n\
+         service s {\n  image \"x\"\n  networks [known, nope]\n}\n",
+    );
+    let span = err.span();
+    assert_eq!(
+        (span.line, span.col),
+        (6, 20),
+        "expected the span of `nope`, got {}:{}",
+        span.line,
+        span.col
+    );
+}
+
+/// The ambiguity is a property of the service's whole `networks` list —
+/// no one reference is at fault — so this one deliberately keeps
+/// pointing at the service.
+#[test]
+fn ambiguous_external_network_error_points_at_the_service() {
+    let err = generate_err(
+        "network a {\n  external\n}\n\
+         network b {\n  external\n}\n\
+         service s {\n  image \"x\"\n  networks [a, b]\n}\n",
+    );
+    assert!(matches!(
+        err,
+        CodegenError::AmbiguousExternalNetwork { ref service, .. } if service == "s"
+    ));
+    let span = err.span();
+    assert_eq!((span.line, span.col), (7, 1));
+}
+
 #[test]
 fn missing_image_is_error() {
     let err = generate_err("service s {\n}\n");
@@ -210,5 +247,77 @@ fn unknown_interpolation_is_error() {
     assert!(matches!(
         err,
         CodegenError::UnknownInterpolation { binding, .. } if binding == "typo"
+    ));
+}
+
+/// #65: a backtick in `expose.host` used to compile to a valid Traefik
+/// rule matching every host, since `Host()`'s value has no escape for
+/// its own delimiter.
+#[test]
+fn backtick_in_expose_host_is_error() {
+    let err = generate_err(
+        "service s {\n  image \"x\"\n  expose 80 as \"ok.example.com`) || HostRegexp(`{any:.+}\"\n}\n",
+    );
+    assert!(matches!(
+        err,
+        CodegenError::UnsafeLabelValue {
+            field: "expose.host",
+            character: '`',
+            ..
+        }
+    ));
+}
+
+/// hl-lang#73: several entry points are several list entries, joined by
+/// codegen into the one `entrypoints=` label Traefik expects — end to
+/// end, through the real parse/compose/generate pipeline.
+#[test]
+fn several_entrypoints_join_into_one_label() {
+    let yaml = generate_from(
+        "service s {\n  image \"x\"\n  expose 80, host: \"ok.example.com\", entrypoint: web, web-secure\n}\n",
+    );
+    assert!(
+        yaml.contains("traefik.http.routers.s.entrypoints=web,web-secure"),
+        "expected a joined entrypoints label, got:\n{yaml}"
+    );
+}
+
+/// hl-lang#73: the flip side — `entrypoint` used to be a scalar where
+/// `"web,web-secure"` was the *only* way to name two entry points, so
+/// this exact spelling used to compile. It's rejected now, and the
+/// message says to use the list instead.
+#[test]
+fn comma_inside_one_entrypoint_is_error_with_a_list_hint() {
+    let err = generate_err(
+        "service s {\n  image \"x\"\n  expose 80, host: \"ok.example.com\", entrypoint: \"web,web-secure\"\n}\n",
+    );
+    assert!(matches!(
+        err,
+        CodegenError::UnsafeLabelValue {
+            field: "expose.entrypoint",
+            character: ',',
+            ..
+        }
+    ));
+    assert!(
+        err.to_string().contains("`entrypoint` is a list"),
+        "expected a list hint, got: {err}"
+    );
+}
+
+/// #65: `middlewares=` is a single comma-joined label, so a comma
+/// inside one name silently became two references.
+#[test]
+fn comma_in_middleware_reference_is_error() {
+    let err = generate_err(
+        "service s {\n  image \"x\"\n  expose 80 as \"ok.example.com\"\n  middleware [\"a,b\"]\n}\n",
+    );
+    assert!(matches!(
+        err,
+        CodegenError::UnsafeLabelValue {
+            field: "middleware",
+            character: ',',
+            ..
+        }
     ));
 }

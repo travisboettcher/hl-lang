@@ -1,12 +1,12 @@
 //! Lexer for hl-lang, the DSL that transpiles to Docker Compose YAML +
-//! Traefik labels (see the design doc, `Homelab Compose DSL.md`, in the
-//! project's vault for the full grammar and motivation).
+//! Traefik labels (see `docs/DESIGN.md` in the repo root for the full
+//! grammar and motivation).
 //!
 //! This crate turns hl-lang source text into a stream of [`Token`]s. It
 //! recognizes the language's lexical grammar exactly and no more:
 //! identifiers, integer number literals, double-quoted string literals
 //! (no escape sequences), the single reserved word `template`, the
-//! punctuation set `{ } [ ] ( ) : = -> ,`, and `#`-to-end-of-line
+//! punctuation set `{ } [ ] ( ) : = -> , . $`, and `#`-to-end-of-line
 //! comments. Every other keyword-shaped word (`service`, `with`, `as`,
 //! `external`, `raw`, `defaults`, ...) is lexed as a plain [`TokenKind::Ident`]
 //! — the lexer has no notion of which identifiers are meaningful; that is

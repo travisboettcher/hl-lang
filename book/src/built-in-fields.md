@@ -57,7 +57,7 @@ Primary field: `port`. Secondary-field shorthand: `as` aliases to `host`.
 |---|---|---|
 | `port` | number | *(no default — omitting `expose` entirely just means no Traefik routing)* |
 | `host` | string | unset (no router rule generated) |
-| `entrypoint` | string | unset (label omitted; Traefik attaches the router to every entry point) |
+| `entrypoint` | reference list | empty (label omitted; Traefik attaches the router to every entry point) |
 
 ```hll,fragment
 expose 8096 as "media.example.com"
@@ -72,15 +72,55 @@ expose 8096 as "media.example.com"
 fields. To also set `entrypoint`, name `host` explicitly instead:
 
 ```hll,fragment
-expose 8096, host: "media.example.com", entrypoint: "web-secure"
+expose 8096, host: "media.example.com", entrypoint: web-secure
 ```
+
+`entrypoint` is a **reference list**, spelled exactly like `middleware`
+below — a bare name, several comma-separated names, or a bracketed list:
+
+```hll,fragment
+expose {
+  port: 8096
+  host: "media.example.com"
+  entrypoint: web, web-secure
+}
+```
+
+However many entry points you name, they produce **one** label:
+`traefik.http.routers.<service>.entrypoints=` with the names
+comma-joined (`entrypoints=web,web-secure`) — `hllc` writes the commas,
+you write the names. Leave `entrypoint` off entirely and no
+`entrypoints=` label is generated at all, which is Traefik's own way of
+saying "attach this router to every entry point".
+
+One caveat if you write a bare list in the `expose 8096, ...` shorthand
+form: the list ends at the next `field:`, so
+`expose 8096, entrypoint: web, host: "media.example.com"` sets one entry
+point and a host, not two entry points. Put `entrypoint` last, use
+brackets (`entrypoint: [web, web-secure]`), or use the `expose { ... }`
+body if you want a bare list in the middle.
 
 `expose.port` becomes Compose's `expose:` entry (the port is reachable
 from other containers on the same network — it isn't published to the
 host). `expose.host`, if set, generates a Traefik router-rule label
 (`Host(...)`,) routing that hostname to this service; `expose.entrypoint`,
-if set, restricts that router to one named Traefik entry point instead of
-all of them.
+if non-empty, restricts that router to the named Traefik entry points
+instead of all of them.
+
+`expose.host` is what switches Traefik routing on at all. With no `host`
+set there's no router, so neither `entrypoint` nor `middleware` produces
+a label — they're silently dropped rather than emitted against a router
+that doesn't exist.
+
+Because `host` is spliced directly into the router rule
+(``Host(`...`)``, which has no escape for its own backtick delimiter),
+`hllc` rejects a `host` containing any rule metacharacter — a backtick
+above all, plus `` ( ) { } | & , " ' \ ``. Each `entrypoint` entry is
+checked against that same set, comma included: `hllc` owns the comma
+that joins entry points, so a comma inside one name would splice an
+extra entry into the label. (`entrypoint "web,web-secure"` is therefore
+an error — write `entrypoint web, web-secure`.) A comma is rejected in a
+`middleware` name for the same reason.
 
 ## `volume`
 
@@ -95,9 +135,10 @@ volume "syncthing-config" -> "/config" # named volume
 ```
 
 Repeating `volume` accumulates entries rather than overwriting. A host
-side that isn't an absolute path is treated as a named Docker volume and
-added to the Compose document's top-level `volumes:` section
-automatically.
+side starting with neither `/` nor `.` is treated as a named Docker
+volume and added to the Compose document's top-level `volumes:` section
+automatically — so `./jellyfin` and `../shared` are bind mounts just as
+`/mnt/media` is, not only absolute paths.
 
 ## `env`
 
@@ -146,8 +187,16 @@ dns ["192.168.50.182"]
 ```
 
 - `middleware` names a Traefik middleware to attach to this service's
-  router (generates a `traefik.http.routers.<name>.middlewares=` label
-  entry per item).
+  router. However many you list, they produce **one** label, not one per
+  item: `traefik.http.routers.<service>.middlewares=` with the names
+  comma-joined. Every name also gets an `@file` suffix appended
+  (`middlewares=local-ipwhitelist@file,forwardAuth-authentik@file`) —
+  that's Traefik's file-provider reference convention, applied
+  unconditionally, so write the bare middleware name and let `hllc` add
+  it. Like `expose`'s `entrypoint` — which joins its own list the same
+  way, just without the `@file` suffix — `middleware` generates nothing at
+  all unless `expose.host` is set: with no host there's no router to
+  attach anything to.
 - `depends_on` names a same-file sibling `service` this one depends on —
   it's not cross-file, and doesn't accept a qualified `alias.name`.
 - `networks` references a top-level `network` declared in the same

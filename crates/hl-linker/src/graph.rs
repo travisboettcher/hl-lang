@@ -85,16 +85,42 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
         let is_entry = id == entry_id;
         let mut module = Module::default();
         let mut alias_spans: HashMap<String, Span> = HashMap::new();
+        // `module.services` is only populated for the entry module, so
+        // unlike networks/templates it can't double as the by-name table
+        // a duplicate check needs — a non-entry file's redeclared
+        // service is still a mistake worth reporting.
+        let mut service_spans: HashMap<String, Span> = HashMap::new();
 
         for decl in program.decls {
             match decl {
                 TopDecl::Network(n) => {
+                    // Checked before either collection is touched:
+                    // `entry_networks` is first-wins for anything reading
+                    // the list while `networks` is last-wins for
+                    // `alias.name` lookups, so a duplicate would leave
+                    // bare and qualified references disagreeing about
+                    // which declaration is the real one (#63).
+                    if let Some(prev) = module.networks.get(&n.name.name) {
+                        return Err(LinkError::Compose(ComposeError::DuplicateNetworkName {
+                            name: n.name.name.clone(),
+                            first: prev.name.span,
+                            second: n.name.span,
+                        }));
+                    }
                     if is_entry {
                         module.entry_networks.push(n.clone());
                     }
                     module.networks.insert(n.name.name.clone(), n);
                 }
                 TopDecl::Service(s) => {
+                    if let Some(&first) = service_spans.get(&s.name.name) {
+                        return Err(LinkError::Compose(ComposeError::DuplicateServiceName {
+                            name: s.name.name.clone(),
+                            first,
+                            second: s.name.span,
+                        }));
+                    }
+                    service_spans.insert(s.name.name.clone(), s.name.span);
                     if is_entry {
                         module.services.push(*s);
                     }

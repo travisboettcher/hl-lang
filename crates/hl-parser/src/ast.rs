@@ -64,7 +64,7 @@ pub enum Literal {
     /// when it sees the `$` sigil — never by ordinary literal parsing,
     /// and never legal (a parse error) outside a template body, since a
     /// plain `service` isn't parameterized. Composition
-    /// ([`crate::compose`]) substitutes every `Param` with the
+    /// ([`fn@crate::compose`]) substitutes every `Param` with the
     /// invocation's bound argument value; a `Param` surviving composition
     /// would be a bug.
     Param(String, Span),
@@ -187,11 +187,19 @@ pub struct Expose {
     /// Settable either via the canonical `host: "..."` field or the
     /// `as "..."` bare-keyword alias sugar; both produce this same slot.
     pub host: Option<Literal>,
-    /// The Traefik entry point to route through (e.g. `"web-secure"`).
-    /// `None` means the generated router gets no `entrypoints=` label at
+    /// The Traefik entry points to route through (e.g. `entrypoint
+    /// web, web-secure`). A list rather than a scalar because Traefik's
+    /// own `entrypoints=` label is a comma-separated list: making the
+    /// language model that directly lets codegen own the joining, so
+    /// no label value ever has to tolerate a user-written comma.
+    ///
+    /// Empty means the generated router gets no `entrypoints=` label at
     /// all — Traefik's own default of attaching to every entry point —
-    /// rather than the parser guessing a homelab-specific value.
-    pub entrypoint: Option<Literal>,
+    /// rather than the parser guessing a homelab-specific value. That's
+    /// why this is a plain `Vec` and not an `Option<Vec<_>>`: "unset"
+    /// and "set to nothing" have to mean the same thing here, and
+    /// `middleware` on [`ServiceFields`] already spells that shape.
+    pub entrypoint: Vec<Reference>,
     pub span: Span,
 }
 

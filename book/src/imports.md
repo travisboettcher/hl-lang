@@ -44,7 +44,7 @@ use "network.hll" as net
 template internal_web(port: Number) {
   networks [net.traefik-net]
   restart unless-stopped
-  expose $port, host: "{{name}}.internal.example.com", entrypoint: "web-secure"
+  expose $port, host: "{{name}}.internal.example.com", entrypoint: web-secure
   middleware local-ipwhitelist
 }
 
@@ -98,3 +98,36 @@ Together, these two rules mean: a template file needs `use` declarations
 for whatever *it* references, and a service file needs `use` declarations
 only for what *it* references directly — importing a template doesn't
 also import that template's own imports.
+
+## `defaults` is the one template `use` can't share
+
+The implicit `defaults` template (see
+[Templates & Composition](./templates-and-composition.md)) is looked up
+only in the entry file — the one `hllc` was actually pointed at. A
+`template defaults { ... }` in an imported file is **silently ignored**:
+nothing errors, the services just don't get those fields. This falls out
+of `defaults` having no invocation to resolve — there's no `with
+common.defaults` to write, and no alias for the lookup to go through.
+
+So if several service files should share a set of baseline fields, give
+the shared template an ordinary name and apply it explicitly:
+
+```hll,file=common.hll,group=defaults-not-shared
+# common.hll — naming this template `defaults` instead would leave it
+# silently unapplied in every file that imports this one
+template baseline {
+  restart unless-stopped
+}
+```
+
+```hll,file=syncthing.hll,group=defaults-not-shared,entry
+# syncthing.hll
+use "common.hll" as common
+
+service syncthing {
+  with common.baseline
+  image "lscr.io/linuxserver/syncthing:latest"
+}
+```
+
+Each file may still declare its own `defaults` for its own services.

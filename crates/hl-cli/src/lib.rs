@@ -129,9 +129,8 @@ fn run_build(path: &Path, out: Option<&Path>) -> ExitCode {
                 eprintln!("{}: {err}", parent.display());
                 return ExitCode::FAILURE;
             }
-            if let Err(err) = fs::write(out_path, &yaml) {
-                eprintln!("{}: {err}", out_path.display());
-                return ExitCode::FAILURE;
+            if let Err(code) = write_output(out_path, &yaml) {
+                return code;
             }
             println!("{}", out_path.display());
         }
@@ -181,6 +180,21 @@ fn build_flat_directory(hll_files: &[PathBuf], dir: &Path, out: Option<&Path>) -
             eprintln!("{}: couldn't determine a file stem", hll_path.display());
             return ExitCode::FAILURE;
         };
+        // `file_stem` is purely lexical and has no notion of a *usable*
+        // directory name: a file literally called `...hll` yields the
+        // stem `..`, and `out_dir.join("..")` resolves one level above
+        // `--out`, writing output outside the directory the user chose
+        // (#64). Anything that isn't a plain single path component is
+        // rejected rather than normalized — there's no sensible output
+        // directory such a name could mean.
+        if stem.is_empty() || stem == "." || stem == ".." || stem.contains(std::path::is_separator)
+        {
+            eprintln!(
+                "{}: `{stem}` isn't usable as an output directory name",
+                hll_path.display()
+            );
+            return ExitCode::FAILURE;
+        }
         if let Err(code) = build_one(hll_path, &out_dir.join(stem)) {
             return code;
         }
@@ -240,12 +254,39 @@ fn build_one(hll_path: &Path, target_dir: &Path) -> Result<(), ExitCode> {
         ExitCode::FAILURE
     })?;
     let out_path = target_dir.join("docker-compose.yml");
-    fs::write(&out_path, &yaml).map_err(|err| {
-        eprintln!("{}: {err}", out_path.display());
-        ExitCode::FAILURE
-    })?;
+    write_output(&out_path, &yaml)?;
     println!("{}", out_path.display());
     Ok(())
+}
+
+/// Writes `yaml` to `out_path`, refusing to do so if `out_path` is a
+/// symlink.
+///
+/// `fs::write` follows symlinks, so without this a `docker-compose.yml`
+/// replaced by a link to some unrelated file would have *that* file
+/// truncated and overwritten by a plain `hllc --build <repo>` — the
+/// co-located mode in particular writes to paths it discovered by
+/// scanning, not paths the user named (#64). Generated output only ever
+/// lands on the path it's addressed to; replacing the link itself is
+/// left to the user, who can see what it points at.
+///
+/// `symlink_metadata` is what makes the check meaningful — it reports on
+/// the link rather than its target. Any other stat failure (most
+/// commonly the file simply not existing yet, which is the normal case)
+/// is deliberately ignored here and left for `fs::write` to report with
+/// its own, more accurate error.
+fn write_output(out_path: &Path, yaml: &str) -> Result<(), ExitCode> {
+    if fs::symlink_metadata(out_path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        eprintln!(
+            "{}: refusing to write through a symlink",
+            out_path.display()
+        );
+        return Err(ExitCode::FAILURE);
+    }
+    fs::write(out_path, yaml).map_err(|err| {
+        eprintln!("{}: {err}", out_path.display());
+        ExitCode::FAILURE
+    })
 }
 
 /// Loads `path`'s whole `use` graph and generates Compose YAML for it.

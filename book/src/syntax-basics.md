@@ -93,13 +93,13 @@ expose 8096 as "media.example.com"
 `as` is the one built-in case of this — it aliases onto `expose`'s `host`
 field. It's a one-shot continuation, though, not a list: `as` can't
 itself be followed by anything else, comma or no comma —
-`expose 8096 as "media.example.com", entrypoint: "web-secure"` is a
+`expose 8096 as "media.example.com", entrypoint: web-secure` is a
 **compile error**. To set additional fields, drop the `as` shorthand and
 name `host` explicitly instead; from there, further `key: value` fields
 are allowed, each one preceded by a comma:
 
 ```hll,fragment
-expose 8096, host: "media.example.com", entrypoint: "web-secure"
+expose 8096, host: "media.example.com", entrypoint: web-secure
 ```
 
 ## Map-style shorthand

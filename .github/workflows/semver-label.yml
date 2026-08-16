@@ -34,6 +34,7 @@ jobs:
       !(github.event.pull_request.user.login == github.repository_owner &&
         contains(github.event.pull_request.title, '[release-bump]'))
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Check labels
         env:

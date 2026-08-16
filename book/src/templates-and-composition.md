@@ -16,7 +16,7 @@ A template accepts exactly the same fields as a `service` body (see
 template internal_web(port: Number) {
   networks [traefik-net]
   restart unless-stopped
-  expose $port, host: "{{name}}.internal.example.com", entrypoint: "web-secure"
+  expose $port, host: "{{name}}.internal.example.com", entrypoint: web-secure
   middleware local-ipwhitelist
 }
 ```
@@ -58,12 +58,18 @@ zero-parameter template like `authenticated` needs no body — bare
 each call — there's no partial application or currying.
 
 A template's own body can itself `with` other templates, so templates
-compose:
+compose. A template may also forward its own parameters into the
+templates it applies:
 
 ```hll
 template linuxserver_app(puid: Number, pgid: Number) {
   env PUID = $puid
   env PGID = $pgid
+}
+
+template linuxserver_web(puid: Number, pgid: Number, port: Number) {
+  with linuxserver_app { puid: $puid, pgid: $pgid }
+  expose $port, entrypoint: web-secure
 }
 ```
 
@@ -103,10 +109,15 @@ body, one or more `with`-listed templates, and possibly an implicit
 **A collision between two explicit `with`-listed templates on the same
 scalar or map field is a compile error** — if two templates you
 explicitly listed both try to set `image`, or both set the same `env`
-key, `hllc` won't guess which one you meant; pick one in the service's
-own body to break the tie. `defaults` is exempt from this check (it
-always silently loses), and the service's own body is exempt too (it
-always silently wins).
+key, `hllc` won't guess which one you meant. Note that setting the field
+in the service's own body does *not* break the tie: the explicit tier
+merges to completion before the body is applied, so the collision is
+reported first and the body never gets a chance to win. The two real
+remedies are to drop one of the templates from the `with` list, or to
+refactor the contested field out of one of them. `defaults` is exempt
+from this check (it always silently loses), and the service's own body
+is exempt too (it always silently wins over whatever survives the
+explicit tier).
 
 Different field kinds merge differently:
 
@@ -123,7 +134,10 @@ Different field kinds merge differently:
   sub-field, and merges per sub-field (`port`/`host`/`entrypoint`
   independently) rather than as one indivisible unit — the same
   key-by-key reasoning as a map field, applied to a struct's named
-  fields instead of a map's keys.
+  fields instead of a map's keys. Each sub-field then follows its own
+  kind's rule: `port` and `host` are scalars and collide, while
+  `entrypoint` is a list and concatenates, so two explicit templates
+  each naming one entry point produce a router attached to both.
 
 That last point means a service's own body can override just
 `expose.host` while still inheriting `port`/`entrypoint` from a
@@ -153,7 +167,7 @@ network traefik-net {
 template internal_web(port: Number) {
   networks [traefik-net]
   restart unless-stopped
-  expose $port, host: "{{name}}.internal.example.com", entrypoint: "web-secure"
+  expose $port, host: "{{name}}.internal.example.com", entrypoint: web-secure
   middleware local-ipwhitelist
 }
 

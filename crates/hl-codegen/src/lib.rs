@@ -64,6 +64,27 @@ pub enum CodegenError {
     /// service block. The parser doesn't enforce this (see
     /// [`hl_parser::Service`]'s doc); codegen must.
     MissingImage { service: String, span: Span },
+    /// A `$param` reference survived composition and reached codegen.
+    /// Composition is supposed to substitute every one of them (see
+    /// [`hl_parser::Literal::Param`]'s doc), so this is a compiler
+    /// invariant rather than an ordinary user error — but it's reported
+    /// as a diagnostic anyway, not a panic: a gap in that invariant
+    /// (`defaults` bypassing argument binding was one, #62) should
+    /// degrade to a located error message the user can act on, never
+    /// take the process down.
+    UnsubstitutedParameter { param: String, span: Span },
+    /// A value destined for a Traefik label contains a character that
+    /// would change the meaning of the label it's spliced into — the
+    /// canonical case being a backtick in `expose.host`, which closes
+    /// the ``Host(`...`)`` rule early and lets everything after it be
+    /// read as more rule grammar. Rejected rather than escaped:
+    /// Traefik's rule grammar has no escape for that backtick, so there
+    /// is nothing to escape *to*.
+    UnsafeLabelValue {
+        field: &'static str,
+        character: char,
+        span: Span,
+    },
 }
 
 impl CodegenError {
@@ -72,7 +93,9 @@ impl CodegenError {
             CodegenError::UnknownNetwork { span, .. }
             | CodegenError::AmbiguousExternalNetwork { span, .. }
             | CodegenError::UnknownInterpolation { span, .. }
-            | CodegenError::MissingImage { span, .. } => *span,
+            | CodegenError::MissingImage { span, .. }
+            | CodegenError::UnsubstitutedParameter { span, .. }
+            | CodegenError::UnsafeLabelValue { span, .. } => *span,
         }
     }
 }
@@ -109,6 +132,41 @@ impl fmt::Display for CodegenError {
                 "{}:{}: service `{service}` has no `image` set",
                 span.line, span.col
             ),
+            CodegenError::UnsubstitutedParameter { param, .. } => write!(
+                f,
+                "{}:{}: template parameter `${param}` was never bound to an argument",
+                span.line, span.col
+            ),
+            // The offending character is rendered with `Debug` rather
+            // than wrapped in backticks like every other quoted name
+            // here: a backtick is the single most likely value, and
+            // backtick-quoting a backtick reads as an unbroken run of
+            // three.
+            CodegenError::UnsafeLabelValue {
+                field, character, ..
+            } => {
+                // A comma in `expose.entrypoint` gets an extra sentence.
+                // It's the one rejection here that used to be *accepted*
+                // — `entrypoint "web,websecure"` was how you attached a
+                // router to several entry points before `entrypoint`
+                // became a list — so it's the one a user is likely to
+                // hit by writing something that was correct yesterday,
+                // or by pasting a value straight out of Traefik's own
+                // docs. Pointing at the list form turns a dead end into
+                // a one-line fix. Note this is a diagnostic affordance,
+                // not a semantic carve-out: the value is still rejected,
+                // exactly like every other metacharacter.
+                let hint = if *field == "expose.entrypoint" && *character == ',' {
+                    " — `entrypoint` is a list, so write the entry points as separate items (`entrypoint web, websecure`) and let `hllc` join them"
+                } else {
+                    ""
+                };
+                write!(
+                    f,
+                    "{}:{}: `{field}` must not contain {character:?} — it would change the meaning of the generated Traefik label{hint}",
+                    span.line, span.col
+                )
+            }
         }
     }
 }
@@ -238,11 +296,17 @@ fn generate_service(
 /// program's top-level `networks:` section, and — if exactly one
 /// referenced network is `external` — its real name, for the
 /// `traefik.docker.network=` label.
+///
+/// `service_span` is only used for [`CodegenError::AmbiguousExternalNetwork`],
+/// which is a property of the service's whole `networks` list rather
+/// than of any one entry in it — there is no single offending
+/// reference to point at. [`CodegenError::UnknownNetwork`] does have
+/// one, and points at it (#70).
 fn resolve_networks(
     refs: &[Reference],
     declared: &[Network],
     service_name: &str,
-    span: Span,
+    service_span: Span,
 ) -> Result<(Vec<String>, NetworkDocs, Option<String>), CodegenError> {
     let mut compose_networks = Vec::with_capacity(refs.len());
     let mut docs = Vec::with_capacity(refs.len());
@@ -255,7 +319,7 @@ fn resolve_networks(
             .ok_or_else(|| CodegenError::UnknownNetwork {
                 service: service_name.to_string(),
                 network: r.name.clone(),
-                span,
+                span: r.span,
             })?;
         compose_networks.push(decl.name.name.clone());
         let is_external = decl.external.is_some();
@@ -283,7 +347,7 @@ fn resolve_networks(
             return Err(CodegenError::AmbiguousExternalNetwork {
                 service: service_name.to_string(),
                 candidates: many.to_vec(),
-                span,
+                span: service_span,
             });
         }
     };
@@ -346,5 +410,75 @@ mod error_display_tests {
             span: span(),
         };
         assert_eq!(err.to_string(), "3:5: service `web` has no `image` set");
+    }
+
+    #[test]
+    fn unsubstituted_parameter_display() {
+        let err = CodegenError::UnsubstitutedParameter {
+            param: "puid".to_string(),
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: template parameter `$puid` was never bound to an argument"
+        );
+    }
+
+    #[test]
+    fn unsafe_label_value_display() {
+        let err = CodegenError::UnsafeLabelValue {
+            field: "expose.host",
+            character: '`',
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: `expose.host` must not contain '`' — it would change the meaning of the generated Traefik label"
+        );
+    }
+
+    /// A comma in `expose.entrypoint` — and only that pairing — gets the
+    /// migration hint appended.
+    #[test]
+    fn comma_in_entrypoint_display_adds_a_list_hint() {
+        let err = CodegenError::UnsafeLabelValue {
+            field: "expose.entrypoint",
+            character: ',',
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: `expose.entrypoint` must not contain ',' — it would change the meaning of the generated Traefik label — `entrypoint` is a list, so write the entry points as separate items (`entrypoint web, websecure`) and let `hllc` join them"
+        );
+    }
+
+    /// The hint is specific to the comma: another metacharacter in the
+    /// same field has nothing to do with list syntax, so suggesting a
+    /// list there would just be wrong.
+    #[test]
+    fn non_comma_in_entrypoint_display_has_no_list_hint() {
+        let err = CodegenError::UnsafeLabelValue {
+            field: "expose.entrypoint",
+            character: '`',
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: `expose.entrypoint` must not contain '`' — it would change the meaning of the generated Traefik label"
+        );
+    }
+
+    /// And a comma in a *different* field doesn't get it either.
+    #[test]
+    fn comma_in_middleware_display_has_no_list_hint() {
+        let err = CodegenError::UnsafeLabelValue {
+            field: "middleware",
+            character: ',',
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: `middleware` must not contain ',' — it would change the meaning of the generated Traefik label"
+        );
     }
 }

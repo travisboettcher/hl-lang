@@ -174,13 +174,18 @@ one line.
    built-in case, aliasing to `expose`'s `host` field) may fuse onto it
    directly with **no comma**: `expose port as "host"`. This is a one-shot
    continuation, not a list — it cannot itself be followed by anything
-   else, comma or no comma; `expose port as "host", entrypoint: "..."` is a
+   else, comma or no comma; `expose port as "host", entrypoint: web` is a
    compile error. Beyond that, additional explicit `key: value`/`key`
    fields may follow, each preceded by a **mandatory comma** (the same
    "trailing comma continues, its absence ends the statement" rule as any
    other comma-list, including exempting the alias keyword itself — `as`
    isn't a valid target of this comma-continuation, only of the immediate
-   no-comma fusion above): `expose port, host: "...", entrypoint: "..."`.
+   no-comma fusion above): `expose port, host: "...", entrypoint: web`.
+   A field whose own value is an unbracketed comma-list (`entrypoint`'s
+   reference list) ends at the next `key:` rather than swallowing it, by
+   the same one-token lookahead: in `expose port, entrypoint: web, host:
+   "..."`, the second comma starts a sibling field of `expose`, not a
+   second entry point.
    A boolean struct field can always be set bare with no value, implying
    `true` (e.g. `external` on `network`). Field-init shorthand (`{ port }`
    standing in for `{ port: port }`, borrowed from Rust) and a bare
@@ -211,6 +216,14 @@ one line.
 | `restart` | struct | `policy` | — | — | no |
 | `with` | struct | `templates` (list of nested instantiations) | — | — | no |
 | `raw` | map | — | `:` | none (schema-free, passthrough) | no |
+
+`expose`'s own `entrypoint` sub-field is a list of references too
+(`entrypoint web, web-secure`), for the same reason it isn't a scalar
+anywhere else in the pipeline: Traefik's `entrypoints=` label is
+comma-separated, and modelling that as a list keeps the separator
+codegen's to write rather than the user's — so no generated label value
+ever has to tolerate a user-written comma, and the metacharacter guard
+can reject `,` uniformly everywhere.
 
 `middleware`, `depends_on`, `networks`, and `dns` are not rows in this
 table — they're plain list-of-reference fields directly on
@@ -259,15 +272,20 @@ key-by-key (or value-by-value for `volume`); scalar fields (`image`,
 the one built-in struct field with more than one sub-field, merges
 per sub-field (`port`/`host`/`entrypoint` independently) rather than as
 one indivisible unit — the same key-by-key reasoning as a map field,
-applied to a struct's named fields instead of a map's keys. This means a
+applied to a struct's named fields instead of a map's keys. Each
+sub-field then merges by its own kind: `port`/`host` are scalars and
+collide, `entrypoint` is a list and concatenates, so two explicit
+templates each naming one entry point yield a router attached to both
+rather than a `FieldCollision`. This means a
 service's own body can override just `expose.host` while still
 inheriting `port`/`entrypoint` from a `with`-listed template, without
 repeating them; two explicit templates only collide if they set the
-*same* `expose` sub-field, not merely the same `expose` field overall.
+*same* scalar `expose` sub-field, not merely the same `expose` field
+overall.
 
 ```
 template internal_web(port: Number) {
-  expose $port, entrypoint: "web-secure"
+  expose $port, entrypoint: web-secure
 }
 
 service it-tools {
@@ -340,7 +358,7 @@ network traefik-net {
 template internal_web(port: Number) {
   networks [traefik-net]
   restart unless-stopped
-  expose $port, host: "{{name}}.internal.techdebtor.io", entrypoint: "web-secure"
+  expose $port, host: "{{name}}.internal.techdebtor.io", entrypoint: web-secure
   middleware local-ipwhitelist
 }
 
@@ -377,7 +395,7 @@ use "network.hll" as net
 template internal_web(port: Number) {
   networks [net.traefik-net]
   restart unless-stopped
-  expose $port, host: "{{name}}.internal.techdebtor.io", entrypoint: "web-secure"
+  expose $port, host: "{{name}}.internal.techdebtor.io", entrypoint: web-secure
   middleware local-ipwhitelist
 }
 

@@ -115,5 +115,21 @@ subdirectory, so `hllc` won't guess.
 ## Exit codes
 
 `hllc` exits non-zero on any lex/parse/link/compose/codegen error,
-printing a `path:line:col: message` diagnostic to stderr — safe to use
-directly as a CI gate before `docker compose up`.
+printing a diagnostic to stderr — safe to use directly as a CI gate
+before `docker compose up`.
+
+How much of a location the diagnostic carries depends on the stage that
+raised it:
+
+- **Lex errors** print `path:line:col: message`.
+- **Parse errors** print `path: line:col: message` — the path, then a
+  space, then the position, so the path isn't part of the `line:col`
+  sequence.
+- **Link errors** about a file as a whole (an import that won't load, a
+  duplicate alias) name that file, which may be an imported one rather
+  than the file you passed on the command line.
+- **Compose and codegen errors** print `line:col: message` with no path
+  at all. A composed service's fields can come from any file in the
+  `use` graph, so naming one would mean guessing — and guessing wrong is
+  worse than saying nothing. Attaching real file identity to these
+  positions is tracked as future work.

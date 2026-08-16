@@ -1,6 +1,8 @@
 use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
-use hl_parser::{Expected, Literal, ParamType, ParseError, TemplateDecl, TopDecl, UseDecl, parse};
+use hl_parser::{
+    Expected, Expose, Literal, ParamType, ParseError, TemplateDecl, TopDecl, UseDecl, parse,
+};
 
 fn parse_ok(source: &str) -> hl_parser::Program {
     parse(source).unwrap_or_else(|err| panic!("unexpected parse error: {err}"))
@@ -240,12 +242,47 @@ fn network_without_real_name_field_is_none() {
     assert!(network.real_name.is_none());
 }
 
+fn entrypoints(expose: &Expose) -> Vec<&str> {
+    expose.entrypoint.iter().map(|r| r.name.as_str()).collect()
+}
+
 #[test]
 fn expose_entrypoint_field() {
+    let program = parse_ok("service s {\n  expose 8096, entrypoint: web-secure\n}\n");
+    let service = as_service(&program.decls[0]);
+    let expose = service.fields.expose.as_ref().unwrap();
+    assert_eq!(entrypoints(expose), vec!["web-secure"]);
+}
+
+/// `entrypoint` is a reference list, spelled exactly like `middleware`:
+/// a bare comma-separated list, a bracketed list, or a repeat of the
+/// field, all of which accumulate.
+#[test]
+fn expose_entrypoint_accepts_a_bare_list() {
+    let program =
+        parse_ok("service s {\n  expose { port: 8096\n entrypoint: web, web-secure }\n}\n");
+    let service = as_service(&program.decls[0]);
+    let expose = service.fields.expose.as_ref().unwrap();
+    assert_eq!(entrypoints(expose), vec!["web", "web-secure"]);
+}
+
+#[test]
+fn expose_entrypoint_accepts_a_bracketed_list() {
+    let program = parse_ok("service s {\n  expose 8096, entrypoint: [web, web-secure]\n}\n");
+    let service = as_service(&program.decls[0]);
+    let expose = service.fields.expose.as_ref().unwrap();
+    assert_eq!(entrypoints(expose), vec!["web", "web-secure"]);
+}
+
+/// A quoted entry point is still a reference — `parse_key` accepts a
+/// STRING — which is what keeps `entrypoint "{{name}}-secure"` (and
+/// every pre-list config that quoted a single name) working.
+#[test]
+fn expose_entrypoint_accepts_a_quoted_name() {
     let program = parse_ok("service s {\n  expose 8096, entrypoint: \"web-secure\"\n}\n");
     let service = as_service(&program.decls[0]);
     let expose = service.fields.expose.as_ref().unwrap();
-    assert_eq!(expose.entrypoint.as_ref().unwrap().text(), "web-secure");
+    assert_eq!(entrypoints(expose), vec!["web-secure"]);
 }
 
 /// `host`/`entrypoint` together, via the explicit comma-separated field
@@ -268,8 +305,38 @@ fn expose_host_and_entrypoint_fields_in_template_body() {
         expose.host.as_ref().unwrap().text(),
         "{{name}}.internal.techdebtor.io"
     );
-    assert_eq!(expose.entrypoint.as_ref().unwrap().text(), "web-secure");
+    assert_eq!(entrypoints(expose), vec!["web-secure"]);
     assert_eq!(template.fields.middleware.len(), 1);
+}
+
+/// A bare `entrypoint` list stops at the next `key:` rather than
+/// swallowing it as another entry point — the one-token lookahead in
+/// `parse_bare_reference_list`. Without it, `host` would be read as a
+/// second entry point and the parse would then die on its `:` with an
+/// error pointing at the wrong place entirely.
+#[test]
+fn bare_entrypoint_list_stops_at_the_next_field_key() {
+    let program =
+        parse_ok("service s {\n  expose 8096, entrypoint: web, host: \"x.example.com\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    let expose = service.fields.expose.as_ref().unwrap();
+    assert_eq!(entrypoints(expose), vec!["web"]);
+    assert_eq!(expose.host.as_ref().unwrap().text(), "x.example.com");
+}
+
+/// The same lookahead must not over-trigger: a comma followed by a
+/// plain reference (no colon after it) still continues the list.
+#[test]
+fn bare_middleware_list_still_continues_past_a_comma() {
+    let program = parse_ok("service s {\n  middleware auth, cors\n}\n");
+    let service = as_service(&program.decls[0]);
+    let names: Vec<&str> = service
+        .fields
+        .middleware
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["auth", "cors"]);
 }
 
 /// Two different fields joined by a comma, with no newline between them,
@@ -284,10 +351,18 @@ fn different_fields_joined_by_comma_on_one_line_is_error() {
 }
 
 #[test]
-fn expose_without_entrypoint_field_is_none() {
+fn expose_without_entrypoint_field_is_empty() {
     let program = parse_ok("service s {\n  expose 8096\n}\n");
     let service = as_service(&program.decls[0]);
-    assert!(service.fields.expose.as_ref().unwrap().entrypoint.is_none());
+    assert!(
+        service
+            .fields
+            .expose
+            .as_ref()
+            .unwrap()
+            .entrypoint
+            .is_empty()
+    );
 }
 
 // --- container_name ---

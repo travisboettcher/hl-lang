@@ -296,3 +296,105 @@ fn unknown_qualified_template_is_error() {
             if name == "nonexistent"
     ));
 }
+
+/// #63, linker side: the graph's own declaration collection rejects a
+/// redeclared service, same as `hl_parser::compose` does for a lone
+/// file.
+#[test]
+fn duplicate_service_name_in_one_file_is_error() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "service.hll",
+        "service web {\n  image \"a\"\n}\nservice web {\n  image \"b\"\n}\n",
+    );
+
+    let err = link(Path::new("service.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        err,
+        LinkError::Compose(ComposeError::DuplicateServiceName { name, .. }) if name == "web"
+    ));
+}
+
+/// A duplicate `service` in an *imported* file is inert (only the entry
+/// module's services are built), but it's still a redeclaration, so it's
+/// still reported — mirroring how a duplicate template is rejected in
+/// every module, entry or not.
+#[test]
+fn duplicate_service_name_in_an_imported_file_is_error() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "lib.hll",
+        "service web {\n  image \"a\"\n}\nservice web {\n  image \"b\"\n}\n",
+    );
+    loader.add(
+        "service.hll",
+        "use \"lib.hll\" as lib\nservice s {\n  image \"x\"\n}\n",
+    );
+
+    let err = link(Path::new("service.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        err,
+        LinkError::Compose(ComposeError::DuplicateServiceName { name, .. }) if name == "web"
+    ));
+}
+
+/// #63: without this check the entry module's `entry_networks` (source
+/// order, first-wins downstream) and its by-name `networks` map
+/// (last-wins) disagree about which `proxy` a reference means.
+#[test]
+fn duplicate_network_name_in_one_file_is_error() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "service.hll",
+        "network proxy {\n  external\n}\nnetwork proxy {\n  name: \"other\"\n}\n\
+         service s {\n  image \"x\"\n  networks [proxy]\n}\n",
+    );
+
+    let err = link(Path::new("service.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        err,
+        LinkError::Compose(ComposeError::DuplicateNetworkName { name, .. }) if name == "proxy"
+    ));
+}
+
+/// The imported-file case of the same check: a library module's
+/// `networks` map is what every `alias.name` lookup goes through, so a
+/// duplicate there is exactly the ambiguity this rejects.
+#[test]
+fn duplicate_network_name_in_an_imported_file_is_error() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "docker.hll",
+        "network proxy {\n  external\n}\nnetwork proxy {\n  name: \"other\"\n}\n",
+    );
+    loader.add(
+        "service.hll",
+        "use \"docker.hll\" as traefik\n\
+         service s {\n  image \"x\"\n  networks [traefik.proxy]\n}\n",
+    );
+
+    let err = link(Path::new("service.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        err,
+        LinkError::Compose(ComposeError::DuplicateNetworkName { name, .. }) if name == "proxy"
+    ));
+}
+
+/// The same network name declared in two *different* modules stays
+/// legal — each module has its own symbol table, and that's exactly what
+/// makes a shared `network` definition importable.
+#[test]
+fn same_network_name_in_two_modules_is_fine() {
+    let mut loader = InMemoryLoader::default();
+    loader.add("docker.hll", "network proxy {\n  external\n}\n");
+    loader.add(
+        "service.hll",
+        "use \"docker.hll\" as traefik\n\
+         network proxy {\n  external\n}\n\
+         service s {\n  image \"x\"\n  networks [proxy]\n}\n",
+    );
+
+    let composed = link(Path::new("service.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+    assert_eq!(composed.networks.len(), 1);
+}
