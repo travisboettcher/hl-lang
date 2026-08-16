@@ -133,7 +133,20 @@ jobs:
           gh pr create --base main --head "$branch" \
             --title "chore(release): v$next [release-bump]" \
             --body "Automated $bump version bump to v$next, from #${{ steps.label.outputs.pr_number }}'s \`semver-$bump\` label. Auto-merges once CI passes; merging cuts the v$next release."
-          gh pr merge "$branch" --auto --squash
+          # GitHub computes a fresh PR's mergeable status asynchronously,
+          # so enabling auto-merge in the same breath as creating it can
+          # transiently fail with "Pull request is in unstable status" —
+          # retry a few times rather than leaving the PR to merge by hand.
+          for attempt in 1 2 3 4 5; do
+            if gh pr merge "$branch" --auto --squash; then
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "::error::gh pr merge --auto failed after 5 attempts"
+              exit 1
+            fi
+            sleep 5
+          done
 
   publish-release:
     name: tag, create GitHub Release, attach hllc binary
