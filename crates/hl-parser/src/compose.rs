@@ -1007,17 +1007,23 @@ impl Spanned for EnvEntry {
 /// or "anything-vs-own" (silent overrides).
 ///
 /// `scalars` holds every single-value collision point in the language —
-/// `image`, `expose.port`/`expose.host`/`expose.entrypoint`, `restart`,
-/// `container_name`, and any future one — keyed generically by name
-/// (dotted only where a struct has more than one sub-field needing
-/// disambiguation, e.g. `expose`'s three; a single-field struct like
-/// `image`/`restart` is keyed under its own bare name) instead of one
-/// dedicated `MergeAcc` field per collision point. Which canonical keys
-/// exist, and how each one's `Literal` slot is read out of/written back
-/// into `ServiceFields`, is entirely described by the [`SCALAR_FIELDS`]
-/// table below — see its doc for why that's what makes a new scalar
-/// collision point a one-line addition rather than a new `MergeAcc`
-/// field plus new hand-written merge/rebuild logic.
+/// `image.ref`, `expose.port`/`expose.host`/`expose.entrypoint`,
+/// `restart.policy`, `container_name`, and any future one — keyed
+/// generically by name, always the fully-dotted canonical path down to
+/// the concrete sub-field (`expose`'s three sub-fields; `image`/
+/// `restart`'s one apiece), never a struct's own bare name, so a field's
+/// key is a stable function of its own identity rather than how many
+/// siblings its struct happens to have today (see #27: keying a
+/// single-field struct under its bare name meant the key would have to
+/// change out from under `image.ref`/`restart.policy` the moment either
+/// struct grew a second field). A bare field with no enclosing struct at
+/// all, like `container_name`, is keyed under its own name — there's no
+/// sub-field path to be dotted onto. Which canonical keys exist, and how
+/// each one's `Literal` slot is read out of/written back into
+/// `ServiceFields`, is entirely described by the [`SCALAR_FIELDS`] table
+/// below — see its doc for why that's what makes a new scalar collision
+/// point a one-line addition rather than a new `MergeAcc` field plus new
+/// hand-written merge/rebuild logic.
 #[derive(Default)]
 struct MergeAcc {
     scalars: HashMap<&'static str, (Literal, Tier)>,
@@ -1057,16 +1063,17 @@ impl MergeAcc {
 
 /// One scalar collision point in `ServiceFields` — a `Literal` slot that
 /// lives either directly on `ServiceFields` (`container_name`) or inside
-/// one of its `Nested` struct fields (`image.reference`,
+/// one of its `Nested` struct fields (`image.ref`,
 /// `expose.port`/`.host`/`.entrypoint`, `restart.policy`) — described
-/// generically by `key` (the name [`merge_scalar`]/`ComposeError` key
-/// collisions by) plus a pair of function pointers for reading the slot
-/// out of a tier's `ServiceFields` (`take`) and writing a merged value
-/// back into a freshly rebuilt one (`set`). This table is what lets
-/// [`merge_tier`] and [`MergeAcc::into_service_fields`] each be one
-/// generic loop instead of the two bespoke, hand-enumerated functions
-/// they used to be (see hl-lang#28) — the only place left that needs to
-/// know `ServiceFields`'s concrete struct shape. Adding a future scalar
+/// generically by `key` (the identity-stable, fully-dotted name
+/// [`merge_scalar`]/`ComposeError` key collisions by — see #27) plus a
+/// pair of function pointers for reading the slot out of a tier's
+/// `ServiceFields` (`take`) and writing a merged value back into a
+/// freshly rebuilt one (`set`). This table is what lets [`merge_tier`]
+/// and [`MergeAcc::into_service_fields`] each be one generic loop
+/// instead of the two bespoke, hand-enumerated functions they used to
+/// be (see hl-lang#28) — the only place left that needs to know
+/// `ServiceFields`'s concrete struct shape. Adding a future scalar
 /// collision point (a new struct sub-field, or a new bare scalar field)
 /// means adding one `ScalarField` entry here, not touching either
 /// generic function.
@@ -1087,7 +1094,7 @@ struct ScalarField {
 
 static SCALAR_FIELDS: &[ScalarField] = &[
     ScalarField {
-        key: "image",
+        key: "image.ref",
         take: |f| f.image.take().and_then(|i| i.reference),
         set: |f, v| {
             f.image = Some(Image {
@@ -1142,7 +1149,7 @@ static SCALAR_FIELDS: &[ScalarField] = &[
         },
     },
     ScalarField {
-        key: "restart",
+        key: "restart.policy",
         take: |f| f.restart.take().and_then(|r| r.policy),
         set: |f, v| {
             f.restart = Some(Restart {
