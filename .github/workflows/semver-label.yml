@@ -30,9 +30,27 @@ jobs:
     # author check is against `repository_owner`, not `github-actions
     # [bot]`. The author + title-marker check together mean an external
     # contributor can't spoof this by naming their own PR the same way.
+    #
+    # Dependabot's `github-actions` PRs are exempt too (#96): they change
+    # CI configuration only and can't affect the shipped binary, so
+    # releasing for one would publish a new version with byte-identical
+    # contents. Left unlabelled, release.yml's own "no semver-* label
+    # found" path skips the release for that merge, which is the wanted
+    # outcome. Its `cargo` PRs are deliberately *not* exempt — those do
+    # change the binary, dependabot.yml labels them `semver-patch`, and
+    # keeping them gated here means that if that labelling ever silently
+    # stops working, this check catches it instead of a binary-affecting
+    # change merging with no release. The ecosystem is read off the
+    # branch name, which Dependabot always prefixes
+    # `dependabot/<ecosystem>/` — grouped runs included, since those only
+    # change what follows the prefix (`.../actions-<hash>` rather than
+    # `.../actions/checkout-7`). `user.login` is set by GitHub and can't
+    # be spoofed by a contributor branch named to look the same way.
     if: |
       !(github.event.pull_request.user.login == github.repository_owner &&
-        contains(github.event.pull_request.title, '[release-bump]'))
+        contains(github.event.pull_request.title, '[release-bump]')) &&
+      !(github.event.pull_request.user.login == 'dependabot[bot]' &&
+        startsWith(github.head_ref, 'dependabot/github_actions/'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
