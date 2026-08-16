@@ -374,3 +374,35 @@ fn build_rejects_a_parent_escaping_file_stem() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+/// #64, the sibling case: `Path::new("..hll").file_stem()` is `.`, which
+/// doesn't escape `--out` but collapses *into* it — every such file
+/// would write to `<out>/docker-compose.yml`, silently overwriting each
+/// other rather than landing in one subdirectory per input.
+#[test]
+fn build_rejects_a_current_directory_file_stem() {
+    let dir = scratch_dir("current-dir-stem");
+    let inputs = dir.join("inputs");
+    fs::create_dir_all(&inputs).unwrap();
+    fs::write(inputs.join("..hll"), SYNCTHING_HLL).unwrap();
+    // Created up front deliberately: `create_dir_all("out/.")` fails
+    // outright when `out` doesn't exist yet, so without this the build
+    // would fail on that IO error instead of on the guard, and the test
+    // would pass whether or not the guard is doing anything.
+    let out_dir = dir.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let code = run(Cli {
+        file: inputs,
+        parse: false,
+        build: true,
+        out: Some(out_dir.clone()),
+    });
+    assert_eq!(code, ExitCode::FAILURE);
+    assert!(
+        !out_dir.join("docker-compose.yml").exists(),
+        "output must not have collapsed into the --out directory itself"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
