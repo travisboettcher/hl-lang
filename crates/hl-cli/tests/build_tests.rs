@@ -8,7 +8,15 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use hl_cli::{Cli, run};
+use hl_cli::{Cli, GENERATED_HEADER, run};
+
+const HAND_WRITTEN_COMPOSE: &str = "\
+# hand-written by me, tuned over months
+services:
+  s:
+    image: nginx
+    deploy: { resources: { limits: { memory: 512M } } }
+";
 
 const SYNCTHING_HLL: &str = include_str!("../../hl-parser/tests/fixtures/syncthing.hll");
 
@@ -38,6 +46,7 @@ fn build_single_file_writes_yaml_to_out_path() {
         parse: false,
         build: true,
         out: Some(out.clone()),
+        force: false,
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -67,6 +76,7 @@ fn build_single_file_creates_missing_out_parent_directories() {
         parse: false,
         build: true,
         out: Some(out.clone()),
+        force: false,
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -94,6 +104,7 @@ fn build_directory_writes_one_file_per_hll_input() {
         parse: false,
         build: true,
         out: Some(out_dir.clone()),
+        force: false,
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -136,6 +147,7 @@ fn build_directory_of_hll_files_with_use_imports_between_them() {
         parse: false,
         build: true,
         out: Some(out.clone()),
+        force: false,
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -150,6 +162,7 @@ fn build_directory_of_hll_files_with_use_imports_between_them() {
         parse: false,
         build: true,
         out: Some(single_file_out.clone()),
+        force: false,
     });
     assert_eq!(code, ExitCode::SUCCESS);
     let baseline_yaml = fs::read_to_string(&single_file_out).unwrap();
@@ -174,6 +187,7 @@ fn build_directory_without_out_is_error() {
         parse: false,
         build: true,
         out: None,
+        force: false,
     });
     assert_eq!(code, ExitCode::FAILURE);
 
@@ -196,6 +210,7 @@ fn build_colocated_service_directories_writes_in_place_with_no_out() {
         parse: false,
         build: true,
         out: None,
+        force: false,
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -234,6 +249,7 @@ fn build_colocated_service_directories_with_out_remaps_tree() {
         parse: false,
         build: true,
         out: Some(out_dir.clone()),
+        force: false,
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -267,6 +283,7 @@ fn build_colocated_directory_with_multiple_hll_files_is_error() {
         parse: false,
         build: true,
         out: None,
+        force: false,
     });
     assert_eq!(code, ExitCode::FAILURE);
 
@@ -286,6 +303,7 @@ fn build_directory_with_no_hll_files_anywhere_is_a_no_op_success() {
         parse: false,
         build: true,
         out: None,
+        force: false,
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -313,6 +331,7 @@ fn build_refuses_to_write_through_a_symlinked_compose_file() {
         parse: false,
         build: true,
         out: None,
+        force: false,
     });
     assert_eq!(code, ExitCode::FAILURE);
     assert_eq!(
@@ -342,6 +361,7 @@ fn build_refuses_a_symlinked_out_path() {
         parse: false,
         build: true,
         out: Some(out),
+        force: false,
     });
     assert_eq!(code, ExitCode::FAILURE);
     assert_eq!(fs::read_to_string(&victim).unwrap(), "precious\n");
@@ -365,6 +385,7 @@ fn build_rejects_a_parent_escaping_file_stem() {
         parse: false,
         build: true,
         out: Some(out_dir.clone()),
+        force: false,
     });
     assert_eq!(code, ExitCode::FAILURE);
     assert!(
@@ -397,12 +418,219 @@ fn build_rejects_a_current_directory_file_stem() {
         parse: false,
         build: true,
         out: Some(out_dir.clone()),
+        force: false,
     });
     assert_eq!(code, ExitCode::FAILURE);
     assert!(
         !out_dir.join("docker-compose.yml").exists(),
         "output must not have collapsed into the --out directory itself"
     );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// #85: every `--build` output carries a header identifying it as
+/// generated — that's what makes generated files tellable apart from
+/// authored ones in a repo, and what the overwrite guard below keys off.
+/// The header is a YAML comment, so the document still parses.
+#[test]
+fn build_output_starts_with_the_generated_header() {
+    let dir = scratch_dir("generated-header");
+    let input = dir.join("syncthing.hll");
+    fs::write(&input, SYNCTHING_HLL).unwrap();
+    let out = dir.join("docker-compose.yml");
+
+    let code = run(Cli {
+        file: input,
+        parse: false,
+        build: true,
+        out: Some(out.clone()),
+        force: false,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let yaml = fs::read_to_string(&out).unwrap();
+    assert!(
+        yaml.starts_with(GENERATED_HEADER),
+        "output should start with the generated header, got:\n{yaml}"
+    );
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(&yaml).expect("output should still be valid YAML");
+    assert!(
+        value
+            .get("services")
+            .and_then(|s| s.get("syncthing"))
+            .is_some()
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// #85, the core case: co-located mode discovers `docker-compose.yml` by
+/// scanning, so a hand-written one — the rest of a repo mid-migration —
+/// used to be destroyed without a word. It must survive untouched, and
+/// the build must fail rather than half-succeed silently.
+#[test]
+fn build_refuses_to_overwrite_a_hand_written_compose_file() {
+    let dir = scratch_dir("hand-written-colocated");
+    let service_dir = dir.join("syncthing");
+    fs::create_dir_all(&service_dir).unwrap();
+    fs::write(service_dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+    let compose = service_dir.join("docker-compose.yml");
+    fs::write(&compose, HAND_WRITTEN_COMPOSE).unwrap();
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: None,
+        force: false,
+    });
+    assert_eq!(code, ExitCode::FAILURE);
+    assert_eq!(
+        fs::read_to_string(&compose).unwrap(),
+        HAND_WRITTEN_COMPOSE,
+        "the hand-written file must not have been touched"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// `--force` is the documented way past that guard, for the user who
+/// really does want the hand-written file replaced.
+#[test]
+fn build_force_overwrites_a_hand_written_compose_file() {
+    let dir = scratch_dir("hand-written-force");
+    let service_dir = dir.join("syncthing");
+    fs::create_dir_all(&service_dir).unwrap();
+    fs::write(service_dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+    let compose = service_dir.join("docker-compose.yml");
+    fs::write(&compose, HAND_WRITTEN_COMPOSE).unwrap();
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: None,
+        force: true,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let yaml = fs::read_to_string(&compose).unwrap();
+    assert!(yaml.starts_with(GENERATED_HEADER));
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(&yaml).expect("output should be valid YAML");
+    assert!(
+        value
+            .get("services")
+            .and_then(|s| s.get("syncthing"))
+            .is_some()
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// The guard must not make rebuilding require `--force`: `hllc`'s own
+/// previous output carries the header, so a second plain build over it
+/// succeeds — the everyday case.
+#[test]
+fn build_overwrites_its_own_previous_output_without_force() {
+    let dir = scratch_dir("rebuild");
+    let service_dir = dir.join("syncthing");
+    fs::create_dir_all(&service_dir).unwrap();
+    fs::write(service_dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+
+    for _ in 0..2 {
+        let code = run(Cli {
+            file: dir.clone(),
+            parse: false,
+            build: true,
+            out: None,
+            force: false,
+        });
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    let yaml = fs::read_to_string(service_dir.join("docker-compose.yml")).unwrap();
+    assert!(yaml.starts_with(GENERATED_HEADER));
+    assert_eq!(
+        yaml.matches(GENERATED_HEADER).count(),
+        1,
+        "rebuilding should replace the file, not accumulate headers"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// #85 asks for the guard on all three write paths, not just the
+/// co-located one. Flat mode derives `<out>/<stem>/docker-compose.yml`
+/// from a scan too, so a pre-existing hand-written file can be sitting
+/// there just the same.
+#[test]
+fn build_flat_mode_refuses_to_overwrite_a_hand_written_compose_file() {
+    let dir = scratch_dir("hand-written-flat");
+    fs::write(dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+    let out_dir = dir.join("out");
+    let existing_dir = out_dir.join("syncthing");
+    fs::create_dir_all(&existing_dir).unwrap();
+    let compose = existing_dir.join("docker-compose.yml");
+    fs::write(&compose, HAND_WRITTEN_COMPOSE).unwrap();
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: Some(out_dir),
+        force: false,
+    });
+    assert_eq!(code, ExitCode::FAILURE);
+    assert_eq!(fs::read_to_string(&compose).unwrap(), HAND_WRITTEN_COMPOSE);
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// And on the `--out` path, where the destination is named directly.
+#[test]
+fn build_refuses_a_hand_written_out_path() {
+    let dir = scratch_dir("hand-written-out");
+    let input = dir.join("syncthing.hll");
+    fs::write(&input, SYNCTHING_HLL).unwrap();
+    let out = dir.join("docker-compose.yml");
+    fs::write(&out, HAND_WRITTEN_COMPOSE).unwrap();
+
+    let code = run(Cli {
+        file: input,
+        parse: false,
+        build: true,
+        out: Some(out.clone()),
+        force: false,
+    });
+    assert_eq!(code, ExitCode::FAILURE);
+    assert_eq!(fs::read_to_string(&out).unwrap(), HAND_WRITTEN_COMPOSE);
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// A path that exists but can't be read back for inspection — here a
+/// directory — is refused rather than assumed disposable: nothing about
+/// it could be shown to be generated output.
+#[test]
+fn build_refuses_an_out_path_it_cannot_inspect() {
+    let dir = scratch_dir("uninspectable-out");
+    let input = dir.join("syncthing.hll");
+    fs::write(&input, SYNCTHING_HLL).unwrap();
+    let out = dir.join("docker-compose.yml");
+    fs::create_dir_all(&out).unwrap();
+
+    let code = run(Cli {
+        file: input,
+        parse: false,
+        build: true,
+        out: Some(out.clone()),
+        force: false,
+    });
+    assert_eq!(code, ExitCode::FAILURE);
+    assert!(out.is_dir(), "the existing path must be left alone");
 
     fs::remove_dir_all(&dir).ok();
 }
