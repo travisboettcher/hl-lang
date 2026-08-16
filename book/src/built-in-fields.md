@@ -61,7 +61,11 @@ Primary field: `port`. Secondary-field shorthand: `as` aliases to `host`.
 
 ```hll
 expose 8096 as "media.example.com"
-# same as: expose { port: 8096, host: "media.example.com" }
+# same as:
+# expose {
+#   port: 8096
+#   host: "media.example.com"
+# }
 
 # `as` is a one-shot fusion, not a list — it can't be followed by more
 # fields. To also set entrypoint, name `host` explicitly instead:

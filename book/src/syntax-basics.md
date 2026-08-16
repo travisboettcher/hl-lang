@@ -77,12 +77,17 @@ field is which.
 
 `expose` needs more than just a port in practice — it also needs the
 hostname Traefik should route from. Rather than dropping back to the full
-`{ port: 8096, host: "..." }` form, one specific shorthand lets a second
-field fuse directly onto the primary value with no comma:
+form (a canonical `{ }` body, each field on its own line — see [Layout
+rules](#layout-rules) below), one specific shorthand lets a second field
+fuse directly onto the primary value with no comma:
 
 ```hll
 expose 8096 as "media.example.com"
-# same as: expose { port: 8096, host: "media.example.com" }
+# same as:
+# expose {
+#   port: 8096
+#   host: "media.example.com"
+# }
 ```
 
 `as` is the one built-in case of this — it aliases onto `expose`'s `host`

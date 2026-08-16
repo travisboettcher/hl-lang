@@ -126,7 +126,8 @@ instead of just within one file.
 
 - [Syntax Basics](./syntax-basics.md) — how a statement, a body, and the
   primary-value shorthand you saw above (`expose 8096 as "..."` instead
-  of `expose { port: 8096, host: "..." }`) actually work.
+  of writing `port`/`host` out as separate fields in a full `expose { }`
+  body) actually work.
 - [Built-in Fields](./built-in-fields.md) — every field `hll` understands,
   what it accepts, and its defaults.
 - [The `hllc` CLI](./cli.md) — building a whole directory of services at
