@@ -47,3 +47,9 @@ name = "hl-cli"
 version_group = "hl-lang"
 git_tag_name = "v{{ version }}"
 git_release_name = "v{{ version }}"
+# GitHub's immutable-releases feature locks a release's assets the
+# moment it's published, so release.yml can't attach the hllc binary
+# afterward — it has to go up while the release is still a draft, then
+# release.yml publishes it itself once the asset's on. See that
+# workflow's own comment on the publish-release job.
+git_release_draft = true

@@ -9,9 +9,12 @@ name: Release
 # itself a push to main, which re-triggers this workflow — that second
 # run is recognized by the `[release-bump]` marker in the squash commit
 # message and runs `publish-release` instead: `release-plz release` tags
-# and creates the GitHub Release (a no-op if that version's tag already
-# exists, so this can never double-release), then the actual `hllc`
-# binary is built and attached to it.
+# and creates the GitHub Release as a draft (a no-op if that version's
+# tag already exists, so this can never double-release), then the
+# actual `hllc` binary is built, attached, and the release published.
+# It has to stay a draft until the binary's attached — GitHub's
+# immutable-releases feature locks a published release's assets
+# immediately, so uploading to it afterward fails.
 #
 # The version bump lands via a real PR merge rather than a direct push
 # to main so this keeps working under branch protection that requires
@@ -156,7 +159,7 @@ jobs:
       - name: cargo build --release
         run: cargo build --workspace --release
 
-      - name: Attach the hllc binary to the release
+      - name: Attach the hllc binary to the release and publish it
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -164,3 +167,4 @@ jobs:
           version=$(grep -m1 '^version' crates/hl-cli/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
           cp target/release/hllc hllc-linux-x86_64
           gh release upload "v$version" hllc-linux-x86_64 --clobber
+          gh release edit "v$version" --draft=false
