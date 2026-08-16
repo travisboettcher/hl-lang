@@ -262,13 +262,41 @@ impl<'src> Parser<'src> {
         Ok(refs)
     }
 
+    /// The unbracketed `a, b, c` form. A comma only continues the list
+    /// if what follows it is genuinely another list item — the same
+    /// "one-token lookahead decides whether this comma belongs to me or
+    /// to whoever called me" rule [`Self::parse_struct_primary_shorthand`]
+    /// already applies to its own trailing fields, and needed here for
+    /// the same reason now that `expose.entrypoint` is a reference list:
+    /// in `expose 8096, entrypoint: web, host: "x"`, the second comma
+    /// starts a sibling *field* of `expose`, not a second entry point,
+    /// and a greedy list would swallow `host` as one and then fail on
+    /// its `:` with an error pointing nowhere near the real problem.
+    ///
+    /// `KEY :` is the whole tell: a list item is a bare reference
+    /// (optionally `alias.name`), never a `key: value` pair, so a colon
+    /// one token past the comma can only mean a new field has begun.
     fn parse_bare_reference_list(&mut self) -> Result<Vec<Reference>, ParseError> {
         let mut refs = vec![self.parse_reference()?];
-        while self.peek().kind == TokenKind::Comma {
+        while self.peek().kind == TokenKind::Comma && !self.comma_starts_a_new_field() {
             self.bump();
             refs.push(self.parse_reference()?);
         }
         Ok(refs)
+    }
+
+    /// Whether the `Comma` at the cursor is followed by `KEY :` — see
+    /// [`Self::parse_bare_reference_list`]. Safe to index `pos + 1`
+    /// (the caller has already seen a non-`Eof` token at `pos`), but
+    /// `pos + 2` may be past the end, so that one is checked.
+    fn comma_starts_a_new_field(&self) -> bool {
+        matches!(
+            self.tokens[self.pos + 1].kind,
+            TokenKind::Ident | TokenKind::Str
+        ) && self
+            .tokens
+            .get(self.pos + 2)
+            .is_some_and(|t| t.kind == TokenKind::Colon)
     }
 
     fn parse_reference_list_value(&mut self) -> Result<Vec<Reference>, ParseError> {
@@ -1213,8 +1241,8 @@ fn lower_expose(mut fields: StructFields, span: Span) -> Expose {
         _ => None,
     };
     let entrypoint = match fields.remove("entrypoint") {
-        Some(FieldValue::Scalar(lit)) => Some(lit),
-        _ => None,
+        Some(FieldValue::RefList(v)) => v,
+        _ => Vec::new(),
     };
     Expose {
         port,

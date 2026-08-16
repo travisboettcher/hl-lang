@@ -4,7 +4,9 @@
 //! in `examples.rs`.
 
 use hl_parser::schema::MapSide;
-use hl_parser::{ComposeError, ComposedProgram, Literal, RawValue, Service, compose, parse};
+use hl_parser::{
+    ComposeError, ComposedProgram, Expose, Literal, RawValue, Service, compose, parse,
+};
 
 fn compose_ok(source: &str) -> ComposedProgram {
     let program = parse(source).unwrap_or_else(|err| panic!("unexpected parse error: {err}"));
@@ -223,6 +225,10 @@ fn explicit_templates_container_name_collision_is_error() {
 
 // --- expose sub-field merge (#10) ---
 
+fn entrypoints(expose: &Expose) -> Vec<&str> {
+    expose.entrypoint.iter().map(|r| r.name.as_str()).collect()
+}
+
 /// The exact scenario from the issue report: a service overriding just
 /// `expose.host` while still inheriting `port`/`entrypoint` from a
 /// `with`-listed template, without repeating them.
@@ -245,7 +251,7 @@ fn service_own_body_can_override_just_expose_host() {
         expose.host.as_ref().unwrap().text(),
         "tools.internal.techdebtor.io"
     );
-    assert_eq!(expose.entrypoint.as_ref().unwrap().text(), "web-secure");
+    assert_eq!(entrypoints(expose), vec!["web-secure"]);
 }
 
 /// Two explicit templates each setting a *different* `expose` sub-field
@@ -289,6 +295,99 @@ fn explicit_templates_setting_same_expose_subfield_still_collide() {
     }
 }
 
+/// An entry point names something in the deployment's own
+/// `traefik.yml`, not a declaration any `.hll` file exports, so a
+/// qualifier has nothing to resolve against — rejected rather than
+/// silently dropped on the way to the label.
+#[test]
+fn qualified_entrypoint_reference_is_rejected() {
+    let err = compose_err("service s {\n  image \"x\"\n  expose 80, entrypoint: traefik.web\n}\n");
+    assert!(
+        matches!(
+            err,
+            ComposeError::UnsupportedQualifiedReference { field: "expose.entrypoint", ref alias, .. } if alias == "traefik"
+        ),
+        "got {err:?}"
+    );
+}
+
+/// `expose.entrypoint` is a reference list, so two explicit templates
+/// both setting it *concatenate* rather than raising the
+/// `FieldCollision` a scalar sub-field would — the same rule
+/// `middleware` has always followed. This is the behavioral point of
+/// making `entrypoint` a list: "attach this router to `web` and to
+/// `web-secure`" is expressible by composition instead of by a
+/// comma-in-a-string that codegen then has to tolerate.
+#[test]
+fn explicit_templates_both_setting_entrypoint_concatenate() {
+    let composed = compose_ok(
+        "template a {\n  expose { entrypoint: web }\n}\n\
+         template b {\n  expose { entrypoint: web-secure }\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let expose = service.fields.expose.as_ref().expect("expose set");
+    assert_eq!(entrypoints(expose), vec!["web", "web-secure"]);
+}
+
+/// And across all three tiers, in the same priority order every other
+/// list field concatenates in.
+#[test]
+fn entrypoint_concatenates_across_all_three_tiers() {
+    let composed = compose_ok(
+        "template defaults {\n  expose { entrypoint: d }\n}\n\
+         template a {\n  expose { entrypoint: t }\n}\n\
+         service s {\n  with a\n  image \"x\"\n  expose { entrypoint: own }\n}\n",
+    );
+    let service = single_service(&composed);
+    let expose = service.fields.expose.as_ref().expect("expose set");
+    assert_eq!(entrypoints(expose), vec!["d", "t", "own"]);
+}
+
+/// `entrypoint` lives inside `expose`, which the merge rebuilds from
+/// scratch — so an inherited entry point with no `port`/`host` beside
+/// it still has to materialize the enclosing `Expose`, not vanish.
+#[test]
+fn entrypoint_alone_still_materializes_expose() {
+    let composed = compose_ok(
+        "template a {\n  expose { entrypoint: web }\n}\n\
+         service s {\n  with a\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let expose = service.fields.expose.as_ref().expect("expose set");
+    assert_eq!(entrypoints(expose), vec!["web"]);
+    assert!(expose.port.is_none());
+}
+
+/// The mirror of the above: an `expose` with *no* entry points must not
+/// be conjured into existence by the list merge, since an empty list
+/// means "unset" (see `Expose::entrypoint`'s doc).
+#[test]
+fn no_entrypoint_anywhere_leaves_expose_unset() {
+    let composed = compose_ok(
+        "template a {\n  middleware auth\n}\n\
+         service s {\n  with a\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert!(service.fields.expose.is_none());
+}
+
+/// `expose`'s span is stamped from `port` when one is present, even
+/// though `entrypoint` came from an earlier tier — the scalar sub-field
+/// table is applied before the list table precisely to keep that
+/// preference order (see `ScalarField`'s doc).
+#[test]
+fn expose_span_prefers_port_over_entrypoint() {
+    let composed = compose_ok(
+        "template a {\n  expose { entrypoint: web }\n}\n\
+         service s {\n  with a\n  image \"x\"\n  expose 8080\n}\n",
+    );
+    let service = single_service(&composed);
+    let expose = service.fields.expose.as_ref().expect("expose set");
+    let port = expose.port.as_ref().expect("port set");
+    assert_eq!(expose.span, port.span());
+}
+
 /// A `defaults` template setting one `expose` sub-field is silently
 /// overridden only on that sub-field — the other sub-fields an explicit
 /// template sets still come through, matching how `env`/`volume` map
@@ -303,7 +402,7 @@ fn defaults_expose_subfield_is_overridden_but_others_survive() {
     let service = single_service(&composed);
     let expose = service.fields.expose.as_ref().expect("expose set");
     assert_eq!(expose.port.as_ref().unwrap().text(), "8080");
-    assert_eq!(expose.entrypoint.as_ref().unwrap().text(), "web");
+    assert_eq!(entrypoints(expose), vec!["web"]);
 }
 
 // --- non-colliding merges ---

@@ -9,7 +9,9 @@ use hl_parser::{ServiceFields, Span};
 
 use crate::{CodegenError, interp};
 
-/// Characters rejected in `expose.host`, which is spliced verbatim into
+/// Characters rejected in every label value the user writes directly —
+/// `expose.host` and each `expose.entrypoint` entry. Motivated by
+/// `expose.host`, which is spliced verbatim into
 /// a ``Host(`...`)`` router rule. A backtick alone is enough to break
 /// out: it closes the value and everything after it is read as more
 /// rule grammar, so `` host "ok.example.com`) || HostRegexp(`{any:.+}" ``
@@ -23,14 +25,15 @@ use crate::{CodegenError, interp};
 /// appear in a real hostname — deliberately a short list of
 /// clearly-dangerous characters rather than an attempt at a full
 /// hostname grammar, so no legitimate existing config is broken.
-const HOST_METACHARACTERS: &[char] = &['`', '(', ')', '{', '}', '|', '&', ',', '"', '\'', '\\'];
-
-/// The same set for `expose.entrypoint` — which lands in a label
-/// *value*, not the rule — minus `,`. A comma there is legitimate
-/// Traefik syntax for attaching one router to several entry points
-/// (`entrypoints=web,websecure`), so rejecting it would break working
-/// configurations.
-const ENTRYPOINT_METACHARACTERS: &[char] = &['`', '(', ')', '{', '}', '|', '&', '"', '\'', '\\'];
+///
+/// `expose.entrypoint` shares this exact set, `,` included. It used to
+/// need its own copy with `,` carved out, because a single scalar
+/// `entrypoint "web,websecure"` was the only way to attach a router to
+/// more than one entry point. Now that `entrypoint` is a list and
+/// codegen writes the separator itself, a comma *inside* one entry can
+/// only ever be a mistake — so the carve-out is gone and one set covers
+/// every label value, with no per-field exception to keep in mind.
+const LABEL_METACHARACTERS: &[char] = &['`', '(', ')', '{', '}', '|', '&', ',', '"', '\'', '\\'];
 
 /// `middlewares=` is one comma-joined label (see [`compute`]), so a
 /// comma *inside* a single middleware name splices extra entries into
@@ -61,7 +64,10 @@ fn reject_metacharacters(
 /// `traefik.docker.network=` (if `docker_network` is set — the real name
 /// of whichever of the service's declared networks is `external`),
 /// the router rule (from `expose.host`), `.entrypoints=` (if
-/// `expose.entrypoint` is set), `.middlewares=` (if any, each getting an
+/// `expose.entrypoint` is non-empty — one comma-joined label for the
+/// whole list, the same shape as `.middlewares=` below but with no
+/// `@file` suffix, which is a file-provider convention specific to
+/// middleware references), `.middlewares=` (if any, each getting an
 /// `@file` suffix — the file provider's own reference convention,
 /// confirmed mechanical/always-on, not homelab-specific), and finally
 /// the loadbalancer port (if `expose.port` is set) — emitted whenever a
@@ -87,21 +93,32 @@ pub fn compute(
         return Ok(labels);
     };
     let host = interp::resolve(host_lit.text(), bindings, host_lit.span())?;
-    reject_metacharacters(&host, "expose.host", HOST_METACHARACTERS, host_lit.span())?;
+    reject_metacharacters(&host, "expose.host", LABEL_METACHARACTERS, host_lit.span())?;
     labels.push(format!(
         "traefik.http.routers.{service_name}.rule=Host(`{host}`)"
     ));
 
-    if let Some(ep) = &expose.entrypoint {
-        let entrypoint = interp::resolve(ep.text(), bindings, ep.span())?;
-        reject_metacharacters(
-            &entrypoint,
-            "expose.entrypoint",
-            ENTRYPOINT_METACHARACTERS,
-            ep.span(),
-        )?;
+    if !expose.entrypoint.is_empty() {
+        // Interpolation still runs per entry, before validation, for
+        // the same reason it always has: `{{name}}` is resolved here, so
+        // the resolved text is what actually reaches the label and
+        // therefore what the metacharacter guard has to inspect. A
+        // reference spelled as a string (`entrypoint "{{name}}-secure"`)
+        // is the case that makes this observable.
+        let mut eps = Vec::with_capacity(expose.entrypoint.len());
+        for r in &expose.entrypoint {
+            let entrypoint = interp::resolve(&r.name, bindings, r.name_span)?;
+            reject_metacharacters(
+                &entrypoint,
+                "expose.entrypoint",
+                LABEL_METACHARACTERS,
+                r.name_span,
+            )?;
+            eps.push(entrypoint);
+        }
         labels.push(format!(
-            "traefik.http.routers.{service_name}.entrypoints={entrypoint}"
+            "traefik.http.routers.{service_name}.entrypoints={}",
+            eps.join(",")
         ));
     }
 
@@ -155,6 +172,18 @@ mod tests {
         HashMap::from([("name", "syncthing")])
     }
 
+    fn refs(names: &[&str]) -> Vec<Reference> {
+        names
+            .iter()
+            .map(|n| Reference {
+                qualifier: None,
+                name: (*n).to_string(),
+                name_span: span(),
+                span: span(),
+            })
+            .collect()
+    }
+
     #[test]
     fn no_expose_means_no_router_labels() {
         let fields = ServiceFields::default();
@@ -175,7 +204,7 @@ mod tests {
             expose: Some(Expose {
                 port: None,
                 host: Some(lit("syncthing.internal.techdebtor.io")),
-                entrypoint: None,
+                entrypoint: Vec::new(),
                 span: span(),
             }),
             ..Default::default()
@@ -192,7 +221,7 @@ mod tests {
             expose: Some(Expose {
                 port: None,
                 host: Some(lit(host)),
-                entrypoint: None,
+                entrypoint: Vec::new(),
                 span: span(),
             }),
             ..Default::default()
@@ -250,7 +279,7 @@ mod tests {
     #[test]
     fn backtick_in_entrypoint_is_rejected() {
         let mut fields = expose_with_host("ok.example.com");
-        fields.expose.as_mut().unwrap().entrypoint = Some(lit("web`-secure"));
+        fields.expose.as_mut().unwrap().entrypoint = refs(&["web`-secure"]);
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
@@ -262,17 +291,89 @@ mod tests {
         ));
     }
 
-    /// `entrypoints=` really is a comma-separated list in Traefik, so a
-    /// comma there is legitimate and must keep working.
+    /// Codegen owns the comma that separates entry points, so a comma
+    /// *inside* one entry can only splice an extra name into the joined
+    /// label — the same failure mode `middleware` already guards
+    /// against. This used to be the one accepted metacharacter here.
     #[test]
-    fn comma_in_entrypoint_is_allowed() {
+    fn comma_in_a_single_entrypoint_is_rejected() {
         let mut fields = expose_with_host("ok.example.com");
-        fields.expose.as_mut().unwrap().entrypoint = Some(lit("web,web-secure"));
+        fields.expose.as_mut().unwrap().entrypoint = refs(&["web,web-secure"]);
+        let err = compute("s", &fields, None, &bindings()).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::UnsafeLabelValue {
+                field: "expose.entrypoint",
+                character: ',',
+                ..
+            }
+        ));
+    }
+
+    /// The replacement for the old comma-in-a-scalar spelling: several
+    /// entry points are several list entries, and codegen joins them
+    /// into the one `entrypoints=` label Traefik expects — with no
+    /// `@file` suffix, which is `middleware`'s convention alone.
+    #[test]
+    fn several_entrypoints_join_into_one_label() {
+        let mut fields = expose_with_host("ok.example.com");
+        fields.expose.as_mut().unwrap().entrypoint = refs(&["web", "web-secure"]);
         let labels = compute("s", &fields, None, &bindings()).unwrap();
         assert!(
             labels
                 .iter()
-                .any(|l| l == "traefik.http.routers.s.entrypoints=web,web-secure")
+                .any(|l| l == "traefik.http.routers.s.entrypoints=web,web-secure"),
+            "expected a joined entrypoints label, got {labels:?}"
+        );
+    }
+
+    /// The list is joined, not emitted one label per entry — a
+    /// per-entry label would silently overwrite itself in the Compose
+    /// `labels:` map and leave only the last entry point attached.
+    #[test]
+    fn several_entrypoints_produce_exactly_one_entrypoints_label() {
+        let mut fields = expose_with_host("ok.example.com");
+        fields.expose.as_mut().unwrap().entrypoint = refs(&["web", "web-secure", "metrics"]);
+        let labels = compute("s", &fields, None, &bindings()).unwrap();
+        assert_eq!(
+            labels
+                .iter()
+                .filter(|l| l.starts_with("traefik.http.routers.s.entrypoints="))
+                .count(),
+            1
+        );
+    }
+
+    /// Same guarantee as `host_is_checked_after_interpolation`, for an
+    /// entry point spelled as a string so it can carry a `{{name}}`.
+    #[test]
+    fn entrypoint_is_checked_after_interpolation() {
+        let mut fields = expose_with_host("ok.example.com");
+        fields.expose.as_mut().unwrap().entrypoint = refs(&["{{name}}-secure"]);
+        let bindings = HashMap::from([("name", "web`")]);
+        let err = compute("s", &fields, None, &bindings).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::UnsafeLabelValue {
+                field: "expose.entrypoint",
+                character: '`',
+                ..
+            }
+        ));
+    }
+
+    /// And the resolved text — not the raw `{{name}}` source — is what
+    /// lands in the label.
+    #[test]
+    fn entrypoint_is_interpolated_into_the_label() {
+        let mut fields = expose_with_host("ok.example.com");
+        fields.expose.as_mut().unwrap().entrypoint = refs(&["{{name}}-secure"]);
+        let labels = compute("s", &fields, None, &bindings()).unwrap();
+        assert!(
+            labels
+                .iter()
+                .any(|l| l == "traefik.http.routers.s.entrypoints=syncthing-secure"),
+            "expected an interpolated entrypoints label, got {labels:?}"
         );
     }
 
@@ -281,12 +382,7 @@ mod tests {
     #[test]
     fn comma_in_middleware_reference_is_rejected() {
         let mut fields = expose_with_host("ok.example.com");
-        fields.middleware = vec![Reference {
-            qualifier: None,
-            name: "a,b".to_string(),
-            name_span: span(),
-            span: span(),
-        }];
+        fields.middleware = refs(&["a,b"]);
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
@@ -321,7 +417,7 @@ mod tests {
                     span: span(),
                 }),
                 host: Some(lit("syncthing.internal.techdebtor.io")),
-                entrypoint: Some(lit("web-secure")),
+                entrypoint: refs(&["web-secure"]),
                 span: span(),
             }),
             middleware: vec![

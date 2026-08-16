@@ -144,11 +144,29 @@ impl fmt::Display for CodegenError {
             // three.
             CodegenError::UnsafeLabelValue {
                 field, character, ..
-            } => write!(
-                f,
-                "{}:{}: `{field}` must not contain {character:?} — it would change the meaning of the generated Traefik label",
-                span.line, span.col
-            ),
+            } => {
+                // A comma in `expose.entrypoint` gets an extra sentence.
+                // It's the one rejection here that used to be *accepted*
+                // — `entrypoint "web,websecure"` was how you attached a
+                // router to several entry points before `entrypoint`
+                // became a list — so it's the one a user is likely to
+                // hit by writing something that was correct yesterday,
+                // or by pasting a value straight out of Traefik's own
+                // docs. Pointing at the list form turns a dead end into
+                // a one-line fix. Note this is a diagnostic affordance,
+                // not a semantic carve-out: the value is still rejected,
+                // exactly like every other metacharacter.
+                let hint = if *field == "expose.entrypoint" && *character == ',' {
+                    " — `entrypoint` is a list, so write the entry points as separate items (`entrypoint web, websecure`) and let `hllc` join them"
+                } else {
+                    ""
+                };
+                write!(
+                    f,
+                    "{}:{}: `{field}` must not contain {character:?} — it would change the meaning of the generated Traefik label{hint}",
+                    span.line, span.col
+                )
+            }
         }
     }
 }
@@ -416,6 +434,51 @@ mod error_display_tests {
         assert_eq!(
             err.to_string(),
             "3:5: `expose.host` must not contain '`' — it would change the meaning of the generated Traefik label"
+        );
+    }
+
+    /// A comma in `expose.entrypoint` — and only that pairing — gets the
+    /// migration hint appended.
+    #[test]
+    fn comma_in_entrypoint_display_adds_a_list_hint() {
+        let err = CodegenError::UnsafeLabelValue {
+            field: "expose.entrypoint",
+            character: ',',
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: `expose.entrypoint` must not contain ',' — it would change the meaning of the generated Traefik label — `entrypoint` is a list, so write the entry points as separate items (`entrypoint web, websecure`) and let `hllc` join them"
+        );
+    }
+
+    /// The hint is specific to the comma: another metacharacter in the
+    /// same field has nothing to do with list syntax, so suggesting a
+    /// list there would just be wrong.
+    #[test]
+    fn non_comma_in_entrypoint_display_has_no_list_hint() {
+        let err = CodegenError::UnsafeLabelValue {
+            field: "expose.entrypoint",
+            character: '`',
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: `expose.entrypoint` must not contain '`' — it would change the meaning of the generated Traefik label"
+        );
+    }
+
+    /// And a comma in a *different* field doesn't get it either.
+    #[test]
+    fn comma_in_middleware_display_has_no_list_hint() {
+        let err = CodegenError::UnsafeLabelValue {
+            field: "middleware",
+            character: ',',
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: `middleware` must not contain ',' — it would change the meaning of the generated Traefik label"
         );
     }
 }

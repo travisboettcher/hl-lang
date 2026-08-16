@@ -268,6 +268,43 @@ fn backtick_in_expose_host_is_error() {
     ));
 }
 
+/// hl-lang#73: several entry points are several list entries, joined by
+/// codegen into the one `entrypoints=` label Traefik expects — end to
+/// end, through the real parse/compose/generate pipeline.
+#[test]
+fn several_entrypoints_join_into_one_label() {
+    let yaml = generate_from(
+        "service s {\n  image \"x\"\n  expose 80, host: \"ok.example.com\", entrypoint: web, web-secure\n}\n",
+    );
+    assert!(
+        yaml.contains("traefik.http.routers.s.entrypoints=web,web-secure"),
+        "expected a joined entrypoints label, got:\n{yaml}"
+    );
+}
+
+/// hl-lang#73: the flip side — `entrypoint` used to be a scalar where
+/// `"web,web-secure"` was the *only* way to name two entry points, so
+/// this exact spelling used to compile. It's rejected now, and the
+/// message says to use the list instead.
+#[test]
+fn comma_inside_one_entrypoint_is_error_with_a_list_hint() {
+    let err = generate_err(
+        "service s {\n  image \"x\"\n  expose 80, host: \"ok.example.com\", entrypoint: \"web,web-secure\"\n}\n",
+    );
+    assert!(matches!(
+        err,
+        CodegenError::UnsafeLabelValue {
+            field: "expose.entrypoint",
+            character: ',',
+            ..
+        }
+    ));
+    assert!(
+        err.to_string().contains("`entrypoint` is a list"),
+        "expected a list hint, got: {err}"
+    );
+}
+
 /// #65: `middlewares=` is a single comma-joined label, so a comma
 /// inside one name silently became two references.
 #[test]

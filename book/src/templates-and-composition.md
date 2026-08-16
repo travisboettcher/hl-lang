@@ -16,7 +16,7 @@ A template accepts exactly the same fields as a `service` body (see
 template internal_web(port: Number) {
   networks [traefik-net]
   restart unless-stopped
-  expose $port, host: "{{name}}.internal.example.com", entrypoint: "web-secure"
+  expose $port, host: "{{name}}.internal.example.com", entrypoint: web-secure
   middleware local-ipwhitelist
 }
 ```
@@ -69,7 +69,7 @@ template linuxserver_app(puid: Number, pgid: Number) {
 
 template linuxserver_web(puid: Number, pgid: Number, port: Number) {
   with linuxserver_app { puid: $puid, pgid: $pgid }
-  expose $port, entrypoint: "web-secure"
+  expose $port, entrypoint: web-secure
 }
 ```
 
@@ -134,7 +134,10 @@ Different field kinds merge differently:
   sub-field, and merges per sub-field (`port`/`host`/`entrypoint`
   independently) rather than as one indivisible unit — the same
   key-by-key reasoning as a map field, applied to a struct's named
-  fields instead of a map's keys.
+  fields instead of a map's keys. Each sub-field then follows its own
+  kind's rule: `port` and `host` are scalars and collide, while
+  `entrypoint` is a list and concatenates, so two explicit templates
+  each naming one entry point produce a router attached to both.
 
 That last point means a service's own body can override just
 `expose.host` while still inheriting `port`/`entrypoint` from a
@@ -164,7 +167,7 @@ network traefik-net {
 template internal_web(port: Number) {
   networks [traefik-net]
   restart unless-stopped
-  expose $port, host: "{{name}}.internal.example.com", entrypoint: "web-secure"
+  expose $port, host: "{{name}}.internal.example.com", entrypoint: web-secure
   middleware local-ipwhitelist
 }
 

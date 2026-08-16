@@ -153,11 +153,15 @@ pub enum ComposeError {
     /// `SingleFileResolver`, which has no aliases at all: a lone
     /// [`Program`] has no imports by definition.
     UnknownAlias { alias: String, span: Span },
-    /// A qualified reference (`alias.name`) was used on `middleware` or
-    /// `depends_on` — neither has a coherent cross-file meaning yet
-    /// (`depends_on` names a same-file sibling service; `middleware`
-    /// isn't resolved against anything at all today), so this is
-    /// rejected rather than silently accepted or silently dropped.
+    /// A qualified reference (`alias.name`) was used on a reference-list
+    /// field that has no cross-file meaning — `middleware`,
+    /// `depends_on`, `dns`, or `expose.entrypoint`. (`depends_on` names
+    /// a same-file sibling service; the others aren't resolved against
+    /// anything an `.hll` file declares at all — an entry point lives
+    /// in the deployment's own `traefik.yml`.) Rejected rather than
+    /// silently accepted or silently dropped. Only `networks` resolves
+    /// a qualifier, because a `network` really is a declaration another
+    /// file can export.
     UnsupportedQualifiedReference {
         field: &'static str,
         alias: String,
@@ -975,9 +979,10 @@ fn resolve_invocation<R: SymbolResolver>(
 /// Resolves every *qualified* `networks [alias.name]` entry in `fields`
 /// against `scope` (rewriting it to an unqualified, resolved bare
 /// reference so [`merge_tier`] never needs to know imports exist), and
-/// rejects a qualified `middleware`/`depends_on` entry outright — see
+/// rejects a qualified `middleware`/`depends_on`/`dns`/
+/// `expose.entrypoint` entry outright — see
 /// [`ComposeError::UnsupportedQualifiedReference`]'s doc for why those
-/// two have no cross-file meaning yet. Runs exactly once per scope, at
+/// have no cross-file meaning yet. Runs exactly once per scope, at
 /// the point that scope's own directly-written fields are merged (its
 /// `Tier::Own` step in [`compose_service`]/[`resolve_template`]) — by
 /// induction, every `ServiceFields` [`merge_tier`] ever sees has already
@@ -999,6 +1004,15 @@ fn resolve_qualified_networks<R: SymbolResolver>(
     reject_qualified(&fields.middleware, "middleware")?;
     reject_qualified(&fields.depends_on, "depends_on")?;
     reject_qualified(&fields.dns, "dns")?;
+    // `expose.entrypoint` joined this list when it became a reference
+    // list. An entry point names something in the deployment's own
+    // `traefik.yml`, which no `.hll` file declares, so there is nothing
+    // for an alias to resolve against — and codegen reads only
+    // `Reference::name`, so an unchecked `traefik.web` would compile
+    // happily to `entrypoints=web` with the qualifier silently gone.
+    if let Some(expose) = &fields.expose {
+        reject_qualified(&expose.entrypoint, "expose.entrypoint")?;
+    }
     Ok(())
 }
 
@@ -1221,10 +1235,10 @@ impl Spanned for EnvEntry {
 /// or "anything-vs-own" (silent overrides).
 ///
 /// `scalars` holds every single-value collision point in the language —
-/// `image.ref`, `expose.port`/`expose.host`/`expose.entrypoint`,
-/// `restart.policy`, `container_name`, and any future one — keyed
+/// `image.ref`, `expose.port`/`expose.host`, `restart.policy`,
+/// `container_name`, and any future one — keyed
 /// generically by name, always the fully-dotted canonical path down to
-/// the concrete sub-field (`expose`'s three sub-fields; `image`/
+/// the concrete sub-field (`expose`'s two scalar sub-fields; `image`/
 /// `restart`'s one apiece), never a struct's own bare name, so a field's
 /// key is a stable function of its own identity rather than how many
 /// siblings its struct happens to have today (see #27: keying a
@@ -1238,16 +1252,20 @@ impl Spanned for EnvEntry {
 /// below — see its doc for why that's what makes a new scalar collision
 /// point a one-line addition rather than a new `MergeAcc` field plus new
 /// hand-written merge/rebuild logic.
+///
+/// `lists` is the same idea for every reference-list field — the four
+/// bare ones on `ServiceFields` (`middleware`/`depends_on`/`networks`/
+/// `dns`) plus `expose.entrypoint`, which lives inside a nested struct
+/// and so can't be a plain `MergeAcc` field the way the others once
+/// were. They carry no `Tier`: list fields concatenate unconditionally,
+/// so there is no collision to attribute to a tier. See [`LIST_FIELDS`].
 #[derive(Default)]
 struct MergeAcc {
     scalars: HashMap<&'static str, (Literal, Tier)>,
+    lists: HashMap<&'static str, Vec<Reference>>,
     volumes: Vec<(VolumeEntry, Tier)>,
     env: Vec<(EnvEntry, Tier)>,
     raw: RawMap,
-    middleware: Vec<Reference>,
-    depends_on: Vec<Reference>,
-    networks: Vec<Reference>,
-    dns: Vec<Reference>,
 }
 
 impl MergeAcc {
@@ -1260,15 +1278,23 @@ impl MergeAcc {
                 entries: self.env.into_iter().map(|(v, _)| v).collect(),
             },
             raw: self.raw,
-            middleware: self.middleware,
-            depends_on: self.depends_on,
-            networks: self.networks,
-            dns: self.dns,
             ..Default::default()
         };
         for field in SCALAR_FIELDS {
             if let Some((value, _)) = self.scalars.remove(field.key) {
                 (field.set)(&mut fields, value);
+            }
+        }
+        // Deliberately after `SCALAR_FIELDS`: `expose.entrypoint`'s
+        // `set` can create the `Expose` that holds it, and the span it
+        // stamps on a freshly created one is meant to lose to
+        // `expose.port`'s and `expose.host`'s (see [`ScalarField`]'s
+        // doc). Running the whole scalar table first keeps
+        // `entrypoint` last in that preference order, exactly where it
+        // sat when it was the table's third `expose` row.
+        for field in LIST_FIELDS {
+            if let Some(values) = self.lists.remove(field.key) {
+                (field.set)(&mut fields, values);
             }
         }
         fields
@@ -1278,7 +1304,7 @@ impl MergeAcc {
 /// One scalar collision point in `ServiceFields` — a `Literal` slot that
 /// lives either directly on `ServiceFields` (`container_name`) or inside
 /// one of its `Nested` struct fields (`image.ref`,
-/// `expose.port`/`.host`/`.entrypoint`, `restart.policy`) — described
+/// `expose.port`/`.host`, `restart.policy`) — described
 /// generically by `key` (the identity-stable, fully-dotted name
 /// [`merge_scalar`]/`ComposeError` key collisions by — see #27) plus a
 /// pair of function pointers for reading the slot out of a tier's
@@ -1292,14 +1318,17 @@ impl MergeAcc {
 /// means adding one `ScalarField` entry here, not touching either
 /// generic function.
 ///
-/// `expose`'s three entries are listed `port`, `host`, `entrypoint` in
-/// that order deliberately: `set`'s `get_or_insert` only stamps a
-/// freshly created `Expose`'s span from the *first* sub-field processed
-/// that's actually present, so this order reproduces the same
-/// port-over-host-over-entrypoint span preference the old hand-written
-/// `into_service_fields` documented (the span itself stays cosmetic —
-/// see [`Expose`]'s doc — nothing downstream reads it for anything but
-/// existence).
+/// `expose`'s entries are listed `port` then `host` in that order
+/// deliberately: `set`'s `get_or_insert` only stamps a freshly created
+/// `Expose`'s span from the *first* sub-field processed that's actually
+/// present, so this order reproduces the same port-over-host span
+/// preference the old hand-written `into_service_fields` documented.
+/// `expose.entrypoint` is no longer a row here — it's a reference list
+/// now, so it lives in [`LIST_FIELDS`] — but it still sorts *after*
+/// both of these for span purposes, because
+/// [`MergeAcc::into_service_fields`] runs this whole table before that
+/// one (the span itself stays cosmetic — see [`Expose`]'s doc —
+/// nothing downstream reads it for anything but existence).
 struct ScalarField {
     key: &'static str,
     take: fn(&mut ServiceFields) -> Option<Literal>,
@@ -1326,7 +1355,7 @@ static SCALAR_FIELDS: &[ScalarField] = &[
                 .get_or_insert(Expose {
                     port: None,
                     host: None,
-                    entrypoint: None,
+                    entrypoint: Vec::new(),
                     span,
                 })
                 .port = Some(v);
@@ -1341,25 +1370,10 @@ static SCALAR_FIELDS: &[ScalarField] = &[
                 .get_or_insert(Expose {
                     port: None,
                     host: None,
-                    entrypoint: None,
+                    entrypoint: Vec::new(),
                     span,
                 })
                 .host = Some(v);
-        },
-    },
-    ScalarField {
-        key: "expose.entrypoint",
-        take: |f| f.expose.as_mut().and_then(|e| e.entrypoint.take()),
-        set: |f, v| {
-            let span = v.span();
-            f.expose
-                .get_or_insert(Expose {
-                    port: None,
-                    host: None,
-                    entrypoint: None,
-                    span,
-                })
-                .entrypoint = Some(v);
         },
     },
     ScalarField {
@@ -1379,8 +1393,83 @@ static SCALAR_FIELDS: &[ScalarField] = &[
     },
 ];
 
-/// Merges one tier's [`ServiceFields`] into `acc`. List fields
-/// (`raw`/`middleware`/`depends_on`/`networks`/`dns`) always concatenate
+/// [`ScalarField`]'s counterpart for reference-list fields — the same
+/// `key`/`take`/`set` triple, minus everything scalars need only
+/// because they can collide. A list never collides (tiers concatenate,
+/// per docs/DESIGN.md's composition rules), so there's no `Tier` to
+/// track and no error to key by name; `key` is here purely as the
+/// `MergeAcc::lists` map key, and stays the same fully-dotted canonical
+/// path convention `ScalarField::key` documents. `set` is only ever
+/// called with a non-empty list — see [`merge_tier`].
+///
+/// Introduced when `expose.entrypoint` became a list (hl-lang#73).
+/// Before that, every reference list sat directly on `ServiceFields`,
+/// so [`merge_tier`] and [`MergeAcc::into_service_fields`] could just
+/// name each one — but `entrypoint` lives inside `expose`, which
+/// `into_service_fields` *rebuilds*, so it needs the same read-out/
+/// write-back indirection the scalars already had. Given one list field
+/// had to be described by function pointers, all five are: the whole
+/// point of [`SCALAR_FIELDS`] (see hl-lang#28) is that both merge
+/// functions stay one generic loop apiece with no hand-enumerated
+/// knowledge of `ServiceFields`'s shape, and leaving four lists
+/// hand-named beside a one-row table would have kept exactly the shape
+/// that design set out to remove.
+struct ListField {
+    key: &'static str,
+    take: fn(&mut ServiceFields) -> Vec<Reference>,
+    set: fn(&mut ServiceFields, Vec<Reference>),
+}
+
+static LIST_FIELDS: &[ListField] = &[
+    ListField {
+        key: "expose.entrypoint",
+        take: |f| {
+            f.expose
+                .as_mut()
+                .map(|e| std::mem::take(&mut e.entrypoint))
+                .unwrap_or_default()
+        },
+        set: |f, v| {
+            // `v` is never empty — see [`merge_tier`]'s `acc.lists`
+            // invariant — so `v[0]` is safe, and the span it stamps on
+            // a freshly created `Expose` is the first entry point's:
+            // cosmetic, and only ever reached when neither `port` nor
+            // `host` was set at all.
+            let span = v[0].span;
+            f.expose
+                .get_or_insert(Expose {
+                    port: None,
+                    host: None,
+                    entrypoint: Vec::new(),
+                    span,
+                })
+                .entrypoint = v;
+        },
+    },
+    ListField {
+        key: "middleware",
+        take: |f| std::mem::take(&mut f.middleware),
+        set: |f, v| f.middleware = v,
+    },
+    ListField {
+        key: "depends_on",
+        take: |f| std::mem::take(&mut f.depends_on),
+        set: |f, v| f.depends_on = v,
+    },
+    ListField {
+        key: "networks",
+        take: |f| std::mem::take(&mut f.networks),
+        set: |f, v| f.networks = v,
+    },
+    ListField {
+        key: "dns",
+        take: |f| std::mem::take(&mut f.dns),
+        set: |f, v| f.dns = v,
+    },
+];
+
+/// Merges one tier's [`ServiceFields`] into `acc`. List fields (`raw`,
+/// plus every [`LIST_FIELDS`] entry) always concatenate
 /// — see [`ComposeError::MapKeyCollision`]'s doc for why `raw` in
 /// particular is never collision-checked, consistent with its existing
 /// intra-body no-uniqueness behavior.
@@ -1392,6 +1481,23 @@ fn merge_tier(
     for field in SCALAR_FIELDS {
         if let Some(value) = (field.take)(&mut incoming) {
             merge_scalar(&mut acc.scalars, field.key, value, tier)?;
+        }
+    }
+    // Before the `merge_map` calls below only because those consume
+    // `incoming`'s map entries by value, and `take` needs `incoming`
+    // whole; the merge itself is order-independent.
+    //
+    // The emptiness check is load-bearing, not a micro-optimization:
+    // it's what establishes `acc.lists`'s invariant that a key present
+    // in the map always maps to a non-empty list. `into_service_fields`
+    // relies on it (an empty list must round-trip as "field unset", not
+    // as an `Expose` materialized to hold nothing), and
+    // [`LIST_FIELDS`]'s `expose.entrypoint` `set` relies on it harder
+    // still — it reads `v[0]` for a span.
+    for field in LIST_FIELDS {
+        let values = (field.take)(&mut incoming);
+        if !values.is_empty() {
+            acc.lists.entry(field.key).or_default().extend(values);
         }
     }
     merge_map(
@@ -1411,10 +1517,6 @@ fn merge_tier(
         |e| e.key.text().to_string(),
     )?;
     acc.raw.entries.extend(incoming.raw.entries);
-    acc.middleware.extend(incoming.middleware);
-    acc.depends_on.extend(incoming.depends_on);
-    acc.networks.extend(incoming.networks);
-    acc.dns.extend(incoming.dns);
     Ok(())
 }
 
