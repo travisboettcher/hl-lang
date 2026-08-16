@@ -27,8 +27,9 @@ compose reusable `template`s onto a service via `with`, and `use` another
 `.hll` file under a local alias to reuse its templates/networks across
 files (`use "docker.hll" as traefik`, then e.g.
 `networks [traefik.traefik-net]`) — see docs/DESIGN.md's Composition and
-Imports sections. `hl-cli --build` runs the whole pipeline end to end and
-writes real Compose YAML.
+Imports sections. `hllc --build` runs the whole pipeline end to end,
+printing the generated Compose YAML to stdout or, with `--out`, writing
+it to disk.
 
 ## Layout
 
@@ -43,7 +44,7 @@ hl-lang/
                  # in-memory map) and implements hl-parser's SymbolResolver
                  # over it
     hl-codegen/  # ComposedProgram -> Docker Compose YAML + Traefik labels
-    hl-cli/      # `hl-cli <file.hll>` lexes; `--parse` parses and prints
+    hl-cli/      # `hllc <file.hll>` lexes; `--parse` parses and prints
                  # the AST; `--build [--out <path>]` runs the full
                  # pipeline (link -> compose -> codegen)
 ```
@@ -83,14 +84,22 @@ cargo llvm-cov --workspace --html --fail-under-lines 80
 # Fuzz testing (lexer, parser, and the full parse -> compose -> codegen
 # pipeline) — requires nightly. CI runs a 60s smoke test per target on
 # every PR, plus a longer nightly scheduled run.
+#
+# `--target x86_64-unknown-linux-gnu` is not optional on Linux:
+# cargo-fuzz defaults to the musl triple there, which is usually not
+# installed and is incompatible with ASan's sanitizer anyway (static
+# musl libc isn't sanitizer-compatible). CI passes the same flag — see
+# .github/workflows/ci.yml.
 cargo install cargo-fuzz --locked
-cargo +nightly fuzz run fuzz_lex -- -max_total_time=60
-cargo +nightly fuzz run fuzz_parse -- -max_total_time=60
-cargo +nightly fuzz run fuzz_pipeline -- -max_total_time=60
+cargo +nightly fuzz run --target x86_64-unknown-linux-gnu fuzz_lex -- -max_total_time=60
+cargo +nightly fuzz run --target x86_64-unknown-linux-gnu fuzz_parse -- -max_total_time=60
+cargo +nightly fuzz run --target x86_64-unknown-linux-gnu fuzz_pipeline -- -max_total_time=60
 
-# Mutation testing — CI fails on any missed mutant.
+# Mutation testing — CI fails on any missed mutant. The timeout
+# multiplier matches CI's, and matters: `.cargo/mutants.toml` documents
+# mutants that hang rather than fail.
 cargo install cargo-mutants --locked
-cargo mutants --workspace
+cargo mutants --workspace --timeout-multiplier 3
 ```
 
 Try the CLI (`hllc`) against an `.hll` file — `cargo run -p hl-cli --` runs

@@ -63,8 +63,11 @@ that test file's own doc comment for the full list): default
 statement in a throwaway `service { }` first; `,build` also runs the
 full link/compose/codegen pipeline, for a complete worked example;
 `,file=NAME,group=ID[,entry]` links multiple blocks together as one
-multi-file `use` example. A new example needs one of these, not just
-prose describing it.
+multi-file `use` example; `,ignore` excludes the block from validation
+entirely, for a snippet that's deliberately invalid (illustrating an
+error message, say). A new example needs one of these, not just prose
+describing it — and reach for `,ignore` only when the block genuinely
+can't compile, since an ignored block is exactly the kind that rots.
 
 ## License
 

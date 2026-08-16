@@ -82,6 +82,20 @@ host). `expose.host`, if set, generates a Traefik router-rule label
 if set, restricts that router to one named Traefik entry point instead of
 all of them.
 
+`expose.host` is what switches Traefik routing on at all. With no `host`
+set there's no router, so neither `entrypoint` nor `middleware` produces
+a label — they're silently dropped rather than emitted against a router
+that doesn't exist.
+
+Because `host` is spliced directly into the router rule
+(``Host(`...`)``, which has no escape for its own backtick delimiter),
+`hllc` rejects a `host` containing any rule metacharacter — a backtick
+above all, plus `` ( ) { } | & , " ' \ ``. The same applies to
+`entrypoint`, except that a comma is allowed there (Traefik's
+`entrypoints=` really is a comma-separated list), and a comma is
+rejected in a `middleware` name, which would otherwise splice an extra
+entry into the comma-joined label.
+
 ## `volume`
 
 Map-kind. Bare-entry separator: `->` (host path/volume name → container
@@ -95,9 +109,10 @@ volume "syncthing-config" -> "/config" # named volume
 ```
 
 Repeating `volume` accumulates entries rather than overwriting. A host
-side that isn't an absolute path is treated as a named Docker volume and
-added to the Compose document's top-level `volumes:` section
-automatically.
+side starting with neither `/` nor `.` is treated as a named Docker
+volume and added to the Compose document's top-level `volumes:` section
+automatically — so `./jellyfin` and `../shared` are bind mounts just as
+`/mnt/media` is, not only absolute paths.
 
 ## `env`
 
@@ -146,8 +161,15 @@ dns ["192.168.50.182"]
 ```
 
 - `middleware` names a Traefik middleware to attach to this service's
-  router (generates a `traefik.http.routers.<name>.middlewares=` label
-  entry per item).
+  router. However many you list, they produce **one** label, not one per
+  item: `traefik.http.routers.<service>.middlewares=` with the names
+  comma-joined. Every name also gets an `@file` suffix appended
+  (`middlewares=local-ipwhitelist@file,forwardAuth-authentik@file`) —
+  that's Traefik's file-provider reference convention, applied
+  unconditionally, so write the bare middleware name and let `hllc` add
+  it. Like `expose`'s `entrypoint`, `middleware` generates nothing at
+  all unless `expose.host` is set: with no host there's no router to
+  attach anything to.
 - `depends_on` names a same-file sibling `service` this one depends on —
   it's not cross-file, and doesn't accept a qualified `alias.name`.
 - `networks` references a top-level `network` declared in the same
