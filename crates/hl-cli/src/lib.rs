@@ -4,7 +4,6 @@
 //! of process-level concerns like `std::env::args` and exit codes.
 
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -314,21 +313,28 @@ fn build_one(hll_path: &Path, target_dir: &Path, force: bool) -> Result<(), Exit
 /// hand-tuned file in the tree on the first `hllc --build .`. A file
 /// starting with [`GENERATED_MARKER`] is `hllc`'s own previous output
 /// and is overwritten as before; anything else is refused until the user
-/// says otherwise with `--force`. A stat/read failure other than "not
-/// there yet" (the normal case) is also refused rather than assumed
-/// safe: whatever is at that path couldn't be inspected, so it can't be
-/// shown to be disposable.
+/// says otherwise with `--force`. A file that's there but can't be read
+/// back is refused too, rather than assumed safe: whatever is at that
+/// path couldn't be inspected, so it can't be shown to be disposable.
+///
+/// The single `symlink_metadata` call answers both "is it a link?" and
+/// "is anything there at all?" — the nothing-there case, which is the
+/// normal one, is its `Err` and needs no inspection. `--force` waives
+/// only the header check; the symlink refusal holds either way, since a
+/// link's whole problem is that the write lands somewhere other than the
+/// path in hand, which is not what `--force` is asking for.
 fn write_output(out_path: &Path, yaml: &str, force: bool) -> Result<(), ExitCode> {
-    if fs::symlink_metadata(out_path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        eprintln!(
-            "{}: refusing to write through a symlink",
-            out_path.display()
-        );
-        return Err(ExitCode::FAILURE);
-    }
-    if !force {
-        match fs::read(out_path) {
-            Ok(existing) if !existing.starts_with(GENERATED_MARKER.as_bytes()) => {
+    match fs::symlink_metadata(out_path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            eprintln!(
+                "{}: refusing to write through a symlink",
+                out_path.display()
+            );
+            return Err(ExitCode::FAILURE);
+        }
+        Ok(_) if !force => match fs::read(out_path) {
+            Ok(existing) if existing.starts_with(GENERATED_MARKER.as_bytes()) => {}
+            Ok(_) => {
                 eprintln!(
                     "{}: refusing to overwrite a file hllc didn't generate \
                      (it has no `{GENERATED_MARKER}` header) — move it aside, \
@@ -337,13 +343,12 @@ fn write_output(out_path: &Path, yaml: &str, force: bool) -> Result<(), ExitCode
                 );
                 return Err(ExitCode::FAILURE);
             }
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => {
                 eprintln!("{}: {err}", out_path.display());
                 return Err(ExitCode::FAILURE);
             }
-        }
+        },
+        _ => {}
     }
     fs::write(out_path, yaml).map_err(|err| {
         eprintln!("{}: {err}", out_path.display());

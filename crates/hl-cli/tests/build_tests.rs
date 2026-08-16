@@ -634,3 +634,32 @@ fn build_refuses_an_out_path_it_cannot_inspect() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+/// `--force` waives the #85 header check, not the #64 symlink refusal:
+/// a link's problem is that the write lands somewhere other than the
+/// path in hand, which isn't what `--force` asks for. Pinned separately
+/// because with `--force` the header check is out of the picture, so
+/// only the symlink guard can keep the victim intact.
+#[cfg(unix)]
+#[test]
+fn build_force_still_refuses_to_write_through_a_symlink() {
+    let dir = scratch_dir("symlink-force");
+    let victim = dir.join("victim.txt");
+    fs::write(&victim, "precious\n").unwrap();
+    let input = dir.join("syncthing.hll");
+    fs::write(&input, SYNCTHING_HLL).unwrap();
+    let out = dir.join("docker-compose.yml");
+    std::os::unix::fs::symlink(&victim, &out).unwrap();
+
+    let code = run(Cli {
+        file: input,
+        parse: false,
+        build: true,
+        out: Some(out),
+        force: true,
+    });
+    assert_eq!(code, ExitCode::FAILURE);
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "precious\n");
+
+    fs::remove_dir_all(&dir).ok();
+}
