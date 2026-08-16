@@ -46,6 +46,26 @@ examples; each crate's rustdoc (`crates/*/src/lib.rs`) covers
 implementation details for that crate. Skim the relevant one before
 making non-trivial changes to the lexer/parser/codegen pipeline.
 
+`book/` is the user-facing guide published at
+<https://travisboettcher.github.io/hl-lang/> (via `.github/workflows/docs.yml`,
+mdBook). If a change adds or alters user-visible syntax or a built-in
+field, update the relevant `book/src/*.md` page alongside `docs/DESIGN.md`
+rather than letting the two drift apart. Build it locally with `mdbook
+build book` (`cargo install mdbook`) or `mdbook serve book` to preview.
+
+Every ` ```hll ` code block in `book/src/*.md` is compiled by
+`crates/hl-cli/tests/book_examples.rs` as part of `cargo test
+--workspace` — the same idea as a rustdoc doctest, so an example that
+stops matching the real grammar fails CI instead of silently going stale
+in the published book. Tag each fenced block via its info string (see
+that test file's own doc comment for the full list): default
+(` ```hll `) parses it as a standalone file; `,fragment` wraps a bare
+statement in a throwaway `service { }` first; `,build` also runs the
+full link/compose/codegen pipeline, for a complete worked example;
+`,file=NAME,group=ID[,entry]` links multiple blocks together as one
+multi-file `use` example. A new example needs one of these, not just
+prose describing it.
+
 ## License
 
 By contributing, you agree your contribution is licensed under the same

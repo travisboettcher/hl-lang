@@ -1,0 +1,134 @@
+# Getting Started
+
+This chapter walks through going from nothing to a running service, using
+`hll` the whole way.
+
+## Installing `hllc`
+
+Every merge to `main` cuts a tagged release with a prebuilt Linux x86-64
+`hllc` binary attached — no Rust toolchain required:
+
+```sh
+curl -Lo hllc https://github.com/travisboettcher/hl-lang/releases/latest/download/hllc-linux-x86_64
+chmod +x hllc
+./hllc --version
+```
+
+Put `hllc` somewhere on your `PATH` (e.g. `~/.local/bin`) so the rest of
+this chapter can just call `hllc` directly. Pin to a specific release tag
+instead of `latest` for anything you intend to keep reproducible (CI, a
+deploy script).
+
+If you're on a platform with no prebuilt binary, or want to build from
+source, see the main repository's README.
+
+## Your first service
+
+Create a file called `jellyfin.hll`:
+
+```hll,build
+service jellyfin {
+  image "jellyfin/jellyfin:latest"
+  expose 8096 as "media.example.com"
+  volume "/mnt/media" -> "/data"
+  env PUID = "1000"
+  restart unless-stopped
+}
+```
+
+This declares one service named `jellyfin`, running the
+`jellyfin/jellyfin:latest` image, exposed on container port `8096` and
+routed from the hostname `media.example.com`, with a bind mount and one
+environment variable, restarting unless explicitly stopped.
+
+Compile it:
+
+```sh
+hllc --build jellyfin.hll
+```
+
+With no `--out`, `--build` prints the generated Compose YAML straight to
+your terminal — a Compose `services:` block for `jellyfin`, with `image`,
+`volumes`, `environment`, `restart`, and a set of `traefik.*` labels
+wired up to route `media.example.com` to port 8096. Skim it — the mapping
+from the `.hll` fields you wrote to the YAML fields it produces should be
+fairly direct.
+
+To write the result to disk instead of printing it:
+
+```sh
+hllc --build jellyfin.hll --out docker-compose.yml
+docker compose -f docker-compose.yml up -d
+```
+
+That's a complete, deployable service from five lines of `hll`.
+
+## Adding a second service
+
+A single `.hll` file can declare more than one `service`, and a real
+homelab will usually want several. Add a second service to the same file,
+or start a new one — either works, since `hllc --build` treats one input
+file as one Compose document that may hold multiple services:
+
+```hll,build
+service jellyfin {
+  image "jellyfin/jellyfin:latest"
+  expose 8096 as "media.example.com"
+  volume "/mnt/media" -> "/data"
+  env PUID = "1000"
+  restart unless-stopped
+}
+
+service uptime-kuma {
+  image "louislam/uptime-kuma:latest"
+  expose 3001 as "status.example.com"
+  volume "uptime-kuma-data" -> "/app/data"
+  restart unless-stopped
+}
+```
+
+## Removing repetition with a template
+
+Both services above repeat `restart unless-stopped`, and a real homelab
+tends to repeat far more than that across every service — the same
+Traefik network, the same forward-auth middleware, the same
+`PUID`/`PGID` pair. That repetition is what `template` and `with` are
+for:
+
+```hll,build
+template defaults {
+  restart unless-stopped
+}
+
+service jellyfin {
+  image "jellyfin/jellyfin:latest"
+  expose 8096 as "media.example.com"
+  volume "/mnt/media" -> "/data"
+  env PUID = "1000"
+}
+
+service uptime-kuma {
+  image "louislam/uptime-kuma:latest"
+  expose 3001 as "status.example.com"
+  volume "uptime-kuma-data" -> "/app/data"
+}
+```
+
+A template named exactly `defaults` is applied to every service in its
+file automatically — no `with` needed. Both services above now pick up
+`restart unless-stopped` without repeating it. [Templates &
+Composition](./templates-and-composition.md) covers named templates,
+parameters, and the merge rules in full; [Imports](./imports.md) covers
+sharing templates like this across every `.hll` file in your homelab
+instead of just within one file.
+
+## Where to go next
+
+- [Syntax Basics](./syntax-basics.md) — how a statement, a body, and the
+  primary-value shorthand you saw above (`expose 8096 as "..."` instead
+  of writing `port`/`host` out as separate fields in a full `expose { }`
+  body) actually work.
+- [Built-in Fields](./built-in-fields.md) — every field `hll` understands,
+  what it accepts, and its defaults.
+- [The `hllc` CLI](./cli.md) — building a whole directory of services at
+  once, not just one file.
