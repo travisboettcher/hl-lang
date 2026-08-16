@@ -47,10 +47,30 @@ pub enum ComposeError {
     /// `with X` (or the implicit `defaults`) names a template with no
     /// matching top-level `template` declaration anywhere in the program.
     UnknownTemplate { name: String, span: Span },
-    /// Two top-level `template` declarations share a name — unlike
-    /// service/network names, template names are actually looked up, so
-    /// they must be unique.
+    /// Two top-level `template` declarations share a name — template
+    /// names are looked up by name, so they must be unique.
     DuplicateTemplateName {
+        name: String,
+        first: Span,
+        second: Span,
+    },
+    /// Two top-level `service` declarations share a name. A service name
+    /// becomes a Compose service key, which is unique by construction,
+    /// so the second declaration used to silently swallow the first —
+    /// including its Traefik labels — with nothing to indicate a whole
+    /// service had gone missing (#63).
+    DuplicateServiceName {
+        name: String,
+        first: Span,
+        second: Span,
+    },
+    /// Two top-level `network` declarations share a name. Worse than the
+    /// service case: the linker keeps declarations both in source order
+    /// (first-wins for anything reading the list) and in a by-name map
+    /// (last-wins for `alias.name` lookups), so a bare and a qualified
+    /// reference to the same duplicated name could resolve to *different*
+    /// declarations (#63).
+    DuplicateNetworkName {
         name: String,
         first: Span,
         second: Span,
@@ -185,6 +205,8 @@ impl ComposeError {
         match self {
             ComposeError::UnknownTemplate { span, .. }
             | ComposeError::DuplicateTemplateName { second: span, .. }
+            | ComposeError::DuplicateServiceName { second: span, .. }
+            | ComposeError::DuplicateNetworkName { second: span, .. }
             | ComposeError::TemplateCycle { span, .. }
             | ComposeError::UnknownTemplateArgument { span, .. }
             | ComposeError::MissingTemplateArgument { span, .. }
@@ -211,6 +233,16 @@ impl fmt::Display for ComposeError {
             ComposeError::DuplicateTemplateName { name, first, .. } => write!(
                 f,
                 "{}:{}: duplicate template `{name}` (first declared at {}:{})",
+                span.line, span.col, first.line, first.col
+            ),
+            ComposeError::DuplicateServiceName { name, first, .. } => write!(
+                f,
+                "{}:{}: duplicate service `{name}` (first declared at {}:{})",
+                span.line, span.col, first.line, first.col
+            ),
+            ComposeError::DuplicateNetworkName { name, first, .. } => write!(
+                f,
+                "{}:{}: duplicate network `{name}` (first declared at {}:{})",
                 span.line, span.col, first.line, first.col
             ),
             ComposeError::TemplateCycle { chain, .. } => write!(
@@ -347,6 +379,32 @@ mod error_display_tests {
         assert_eq!(
             err.to_string(),
             "4:1: duplicate template `base` (first declared at 1:1)"
+        );
+    }
+
+    #[test]
+    fn duplicate_service_name_display() {
+        let err = ComposeError::DuplicateServiceName {
+            name: "web".to_string(),
+            first: span(1, 1),
+            second: span(6, 1),
+        };
+        assert_eq!(
+            err.to_string(),
+            "6:1: duplicate service `web` (first declared at 1:1)"
+        );
+    }
+
+    #[test]
+    fn duplicate_network_name_display() {
+        let err = ComposeError::DuplicateNetworkName {
+            name: "proxy".to_string(),
+            first: span(2, 1),
+            second: span(9, 1),
+        };
+        assert_eq!(
+            err.to_string(),
+            "9:1: duplicate network `proxy` (first declared at 2:1)"
         );
     }
 
@@ -644,11 +702,36 @@ pub fn compose(program: Program) -> Result<ComposedProgram, ComposeError> {
     let mut networks = Vec::new();
     let mut services = Vec::new();
     let mut templates: HashMap<String, TemplateDecl> = HashMap::new();
+    // Networks and services are kept as ordered `Vec`s (source order is
+    // load-bearing downstream), so unlike templates they need their own
+    // by-name tables purely to detect a redeclaration.
+    let mut network_spans: HashMap<String, Span> = HashMap::new();
+    let mut service_spans: HashMap<String, Span> = HashMap::new();
 
     for decl in program.decls {
         match decl {
-            TopDecl::Network(n) => networks.push(n),
-            TopDecl::Service(s) => services.push(*s),
+            TopDecl::Network(n) => {
+                if let Some(&first) = network_spans.get(&n.name.name) {
+                    return Err(ComposeError::DuplicateNetworkName {
+                        name: n.name.name.clone(),
+                        first,
+                        second: n.name.span,
+                    });
+                }
+                network_spans.insert(n.name.name.clone(), n.name.span);
+                networks.push(n);
+            }
+            TopDecl::Service(s) => {
+                if let Some(&first) = service_spans.get(&s.name.name) {
+                    return Err(ComposeError::DuplicateServiceName {
+                        name: s.name.name.clone(),
+                        first,
+                        second: s.name.span,
+                    });
+                }
+                service_spans.insert(s.name.name.clone(), s.name.span);
+                services.push(*s);
+            }
             TopDecl::Template(t) => {
                 if let Some(prev) = templates.get(&t.name.name) {
                     return Err(ComposeError::DuplicateTemplateName {

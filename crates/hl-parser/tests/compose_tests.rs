@@ -799,6 +799,49 @@ fn parameterized_non_defaults_template_is_unaffected() {
     );
 }
 
+/// #63: the second `service web` used to silently replace the first,
+/// dropping everything it declared (Traefik labels included) with no
+/// diagnostic at all.
+#[test]
+fn duplicate_top_level_service_name_is_error() {
+    let err = compose_err(
+        "service web {\n  image \"a\"\n}\n\
+         service web {\n  image \"b\"\n}\n",
+    );
+    assert!(matches!(
+        err,
+        ComposeError::DuplicateServiceName { name, .. } if name == "web"
+    ));
+}
+
+/// #63: duplicate networks are worse than duplicate services — see
+/// `ComposeError::DuplicateNetworkName`'s doc.
+#[test]
+fn duplicate_top_level_network_name_is_error() {
+    let err = compose_err(
+        "network proxy {\n  external\n}\n\
+         network proxy {\n  name: \"other\"\n}\n",
+    );
+    assert!(matches!(
+        err,
+        ComposeError::DuplicateNetworkName { name, .. } if name == "proxy"
+    ));
+}
+
+/// A name may still be reused *across* declaration kinds — the three
+/// symbol tables are separate, and nothing looks a service up by a
+/// network's name or vice versa.
+#[test]
+fn same_name_across_different_declaration_kinds_is_fine() {
+    let composed = compose_ok(
+        "network shared {\n  external\n}\n\
+         template shared {\n  restart always\n}\n\
+         service shared {\n  image \"x\"\n  with shared\n  networks [shared]\n}\n",
+    );
+    assert_eq!(composed.networks.len(), 1);
+    assert_eq!(composed.services.len(), 1);
+}
+
 // --- imports (Stage 1: no real file loading yet) ---
 
 #[test]
