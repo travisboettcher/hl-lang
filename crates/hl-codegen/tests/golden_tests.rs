@@ -212,3 +212,38 @@ fn unknown_interpolation_is_error() {
         CodegenError::UnknownInterpolation { binding, .. } if binding == "typo"
     ));
 }
+
+/// #65: a backtick in `expose.host` used to compile to a valid Traefik
+/// rule matching every host, since `Host()`'s value has no escape for
+/// its own delimiter.
+#[test]
+fn backtick_in_expose_host_is_error() {
+    let err = generate_err(
+        "service s {\n  image \"x\"\n  expose 80 as \"ok.example.com`) || HostRegexp(`{any:.+}\"\n}\n",
+    );
+    assert!(matches!(
+        err,
+        CodegenError::UnsafeLabelValue {
+            field: "expose.host",
+            character: '`',
+            ..
+        }
+    ));
+}
+
+/// #65: `middlewares=` is a single comma-joined label, so a comma
+/// inside one name silently became two references.
+#[test]
+fn comma_in_middleware_reference_is_error() {
+    let err = generate_err(
+        "service s {\n  image \"x\"\n  expose 80 as \"ok.example.com\"\n  middleware [\"a,b\"]\n}\n",
+    );
+    assert!(matches!(
+        err,
+        CodegenError::UnsafeLabelValue {
+            field: "middleware",
+            character: ',',
+            ..
+        }
+    ));
+}

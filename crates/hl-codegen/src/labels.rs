@@ -5,9 +5,57 @@
 
 use std::collections::HashMap;
 
-use hl_parser::ServiceFields;
+use hl_parser::{ServiceFields, Span};
 
 use crate::{CodegenError, interp};
+
+/// Characters rejected in `expose.host`, which is spliced verbatim into
+/// a ``Host(`...`)`` router rule. A backtick alone is enough to break
+/// out: it closes the value and everything after it is read as more
+/// rule grammar, so `` host "ok.example.com`) || HostRegexp(`{any:.+}" ``
+/// compiles to a valid rule matching *every* host (#65). Traefik's rule
+/// syntax has no backtick escape, so the only available answer is to
+/// reject.
+///
+/// The rest of the set closes the same door earlier: each is live rule
+/// syntax (grouping, `||`/`&&`, the `{name:regexp}` capture form,
+/// comma-separated matcher arguments, quoting) and none of them can
+/// appear in a real hostname — deliberately a short list of
+/// clearly-dangerous characters rather than an attempt at a full
+/// hostname grammar, so no legitimate existing config is broken.
+const HOST_METACHARACTERS: &[char] = &['`', '(', ')', '{', '}', '|', '&', ',', '"', '\'', '\\'];
+
+/// The same set for `expose.entrypoint` — which lands in a label
+/// *value*, not the rule — minus `,`. A comma there is legitimate
+/// Traefik syntax for attaching one router to several entry points
+/// (`entrypoints=web,websecure`), so rejecting it would break working
+/// configurations.
+const ENTRYPOINT_METACHARACTERS: &[char] = &['`', '(', ')', '{', '}', '|', '&', '"', '\'', '\\'];
+
+/// `middlewares=` is one comma-joined label (see [`compute`]), so a
+/// comma *inside* a single middleware name splices extra entries into
+/// it: `middleware ["a,b"]` produced `middlewares=a,b@file`, i.e. two
+/// references, only the second of which got the `@file` suffix (#65).
+const MIDDLEWARE_METACHARACTERS: &[char] = &[','];
+
+/// Rejects `value` if it contains any of `forbidden`. Always applied to
+/// the *resolved* value, after `{{}}` interpolation, since that's the
+/// text that actually reaches the label.
+fn reject_metacharacters(
+    value: &str,
+    field: &'static str,
+    forbidden: &[char],
+    span: Span,
+) -> Result<(), CodegenError> {
+    match value.chars().find(|c| forbidden.contains(c)) {
+        Some(character) => Err(CodegenError::UnsafeLabelValue {
+            field,
+            character,
+            span,
+        }),
+        None => Ok(()),
+    }
+}
 
 /// Computes `service_name`'s Traefik label list, in this order:
 /// `traefik.docker.network=` (if `docker_network` is set — the real name
@@ -39,23 +87,35 @@ pub fn compute(
         return Ok(labels);
     };
     let host = interp::resolve(host_lit.text(), bindings, host_lit.span())?;
+    reject_metacharacters(&host, "expose.host", HOST_METACHARACTERS, host_lit.span())?;
     labels.push(format!(
         "traefik.http.routers.{service_name}.rule=Host(`{host}`)"
     ));
 
     if let Some(ep) = &expose.entrypoint {
         let entrypoint = interp::resolve(ep.text(), bindings, ep.span())?;
+        reject_metacharacters(
+            &entrypoint,
+            "expose.entrypoint",
+            ENTRYPOINT_METACHARACTERS,
+            ep.span(),
+        )?;
         labels.push(format!(
             "traefik.http.routers.{service_name}.entrypoints={entrypoint}"
         ));
     }
 
     if !fields.middleware.is_empty() {
-        let mws: Vec<String> = fields
-            .middleware
-            .iter()
-            .map(|r| format!("{}@file", r.name))
-            .collect();
+        let mut mws = Vec::with_capacity(fields.middleware.len());
+        for r in &fields.middleware {
+            reject_metacharacters(
+                &r.name,
+                "middleware",
+                MIDDLEWARE_METACHARACTERS,
+                r.name_span,
+            )?;
+            mws.push(format!("{}@file", r.name));
+        }
         labels.push(format!(
             "traefik.http.routers.{service_name}.middlewares={}",
             mws.join(",")
@@ -124,6 +184,130 @@ mod tests {
         assert_eq!(
             labels,
             vec!["traefik.http.routers.syncthing.rule=Host(`syncthing.internal.techdebtor.io`)"]
+        );
+    }
+
+    fn expose_with_host(host: &str) -> ServiceFields {
+        ServiceFields {
+            expose: Some(Expose {
+                port: None,
+                host: Some(lit(host)),
+                entrypoint: None,
+                span: span(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// #65: the exact escape from the issue — a backtick closes the
+    /// `Host()` value and the rest is read as more rule grammar,
+    /// yielding a valid rule that matches every host.
+    #[test]
+    fn backtick_in_host_is_rejected() {
+        let fields = expose_with_host("ok.example.com`) || HostRegexp(`{any:.+}");
+        let err = compute("s", &fields, None, &bindings()).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::UnsafeLabelValue {
+                field: "expose.host",
+                character: '`',
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn comma_in_host_is_rejected() {
+        let fields = expose_with_host("a.example.com,b.example.com");
+        let err = compute("s", &fields, None, &bindings()).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::UnsafeLabelValue {
+                field: "expose.host",
+                character: ',',
+                ..
+            }
+        ));
+    }
+
+    /// The guard runs on the *resolved* value, so a metacharacter that
+    /// only appears after `{{name}}` interpolation is still caught.
+    #[test]
+    fn host_is_checked_after_interpolation() {
+        let fields = expose_with_host("{{name}}.example.com");
+        let bindings = HashMap::from([("name", "bad`)")]);
+        let err = compute("s", &fields, None, &bindings).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::UnsafeLabelValue {
+                field: "expose.host",
+                character: '`',
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn backtick_in_entrypoint_is_rejected() {
+        let mut fields = expose_with_host("ok.example.com");
+        fields.expose.as_mut().unwrap().entrypoint = Some(lit("web`-secure"));
+        let err = compute("s", &fields, None, &bindings()).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::UnsafeLabelValue {
+                field: "expose.entrypoint",
+                character: '`',
+                ..
+            }
+        ));
+    }
+
+    /// `entrypoints=` really is a comma-separated list in Traefik, so a
+    /// comma there is legitimate and must keep working.
+    #[test]
+    fn comma_in_entrypoint_is_allowed() {
+        let mut fields = expose_with_host("ok.example.com");
+        fields.expose.as_mut().unwrap().entrypoint = Some(lit("web,web-secure"));
+        let labels = compute("s", &fields, None, &bindings()).unwrap();
+        assert!(
+            labels
+                .iter()
+                .any(|l| l == "traefik.http.routers.s.entrypoints=web,web-secure")
+        );
+    }
+
+    /// #65: `middlewares=` is one comma-joined label, so a comma inside
+    /// a single name splices an extra entry into it.
+    #[test]
+    fn comma_in_middleware_reference_is_rejected() {
+        let mut fields = expose_with_host("ok.example.com");
+        fields.middleware = vec![Reference {
+            qualifier: None,
+            name: "a,b".to_string(),
+            name_span: span(),
+            span: span(),
+        }];
+        let err = compute("s", &fields, None, &bindings()).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::UnsafeLabelValue {
+                field: "middleware",
+                character: ',',
+                ..
+            }
+        ));
+    }
+
+    /// A hostname with the punctuation real hostnames actually use
+    /// stays accepted — the guard is a short deny-list, not a hostname
+    /// grammar.
+    #[test]
+    fn ordinary_hostname_punctuation_is_still_accepted() {
+        let fields = expose_with_host("my-service.sub_domain.example.com:8443");
+        let labels = compute("s", &fields, None, &bindings()).unwrap();
+        assert_eq!(
+            labels,
+            vec!["traefik.http.routers.s.rule=Host(`my-service.sub_domain.example.com:8443`)"]
         );
     }
 

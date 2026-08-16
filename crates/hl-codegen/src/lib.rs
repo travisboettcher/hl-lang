@@ -73,6 +73,18 @@ pub enum CodegenError {
     /// degrade to a located error message the user can act on, never
     /// take the process down.
     UnsubstitutedParameter { param: String, span: Span },
+    /// A value destined for a Traefik label contains a character that
+    /// would change the meaning of the label it's spliced into — the
+    /// canonical case being a backtick in `expose.host`, which closes
+    /// the ``Host(`...`)`` rule early and lets everything after it be
+    /// read as more rule grammar. Rejected rather than escaped:
+    /// Traefik's rule grammar has no escape for that backtick, so there
+    /// is nothing to escape *to*.
+    UnsafeLabelValue {
+        field: &'static str,
+        character: char,
+        span: Span,
+    },
 }
 
 impl CodegenError {
@@ -82,7 +94,8 @@ impl CodegenError {
             | CodegenError::AmbiguousExternalNetwork { span, .. }
             | CodegenError::UnknownInterpolation { span, .. }
             | CodegenError::MissingImage { span, .. }
-            | CodegenError::UnsubstitutedParameter { span, .. } => *span,
+            | CodegenError::UnsubstitutedParameter { span, .. }
+            | CodegenError::UnsafeLabelValue { span, .. } => *span,
         }
     }
 }
@@ -122,6 +135,18 @@ impl fmt::Display for CodegenError {
             CodegenError::UnsubstitutedParameter { param, .. } => write!(
                 f,
                 "{}:{}: template parameter `${param}` was never bound to an argument",
+                span.line, span.col
+            ),
+            // The offending character is rendered with `Debug` rather
+            // than wrapped in backticks like every other quoted name
+            // here: a backtick is the single most likely value, and
+            // backtick-quoting a backtick reads as an unbroken run of
+            // three.
+            CodegenError::UnsafeLabelValue {
+                field, character, ..
+            } => write!(
+                f,
+                "{}:{}: `{field}` must not contain {character:?} — it would change the meaning of the generated Traefik label",
                 span.line, span.col
             ),
         }
@@ -372,6 +397,19 @@ mod error_display_tests {
         assert_eq!(
             err.to_string(),
             "3:5: template parameter `$puid` was never bound to an argument"
+        );
+    }
+
+    #[test]
+    fn unsafe_label_value_display() {
+        let err = CodegenError::UnsafeLabelValue {
+            field: "expose.host",
+            character: '`',
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: `expose.host` must not contain '`' — it would change the meaning of the generated Traefik label"
         );
     }
 }
