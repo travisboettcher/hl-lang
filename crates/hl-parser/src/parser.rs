@@ -726,6 +726,12 @@ impl<'src> Parser<'src> {
         nested: &'static TypeSchema,
         fields: &mut StructFields,
     ) -> Result<(), ParseError> {
+        // Mirrors `parse_field_value_literal` and `parse_reference_list_value`:
+        // an optional leading colon (`key: value`) is accepted alongside the
+        // bare-sugar form (`key value`).
+        if self.peek().kind == TokenKind::Colon {
+            self.bump();
+        }
         match nested.kind {
             SchemaKind::Struct => {
                 let (nested_fields, span) = if self.peek().kind == TokenKind::LBrace {
