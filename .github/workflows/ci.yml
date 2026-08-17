@@ -126,6 +126,21 @@ jobs:
           path: mutants.out
           if-no-files-found: ignore
 
+  deny:
+    name: cargo-deny (advisories, licenses, bans)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # deny.toml's [advisories] section deliberately ignores nothing —
+      # see its own comment and #76 for why (the serde_yaml decision
+      # that issue describes stays open; this job exists to surface it
+      # automatically if/when RustSec ever files an advisory for it).
+      - uses: EmbarkStudios/cargo-deny-action@30f817c6f72275c6d54dc744fbca09ebc958599f # v2.0.12
+        with:
+          command: check
+
   fuzz-smoke:
     name: fuzz smoke test (${{ matrix.target }})
     runs-on: ubuntu-latest

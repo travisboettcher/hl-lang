@@ -1,0 +1,51 @@
+# cargo-deny configuration — advisories, licenses, and bans over the
+# full dependency graph. See https://embarkstudios.github.io/cargo-deny/
+# and the `deny` job in `.github/workflows/ci.yml`.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[advisories]
+# Deliberately empty: no advisory is ignored here. #76 raised
+# serde_yaml (crates/hl-codegen/Cargo.toml:10, deprecated by its own
+# author, "0.9.34+deprecated") as a still-open decision citing
+# RUSTSEC-2024-0370 — but that ID actually belongs to proc-macro-error,
+# a crate that isn't in this dependency tree, and the advisory
+# database (as of this writing) has no entry at all for serde_yaml
+# being unmaintained. There's nothing to ignore today; if RustSec ever
+# files one, an empty ignore list here means it surfaces in CI
+# immediately rather than being silently pre-suppressed.
+ignore = []
+
+[licenses]
+# Every license actually present in the dependency graph, verified via
+# `cargo deny check licenses` against this workspace's real Cargo.lock —
+# not a generic allow-list. All are permissive and compatible with the
+# workspace's own dual MIT/Apache-2.0 declaration (Cargo.toml's
+# [workspace.package]).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The workspace's own crates depend on each other by unversioned `path`
+# deps (e.g. crates/hl-cli/Cargo.toml's `hl-lexer = { path = "../hl-lexer" }`),
+# which the wildcards lint otherwise flags — crates.io doesn't allow
+# publishing path deps anyway, so this can't hide a real loose external
+# version requirement.
+allow-wildcard-paths = true
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
