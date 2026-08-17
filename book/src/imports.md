@@ -99,6 +99,38 @@ for whatever *it* references, and a service file needs `use` declarations
 only for what *it* references directly — importing a template doesn't
 also import that template's own imports.
 
+## Two networks can't share one bare name
+
+An imported `network` keeps its own bare name in the generated Compose —
+`net.traefik-net` becomes the `traefik-net` key under `networks:`. So a
+file that pulls in an imported network while also declaring one of its
+own by the same name is asking for two different networks under one key,
+and `hllc` rejects it:
+
+```hll,ignore
+use "network.hll" as net
+
+# error: `net.proxy` collides with another network named `proxy`
+network proxy {
+  name: "local_real_name"
+}
+
+service web {
+  image "nginx"
+  networks [net.proxy]
+}
+```
+
+Rename one of the two and the ambiguity goes away. The same applies to
+two *imported* networks sharing a bare name — `use`-ing both `a.hll` and
+`b.hll` is fine, and referencing `a.proxy` and `b.proxy` from the same
+file is what's rejected.
+
+Note this only triggers when a qualified reference actually pulls the
+imported network in. Two files each declaring their own `network proxy`
+is perfectly normal, and stays legal for as long as nothing reaches
+across the import to name the other one.
+
 ## `defaults` is the one template `use` can't share
 
 The implicit `defaults` template (see
