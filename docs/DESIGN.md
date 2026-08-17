@@ -348,6 +348,14 @@ use "docker.hll" as traefik
   and `templates.hll` uses `docker.hll`, `service.hll` cannot write
   `docker.hll`'s alias itself; only `templates.hll`'s own template
   bodies can (via the lexical-scoping rule above).
+- **An imported network keeps its own bare name**, and that bare name is
+  what a service's `networks [...]` entries are resolved by, so two
+  networks can't share one. A file that pulls in `ext.proxy` while also
+  declaring its own `network proxy` — or that pulls in both `a.proxy`
+  and `b.proxy` — is a compile error rather than a silent pick between
+  them. Two files each declaring an unrelated `network proxy` stay
+  legal; the error only fires when a qualified reference actually brings
+  one across an import into the other's company.
 
 ## Worked examples
 

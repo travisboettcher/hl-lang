@@ -382,7 +382,9 @@ fn duplicate_network_name_in_an_imported_file_is_error() {
 
 /// The same network name declared in two *different* modules stays
 /// legal — each module has its own symbol table, and that's exactly what
-/// makes a shared `network` definition importable.
+/// makes a shared `network` definition importable. Nothing in the entry
+/// file's own `networks [proxy]` reaches across the import, so the two
+/// declarations never have to be told apart.
 #[test]
 fn same_network_name_in_two_modules_is_fine() {
     let mut loader = InMemoryLoader::default();
@@ -397,4 +399,116 @@ fn same_network_name_in_two_modules_is_fine() {
     let composed = link(Path::new("service.hll"), &loader)
         .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
     assert_eq!(composed.networks.len(), 1);
+}
+
+/// #71: ...but the moment the entry file *does* reach across the import
+/// while declaring its own `proxy`, the two become indistinguishable.
+/// Codegen re-resolves `networks [...]` by bare name against one flat
+/// list where the entry file's declaration comes first, so asking for
+/// `ext.proxy` used to silently produce the local `proxy` — wrong
+/// Compose output, and no `traefik.docker.network` label at all, with no
+/// diagnostic anywhere.
+#[test]
+fn imported_network_colliding_with_a_local_one_is_error() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "net.hll",
+        "network proxy {\n  external\n  name: \"imported_real_name\"\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"net.hll\" as ext\n\
+         network proxy {\n  name: \"local_real_name\"\n}\n\
+         service web {\n  image \"nginx\"\n  networks [ext.proxy]\n}\n",
+    );
+
+    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        &err,
+        LinkError::Compose(ComposeError::CollidingImportedNetwork { alias, name, .. })
+            if alias == "ext" && name == "proxy"
+    ));
+    // Points at the reference in the entry file, not at the imported
+    // declaration — a `Span` carries no file identity, so the imported
+    // one's line/column would be read against the wrong source.
+    let LinkError::Compose(compose_err) = &err else {
+        panic!("expected a compose error, got {err:?}");
+    };
+    let span = compose_err.span();
+    assert_eq!((span.line, span.col), (7, 13));
+}
+
+/// The same collision between two *imported* modules: neither is the
+/// entry file's own, but codegen still can't tell them apart.
+#[test]
+fn two_imported_networks_sharing_a_bare_name_is_error() {
+    let mut loader = InMemoryLoader::default();
+    loader.add("a.hll", "network proxy {\n  name: \"a_real\"\n}\n");
+    loader.add("b.hll", "network proxy {\n  name: \"b_real\"\n}\n");
+    loader.add(
+        "svc.hll",
+        "use \"a.hll\" as a\n\
+         use \"b.hll\" as b\n\
+         service s {\n  image \"x\"\n  networks [a.proxy, b.proxy]\n}\n",
+    );
+
+    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        err,
+        LinkError::Compose(ComposeError::CollidingImportedNetwork { alias, name, .. })
+            if alias == "b" && name == "proxy"
+    ));
+}
+
+/// One imported network reached from several places is one network, not
+/// a collision with itself — the check compares declarations, not just
+/// how many times a reference pulled one in.
+#[test]
+fn one_imported_network_referenced_by_several_services_is_fine() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "net.hll",
+        "network proxy {\n  external\n  name: \"real\"\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"net.hll\" as ext\n\
+         template t {\n  networks [ext.proxy]\n}\n\
+         service web {\n  image \"x\"\n  with t\n  networks [ext.proxy]\n}\n\
+         service api {\n  image \"x\"\n  networks [ext.proxy]\n}\n",
+    );
+
+    let composed = link(Path::new("svc.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+    assert_eq!(composed.networks.len(), 1);
+    assert_eq!(
+        composed.networks[0].real_name.as_ref().unwrap().text(),
+        "real"
+    );
+}
+
+/// A local network that shares no name with anything imported is
+/// untouched by the check — both survive into the output.
+#[test]
+fn local_and_imported_networks_with_distinct_names_both_survive() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "net.hll",
+        "network shared {\n  external\n  name: \"real\"\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"net.hll\" as ext\n\
+         network internal {\n  name: \"internal_real\"\n}\n\
+         service s {\n  image \"x\"\n  networks [internal, ext.shared]\n}\n",
+    );
+
+    let composed = link(Path::new("svc.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+    let names: Vec<&str> = composed
+        .networks
+        .iter()
+        .map(|n| n.name.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["internal", "shared"]);
 }

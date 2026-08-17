@@ -1145,6 +1145,73 @@ fn qualified_zero_arg_template_invocation() {
     assert!(inv.args.entries.is_empty());
 }
 
+// --- raw nesting depth (#72) ---
+
+/// Wraps `k: <value>` in `n` nested `[ ]`, the shape the issue used to
+/// overflow the stack with.
+fn nested_raw_source(n: usize) -> String {
+    format!(
+        "service s {{\n  image \"x\"\n  raw {{ k: {}{} }}\n}}\n",
+        "[".repeat(n),
+        "]".repeat(n)
+    )
+}
+
+/// The limit is a real ceiling, not a rejection of anything nested: a
+/// `raw` value right at it still parses.
+#[test]
+fn raw_value_at_the_depth_limit_parses() {
+    let program = parse_ok(&nested_raw_source(hl_parser::MAX_RAW_VALUE_DEPTH));
+    assert_eq!(as_service(&program.decls[0]).fields.raw.entries.len(), 1);
+}
+
+/// ...and dropping that maximally deep tree has to be safe too, since
+/// drop glue recurses just like the parser did and `Drop` can't return
+/// an error. This is the half of the fix a bare depth counter with too
+/// generous a limit would still get wrong, so it's asserted explicitly
+/// rather than left to the end of the enclosing scope.
+#[test]
+fn a_raw_value_at_the_depth_limit_drops_without_overflowing() {
+    let program = parse_ok(&nested_raw_source(hl_parser::MAX_RAW_VALUE_DEPTH));
+    drop(program);
+}
+
+/// One level past the limit is a catchable `ParseError`, not the
+/// `fatal runtime error: stack overflow` process abort it used to be —
+/// which matters because these crates are a library with public
+/// `parse()`/`link()` entry points an embedder can't defend behind.
+#[test]
+fn raw_value_past_the_depth_limit_is_an_error() {
+    let err = parse(&nested_raw_source(hl_parser::MAX_RAW_VALUE_DEPTH + 1))
+        .expect_err("expected a parse error");
+    assert!(matches!(
+        err,
+        ParseError::RawValueTooDeep { limit, .. } if limit == hl_parser::MAX_RAW_VALUE_DEPTH
+    ));
+}
+
+/// The depth that used to abort the process outright — tens of thousands
+/// of levels, well past where even a release build's stack gave out.
+#[test]
+fn a_pathologically_deep_raw_value_errors_instead_of_aborting() {
+    let err = parse(&nested_raw_source(50_000)).expect_err("expected a parse error");
+    assert!(matches!(err, ParseError::RawValueTooDeep { .. }));
+}
+
+/// Nested maps recurse through the same function as nested lists, so
+/// they're capped by the same counter.
+#[test]
+fn deeply_nested_raw_maps_are_capped_too() {
+    let n = hl_parser::MAX_RAW_VALUE_DEPTH + 1;
+    let source = format!(
+        "service s {{\n  image \"x\"\n  raw {{ k: {}1{} }}\n}}\n",
+        "{ a: ".repeat(n),
+        " }".repeat(n)
+    );
+    let err = parse(&source).expect_err("expected a parse error");
+    assert!(matches!(err, ParseError::RawValueTooDeep { .. }));
+}
+
 #[test]
 fn qualified_middleware_reference_parses() {
     // Parsing accepts a qualified reference on any Reference-typed
