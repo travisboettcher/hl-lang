@@ -780,19 +780,44 @@ impl<'src> Parser<'src> {
         }
     }
 
+    // ---- map-kind bodies (raw / volume / env) ----
+
+    /// Parses a `{ entry (sep entry)* }`-shaped body, shared by `raw {}`
+    /// (and, since it reuses that entry parser, a `with`-invocation's own
+    /// argument body) and `volume`/`env`'s canonical form. Entries must
+    /// be separated by a comma or a newline; bare same-line adjacency
+    /// between two entries (`{ a: 1 b: 2 }`) is a parse error, mirroring
+    /// the comma-list rule the rest of the language already follows —
+    /// "trailing comma continues, its absence ends the statement", never
+    /// silent adjacency (#81 follow-up).
+    fn parse_map_body<T>(
+        &mut self,
+        mut parse_entry: impl FnMut(&mut Self) -> Result<T, ParseError>,
+    ) -> Result<Vec<T>, ParseError> {
+        self.expect(TokenKind::LBrace)?;
+        let mut entries = Vec::new();
+        while self.peek().kind != TokenKind::RBrace {
+            entries.push(parse_entry(self)?);
+            let prev_line = self.tokens[self.pos.saturating_sub(1)].span.line;
+            if self.peek().kind == TokenKind::Comma {
+                self.bump();
+            } else if self.peek().kind != TokenKind::RBrace && self.peek().span.line == prev_line {
+                return Err(self.unexpected(Expected::Description(
+                    "a comma or a newline before the next entry",
+                )));
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(entries)
+    }
+
     // ---- literal-valued map-kind bodies (volume/env) ----
 
     fn parse_literal_map_body(
         &mut self,
         schema: &'static TypeSchema,
     ) -> Result<Vec<(Literal, Literal, Span)>, ParseError> {
-        self.expect(TokenKind::LBrace)?;
-        let mut entries = Vec::new();
-        while self.peek().kind != TokenKind::RBrace {
-            entries.push(self.parse_literal_map_entry(schema)?);
-        }
-        self.expect(TokenKind::RBrace)?;
-        Ok(entries)
+        self.parse_map_body(|p| p.parse_literal_map_entry(schema))
     }
 
     /// One `volume`/`env` entry, in either its canonical form (`key ":"
@@ -826,20 +851,7 @@ impl<'src> Parser<'src> {
     // ---- raw (schema-free passthrough) ----
 
     fn parse_raw_body(&mut self) -> Result<RawMap, ParseError> {
-        self.expect(TokenKind::LBrace)?;
-        let mut entries = Vec::new();
-        while self.peek().kind != TokenKind::RBrace {
-            entries.push(self.parse_raw_entry()?);
-            // See the matching comment in `parse_struct_body`: an
-            // optional trailing comma between entries is tolerated (a
-            // `with`-invocation's argument body reuses this parser, and
-            // docs/DESIGN.md's worked example writes its multi-argument
-            // bodies comma-separated: `{ puid: 1000, pgid: 100 }`).
-            if self.peek().kind == TokenKind::Comma {
-                self.bump();
-            }
-        }
-        self.expect(TokenKind::RBrace)?;
+        let entries = self.parse_map_body(Self::parse_raw_entry)?;
         Ok(RawMap { entries })
     }
 
