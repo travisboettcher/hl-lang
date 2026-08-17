@@ -330,6 +330,23 @@ fn explicit_templates_both_setting_entrypoint_concatenate() {
     assert_eq!(entrypoints(expose), vec!["web", "web-secure"]);
 }
 
+/// ...but two templates naming the *same* entry point concatenate to
+/// one entry, not two (#69): `entrypoint` is set-like, and a router
+/// attached twice to `web-secure` is attached to it once. Left
+/// undeduped, this reached the Traefik label as
+/// `entrypoints=web-secure,web-secure`.
+#[test]
+fn explicit_templates_naming_the_same_entrypoint_dedupe() {
+    let composed = compose_ok(
+        "template a {\n  expose { entrypoint: web-secure }\n}\n\
+         template b {\n  expose { entrypoint: web-secure }\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n  expose { entrypoint: web-secure }\n}\n",
+    );
+    let service = single_service(&composed);
+    let expose = service.fields.expose.as_ref().expect("expose set");
+    assert_eq!(entrypoints(expose), vec!["web-secure"]);
+}
+
 /// And across all three tiers, in the same priority order every other
 /// list field concatenates in.
 #[test]
@@ -473,6 +490,91 @@ fn list_fields_concatenate_in_priority_order() {
     assert_eq!(names, vec!["d1", "a1", "b1", "own1"]);
 }
 
+/// #69: the set-like lists concatenate *by distinct name*. Restating a
+/// network (or middleware, or dependency) a template already supplies is
+/// a natural thing to write, and means exactly what stating it once
+/// means — so the repeat is dropped rather than duplicated into the
+/// output.
+#[test]
+fn set_like_list_fields_dedupe_across_tiers() {
+    let composed = compose_ok(
+        "network proxy {\n  name: \"real\"\n}\n\
+         template a {\n  networks [proxy]\n  middleware auth\n  depends_on [db]\n}\n\
+         template b {\n  networks [proxy]\n  middleware auth\n  depends_on [db]\n}\n\
+         service s {\n  image \"x\"\n  with a, b\n  networks [proxy]\n  middleware auth\n  depends_on [db]\n}\n",
+    );
+    let service = single_service(&composed);
+    let names = |refs: &[hl_parser::Reference]| -> Vec<String> {
+        refs.iter().map(|r| r.name.clone()).collect()
+    };
+    assert_eq!(names(&service.fields.networks), vec!["proxy"]);
+    assert_eq!(names(&service.fields.middleware), vec!["auth"]);
+    assert_eq!(names(&service.fields.depends_on), vec!["db"]);
+}
+
+/// Deduping keeps the *first* occurrence, so the surviving order is
+/// still tier order — `defaults`, then each `with` target left to
+/// right, then the service's own list.
+#[test]
+fn deduped_list_keeps_first_occurrence_order() {
+    let composed = compose_ok(
+        "template defaults {\n  middleware d1\n}\n\
+         template a {\n  middleware a1\n  middleware d1\n}\n\
+         service s {\n  image \"x\"\n  with a\n  middleware own1\n  middleware a1\n}\n",
+    );
+    let service = single_service(&composed);
+    let names: Vec<&str> = service
+        .fields
+        .middleware
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["d1", "a1", "own1"]);
+}
+
+/// A repeat written twice inside *one* body is dropped too — the dedupe
+/// is against everything accumulated so far, not just against earlier
+/// tiers.
+#[test]
+fn repeated_entry_within_one_list_is_deduped() {
+    let composed = compose_ok(
+        "network proxy {\n  name: \"real\"\n}\n\
+         service s {\n  image \"x\"\n  networks [proxy, proxy]\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(service.fields.networks.len(), 1);
+}
+
+/// #69's expansion bomb: list-kind fields used to accumulate without
+/// dedupe, so result size doubled per composition level even though
+/// `resolve_template`'s cache prevents re-*resolution*. At N=26 — under
+/// a kilobyte of source — that exhausted a 1 GB allocation cap.
+///
+/// The invariant under test is that the accumulated list's size doesn't
+/// grow with composition *depth* at all, which N=12 states just as
+/// sharply as N=26 would: one entry if deduping works, 4,096 if it
+/// doesn't. N is kept deliberately low rather than at the issue's
+/// headline figure, because a test that only fails by exhausting memory
+/// takes the whole suite down with it instead of failing — under
+/// `cargo mutants`, a broken dedupe at N=26 hangs the run and is
+/// reported as a timeout rather than as the caught mutant it should be.
+#[test]
+fn nested_with_chain_does_not_expand_exponentially() {
+    let mut source = String::from("template t0 {\n  middleware m\n}\n");
+    for i in 1..=12 {
+        source.push_str(&format!(
+            "template t{i} {{\n  with t{}, t{}\n}}\n",
+            i - 1,
+            i - 1
+        ));
+    }
+    source.push_str("service s {\n  image \"x\"\n  with t12\n}\n");
+    let composed = compose_ok(&source);
+    let service = single_service(&composed);
+    assert_eq!(service.fields.middleware.len(), 1);
+    assert_eq!(service.fields.middleware[0].name, "m");
+}
+
 /// `dns` is list-typed just like `middleware`/`depends_on`/`networks` —
 /// it concatenates across tiers rather than colliding.
 #[test]
@@ -484,6 +586,21 @@ fn dns_concatenates_across_tiers() {
     let service = single_service(&composed);
     let entries: Vec<&str> = service.fields.dns.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(entries, vec!["192.168.50.182", "192.168.50.183"]);
+}
+
+/// ...and unlike the set-like lists, `dns` is *not* deduped (#69).
+/// Ordering is observable there — it's resolver priority — so its append
+/// semantics are left exactly as they were, even though a repeat is just
+/// as meaningless as it is elsewhere.
+#[test]
+fn dns_keeps_duplicates() {
+    let composed = compose_ok(
+        "template a {\n  dns \"192.168.50.182\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n  dns \"192.168.50.182\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries: Vec<&str> = service.fields.dns.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(entries, vec!["192.168.50.182", "192.168.50.182"]);
 }
 
 // --- cycles ---

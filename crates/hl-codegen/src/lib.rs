@@ -296,9 +296,9 @@ fn generate_service(
 /// Resolves a service's `networks [x, ...]` references against the
 /// program's top-level `network` declarations. Returns the Compose-level
 /// network name list, the `(name, doc)` pairs to merge into the
-/// program's top-level `networks:` section, and — if exactly one
-/// referenced network is `external` — its real name, for the
-/// `traefik.docker.network=` label.
+/// program's top-level `networks:` section, and — if the referenced
+/// networks name exactly one distinct external real name — that name,
+/// for the `traefik.docker.network=` label.
 ///
 /// `service_span` is only used for [`CodegenError::AmbiguousExternalNetwork`],
 /// which is a property of the service's whole `networks` list rather
@@ -331,7 +331,15 @@ fn resolve_networks(
             .as_ref()
             .map(|l| l.text().to_string())
             .unwrap_or_else(|| decl.name.name.clone());
-        if is_external {
+        // By *distinct* real name (#69): naming one external network
+        // more than once is not an ambiguity between it and itself,
+        // it's one answer given twice. Composition already drops
+        // repeated `networks` entries, so a duplicate can only reach
+        // here from a caller that built a `ComposedProgram` some other
+        // way, or from two declarations that differ in `hll` name but
+        // resolve to the same real one — neither of which leaves
+        // `traefik.docker.network` with an actual choice to make.
+        if is_external && !external_candidates.contains(&real_name) {
             external_candidates.push(real_name.clone());
         }
         docs.push((

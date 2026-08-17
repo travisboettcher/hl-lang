@@ -231,6 +231,47 @@ fn ambiguous_external_network_error_points_at_the_service() {
     assert_eq!((span.line, span.col), (7, 1));
 }
 
+/// #69: one external network named by several tiers is one answer given
+/// repeatedly, not an ambiguity between it and itself. Composition drops
+/// the repeated `networks` entries, and the label resolves to the single
+/// real name rather than erroring out.
+#[test]
+fn external_network_named_by_several_tiers_is_not_ambiguous() {
+    let yaml = generate_from(
+        "network proxy {\n  external\n  name: \"docker_default\"\n}\n\
+         template a {\n  networks [proxy]\n}\n\
+         template b {\n  networks [proxy]\n}\n\
+         service web {\n  image \"nginx\"\n  with a, b\n  networks [proxy]\n}\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        "services:\n  web:\n    image: nginx\n    container_name: web\n\
+         \n    networks: [proxy]\n    labels:\n\
+         \n      - traefik.docker.network=docker_default\n\
+         networks:\n  proxy:\n    name: docker_default\n    external: true\n",
+    );
+}
+
+/// Two distinct declarations that resolve to the *same* real name are
+/// not an ambiguity either: the check is on distinct real names, so
+/// there is still only one answer `traefik.docker.network` could take.
+/// (Two genuinely different external networks remain an error — see
+/// `ambiguous_external_network_error_points_at_the_service`.)
+#[test]
+fn two_declarations_sharing_one_real_name_are_not_ambiguous() {
+    let yaml = generate_from(
+        "network a {\n  external\n  name: \"shared_real\"\n}\n\
+         network b {\n  external\n  name: \"shared_real\"\n}\n\
+         service s {\n  image \"x\"\n  networks [a, b]\n}\n",
+    );
+    let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+    let labels = &value["services"]["s"]["labels"];
+    assert_eq!(
+        labels,
+        &serde_yaml::Value::from(vec!["traefik.docker.network=shared_real"])
+    );
+}
+
 #[test]
 fn missing_image_is_error() {
     let err = generate_err("service s {\n}\n");
