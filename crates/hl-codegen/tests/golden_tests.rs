@@ -321,3 +321,225 @@ fn comma_in_middleware_reference_is_error() {
         }
     ));
 }
+
+/// #68: `raw` used to be flattened in on top of the built-in fields
+/// without checking for collisions, so a `raw` key naming one of them
+/// emitted that key *twice* in the same mapping — invalid YAML that
+/// `docker compose config` rejects outright and Python's
+/// `yaml.safe_load` silently reads last-wins. `raw` now wins outright
+/// and the built-in is suppressed.
+///
+/// Note this test would fail on the old behavior at `assert_yaml_eq`'s
+/// own parse step, not at the comparison: `serde_yaml` rejects a
+/// duplicate mapping key.
+#[test]
+fn raw_key_shadowing_a_built_in_field_overrides_it() {
+    let yaml = generate_from(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           raw {\n    \
+             image: \"override\"\n    \
+             container_name: \"boom\"\n  \
+           }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  web:
+    image: override
+    container_name: boom
+"#,
+    );
+}
+
+/// The sharp edge of override semantics, asserted deliberately: `raw`'s
+/// `labels` replaces the computed Traefik labels wholesale rather than
+/// merging with them. Merging would make `raw` something other than
+/// verbatim passthrough.
+#[test]
+fn raw_labels_replace_the_computed_traefik_labels() {
+    let yaml = generate_from(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           expose 8080 as \"web.example.com\"\n  \
+           raw {\n    labels: [\"only.this=1\"]\n  }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  web:
+    image: nginx
+    container_name: web
+    expose:
+      - 8080
+    labels:
+      - only.this=1
+"#,
+    );
+}
+
+/// Every field `ComposeServiceDoc` serializes is overridable, checked in
+/// one shot — if a new built-in field is ever added without an override
+/// rule, this fails (with a duplicate-key parse error) alongside the
+/// exhaustive destructure in `doc.rs` that won't compile without one.
+#[test]
+fn every_built_in_field_is_overridable_by_raw() {
+    let yaml = generate_from(
+        "network traefik-net {\n  external\n  name: \"docker_default\"\n}\n\
+         service database {\n  image \"postgres\"\n}\n\
+         service web {\n  \
+           image \"nginx\"\n  \
+           container_name \"web-ctr\"\n  \
+           restart unless-stopped\n  \
+           env PUID = \"1000\"\n  \
+           volume \"web-data\" -> \"/data\"\n  \
+           networks [traefik-net]\n  \
+           dns [\"192.168.50.182\"]\n  \
+           expose 8080 as \"web.example.com\"\n  \
+           depends_on database\n  \
+           raw {\n    \
+             image: \"raw-image\"\n    \
+             container_name: \"raw-name\"\n    \
+             restart: \"always\"\n    \
+             environment: [\"RAW=1\"]\n    \
+             volumes: [\"raw-vol:/raw\"]\n    \
+             networks: [\"raw-net\"]\n    \
+             dns: [\"1.1.1.1\"]\n    \
+             expose: [9999]\n    \
+             depends_on: [\"raw-dep\"]\n    \
+             labels: [\"raw.label=1\"]\n  \
+           }\n\
+         }\n",
+    );
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml)
+        .unwrap_or_else(|err| panic!("output isn't valid YAML: {err}\n{yaml}"));
+    let web = &parsed["services"]["web"];
+    let expected: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+image: raw-image
+container_name: raw-name
+restart: always
+environment:
+  - RAW=1
+volumes:
+  - raw-vol:/raw
+networks:
+  - raw-net
+dns:
+  - 1.1.1.1
+expose:
+  - 9999
+depends_on:
+  - raw-dep
+labels:
+  - raw.label=1
+"#,
+    )
+    .unwrap();
+    assert_eq!(web, &expected, "\n--- actual ---\n{yaml}");
+}
+
+/// Overriding the service's own `volumes:`/`networks:` keys doesn't
+/// retract the top-level `volumes:`/`networks:` declarations codegen
+/// derived from the built-in fields. `raw`'s values are unparsed, so
+/// there's no way to re-derive those declarations from the replacement
+/// — and keeping them is what lets a `raw` value that names the same
+/// named volume or network still resolve.
+#[test]
+fn raw_override_keeps_the_top_level_volume_and_network_declarations() {
+    let yaml = generate_from(
+        "network traefik-net {\n  external\n  name: \"docker_default\"\n}\n\
+         service web {\n  \
+           image \"nginx\"\n  \
+           volume \"web-data\" -> \"/data\"\n  \
+           networks [traefik-net]\n  \
+           raw {\n    \
+             volumes: [\"web-data:/elsewhere\"]\n    \
+             networks: [\"traefik-net\"]\n  \
+           }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  web:
+    image: nginx
+    container_name: web
+    labels:
+      - "traefik.docker.network=docker_default"
+    volumes:
+      - web-data:/elsewhere
+    networks:
+      - traefik-net
+
+networks:
+  traefik-net:
+    name: docker_default
+    external: true
+
+volumes:
+  web-data:
+"#,
+    );
+}
+
+/// The symmetric half of `every_built_in_field_is_overridable_by_raw`:
+/// a `raw` block that names *other* keys leaves every built-in field
+/// alone. Same service, same `raw` arity — only the keys differ — so
+/// the two together pin the override to key equality rather than to
+/// "there is a `raw` block".
+#[test]
+fn raw_leaves_built_in_fields_it_does_not_name_alone() {
+    let yaml = generate_from(
+        "network traefik-net {\n  external\n  name: \"docker_default\"\n}\n\
+         service database {\n  image \"postgres\"\n}\n\
+         service web {\n  \
+           image \"nginx\"\n  \
+           container_name \"web-ctr\"\n  \
+           restart unless-stopped\n  \
+           env PUID = \"1000\"\n  \
+           volume \"web-data\" -> \"/data\"\n  \
+           networks [traefik-net]\n  \
+           dns [\"192.168.50.182\"]\n  \
+           expose 8080 as \"web.example.com\"\n  \
+           depends_on database\n  \
+           raw {\n    privileged: true\n    cap_add: [\"NET_ADMIN\"]\n  }\n\
+         }\n",
+    );
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml)
+        .unwrap_or_else(|err| panic!("output isn't valid YAML: {err}\n{yaml}"));
+    let web = &parsed["services"]["web"];
+    let expected: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+image: nginx
+container_name: web-ctr
+restart: unless-stopped
+environment:
+  - PUID=1000
+volumes:
+  - web-data:/data
+networks:
+  - traefik-net
+dns:
+  - 192.168.50.182
+expose:
+  - 8080
+depends_on:
+  - database
+labels:
+  - "traefik.docker.network=docker_default"
+  - "traefik.http.routers.web.rule=Host(`web.example.com`)"
+  - "traefik.http.services.web.loadbalancer.server.port=8080"
+privileged: true
+cap_add:
+  - NET_ADMIN
+"#,
+    )
+    .unwrap();
+    assert_eq!(web, &expected, "\n--- actual ---\n{yaml}");
+}

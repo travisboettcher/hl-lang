@@ -244,6 +244,43 @@ written — there's no validation, so a typo'd key or a value Compose
 doesn't understand won't be caught until `docker compose` itself rejects
 it.
 
+### `raw` wins over a built-in field of the same name
+
+A `raw` key may name a field `hll` already has (`image`,
+`container_name`, `restart`, `environment`, `volumes`, `networks`,
+`dns`, `expose`, `depends_on`, `labels`). When it does, the `raw` value
+is what's emitted and the built-in one is dropped — the key appears
+exactly once:
+
+```hll,fragment
+image "nginx"
+raw {
+  image: "nginx:1.27-alpine"   # this is the image that's emitted
+}
+```
+
+This is what makes `raw` a durable escape hatch. A file that writes
+`raw { ports: [...] }` today, because there's no dedicated `ports`
+field yet, keeps working unchanged the day one is added — so gaining a
+built-in field is never a breaking change for files that were working
+around its absence.
+
+Note that `raw`'s value **replaces** the built-in one; it never merges
+with it. That's worth knowing for `labels` in particular, since `hll`
+computes the Traefik labels itself:
+
+```hll,fragment
+expose 8080 as "web.example.com"
+raw {
+  labels: ["only.this=1"]   # every computed Traefik label is dropped
+}
+```
+
+Overriding a service's `volumes:` or `networks:` key doesn't retract
+the top-level `volumes:`/`networks:` declarations that `volume` and
+`networks` produced — those stay, so a `raw` replacement naming the
+same named volume or network still resolves.
+
 ## `with`
 
 Not really a "field" you set directly so much as the mechanism for

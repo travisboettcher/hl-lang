@@ -217,6 +217,16 @@ one line.
 | `with` | struct | `templates` (list of nested instantiations) | — | — | no |
 | `raw` | map | — | `:` | none (schema-free, passthrough) | no |
 
+`raw`'s "no uniqueness checking" is a *parser*-level statement: its own
+entries are unchecked against each other and against any other field.
+Codegen does have one rule about them, because YAML forces the issue —
+two keys spelled the same in one mapping is invalid — and a `raw` key
+may well name a field that has a row above. Where it does, the `raw`
+value is what's emitted and the built-in one is dropped, which keeps
+adding a row to this table from breaking files that were already
+reaching for `raw` in that row's absence (see the `raw` section of the
+book's Built-in Fields page).
+
 `expose`'s own `entrypoint` sub-field is a list of references too
 (`entrypoint web, web-secure`), for the same reason it isn't a scalar
 anywhere else in the pipeline: Traefik's `entrypoints=` label is

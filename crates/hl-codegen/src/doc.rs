@@ -29,11 +29,13 @@ pub(crate) struct NetworkDoc {
 pub(crate) struct ComposeServiceDoc {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-    /// Unlike every other optional field here, always populated —
-    /// codegen defaults it to the service's own name when `.hll` doesn't
-    /// set one explicitly, matching real-world hand-written Compose
-    /// files (see `hl_codegen::generate_service`).
-    pub container_name: String,
+    /// Always populated by codegen — it defaults to the service's own
+    /// name when `.hll` doesn't set one explicitly, matching real-world
+    /// hand-written Compose files (see `hl_codegen::generate_service`).
+    /// `Option` only so [`ComposeServiceDoc::apply_raw_overrides`] can
+    /// take it back out again; nothing else ever leaves it `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -55,6 +57,93 @@ pub(crate) struct ComposeServiceDoc {
     /// verbatim-passthrough design intent. `serde(flatten)` doesn't
     /// support `skip_serializing_if`, but an empty map flattens to zero
     /// extra keys anyway, so nothing extra is needed here.
+    ///
+    /// A key here that also names one of the fields above would flatten
+    /// into a *second* copy of that key in the same mapping — invalid
+    /// YAML (#68). [`ComposeServiceDoc::apply_raw_overrides`] is what
+    /// keeps that from happening, and every construction of this struct
+    /// has to call it.
     #[serde(flatten)]
     pub raw: IndexMap<String, serde_yaml::Value>,
+}
+
+impl ComposeServiceDoc {
+    /// Clears every built-in field that a `raw {}` entry names, so the
+    /// `raw` value is the only copy of that key left to serialize.
+    ///
+    /// Two keys spelled the same in one mapping is invalid YAML, and
+    /// downstream tools disagree about it in the worst possible way —
+    /// `docker compose config` rejects the document outright, while
+    /// Python's `yaml.safe_load` accepts it and silently takes the last
+    /// one (#68). So one of the two has to go, and `raw` is the one
+    /// that wins: it's documented as the escape hatch for Compose keys
+    /// `hll` has no dedicated field for *yet*, which means today's
+    /// `raw { ports: [...] }` is tomorrow's collision with a built-in
+    /// `ports` field. Overriding keeps that file compiling the day the
+    /// built-in lands, making new built-in fields a purely additive
+    /// change; rejecting the collision instead would make every one of
+    /// them a breaking change.
+    ///
+    /// The trade is that `raw { labels: [...] }` drops the computed
+    /// Traefik labels rather than merging with them — deliberate, since
+    /// a `raw` value that arrives half-merged isn't verbatim
+    /// passthrough anymore. The book calls this out.
+    ///
+    /// Only the service key itself is suppressed. Anything else codegen
+    /// derives from the overridden field stays — notably the top-level
+    /// `volumes:`/`networks:` declarations, which a `raw` replacement
+    /// still needs if it names the same named volume or network, and
+    /// which `raw`'s unparsed values give no way to re-derive.
+    pub(crate) fn apply_raw_overrides(&mut self) {
+        // Destructured exhaustively on purpose: adding a field to this
+        // struct without giving it an override rule below stops
+        // compiling here, rather than silently reintroducing #68's
+        // duplicate key for that field.
+        let Self {
+            image,
+            container_name,
+            restart,
+            environment,
+            volumes,
+            networks,
+            dns,
+            expose,
+            depends_on,
+            labels,
+            raw,
+        } = self;
+
+        // Key names are the serialized ones, which for this struct are
+        // its Rust field names — there is no `#[serde(rename)]` above.
+        if raw.contains_key("image") {
+            *image = None;
+        }
+        if raw.contains_key("container_name") {
+            *container_name = None;
+        }
+        if raw.contains_key("restart") {
+            *restart = None;
+        }
+        if raw.contains_key("environment") {
+            environment.clear();
+        }
+        if raw.contains_key("volumes") {
+            volumes.clear();
+        }
+        if raw.contains_key("networks") {
+            networks.clear();
+        }
+        if raw.contains_key("dns") {
+            dns.clear();
+        }
+        if raw.contains_key("expose") {
+            expose.clear();
+        }
+        if raw.contains_key("depends_on") {
+            depends_on.clear();
+        }
+        if raw.contains_key("labels") {
+            labels.clear();
+        }
+    }
 }
