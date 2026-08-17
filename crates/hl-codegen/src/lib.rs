@@ -198,7 +198,7 @@ pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenErr
         networks,
         volumes,
     };
-    let yaml = serde_yaml::to_string(&compose_doc)
+    let yaml = serde_yaml_ng::to_string(&compose_doc)
         .expect("ComposeDoc only contains strings/maps/numbers; serialization cannot fail");
     Ok(GeneratedProgram { yaml })
 }
@@ -255,7 +255,7 @@ fn generate_service(
     let (compose_networks, network_docs, docker_network) =
         resolve_networks(&fields.networks, declared_networks, name, service.span)?;
 
-    let expose: Vec<serde_yaml::Value> = fields
+    let expose: Vec<serde_yaml_ng::Value> = fields
         .expose
         .as_ref()
         .and_then(|e| e.port.as_ref())

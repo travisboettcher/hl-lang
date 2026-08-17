@@ -7,15 +7,15 @@ all-features = false
 no-default-features = false
 
 [advisories]
-# Deliberately empty: no advisory is ignored here. #76 raised
-# serde_yaml (crates/hl-codegen/Cargo.toml:10, deprecated by its own
-# author, "0.9.34+deprecated") as a still-open decision citing
+# Deliberately empty: no advisory is ignored here. #76/#126 raised
+# serde_yaml (deprecated by its own author, "0.9.34+deprecated") citing
 # RUSTSEC-2024-0370 — but that ID actually belongs to proc-macro-error,
-# a crate that isn't in this dependency tree, and the advisory
-# database (as of this writing) has no entry at all for serde_yaml
-# being unmaintained. There's nothing to ignore today; if RustSec ever
-# files one, an empty ignore list here means it surfaces in CI
-# immediately rather than being silently pre-suppressed.
+# a crate that isn't in this dependency tree, and the advisory database
+# never had an entry for serde_yaml being unmaintained either. So there
+# was nothing to ignore even then; #126 has since moved the workspace
+# off it to the maintained serde_yaml_ng fork anyway. Keeping this list
+# empty means a future RustSec filing against anything in the tree
+# surfaces in CI immediately rather than being silently pre-suppressed.
 ignore = []
 
 [licenses]
