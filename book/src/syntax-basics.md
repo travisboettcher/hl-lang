@@ -129,9 +129,9 @@ Two rules govern whitespace and punctuation, and both matter in practice:
   their own line inside a service/template/network body; a comma between
   two unrelated fields (`image "x", restart unless-stopped`) is a compile
   error. A comma is reserved for continuing a *single* field's own list —
-  never for marking the boundary between two different fields. (`raw { }`
-  bodies and a `with`-invocation's argument body are the one exception —
-  see below.)
+  never for marking the boundary between two different fields. (`volume`/
+  `env`/`raw { }` bodies and a `with`-invocation's argument body are the
+  exception — see below.)
 - **A trailing comma continues a list; its absence ends it.** This applies
   to bracket lists (`[a, b, c]`), a bare `with`-list (`with a, b, c`), and
   the secondary-field shorthand above. If there's a next item, the comma
@@ -152,10 +152,14 @@ A long `with` list reads better wrapped across multiple lines, one
 template per line, as long as every line but the last ends with a
 trailing comma — this parses identically to writing it all on one line.
 
-`raw { }` bodies, and a `with`-invocation's own argument body (`{ port:
-8080 }` above), are the one exception to the newline rule: they're
-key/value maps, not named struct fields, so the compact one-line style
-(`{ puid: 1000, pgid: 100 }`) is fine there.
+`volume { }`/`env { }`/`raw { }` bodies, and a `with`-invocation's own
+argument body (`{ port: 8080 }` above), are the exception to the newline
+rule: they're key/value maps, not named struct fields, so the compact
+one-line style (`{ puid: 1000, pgid: 100 }`) is fine there, comma-separated
+or one entry per line with no commas at all. What's still not valid is
+bare adjacency *on one line* with neither — `{ "a": "/x" "b": "/y" }` is a
+parse error, just written without the comma the struct-body rule above
+would otherwise demand a newline for instead.
 
 ## Comments and interpolation
 
