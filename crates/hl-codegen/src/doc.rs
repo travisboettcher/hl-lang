@@ -29,11 +29,14 @@ pub(crate) struct NetworkDoc {
 pub(crate) struct ComposeServiceDoc {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-    /// Always populated by codegen — it defaults to the service's own
-    /// name when `.hll` doesn't set one explicitly, matching real-world
-    /// hand-written Compose files (see `hl_codegen::generate_service`).
-    /// `Option` only so [`ComposeServiceDoc::apply_raw_overrides`] can
-    /// take it back out again; nothing else ever leaves it `None`.
+    /// Only emitted when `.hll` sets `container_name` explicitly (#90).
+    /// Compose's own default naming (`<project>_<service>_1`) is scoped
+    /// per project and is what most people want; an explicit
+    /// `container_name` forces one specific name across every stack it's
+    /// used in, so it must opt in rather than default to the service's
+    /// own name — that default reliably collided across independent
+    /// stacks sharing a common service name (`db`, `broker`, ...), and
+    /// Compose refuses to start the second container with the same name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -222,7 +222,17 @@ container_name "uptime-kuma"
 
 | Accepts | Default |
 |---|---|
-| string | the service's own name |
+| string | not set — Compose's own per-project name applies |
+
+Only emitted when set explicitly. Compose's own default container
+naming is scoped per project and is what most people want; an explicit
+`container_name` forces one specific name everywhere it's deployed, so
+it's an opt-in override (for a stable DNS name or an external
+reference), not something every service should get by default —
+defaulting it to the service's own name reliably collides across
+independent stacks that happen to share a service name (`db`, `broker`,
+...), and Compose refuses to start the second container with the same
+name.
 
 ## `raw`
 

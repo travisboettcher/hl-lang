@@ -52,7 +52,6 @@ fn syncthing_matches_real_deployed_service() {
 services:
   syncthing:
     image: lscr.io/linuxserver/syncthing:latest
-    container_name: syncthing
     restart: unless-stopped
     environment:
       - PUID=1000
@@ -95,7 +94,6 @@ fn cadvisor_raw_passthrough_matches_real_service() {
 services:
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:latest
-    container_name: cadvisor
     privileged: true
     devices:
       - /dev/kmsg
@@ -116,7 +114,6 @@ fn jellyfin_plain_service_produces_minimal_doc() {
 services:
   jellyfin:
     image: jellyfin/jellyfin:latest
-    container_name: jellyfin
     restart: unless-stopped
     environment:
       - PUID=1000
@@ -131,25 +128,32 @@ services:
     );
 }
 
-/// `container_name` (#17): defaults to the service's own name when
-/// unset, so the common case — matching the syncthing/jellyfin/cadvisor
-/// fixtures above — needs nothing written at all.
+/// `container_name` (#90): never emitted unless `.hll` sets it
+/// explicitly. Compose's own per-project default naming (`<project>_
+/// <service>_1`) is what most people want, and defaulting the built-in
+/// to the service's own name reliably collided across independent
+/// stacks sharing a common service name (`db`, `broker`, ...) — Compose
+/// refuses to start the second container with the same name.
 #[test]
-fn container_name_defaults_to_service_name() {
+fn container_name_is_absent_when_unset() {
     let yaml = generate_from("service uptime-kuma {\n  image \"louislam/uptime-kuma:latest\"\n}\n");
     let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-    assert_eq!(
-        parsed["services"]["uptime-kuma"]["container_name"],
-        serde_yaml::Value::String("uptime-kuma".to_string())
+    assert!(
+        parsed["services"]["uptime-kuma"]
+            .as_mapping()
+            .unwrap()
+            .get("container_name")
+            .is_none(),
+        "expected no container_name key, got:\n{yaml}"
     );
 }
 
-/// An explicit `container_name` overrides the default — the "subdomain
-/// shorter than the service name" style case the issue calls out
-/// (`it-tools` -> a shorter container name), mirrored here with a
-/// differently-named container.
+/// An explicit `container_name` is emitted verbatim — the case the issue
+/// calls out as the deliberate, opt-in use (a stable DNS name or an
+/// external reference), mirrored here with a shorter container name than
+/// the service's own.
 #[test]
-fn explicit_container_name_overrides_default() {
+fn explicit_container_name_is_emitted() {
     let yaml = generate_from(
         "service it-tools {\n  image \"corentinth/it-tools:latest\"\n  container_name \"tools\"\n}\n",
     );
@@ -177,7 +181,6 @@ fn dns_field_emits_dns_compose_key() {
 services:
   uptime-kuma:
     image: louislam/uptime-kuma:latest
-    container_name: uptime-kuma
     dns:
       - 192.168.50.182
 "#,
@@ -245,7 +248,7 @@ fn external_network_named_by_several_tiers_is_not_ambiguous() {
     );
     assert_yaml_eq(
         &yaml,
-        "services:\n  web:\n    image: nginx\n    container_name: web\n\
+        "services:\n  web:\n    image: nginx\n\
          \n    networks: [proxy]\n    labels:\n\
          \n      - traefik.docker.network=docker_default\n\
          networks:\n  proxy:\n    name: docker_default\n    external: true\n",
@@ -414,7 +417,6 @@ fn raw_labels_replace_the_computed_traefik_labels() {
 services:
   web:
     image: nginx
-    container_name: web
     expose:
       - 8080
     labels:
@@ -510,7 +512,6 @@ fn raw_override_keeps_the_top_level_volume_and_network_declarations() {
 services:
   web:
     image: nginx
-    container_name: web
     labels:
       - "traefik.docker.network=docker_default"
     volumes:

@@ -221,10 +221,11 @@ fn generate_service(
         })?;
     let image = interp::resolve(image_lit.text(), &bindings, image_lit.span())?;
 
-    let container_name = match fields.container_name.as_ref() {
-        Some(lit) => interp::resolve(lit.text(), &bindings, lit.span())?,
-        None => name.clone(),
-    };
+    let container_name = fields
+        .container_name
+        .as_ref()
+        .map(|lit| interp::resolve(lit.text(), &bindings, lit.span()))
+        .transpose()?;
 
     let restart = fields
         .restart
@@ -275,7 +276,7 @@ fn generate_service(
 
     let mut service_doc = doc::ComposeServiceDoc {
         image: Some(image),
-        container_name: Some(container_name),
+        container_name,
         restart,
         environment,
         volumes: volume_entries,
