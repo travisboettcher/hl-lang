@@ -148,6 +148,11 @@ Nothing here is published to crates.io. A "release" means a git tag plus a
 GitHub Release carrying the `hllc` binary — `release-plz.toml`'s
 `[workspace] publish = false` + `git_only = true` is what encodes that.
 
+See [`docs/DESIGN.md`](docs/DESIGN.md) for the language's grammar, and each
+crate's rustdoc (`crates/hl-lexer/src/lib.rs`, `crates/hl-parser/src/lib.rs`,
+`crates/hl-linker/src/lib.rs`, `crates/hl-codegen/src/lib.rs`) for
+implementation details (token/AST shapes, span semantics, error types).
+
 ## What a version number promises
 
 **1.0 means a stable `.hll` language and a stable `hllc` CLI — explicitly
@@ -197,11 +202,6 @@ the usual 0.x convention. Crossing to 1.0.0 is a deliberate act, not an
 arithmetic consequence of a `semver-major` label: `release.yml` refuses to
 bump `0.x` to `1.0.0` unless the merged PR also carries a `release-1.0`
 label. See CONTRIBUTING.md for how to pick a label.
-
-See [`docs/DESIGN.md`](docs/DESIGN.md) for the language's grammar, and each
-crate's rustdoc (`crates/hl-lexer/src/lib.rs`, `crates/hl-parser/src/lib.rs`,
-`crates/hl-linker/src/lib.rs`, `crates/hl-codegen/src/lib.rs`) for
-implementation details (token/AST shapes, span semantics, error types).
 
 ## Contributing
 
