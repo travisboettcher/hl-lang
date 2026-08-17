@@ -33,13 +33,23 @@ confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
-wildcards = "deny"
-# The workspace's own crates depend on each other by unversioned `path`
-# deps (e.g. crates/hl-cli/Cargo.toml's `hl-lexer = { path = "../hl-lexer" }`),
-# which the wildcards lint otherwise flags — crates.io doesn't allow
-# publishing path deps anyway, so this can't hide a real loose external
-# version requirement.
-allow-wildcard-paths = true
+# Left at the default ("warn") rather than "deny": the workspace's own
+# crates depend on each other by unversioned `path` deps (e.g.
+# crates/hl-cli/Cargo.toml's `hl-lexer = { path = "../hl-lexer" }`),
+# which trips this lint. cargo-deny's usual escape hatch,
+# allow-wildcard-paths, only exempts crates Cargo considers
+# unpublishable (`publish = false`) — and that field is deliberately
+# absent from every crate's Cargo.toml here: release-plz's
+# publishable_packages() filters out any `publish = false` package
+# before it ever reaches its git-tag/release logic, regardless of
+# release-plz.toml's own workspace-level publish/git_only config, which
+# silently broke the release pipeline the one time this repo tried it
+# (see 18800c9, "Drop per-crate publish = false: it silently disables
+# the release"). So there's no way to satisfy allow-wildcard-paths
+# without reintroducing that bug — "warn" still surfaces a real loose
+# external version requirement in CI output without hard-failing on
+# these internal ones.
+wildcards = "warn"
 deny = []
 skip = []
 skip-tree = []
