@@ -531,20 +531,27 @@ fn repeated_entry_within_one_list_is_deduped() {
 /// #69's expansion bomb: list-kind fields used to accumulate without
 /// dedupe, so result size doubled per composition level even though
 /// `resolve_template`'s cache prevents re-*resolution*. At N=26 — under
-/// a kilobyte of source — that exhausted a 1 GB allocation cap. Deduping
-/// is what bounds the accumulated list by the number of *distinct*
-/// names, so this now resolves to a single entry, in milliseconds.
+/// a kilobyte of source — that exhausted a 1 GB allocation cap.
+///
+/// The invariant under test is that the accumulated list's size doesn't
+/// grow with composition *depth* at all, which N=12 states just as
+/// sharply as N=26 would: one entry if deduping works, 4,096 if it
+/// doesn't. N is kept deliberately low rather than at the issue's
+/// headline figure, because a test that only fails by exhausting memory
+/// takes the whole suite down with it instead of failing — under
+/// `cargo mutants`, a broken dedupe at N=26 hangs the run and is
+/// reported as a timeout rather than as the caught mutant it should be.
 #[test]
 fn nested_with_chain_does_not_expand_exponentially() {
     let mut source = String::from("template t0 {\n  middleware m\n}\n");
-    for i in 1..=26 {
+    for i in 1..=12 {
         source.push_str(&format!(
             "template t{i} {{\n  with t{}, t{}\n}}\n",
             i - 1,
             i - 1
         ));
     }
-    source.push_str("service s {\n  image \"x\"\n  with t26\n}\n");
+    source.push_str("service s {\n  image \"x\"\n  with t12\n}\n");
     let composed = compose_ok(&source);
     let service = single_service(&composed);
     assert_eq!(service.fields.middleware.len(), 1);
