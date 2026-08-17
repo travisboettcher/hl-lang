@@ -332,3 +332,205 @@ fn template_qualified_reference_resolves_in_its_own_declaring_scope_not_the_invo
     assert!(network_ref.qualifier.is_none());
     assert_eq!(network_ref.name, "traefik-net");
 }
+
+// --- imported-network name collisions (#71) ---
+//
+// These live here rather than only in `hl-linker`'s `link_tests.rs`
+// because the check itself lives in `compose_with_resolver`: a qualified
+// network reference is unreachable through the plain `compose()` entry
+// point (`SingleFileResolver` has no aliases at all), so `FakeResolver`
+// is the only way to exercise this code from inside `hl-parser`, where
+// it's written.
+
+/// The entry file declares its own `proxy` *and* reaches across an
+/// import for another one. Codegen resolves `networks [...]` by bare
+/// name against one flat list, so the two are indistinguishable there
+/// and the entry file's own silently wins — which is the silent
+/// wrongness this rejects.
+#[test]
+fn imported_network_colliding_with_an_entry_network_is_error() {
+    let imported = parse_network(
+        "network proxy {\n  external\n  name: \"imported_real\"\n}\n",
+        "proxy",
+    );
+    let local = parse_network("network proxy {\n  name: \"local_real\"\n}\n", "proxy");
+
+    let mut modules = HashMap::new();
+    modules.insert(
+        Scope::Docker,
+        Module {
+            networks: HashMap::from([("proxy".to_string(), imported)]),
+            ..Default::default()
+        },
+    );
+    modules.insert(
+        Scope::Service,
+        Module {
+            aliases: HashMap::from([("ext".to_string(), Scope::Docker)]),
+            ..Default::default()
+        },
+    );
+
+    let resolver = FakeResolver { modules };
+    let s = parse_service(
+        "service s {\n  image \"x\"\n  networks [ext.proxy]\n}\n",
+        "s",
+    );
+
+    let err = compose_with_resolver(vec![local], vec![s], Scope::Service, &resolver)
+        .expect_err("expected a compose error");
+    assert!(
+        matches!(
+            &err,
+            ComposeError::CollidingImportedNetwork { alias, name, .. }
+                if alias == "ext" && name == "proxy"
+        ),
+        "expected CollidingImportedNetwork, got {err:?}"
+    );
+    // The reference in the entry file, not the imported declaration:
+    // a `Span` carries no file identity.
+    assert_eq!((err.span().line, err.span().col), (3, 13));
+}
+
+/// Two *imported* networks sharing a bare name collide with each other
+/// for the same reason, with no entry-file declaration involved.
+#[test]
+fn two_imported_networks_sharing_a_bare_name_is_error() {
+    let net_a = parse_network("network proxy {\n  name: \"a_real\"\n}\n", "proxy");
+    let net_b = parse_network("network proxy {\n  name: \"b_real\"\n}\n", "proxy");
+
+    let mut modules = HashMap::new();
+    modules.insert(
+        Scope::A,
+        Module {
+            networks: HashMap::from([("proxy".to_string(), net_a)]),
+            ..Default::default()
+        },
+    );
+    modules.insert(
+        Scope::B,
+        Module {
+            networks: HashMap::from([("proxy".to_string(), net_b)]),
+            ..Default::default()
+        },
+    );
+    modules.insert(
+        Scope::Service,
+        Module {
+            aliases: HashMap::from([("a".to_string(), Scope::A), ("b".to_string(), Scope::B)]),
+            ..Default::default()
+        },
+    );
+
+    let resolver = FakeResolver { modules };
+    let s = parse_service(
+        "service s {\n  image \"x\"\n  networks [a.proxy, b.proxy]\n}\n",
+        "s",
+    );
+
+    let err = compose_with_resolver(Vec::new(), vec![s], Scope::Service, &resolver)
+        .expect_err("expected a compose error");
+    assert!(
+        matches!(
+            &err,
+            ComposeError::CollidingImportedNetwork { alias, name, .. }
+                if alias == "b" && name == "proxy"
+        ),
+        "expected CollidingImportedNetwork naming `b`, got {err:?}"
+    );
+}
+
+/// One imported network pulled in by several references is the same
+/// declaration reaching the merge more than once, not a collision with
+/// itself — this is what the equality check in that arm is for, and it's
+/// why the check compares declarations rather than just counting names.
+#[test]
+fn one_imported_network_pulled_in_twice_is_not_a_collision() {
+    let imported = parse_network(
+        "network proxy {\n  external\n  name: \"real\"\n}\n",
+        "proxy",
+    );
+
+    let mut modules = HashMap::new();
+    modules.insert(
+        Scope::Docker,
+        Module {
+            networks: HashMap::from([("proxy".to_string(), imported)]),
+            ..Default::default()
+        },
+    );
+    modules.insert(
+        Scope::Service,
+        Module {
+            aliases: HashMap::from([("ext".to_string(), Scope::Docker)]),
+            ..Default::default()
+        },
+    );
+
+    let resolver = FakeResolver { modules };
+    let s1 = parse_service(
+        "service s1 {\n  image \"x\"\n  networks [ext.proxy]\n}\n",
+        "s1",
+    );
+    let s2 = parse_service(
+        "service s2 {\n  image \"x\"\n  networks [ext.proxy]\n}\n",
+        "s2",
+    );
+
+    let composed = compose_with_resolver(Vec::new(), vec![s1, s2], Scope::Service, &resolver)
+        .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
+
+    // Pulled in twice, present once — the duplicate is recognized as the
+    // same declaration and dropped rather than appended.
+    assert_eq!(composed.networks.len(), 1);
+    assert_eq!(
+        composed.networks[0].real_name.as_ref().unwrap().text(),
+        "real"
+    );
+}
+
+/// An entry-file network whose name nothing imported shares is left
+/// alone, and an imported one under a different name joins it.
+#[test]
+fn entry_and_imported_networks_with_distinct_names_both_survive() {
+    let imported = parse_network(
+        "network shared {\n  external\n  name: \"real\"\n}\n",
+        "shared",
+    );
+    let local = parse_network(
+        "network internal {\n  name: \"internal_real\"\n}\n",
+        "internal",
+    );
+
+    let mut modules = HashMap::new();
+    modules.insert(
+        Scope::Docker,
+        Module {
+            networks: HashMap::from([("shared".to_string(), imported)]),
+            ..Default::default()
+        },
+    );
+    modules.insert(
+        Scope::Service,
+        Module {
+            aliases: HashMap::from([("ext".to_string(), Scope::Docker)]),
+            ..Default::default()
+        },
+    );
+
+    let resolver = FakeResolver { modules };
+    let s = parse_service(
+        "service s {\n  image \"x\"\n  networks [internal, ext.shared]\n}\n",
+        "s",
+    );
+
+    let composed = compose_with_resolver(vec![local], vec![s], Scope::Service, &resolver)
+        .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
+
+    let names: Vec<&str> = composed
+        .networks
+        .iter()
+        .map(|n| n.name.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["internal", "shared"]);
+}
