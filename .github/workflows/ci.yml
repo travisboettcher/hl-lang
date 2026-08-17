@@ -135,13 +135,18 @@ jobs:
 
       # The pinned dev/CI toolchain (rust-toolchain.toml) is newer than
       # the declared floor on purpose — this job is what actually keeps
-      # that floor honest rather than aspirational.
+      # that floor honest rather than aspirational. rust-toolchain.toml
+      # would otherwise silently override the toolchain this job just
+      # installed (it takes precedence over `rustup default`), so
+      # RUSTUP_TOOLCHAIN forces the MSRV one for real.
       - name: Install Rust (MSRV)
         uses: dtolnay/rust-toolchain@1.88.0
 
       - uses: Swatinem/rust-cache@v2
 
       - name: cargo check --workspace --all-targets
+        env:
+          RUSTUP_TOOLCHAIN: "1.88.0"
         run: cargo check --workspace --all-targets
 
   fuzz-smoke:
@@ -149,6 +154,12 @@ jobs:
     runs-on: ubuntu-latest
     # 60s of fuzzing plus a nightly toolchain and cargo-fuzz build.
     timeout-minutes: 30
+    # rust-toolchain.toml pins a stable release for the rest of CI, but
+    # it takes precedence over `rustup default nightly` too (a toolchain
+    # file beats the default toolchain), which would otherwise silently
+    # hand cargo-fuzz's `-Z` flags to a stable rustc that rejects them.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     strategy:
       fail-fast: false
       matrix:
