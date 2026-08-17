@@ -137,7 +137,7 @@ jobs:
       # see its own comment and #76 for why (the serde_yaml decision
       # that issue describes stays open; this job exists to surface it
       # automatically if/when RustSec ever files an advisory for it).
-      - uses: EmbarkStudios/cargo-deny-action@30f817c6f72275c6d54dc744fbca09ebc958599f # v2.0.12
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
         with:
           command: check
 
