@@ -49,6 +49,44 @@ impl<'src> Lexer<'src> {
         Lexer::new(source).collect()
     }
 
+    /// Scans `source` in full, collecting *every* [`LexError`] encountered
+    /// along the way rather than stopping at the first (#87) — each
+    /// erroring call to [`Self::next_token`] has already consumed the
+    /// offending character before returning `Err`, so scanning can simply
+    /// continue from there without any extra recovery logic. Returns
+    /// `Ok` only if zero errors occurred; otherwise every error found,
+    /// in source order.
+    ///
+    /// Deliberately bypasses the [`Iterator`] impl, which fuses (stops
+    /// for good) after the first `Err` — that behavior is preserved for
+    /// existing callers of the iterator/[`Self::tokenize`] directly, and
+    /// this is an additive alternative for a caller that wants every lex
+    /// error at once instead.
+    pub fn tokenize_collecting_errors(
+        source: &'src str,
+    ) -> Result<Vec<Token<'src>>, Vec<LexError>> {
+        let mut lexer = Lexer::new(source);
+        let mut tokens = Vec::new();
+        let mut errors = Vec::new();
+        loop {
+            match lexer.next_token() {
+                Ok(tok) => {
+                    let is_eof = tok.kind == crate::token::TokenKind::Eof;
+                    tokens.push(tok);
+                    if is_eof {
+                        break;
+                    }
+                }
+                Err(err) => errors.push(err),
+            }
+        }
+        if errors.is_empty() {
+            Ok(tokens)
+        } else {
+            Err(errors)
+        }
+    }
+
     fn peek_char(&mut self) -> Option<char> {
         self.chars.peek().map(|&(_, c)| c)
     }

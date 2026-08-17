@@ -19,9 +19,11 @@ pub enum Expected {
 impl fmt::Display for Expected {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expected::Token(kind) => write!(f, "{kind:?}"),
+            // `TokenKind`'s own `Display` renders surface syntax (`` `:` ``,
+            // "an identifier", ...), not the Rust variant name (#87).
+            Expected::Token(kind) => write!(f, "{kind}"),
             Expected::OneOf(kinds) => {
-                let parts: Vec<String> = kinds.iter().map(|k| format!("{k:?}")).collect();
+                let parts: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
                 write!(f, "one of {}", parts.join(", "))
             }
             Expected::Description(desc) => write!(f, "{desc}"),
@@ -31,13 +33,18 @@ impl fmt::Display for Expected {
 
 /// A parse error, structured with position information (mirroring
 /// [`LexError`]'s design) so a future machine-readable/JSON diagnostic
-/// mode doesn't need to re-derive it from source. The parser stops at the
-/// first error — there is no error recovery this milestone, matching the
-/// lexer's own simplicity.
+/// mode doesn't need to re-derive it from source. Tokenizing collects
+/// every [`LexError`] found in one pass (see `Lex`, below), but once
+/// parsing itself starts, it still stops at the first error — full
+/// parser error recovery is much larger in scope and deliberately out
+/// of scope here (#87).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseError {
-    /// A lexical error surfaced while tokenizing (see [`LexError`]).
-    Lex(LexError),
+    /// One or more lexical errors surfaced while tokenizing (see
+    /// [`LexError`]) — every one found in the source, not just the
+    /// first (#87), since tokenizing the whole file happens in one pass
+    /// before parsing can even start. Always non-empty.
+    Lex(Vec<LexError>),
     /// The next token wasn't one the current grammar position allows.
     UnexpectedToken {
         expected: Expected,
@@ -103,21 +110,45 @@ pub enum ParseError {
     /// resulting `RawValue` tree safe — dropping is the other recursion
     /// here, and it can't return an error at all.
     RawValueTooDeep { limit: usize, span: Span },
-}
-
-impl From<LexError> for ParseError {
-    fn from(err: LexError) -> Self {
-        ParseError::Lex(err)
-    }
+    /// A `bare_keyword_alias` fusion (`as`) was immediately followed by a
+    /// comma — `expose port as "host", entrypoint: "..."`. The alias
+    /// fuses onto the primary value as a one-shot unit and can't itself
+    /// continue a field list (docs/DESIGN.md's desugaring rule 3), so
+    /// this is always someone reaching for the explicit comma-separated
+    /// field form and spelling it with the alias sugar instead. Left
+    /// unnamed, this surfaces from the *enclosing* body as a generic
+    /// "expected a newline before the next field" error that never
+    /// mentions what to write instead (#87).
+    AliasSugarCannotContinue {
+        type_name: &'static str,
+        keyword: &'static str,
+        primary_field: &'static str,
+        alias_field: &'static str,
+        span: Span,
+    },
+    /// A `volume`/`env` bare entry's first value had neither `:` nor the
+    /// type's own bare-entry separator after it. `span` is the entry's
+    /// own first value, not wherever parsing next stumbled (often the
+    /// start of an unrelated following field, on a different line) —
+    /// the missing separator is always this entry's own mistake (#87).
+    MapEntryMissingSeparator {
+        type_name: &'static str,
+        separator: TokenKind,
+        span: Span,
+    },
 }
 
 impl ParseError {
     /// Where the error occurred. For duplicate-style errors this is the
     /// *second* (offending) occurrence; the first occurrence's location
-    /// is still available in the variant's `first` field.
+    /// is still available in the variant's `first` field. For `Lex`,
+    /// the first (earliest, in source order) of the batched errors.
     pub fn span(&self) -> Span {
         match self {
-            ParseError::Lex(err) => err.span(),
+            ParseError::Lex(errs) => errs
+                .first()
+                .expect("Lex variant always carries at least one error")
+                .span(),
             ParseError::UnexpectedToken { span, .. }
             | ParseError::UnknownTopLevelType { span, .. }
             | ParseError::UnknownField { span, .. }
@@ -128,7 +159,9 @@ impl ParseError {
             | ParseError::UnknownParamType { span, .. }
             | ParseError::ParamReferenceOutsideTemplate { span, .. }
             | ParseError::UnknownTemplateParam { span, .. }
-            | ParseError::RawValueTooDeep { span, .. } => *span,
+            | ParseError::RawValueTooDeep { span, .. }
+            | ParseError::AliasSugarCannotContinue { span, .. }
+            | ParseError::MapEntryMissingSeparator { span, .. } => *span,
         }
     }
 }
@@ -137,17 +170,39 @@ impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let span = self.span();
         match self {
-            ParseError::Lex(err) => write!(f, "{err}"),
+            ParseError::Lex(errs) => {
+                for (i, err) in errs.iter().enumerate() {
+                    if i > 0 {
+                        writeln!(f)?;
+                    }
+                    write!(f, "{err}")?;
+                }
+                Ok(())
+            }
             ParseError::UnexpectedToken {
                 expected,
                 found_kind,
                 found_lexeme,
                 ..
-            } => write!(
-                f,
-                "{}:{}: expected {expected}, found {found_kind:?} {found_lexeme:?}",
-                span.line, span.col
-            ),
+            } => {
+                // A fixed-punctuation kind's surface text already names its
+                // one possible lexeme (`` `:` `` can only ever be `:`), so
+                // repeating it as a quoted string is redundant; a
+                // variable-lexeme kind (identifier/number/string) needs the
+                // actual text to be useful (#87).
+                match found_kind {
+                    TokenKind::Ident | TokenKind::Number | TokenKind::Str => write!(
+                        f,
+                        "{}:{}: expected {expected}, found {found_kind} {found_lexeme:?}",
+                        span.line, span.col
+                    ),
+                    _ => write!(
+                        f,
+                        "{}:{}: expected {expected}, found {found_kind}",
+                        span.line, span.col
+                    ),
+                }
+            }
             ParseError::UnknownTopLevelType { name, .. } => {
                 write!(
                     f,
@@ -223,6 +278,28 @@ impl fmt::Display for ParseError {
                 "{}:{}: `raw` value nested more than {limit} levels deep",
                 span.line, span.col
             ),
+            ParseError::AliasSugarCannotContinue {
+                type_name,
+                keyword,
+                primary_field,
+                alias_field,
+                ..
+            } => write!(
+                f,
+                "{}:{}: `{keyword}` fuses onto the primary value as a one-shot alias and can't \
+                 be followed by more fields — write `{type_name} <{primary_field}>, \
+                 {alias_field}: \"...\", ...` instead",
+                span.line, span.col
+            ),
+            ParseError::MapEntryMissingSeparator {
+                type_name,
+                separator,
+                ..
+            } => write!(
+                f,
+                "{}:{}: `{type_name}` entry has no `:` or {separator} after its first value",
+                span.line, span.col
+            ),
         }
     }
 }
@@ -244,14 +321,14 @@ mod display_tests {
 
     #[test]
     fn expected_token_display() {
-        assert_eq!(Expected::Token(TokenKind::Colon).to_string(), "Colon");
+        assert_eq!(Expected::Token(TokenKind::Colon).to_string(), "`:`");
     }
 
     #[test]
     fn expected_one_of_display() {
         assert_eq!(
             Expected::OneOf(&[TokenKind::Colon, TokenKind::Equals]).to_string(),
-            "one of Colon, Equals"
+            "one of `:`, `=`"
         );
     }
 
@@ -262,7 +339,7 @@ mod display_tests {
 
     #[test]
     fn lex_display() {
-        let err = ParseError::Lex(LexError::DanglingDash { span: span(1, 1) });
+        let err = ParseError::Lex(vec![LexError::DanglingDash { span: span(1, 1) }]);
         assert_eq!(
             err.to_string(),
             "1:1: unexpected '-' (expected '->' or an identifier)"
@@ -270,14 +347,41 @@ mod display_tests {
     }
 
     #[test]
-    fn unexpected_token_display() {
+    fn unexpected_token_display_omits_the_redundant_lexeme_for_punctuation() {
         let err = ParseError::UnexpectedToken {
             expected: Expected::Token(TokenKind::Colon),
             found_kind: TokenKind::Equals,
             found_lexeme: "=".to_string(),
             span: span(3, 5),
         };
-        assert_eq!(err.to_string(), "3:5: expected Colon, found Equals \"=\"");
+        assert_eq!(err.to_string(), "3:5: expected `:`, found `=`");
+    }
+
+    #[test]
+    fn unexpected_token_display_keeps_the_lexeme_for_variable_text_kinds() {
+        let err = ParseError::UnexpectedToken {
+            expected: Expected::Token(TokenKind::Colon),
+            found_kind: TokenKind::Number,
+            found_lexeme: "42".to_string(),
+            span: span(3, 5),
+        };
+        assert_eq!(err.to_string(), "3:5: expected `:`, found a number \"42\"");
+    }
+
+    #[test]
+    fn lex_display_joins_multiple_batched_errors_one_per_line() {
+        let err = ParseError::Lex(vec![
+            LexError::UnexpectedChar {
+                ch: '@',
+                span: span(1, 1),
+            },
+            LexError::DanglingDash { span: span(3, 4) },
+        ]);
+        assert_eq!(
+            err.to_string(),
+            "1:1: unexpected character '@' — string values must be quoted (\"...\")\n\
+             3:4: unexpected '-' (expected '->' or an identifier)"
+        );
     }
 
     #[test]

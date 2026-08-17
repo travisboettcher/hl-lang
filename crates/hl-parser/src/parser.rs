@@ -39,8 +39,13 @@ use crate::schema::{
 pub const MAX_RAW_VALUE_DEPTH: usize = 128;
 
 /// Parses a complete hl-lang source file into a [`Program`].
+///
+/// Tokenizing collects every lex error found in the file, not just the
+/// first (#87) — since lexing is a whole-file pass that has to finish
+/// before parsing can even start, stopping at the first one meant a
+/// second, later mistake could sit hidden for another run.
 pub fn parse(source: &str) -> Result<Program, ParseError> {
-    let tokens = Lexer::tokenize(source)?;
+    let tokens = Lexer::tokenize_collecting_errors(source).map_err(ParseError::Lex)?;
     Parser::new(tokens).parse_program()
 }
 
@@ -552,11 +557,30 @@ impl<'src> Parser<'src> {
         // rather than mixing the alias sugar with further comma-continued
         // fields — `expose port as "host", entrypoint: "..."` no longer
         // parses.
-        if let Some((keyword, _)) = nested.bare_keyword_alias
+        if let Some((keyword, alias_field)) = nested.bare_keyword_alias
             && self.peek().kind == TokenKind::Ident
             && self.peek().lexeme == keyword
         {
             self.parse_statement_into(nested, &mut fields)?;
+            // A comma right here is always someone trying to continue
+            // with more fields the way the explicit form allows
+            // (`expose port, host: "...", entrypoint: "..."`) but spelled
+            // with the alias sugar instead — that combination doesn't
+            // parse (see this fn's own doc above), and left to the
+            // enclosing body's own newline check, it surfaces as
+            // "expected a newline before the next field, found Comma"
+            // with no mention of what to write instead (#87). Naming the
+            // canonical form directly here is cheap and catches it before
+            // that generic message ever gets a chance to fire.
+            if self.peek().kind == TokenKind::Comma {
+                return Err(ParseError::AliasSugarCannotContinue {
+                    type_name: nested.type_name,
+                    keyword,
+                    primary_field: primary_name,
+                    alias_field,
+                    span: self.peek().span,
+                });
+            }
             let last_end = self.tokens[self.pos.saturating_sub(1)].span.end;
             let span = Span {
                 start: start_span.start,
@@ -842,9 +866,19 @@ impl<'src> Parser<'src> {
             };
             Ok((first, second, span))
         } else {
-            Err(self.unexpected(Expected::Description(
-                "':' or the map's bare-entry separator",
-            )))
+            // Anchored at the entry's own first value, not wherever the
+            // next (mismatched) token happens to be — a missing separator
+            // is only ever this entry's own fault, but reporting the
+            // *next* token's position (typically the start of the next
+            // field, often on a different line entirely) reads as if
+            // that next field were the mistake instead (#87). The
+            // concrete separator token is named directly, rather than
+            // the schema-internal phrase "the map's bare-entry separator".
+            Err(ParseError::MapEntryMissingSeparator {
+                type_name: schema.type_name,
+                separator: sep,
+                span: first.span(),
+            })
         }
     }
 

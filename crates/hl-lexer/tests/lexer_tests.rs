@@ -322,6 +322,35 @@ fn unexpected_char_errors() {
     }
 }
 
+// --- batched errors (#87) ---
+
+#[test]
+fn tokenize_collecting_errors_returns_ok_with_no_errors() {
+    let tokens = Lexer::tokenize_collecting_errors("service s {\n  image \"x\"\n}\n")
+        .expect("valid source should collect zero errors");
+    assert_eq!(tokens.last().unwrap().kind, TokenKind::Eof);
+}
+
+#[test]
+fn tokenize_collecting_errors_finds_every_unexpected_char_in_one_pass() {
+    // Two independent unexpected characters, on different lines — the
+    // single-error `tokenize`/iterator path would only ever report the
+    // first and stop; this collects both.
+    let errors = Lexer::tokenize_collecting_errors("a @ b\nc % d\n")
+        .expect_err("expected both unexpected characters to be reported");
+    assert_eq!(errors.len(), 2);
+    assert!(matches!(
+        errors[0],
+        LexError::UnexpectedChar { ch: '@', .. }
+    ));
+    assert!(matches!(
+        errors[1],
+        LexError::UnexpectedChar { ch: '%', .. }
+    ));
+    assert_eq!(errors[0].span().line, 1);
+    assert_eq!(errors[1].span().line, 2);
+}
+
 // --- spans ---
 
 #[test]
