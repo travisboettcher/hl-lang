@@ -330,6 +330,23 @@ fn explicit_templates_both_setting_entrypoint_concatenate() {
     assert_eq!(entrypoints(expose), vec!["web", "web-secure"]);
 }
 
+/// ...but two templates naming the *same* entry point concatenate to
+/// one entry, not two (#69): `entrypoint` is set-like, and a router
+/// attached twice to `web-secure` is attached to it once. Left
+/// undeduped, this reached the Traefik label as
+/// `entrypoints=web-secure,web-secure`.
+#[test]
+fn explicit_templates_naming_the_same_entrypoint_dedupe() {
+    let composed = compose_ok(
+        "template a {\n  expose { entrypoint: web-secure }\n}\n\
+         template b {\n  expose { entrypoint: web-secure }\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n  expose { entrypoint: web-secure }\n}\n",
+    );
+    let service = single_service(&composed);
+    let expose = service.fields.expose.as_ref().expect("expose set");
+    assert_eq!(entrypoints(expose), vec!["web-secure"]);
+}
+
 /// And across all three tiers, in the same priority order every other
 /// list field concatenates in.
 #[test]

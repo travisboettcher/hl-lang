@@ -121,17 +121,16 @@ explicit tier).
 
 Different field kinds merge differently:
 
-- **List fields** (`middleware`, `depends_on`, `networks`, `dns`)
-  concatenate — no collision is possible, since there's nothing to
-  overwrite. The set-like ones — `middleware`, `depends_on` and
-  `networks` — concatenate *by distinct name*: naming the same network
-  in a template and again in the service's own body means what naming
-  it once means, so the repeat is dropped rather than emitted twice.
-  The first occurrence is the one kept, so the surviving order is still
-  `defaults`, then each `with` target left to right, then the body's own
-  entries. `dns` is the exception and keeps every entry, duplicates
-  included, because its order is resolver priority and is therefore
-  something you can observe.
+- **List fields** (`middleware`, `depends_on`, `networks`, `dns`, and
+  `expose`'s `entrypoint`) concatenate — no collision is possible, since
+  there's nothing to overwrite. All but `dns` concatenate *by distinct
+  name*: naming the same network in a template and again in the
+  service's own body means what naming it once means, so the repeat is
+  dropped rather than emitted twice. The first occurrence is the one
+  kept, so the surviving order is still `defaults`, then each `with`
+  target left to right, then the body's own entries. `dns` is the
+  exception and keeps every entry, duplicates included, because its
+  order is resolver priority and is therefore something you can observe.
 - **Map fields** (`volume`, `env`) merge key-by-key (or value-by-value
   for `volume`, since its uniqueness check is on the container-path
   side) — a genuine collision on the same key is the compile error case
@@ -145,7 +144,9 @@ Different field kinds merge differently:
   fields instead of a map's keys. Each sub-field then follows its own
   kind's rule: `port` and `host` are scalars and collide, while
   `entrypoint` is a list and concatenates, so two explicit templates
-  each naming one entry point produce a router attached to both.
+  each naming one entry point produce a router attached to both — and
+  two naming the *same* entry point produce a router attached to it
+  once, per the distinct-name rule above.
 
 That last point means a service's own body can override just
 `expose.host` while still inheriting `port`/`entrypoint` from a

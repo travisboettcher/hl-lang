@@ -1420,27 +1420,28 @@ struct ListField {
     set: fn(&mut ServiceFields, Vec<Reference>),
     /// Whether repeats of an already-accumulated name are dropped
     /// rather than appended (hl-lang#69). True for the set-like fields
-    /// — `networks`, `middleware`, `depends_on` — where naming the same
-    /// thing twice means exactly what naming it once means, so the
-    /// repeat is pure noise: it duplicated `networks:` entries and
-    /// `middlewares=` label values in the output, made a single
-    /// external network look like an ambiguity with itself, and (since
-    /// list size then doubled per composition level) turned a few
-    /// hundred bytes of nested `with` into an out-of-memory abort.
+    /// — `networks`, `middleware`, `depends_on`, `expose.entrypoint` —
+    /// where naming the same thing twice means exactly what naming it
+    /// once means, so the repeat is pure noise: it duplicated
+    /// `networks:` entries and `middlewares=` label values in the
+    /// output, made a single external network look like an ambiguity
+    /// with itself, and (since list size then doubled per composition
+    /// level) turned a few hundred bytes of nested `with` into an
+    /// out-of-memory abort.
     ///
-    /// False for `dns`, deliberately: order is observable there
-    /// (resolver priority), so its append semantics are left exactly as
-    /// they were even though a repeat is just as meaningless. False for
-    /// `expose.entrypoint` for the narrower reason that it wasn't part
-    /// of the decision on #69 — it has the same set-like shape and
-    /// could join later, but changing it isn't required by that fix.
+    /// `dns` is the one exception, deliberately: order is observable
+    /// there (resolver priority), so its append semantics are left
+    /// exactly as they were even though a repeat is just as
+    /// meaningless. Every other reference list — `expose.entrypoint`
+    /// included — is a set, and a router attached twice to the same
+    /// entry point is attached to it once.
     dedupe: bool,
 }
 
 static LIST_FIELDS: &[ListField] = &[
     ListField {
         key: "expose.entrypoint",
-        dedupe: false,
+        dedupe: true,
         take: |f| {
             f.expose
                 .as_mut()
