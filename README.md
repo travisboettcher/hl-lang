@@ -67,6 +67,11 @@ source instead — e.g. for a platform with no release binary.
 
 ## Building & testing
 
+MSRV is 1.88 (the workspace uses let-chains, stabilized in edition 2024 as
+of that release). `rust-toolchain.toml` pins a specific newer stable for
+local builds and most of CI; a dedicated CI job builds against 1.88
+itself to keep that floor honest.
+
 ```sh
 cargo build --workspace
 cargo test --workspace
