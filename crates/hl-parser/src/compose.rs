@@ -950,7 +950,15 @@ fn resolve_template<'r, R: SymbolResolver>(
     // passes it at every level and used to recurse until the stack
     // overflowed, aborting the process instead of returning an error a
     // library embedder could catch.
-    if in_progress.len() >= MAX_TEMPLATE_DEPTH {
+    //
+    // Written against the 1-based level this call occupies rather than
+    // as `len() >= MAX`, which is the same test but has an *equivalent
+    // mutant*: `in_progress` only ever grows one at a time, so `==` and
+    // `>=` trigger at exactly the same call and no test could tell them
+    // apart. `level > MAX` moves every comparison mutant one level off
+    // the boundary, where the tests at and past the limit catch it.
+    let level = in_progress.len() + 1;
+    if level > MAX_TEMPLATE_DEPTH {
         return Err(ComposeError::TemplateNestingTooDeep {
             name: name.clone(),
             limit: MAX_TEMPLATE_DEPTH,

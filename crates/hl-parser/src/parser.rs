@@ -864,8 +864,18 @@ impl<'src> Parser<'src> {
     /// attacker-shaped input, and without a limit a few kilobytes of
     /// `[[[[ ... ]]]]` overflowed the stack and aborted the process
     /// (#72). Every entry point passes `0`.
+    ///
+    /// The check is written against `level` — the 1-based level this
+    /// call itself occupies — rather than as `depth >= MAX`, which is
+    /// the same test but has an *equivalent mutant*: because `depth`
+    /// only ever rises one at a time, `==` and `>=` trigger at exactly
+    /// the same call, so no test could tell them apart and `cargo
+    /// mutants` reports the swap as missed coverage forever. Comparing
+    /// `level > MAX` moves every comparison mutant one level off the
+    /// real boundary, where the tests at and past the limit catch it.
     fn parse_raw_value(&mut self, depth: usize) -> Result<RawValue, ParseError> {
-        if depth >= MAX_RAW_VALUE_DEPTH {
+        let level = depth + 1;
+        if level > MAX_RAW_VALUE_DEPTH {
             return Err(ParseError::RawValueTooDeep {
                 limit: MAX_RAW_VALUE_DEPTH,
                 span: self.peek().span,
