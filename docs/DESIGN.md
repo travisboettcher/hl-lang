@@ -248,11 +248,11 @@ isn't a row either, for the opposite reason: it's a plain *scalar* field
 directly on `service`/`template` (`container_name "uptime-kuma"` /
 `container_name: "uptime-kuma"`) rather than a nested struct type — it
 has no secondary fields of its own to give it a primary-field/separator
-shape worth a table row. Unset, it defaults to the service's own name
-(via the same `{{name}}` interpolation binding `expose`'s `as`-sugar
-already uses), applied at codegen time — the same "parser leaves it
-unset, a later stage supplies the default" pattern `network`'s own
-`name` field already uses. `template` isn't a row either — it's the
+shape worth a table row. Unset, it's simply omitted from the generated
+service block rather than defaulting to anything (#90) — Compose's own
+per-project default naming is what most people want, and defaulting the
+built-in to the service's own name reliably collided across independent
+stacks sharing a common service name. `template` isn't a row either — it's the
 mechanism for adding new rows to this table at parse time. `defaults` is
 likewise not a row — it's an ordinary template, semantically special
 only in that it's implicitly applied (see
