@@ -186,6 +186,30 @@ pub enum ComposeError {
         name: String,
         span: Span,
     },
+    /// A qualified `networks [alias.name]` entry resolved to an imported
+    /// `network`, but another `network` with the same bare name is
+    /// already in scope — the entry file's own declaration, or one
+    /// pulled in through a different alias.
+    ///
+    /// Codegen re-resolves a service's `networks [...]` entries by bare
+    /// name against one flat list of declarations, so two networks
+    /// sharing a bare name are indistinguishable to it and the first
+    /// silently wins. Before this check, that meant asking for
+    /// `ext.proxy` and quietly getting the local `proxy` — wrong
+    /// Compose output *and* a missing `traefik.docker.network` label,
+    /// with no diagnostic at any stage (#71).
+    ///
+    /// The lasting fix is to preserve the resolved identity on the
+    /// `Reference` so codegen never re-resolves by bare name at all;
+    /// this error is the contained stopgap, and stays worth keeping
+    /// afterwards as a clarity check — two networks sharing one bare
+    /// name in a single document is confusing whether or not the
+    /// compiler can tell them apart.
+    CollidingImportedNetwork {
+        alias: String,
+        name: String,
+        span: Span,
+    },
 }
 
 /// Details for [`ComposeError::MapKeyCollision`], boxed out of the enum
@@ -221,7 +245,8 @@ impl ComposeError {
             | ComposeError::UnknownAlias { span, .. }
             | ComposeError::UnsupportedQualifiedReference { span, .. }
             | ComposeError::ParameterizedDefaults { span, .. }
-            | ComposeError::UnknownQualifiedNetwork { span, .. } => *span,
+            | ComposeError::UnknownQualifiedNetwork { span, .. }
+            | ComposeError::CollidingImportedNetwork { span, .. } => *span,
             ComposeError::MapKeyCollision(details) => details.second,
         }
     }
@@ -343,6 +368,13 @@ impl fmt::Display for ComposeError {
             ComposeError::UnknownQualifiedNetwork { alias, name, .. } => write!(
                 f,
                 "{}:{}: no network `{name}` in `{alias}`",
+                span.line, span.col
+            ),
+            ComposeError::CollidingImportedNetwork { alias, name, .. } => write!(
+                f,
+                "{}:{}: `{alias}.{name}` collides with another network named `{name}` \
+                 already in scope — networks are resolved by their bare name, so the \
+                 two can't be told apart; rename one of them",
                 span.line, span.col
             ),
         }
@@ -585,6 +617,21 @@ mod error_display_tests {
         };
         assert_eq!(err.to_string(), "2:2: no network `proxy` in `traefik`");
     }
+
+    #[test]
+    fn colliding_imported_network_display() {
+        let err = ComposeError::CollidingImportedNetwork {
+            alias: "ext".to_string(),
+            name: "proxy".to_string(),
+            span: span(7, 13),
+        };
+        assert_eq!(
+            err.to_string(),
+            "7:13: `ext.proxy` collides with another network named `proxy` already in \
+             scope — networks are resolved by their bare name, so the two can't be told \
+             apart; rename one of them"
+        );
+    }
 }
 
 /// Resolves names against a whole-program symbol table, generalized over
@@ -771,7 +818,7 @@ pub fn compose_with_resolver<R: SymbolResolver>(
     resolver: &R,
 ) -> Result<ComposedProgram, ComposeError> {
     let mut cache: HashMap<(R::Scope, String), ServiceFields> = HashMap::new();
-    let mut extra_networks: Vec<Network> = Vec::new();
+    let mut extra_networks: Vec<ImportedNetwork> = Vec::new();
     let mut composed = Vec::with_capacity(services.len());
     for service in services {
         composed.push(compose_service(
@@ -784,11 +831,52 @@ pub fn compose_with_resolver<R: SymbolResolver>(
     }
 
     let mut all_networks = networks;
-    all_networks.extend(extra_networks);
+    for imported in extra_networks {
+        match all_networks
+            .iter()
+            .find(|n| n.name.name == imported.network.name.name)
+        {
+            // Already pulled in: the same imported declaration reached
+            // here more than once, because more than one service (or
+            // more than one `networks [...]` entry) referenced it. One
+            // network named once, not a collision.
+            Some(already) if *already == imported.network => {}
+            // A *different* declaration is already in scope under this
+            // bare name. Codegen resolves a service's `networks [...]`
+            // entries by bare name against this one flat list, so the
+            // two are indistinguishable there and the first — the entry
+            // file's own, since its declarations come first — silently
+            // wins (#71). That produced Compose output for a network the
+            // user never asked for, plus a missing
+            // `traefik.docker.network` label, with no diagnostic
+            // anywhere. Reject it instead.
+            Some(_) => {
+                return Err(ComposeError::CollidingImportedNetwork {
+                    alias: imported.alias,
+                    name: imported.network.name.name,
+                    span: imported.reference,
+                });
+            }
+            None => all_networks.push(imported.network),
+        }
+    }
     Ok(ComposedProgram {
         networks: all_networks,
         services: composed,
     })
+}
+
+/// A `network` an entry-file service reached through a qualified
+/// `networks [alias.name]` reference, kept together with the reference
+/// that pulled it in. The reference's own span is what
+/// [`ComposeError::CollidingImportedNetwork`] points at: the imported
+/// declaration itself lives in another file, and a [`Span`] carries no
+/// file identity, so its line/column would be read against the wrong
+/// source.
+struct ImportedNetwork {
+    network: Network,
+    alias: String,
+    reference: Span,
 }
 
 fn compose_service<R: SymbolResolver>(
@@ -796,7 +884,7 @@ fn compose_service<R: SymbolResolver>(
     scope: R::Scope,
     resolver: &R,
     cache: &mut HashMap<(R::Scope, String), ServiceFields>,
-    extra_networks: &mut Vec<Network>,
+    extra_networks: &mut Vec<ImportedNetwork>,
 ) -> Result<Service, ComposeError> {
     let mut acc = MergeAcc::default();
     let mut in_progress = Vec::new();
@@ -872,7 +960,7 @@ fn resolve_template<'r, R: SymbolResolver>(
     resolver: &'r R,
     cache: &mut HashMap<(R::Scope, String), ServiceFields>,
     in_progress: &mut Vec<(R::Scope, String)>,
-    extra_networks: &mut Vec<Network>,
+    extra_networks: &mut Vec<ImportedNetwork>,
 ) -> Result<ServiceFields, ComposeError> {
     let name = &decl.name.name;
     let cache_key = (scope, name.clone());
@@ -920,7 +1008,7 @@ fn resolve_invocation<R: SymbolResolver>(
     resolver: &R,
     cache: &mut HashMap<(R::Scope, String), ServiceFields>,
     in_progress: &mut Vec<(R::Scope, String)>,
-    extra_networks: &mut Vec<Network>,
+    extra_networks: &mut Vec<ImportedNetwork>,
 ) -> Result<ServiceFields, ComposeError> {
     let (target_scope, decl) =
         resolver.resolve_template(scope, inv.qualifier.as_ref(), &inv.name.name, inv.span)?;
@@ -992,13 +1080,17 @@ fn resolve_qualified_networks<R: SymbolResolver>(
     fields: &mut ServiceFields,
     scope: R::Scope,
     resolver: &R,
-    extra_networks: &mut Vec<Network>,
+    extra_networks: &mut Vec<ImportedNetwork>,
 ) -> Result<(), ComposeError> {
     for r in &mut fields.networks {
         if let Some(qualifier) = r.qualifier.take() {
             let network = resolver.resolve_qualified_network(scope, &qualifier, &r.name, r.span)?;
             r.name = network.name.name.clone();
-            extra_networks.push(network.clone());
+            extra_networks.push(ImportedNetwork {
+                network: network.clone(),
+                alias: qualifier.name.clone(),
+                reference: r.span,
+            });
         }
     }
     reject_qualified(&fields.middleware, "middleware")?;
