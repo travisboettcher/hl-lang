@@ -154,13 +154,19 @@ token identity):
 
 Map-kind bodies — `raw { }`, `volume { }`/`env { }`, and a `with`-invocation's
 own argument body (which reuses `raw`'s entry parsing) — are exempt from the
-newline rule — their entries are conceptually key-value pairs in a
-dictionary, not named struct fields, and the compact one-line style (`{
-puid: 1000, pgid: 100 }`) used throughout this doc's own worked examples
-stays valid, comma-separated, on one line. The comma between entries is
-optional here, unlike the comma-list rule just above: `{ "a": "/x" "b":
-"/y" }` (bare adjacency) and `{ "a": "/x", "b": "/y" }` (comma-separated)
-both parse to the same two entries (#81).
+newline rule in the *opposite* direction from the comma-list rule above:
+their entries are conceptually key-value pairs in a dictionary, not named
+struct fields, and either a comma *or* a newline (not just a comma) is
+enough to separate them, so the compact one-line style (`{ puid: 1000, pgid:
+100 }`) used throughout this doc's own worked examples stays valid,
+comma-separated, on one line, alongside the equally valid multi-line form
+with no commas at all. What's never valid is bare adjacency on *one* line
+with neither: `{ "a": "/x" "b": "/y" }` is a parse error (`expected a comma
+or a newline before the next entry`), same as the comma-list rule's own
+"bare adjacency no longer implies continuation" — only here a newline is
+also an accepted substitute for the comma, not just its own separate case.
+Both `{ "a": "/x", "b": "/y" }` and `{ "a": "/x"\n  "b": "/y" }` parse to the
+same two entries (#81).
 
 ### Desugaring rules
 

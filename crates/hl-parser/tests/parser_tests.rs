@@ -502,13 +502,45 @@ fn volume_body_accepts_comma_between_entries() {
     assert_eq!(service.fields.volumes.entries[1].host.text(), "b");
 }
 
-/// #81: bare adjacency (no separator at all between entries) keeps
-/// working exactly as before — the comma is optional, not required.
+/// #81 follow-up: same-line bare adjacency (no comma, no newline) between
+/// two entries is a parse error, mirroring the comma-list rule the rest
+/// of the language already follows elsewhere — a comma is never optional
+/// when there's a next item, and now neither is a newline the comma
+/// substitutes for.
 #[test]
-fn volume_body_still_accepts_bare_adjacency_between_entries() {
-    let program = parse_ok("service s {\n  volume { \"a\": \"/x\" \"b\": \"/y\" }\n}\n");
+fn volume_body_rejects_bare_adjacency_on_one_line() {
+    let err = parse("service s {\n  volume { \"a\": \"/x\" \"b\": \"/y\" }\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnexpectedToken {
+            expected: Expected::Description("a comma or a newline before the next entry"),
+            ..
+        }
+    ));
+}
+
+/// A newline between entries is still accepted with no comma needed —
+/// only bare adjacency *on one line* is rejected.
+#[test]
+fn volume_body_accepts_a_newline_between_entries_with_no_comma() {
+    let program =
+        parse_ok("service s {\n  volume {\n    \"a\": \"/x\"\n    \"b\": \"/y\"\n  }\n}\n");
     let service = as_service(&program.decls[0]);
     assert_eq!(service.fields.volumes.entries.len(), 2);
+}
+
+/// Same rule applies to `raw {}`, which shares the same body-parsing
+/// helper.
+#[test]
+fn raw_body_rejects_bare_adjacency_on_one_line() {
+    let err = parse("service s {\n  raw { a: 1 b: 2 }\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnexpectedToken {
+            expected: Expected::Description("a comma or a newline before the next entry"),
+            ..
+        }
+    ));
 }
 
 #[test]
