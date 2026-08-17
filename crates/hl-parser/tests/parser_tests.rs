@@ -214,13 +214,31 @@ fn expose_duplicate_host_via_explicit_fields_is_error() {
 /// `as` alone provides, it must use the explicit comma-separated field
 /// form instead (`expose port, host: "...", entrypoint: "..."`) or the
 /// canonical `expose { ... }` body.
+///
+/// #87: this dead end used to surface as a generic "expected a newline
+/// before the next field, found Comma" from the *enclosing* body, never
+/// mentioning the explicit field-list form that's the actual fix. It now
+/// gets a dedicated error naming it directly.
 #[test]
 fn alias_sugar_cannot_be_followed_by_further_secondary_fields() {
     let err = parse(
         "service s {\n  expose 8096 as \"host.example.com\", entrypoint: \"web-secure\"\n}\n",
     )
     .unwrap_err();
-    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+    match err {
+        ParseError::AliasSugarCannotContinue {
+            type_name: "expose",
+            keyword: "as",
+            primary_field: "port",
+            alias_field: "host",
+            ..
+        } => {}
+        other => panic!("expected AliasSugarCannotContinue, got {other:?}"),
+    }
+    assert!(
+        err.to_string().contains("expose <port>, host:"),
+        "expected the canonical form in the message, got: {err}"
+    );
 }
 
 // --- bool flag ---
@@ -537,6 +555,41 @@ fn volume_duplicate_container_path_is_error() {
         }
         other => panic!("expected DuplicateMapKey on volume container path, got {other:?}"),
     }
+}
+
+/// #87: a `volume` entry missing its `->` used to blame whatever token
+/// parsing stumbled on next — typically the start of the *following*
+/// field, on a different line — rather than the entry itself. Reproduces
+/// the issue's own repro: `volume "/data:/data"` (colons are just
+/// ordinary string content inside the quotes, not a separator) with no
+/// `-> "container"`, followed by an unrelated `env` field on the next
+/// line.
+#[test]
+fn volume_entry_missing_separator_is_anchored_at_the_entry_not_the_next_field() {
+    let err = parse(
+        "service a {\n  image \"nginx\"\n  volume \"/data:/data\"\n  env TZ = \"America/Denver\"\n}\n",
+    )
+    .unwrap_err();
+    match err {
+        ParseError::MapEntryMissingSeparator {
+            type_name: "volume",
+            separator: TokenKind::Arrow,
+            span,
+        } => {
+            assert_eq!(
+                (span.line, span.col),
+                (3, 10),
+                "expected the error anchored at the volume entry itself (line 3), not the \
+                 following env field (line 4)"
+            );
+        }
+        other => panic!("expected MapEntryMissingSeparator, got {other:?}"),
+    }
+    assert!(
+        err.to_string()
+            .contains("`volume` entry has no `:` or `->`"),
+        "expected the concrete separator token named in the message, got: {err}"
+    );
 }
 
 #[test]

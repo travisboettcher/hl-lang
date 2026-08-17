@@ -36,7 +36,17 @@ impl fmt::Display for LexError {
                 write!(f, "{}:{}: unterminated string literal", span.line, span.col)
             }
             LexError::UnexpectedChar { ch, .. } => {
-                write!(f, "{}:{}: unexpected character {ch:?}", span.line, span.col)
+                // Every character in the punctuation set the grammar
+                // actually uses (`{ } [ ] ( ) : = -> , . $`) already has
+                // its own token and never reaches here, so whatever
+                // triggers this is essentially always the same real
+                // mistake: an unquoted value (a path, a domain, a version
+                // string, ...) that needed `"..."` around it (#87).
+                write!(
+                    f,
+                    "{}:{}: unexpected character {ch:?} — string values must be quoted (\"...\")",
+                    span.line, span.col
+                )
             }
             LexError::DanglingDash { .. } => {
                 write!(
@@ -73,10 +83,13 @@ mod display_tests {
     #[test]
     fn unexpected_char_display() {
         let err = LexError::UnexpectedChar {
-            ch: '$',
+            ch: '/',
             span: span(),
         };
-        assert_eq!(err.to_string(), "2:4: unexpected character '$'");
+        assert_eq!(
+            err.to_string(),
+            "2:4: unexpected character '/' — string values must be quoted (\"...\")"
+        );
     }
 
     #[test]

@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::span::Span;
 
 /// The kind of a lexical token.
@@ -44,6 +46,34 @@ pub enum TokenKind {
     Eof,
 }
 
+/// Surface syntax, not the Rust variant name (#87) — used everywhere a
+/// diagnostic names a token kind, so a user sees `` `:` `` or "an
+/// identifier" rather than `Colon` or `Ident`.
+impl fmt::Display for TokenKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            TokenKind::Ident => "an identifier",
+            TokenKind::Number => "a number",
+            TokenKind::Str => "a string literal",
+            TokenKind::Template => "`template`",
+            TokenKind::LBrace => "`{`",
+            TokenKind::RBrace => "`}`",
+            TokenKind::LBracket => "`[`",
+            TokenKind::RBracket => "`]`",
+            TokenKind::LParen => "`(`",
+            TokenKind::RParen => "`)`",
+            TokenKind::Colon => "`:`",
+            TokenKind::Equals => "`=`",
+            TokenKind::Arrow => "`->`",
+            TokenKind::Comma => "`,`",
+            TokenKind::Dot => "`.`",
+            TokenKind::Dollar => "`$`",
+            TokenKind::Eof => "end of file",
+        };
+        write!(f, "{text}")
+    }
+}
+
 /// A single lexical token: its kind, its exact source text, and its
 /// location.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,4 +85,28 @@ pub struct Token<'src> {
     /// span's byte width for string tokens specifically.
     pub lexeme: &'src str,
     pub span: Span,
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    #[test]
+    fn punctuation_renders_as_backtick_quoted_surface_text() {
+        assert_eq!(TokenKind::Colon.to_string(), "`:`");
+        assert_eq!(TokenKind::Arrow.to_string(), "`->`");
+        assert_eq!(TokenKind::LBrace.to_string(), "`{`");
+    }
+
+    #[test]
+    fn variable_lexeme_kinds_render_as_prose() {
+        assert_eq!(TokenKind::Ident.to_string(), "an identifier");
+        assert_eq!(TokenKind::Number.to_string(), "a number");
+        assert_eq!(TokenKind::Str.to_string(), "a string literal");
+    }
+
+    #[test]
+    fn eof_renders_as_prose() {
+        assert_eq!(TokenKind::Eof.to_string(), "end of file");
+    }
 }
