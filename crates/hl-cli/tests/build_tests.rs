@@ -34,6 +34,21 @@ fn scratch_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// Runs the real `hllc` binary (built by Cargo before integration tests
+/// run, per `CARGO_BIN_EXE_<name>`) as a subprocess and returns its
+/// captured output. `run()`'s own `eprintln!`/`println!` calls write
+/// straight to the process's real stdout/stderr, which an in-process
+/// call to `run()` has no way to intercept — the zero-output/skip
+/// messages this file's tests check below only exist as printed text,
+/// with no other observable side effect, so this is the one place that
+/// needs the real binary rather than calling `run()` directly.
+fn hllc_output(args: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_hllc"))
+        .args(args)
+        .output()
+        .expect("failed to run the hllc binary")
+}
+
 #[test]
 fn build_single_file_writes_yaml_to_out_path() {
     let dir = scratch_dir("single-file");
@@ -306,6 +321,269 @@ fn build_directory_with_no_hll_files_anywhere_is_a_no_op_success() {
         force: false,
     });
     assert_eq!(code, ExitCode::SUCCESS);
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// #89: the exact layout `book/src/getting-started.md` teaches —
+/// `homelab/shared/{network.hll,templates.hll}` (a library directory,
+/// declaring no service) alongside `homelab/services/<service>/*.hll`
+/// (real service directories one level *further* than the old
+/// one-level-only scan ever looked). Before this fix, `shared/`'s two
+/// `.hll` files hard-errored the whole build ("expected exactly one per
+/// co-located service directory"), and removing `shared/` still built
+/// nothing: `services/` itself holds no `.hll` files, so the old scan
+/// silently skipped it and exited 0.
+#[test]
+fn build_book_layout_with_library_directory_and_nested_services() {
+    let dir = scratch_dir("book-layout");
+    let shared_dir = dir.join("shared");
+    fs::create_dir_all(&shared_dir).unwrap();
+    fs::write(shared_dir.join("network.hll"), IMPORTS_NETWORK_HLL).unwrap();
+    fs::write(shared_dir.join("templates.hll"), IMPORTS_TEMPLATES_HLL).unwrap();
+
+    let services_dir = dir.join("services");
+    let jellyfin_dir = services_dir.join("jellyfin");
+    fs::create_dir_all(&jellyfin_dir).unwrap();
+    fs::write(jellyfin_dir.join("jellyfin.hll"), SYNCTHING_HLL).unwrap();
+    let syncthing_dir = services_dir.join("syncthing");
+    fs::create_dir_all(&syncthing_dir).unwrap();
+    fs::write(syncthing_dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: None,
+        force: false,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    for service_dir in [&jellyfin_dir, &syncthing_dir] {
+        let generated = service_dir.join("docker-compose.yml");
+        assert!(
+            generated.exists(),
+            "expected {} to exist",
+            generated.display()
+        );
+    }
+    assert!(
+        !shared_dir.join("docker-compose.yml").exists(),
+        "shared/ declares no service and shouldn't produce output"
+    );
+    assert!(!services_dir.join("docker-compose.yml").exists());
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// Same layout, but with `--out` given: each service directory's output
+/// lands under `<out>/<path-from-root>/`, preserving the tree's own
+/// relative structure rather than flattening it — the co-located
+/// equivalent of flat mode's per-file-stem remapping.
+#[test]
+fn build_book_layout_with_out_preserves_relative_structure() {
+    let dir = scratch_dir("book-layout-out");
+    let services_dir = dir.join("services");
+    let jellyfin_dir = services_dir.join("jellyfin");
+    fs::create_dir_all(&jellyfin_dir).unwrap();
+    fs::write(jellyfin_dir.join("jellyfin.hll"), SYNCTHING_HLL).unwrap();
+    let out_dir = dir.join("out");
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: Some(out_dir.clone()),
+        force: false,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let generated = out_dir
+        .join("services")
+        .join("jellyfin")
+        .join("docker-compose.yml");
+    assert!(
+        generated.exists(),
+        "expected {} to exist",
+        generated.display()
+    );
+    assert!(!jellyfin_dir.join("docker-compose.yml").exists());
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// #89: pointing `--build` (flat mode, since `shared/` holds `.hll`
+/// files directly) at a library directory used to produce one useless
+/// `docker-compose.yml` per file (`services: {}`, every declaration
+/// dropped). Both files here declare no service and should be skipped
+/// entirely, leaving the build a documented no-op rather than junk
+/// output a user might `docker compose up`.
+#[test]
+fn build_flat_directory_skips_library_only_files() {
+    let dir = scratch_dir("flat-library-only");
+    fs::write(dir.join("network.hll"), IMPORTS_NETWORK_HLL).unwrap();
+    fs::write(dir.join("templates.hll"), IMPORTS_TEMPLATES_HLL).unwrap();
+    let out_dir = dir.join("out");
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: Some(out_dir.clone()),
+        force: false,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert!(
+        !out_dir.exists() || fs::read_dir(&out_dir).unwrap().next().is_none(),
+        "expected no output to be written for a directory of library-only files"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// The flip side: a flat directory mixing one real service file with
+/// library-only files builds only the service, skipping the rest,
+/// rather than failing or producing junk for the others.
+#[test]
+fn build_flat_directory_builds_only_the_files_that_declare_a_service() {
+    let dir = scratch_dir("flat-mixed");
+    fs::write(dir.join("network.hll"), IMPORTS_NETWORK_HLL).unwrap();
+    fs::write(dir.join("templates.hll"), IMPORTS_TEMPLATES_HLL).unwrap();
+    fs::write(dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+    let out_dir = dir.join("out");
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: Some(out_dir.clone()),
+        force: false,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let generated = out_dir.join("syncthing").join("docker-compose.yml");
+    assert!(generated.exists());
+    assert!(!out_dir.join("network").exists());
+    assert!(!out_dir.join("templates").exists());
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// The "nothing was built" message (#89) is printed exactly when the
+/// running `built` count stayed zero — checked from both directions, so
+/// a `==`/`!=` swap on that check, or a `+=`/`*=` swap on the counter
+/// itself (which would leave `built` stuck at zero even after a real
+/// build), each flips one of these two assertions.
+#[test]
+fn build_flat_directory_prints_no_message_when_something_builds() {
+    let dir = scratch_dir("flat-message-positive");
+    fs::write(dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+    let out_dir = dir.join("out");
+
+    let output = hllc_output(&[
+        "--build",
+        dir.to_str().unwrap(),
+        "--out",
+        out_dir.to_str().unwrap(),
+    ]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("nothing was built"),
+        "expected no 'nothing was built' message when a service did build, got: {stderr}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn build_flat_directory_prints_a_message_when_nothing_builds() {
+    let dir = scratch_dir("flat-message-negative");
+    fs::write(dir.join("network.hll"), IMPORTS_NETWORK_HLL).unwrap();
+    let out_dir = dir.join("out");
+
+    let output = hllc_output(&[
+        "--build",
+        dir.to_str().unwrap(),
+        "--out",
+        out_dir.to_str().unwrap(),
+    ]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("nothing was built"),
+        "expected a 'nothing was built' message when no service built, got: {stderr}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// Same pair, for co-located mode's own `built` counter and zero-output
+/// check in `run_build`.
+#[test]
+fn build_colocated_prints_no_message_when_something_builds() {
+    let dir = scratch_dir("colocated-message-positive");
+    let service_dir = dir.join("syncthing");
+    fs::create_dir_all(&service_dir).unwrap();
+    fs::write(service_dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+
+    let output = hllc_output(&["--build", dir.to_str().unwrap()]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("nothing was built"),
+        "expected no 'nothing was built' message when a service did build, got: {stderr}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn build_colocated_prints_a_message_when_nothing_builds() {
+    let dir = scratch_dir("colocated-message-negative");
+    fs::create_dir_all(dir.join("shared")).unwrap();
+    fs::write(dir.join("shared").join("network.hll"), IMPORTS_NETWORK_HLL).unwrap();
+
+    let output = hllc_output(&["--build", dir.to_str().unwrap()]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("nothing was built"),
+        "expected a 'nothing was built' message when no service built, got: {stderr}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// #89: without the recursion-depth cap, a symlinked directory pointing
+/// back at one of its own ancestors turns the co-located scan into
+/// unbounded recursion — this creates exactly that cycle and confirms
+/// the build fails cleanly (rather than hanging or overflowing the
+/// stack) once the cap is hit. Also the only test that actually exercises
+/// the depth counter incrementing on each recursive step, rather than a
+/// real (finite, small) tree that would terminate on its own regardless
+/// of whether the counter worked. Unix-only: no portable way to create a
+/// symlink.
+#[cfg(unix)]
+#[test]
+fn build_colocated_directory_cycle_is_stopped_by_the_depth_cap() {
+    let dir = scratch_dir("colocated-symlink-cycle");
+    let inner = dir.join("inner");
+    fs::create_dir_all(&inner).unwrap();
+    std::os::unix::fs::symlink(&dir, inner.join("loop")).unwrap();
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: None,
+        force: false,
+    });
+    assert_eq!(
+        code,
+        ExitCode::FAILURE,
+        "expected the recursion depth cap to stop a symlink cycle rather than hang or crash"
+    );
 
     fs::remove_dir_all(&dir).ok();
 }

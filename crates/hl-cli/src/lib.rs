@@ -127,17 +127,29 @@ fn run_build(path: &Path, out: Option<&Path>, force: bool) -> ExitCode {
         // one independent entry point per file, `--out` required (there's
         // no single meaningful default location for potentially many
         // files' output). A directory holding no `.hll` files of its own
-        // but at least one subdirectory that does is the co-located
-        // case (#12): each such subdirectory's own `.hll` file(s) build
-        // in place, right back into that same subdirectory by default.
-        // A directory matching neither (no `.hll` files anywhere within
-        // one level) builds nothing — same as today's flat case already
-        // does when it finds zero `.hll` files.
+        // is the co-located case (#12): recurse through its
+        // subdirectories looking for service directories, however many
+        // levels down they sit (#89) — a root whose immediate children
+        // are library/intermediate directories (a `shared/` directory of
+        // templates, or a `services/` directory that itself holds no
+        // `.hll` files but nests every real service directory one level
+        // further) is a common real layout, not a malformed one.
         if !hll_files.is_empty() {
             return build_flat_directory(&hll_files, path, out, force);
         }
-        if !subdirs.is_empty() {
-            return build_colocated_directories(&subdirs, out, force);
+        let mut built = 0usize;
+        for subdir in &subdirs {
+            if let Err(code) = build_colocated_tree(subdir, path, out, force, 0, &mut built) {
+                return code;
+            }
+        }
+        if built == 0 {
+            eprintln!(
+                "{}: no service directories found (looked for a single .hll \
+                 file declaring a `service`, in this directory or any \
+                 subdirectory) — nothing was built",
+                path.display()
+            );
         }
         return ExitCode::SUCCESS;
     }
@@ -191,8 +203,14 @@ fn scan_dir(dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ExitCode> {
     Ok((hll_files, subdirs))
 }
 
-/// The flat case: every `.hll` file directly inside `dir` is its own
-/// independent entry point, written to `<out>/<stem>/docker-compose.yml`.
+/// The flat case: every `.hll` file directly inside `dir` that declares
+/// a `service` is its own independent entry point, written to
+/// `<out>/<stem>/docker-compose.yml`. A file that declares no service —
+/// a library file of templates/networks only — is skipped rather than
+/// compiled into its own, service-less Compose document (#89): before
+/// this, pointing `--build` at a library directory produced one useless
+/// `docker-compose.yml` per file (`services: {}`, every declaration
+/// dropped, since codegen only ever emits what a service references).
 fn build_flat_directory(
     hll_files: &[PathBuf],
     dir: &Path,
@@ -206,7 +224,13 @@ fn build_flat_directory(
         );
         return ExitCode::FAILURE;
     };
+    let mut built = 0usize;
     for hll_path in hll_files {
+        match declares_a_service(hll_path) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(code) => return code,
+        }
         let Some(stem) = hll_path.file_stem().and_then(|s| s.to_str()) else {
             eprintln!("{}: couldn't determine a file stem", hll_path.display());
             return ExitCode::FAILURE;
@@ -229,50 +253,122 @@ fn build_flat_directory(
         if let Err(code) = build_one(hll_path, &out_dir.join(stem), force) {
             return code;
         }
+        built += 1;
+    }
+    if built == 0 {
+        eprintln!(
+            "{}: none of the .hll files here declare a service — nothing was built",
+            dir.display()
+        );
     }
     ExitCode::SUCCESS
 }
 
-/// The co-located case (#12): `subdirs` are `root`'s immediate child
-/// directories, each expected to hold exactly one `.hll` file
-/// co-located with its own `docker-compose.yml` (a real layout — see
-/// docs/DESIGN.md's Pipeline section — where each service's `.hll`
-/// source sits next to its other files, e.g. `.env`, bind-mounted
-/// config, instead of every `.hll` file living in one flat directory).
-/// Each subdirectory builds independently, writing to that same
-/// subdirectory by default, or to `<out>/<subdir-name>/` if `--out` is
-/// given — remapping the whole tree the same way flat mode's `--out`
-/// already does, just keyed by directory name instead of file stem.
-fn build_colocated_directories(subdirs: &[PathBuf], out: Option<&Path>, force: bool) -> ExitCode {
-    for subdir in subdirs {
-        let (hll_files, _) = match scan_dir(subdir) {
-            Ok(scanned) => scanned,
-            Err(code) => return code,
-        };
-        if hll_files.is_empty() {
-            continue;
-        }
-        if hll_files.len() > 1 {
-            eprintln!(
-                "{}: {} .hll files found, expected exactly one per co-located service directory",
-                subdir.display(),
-                hll_files.len()
-            );
-            return ExitCode::FAILURE;
-        }
-        let Some(name) = subdir.file_name().and_then(|s| s.to_str()) else {
-            eprintln!("{}: couldn't determine a directory name", subdir.display());
-            return ExitCode::FAILURE;
-        };
-        let target_dir = match out {
-            Some(out_root) => out_root.join(name),
-            None => subdir.clone(),
-        };
-        if let Err(code) = build_one(&hll_files[0], &target_dir, force) {
-            return code;
+/// How many directory levels [`build_colocated_tree`] will recurse
+/// below the build root before giving up. Purely a defensive cap
+/// against a symlinked-directory cycle turning the walk into an
+/// infinite loop (`fs::read_dir`/`Path::is_dir` both follow symlinks,
+/// and nothing else here bounds recursion) — any real homelab tree is a
+/// handful of levels deep at most.
+const MAX_COLOCATED_DEPTH: usize = 64;
+
+/// The co-located case (#12, #89): recursively walks `dir` (starting
+/// from one of the build root's immediate children) looking for service
+/// directories — a directory holding exactly one `.hll` file that
+/// declares a `service`, co-located with its own `docker-compose.yml`
+/// (a real layout — see docs/DESIGN.md's Pipeline section — where each
+/// service's `.hll` source sits next to its other files, e.g. `.env`,
+/// bind-mounted config, instead of every `.hll` file living in one flat
+/// directory).
+///
+/// A directory that declares no service directly — whether it holds no
+/// `.hll` files at all, or holds one or more that declare only
+/// templates/networks (a *library* directory like `shared/`) — isn't a
+/// service directory itself, so this recurses into its subdirectories
+/// instead of erroring on file count. That's what makes a layout like
+/// `homelab/services/<service>/<service>.hll`, with an intervening
+/// `services/` directory that holds no `.hll` files of its own, resolve
+/// correctly: the old one-level-only scan saw `services/` as empty and
+/// silently built nothing.
+///
+/// Each service directory found builds in place (writing right back into
+/// that same directory) by default, or under `<out>/<path-from-root>/`
+/// if `--out` is given — preserving the tree's own relative structure,
+/// the same way flat mode's `--out` remaps by file stem.
+fn build_colocated_tree(
+    dir: &Path,
+    root: &Path,
+    out: Option<&Path>,
+    force: bool,
+    depth: usize,
+    built: &mut usize,
+) -> Result<(), ExitCode> {
+    if depth >= MAX_COLOCATED_DEPTH {
+        eprintln!(
+            "{}: too many nested directories (over {MAX_COLOCATED_DEPTH} levels below {}) \
+             — refusing to recurse further, in case a symlink cycle is involved",
+            dir.display(),
+            root.display()
+        );
+        return Err(ExitCode::FAILURE);
+    }
+
+    let (hll_files, subdirs) = scan_dir(dir)?;
+
+    let mut service_files = Vec::new();
+    for hll_path in &hll_files {
+        if declares_a_service(hll_path)? {
+            service_files.push(hll_path.clone());
         }
     }
-    ExitCode::SUCCESS
+
+    match service_files.as_slice() {
+        [] => {
+            for subdir in &subdirs {
+                build_colocated_tree(subdir, root, out, force, depth + 1, built)?;
+            }
+            Ok(())
+        }
+        [hll_path] => {
+            let target_dir = match out {
+                Some(out_root) => out_root.join(dir.strip_prefix(root).unwrap_or(dir)),
+                None => dir.to_path_buf(),
+            };
+            build_one(hll_path, &target_dir, force)?;
+            *built += 1;
+            Ok(())
+        }
+        _ => {
+            eprintln!(
+                "{}: {} .hll files here declare a service, expected exactly one \
+                 entry point per co-located service directory",
+                dir.display(),
+                service_files.len()
+            );
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// Whether `hll_path` declares at least one top-level `service` — the
+/// same test the linker itself effectively applies: only the *entry*
+/// file's own `service` decls are ever used (an imported file's are
+/// parsed but discarded, per `hl-linker`'s `graph::build`). A file with
+/// none is a library file (templates/networks only), not a buildable
+/// entry point (#89).
+fn declares_a_service(hll_path: &Path) -> Result<bool, ExitCode> {
+    let source = fs::read_to_string(hll_path).map_err(|err| {
+        eprintln!("{}: {err}", hll_path.display());
+        ExitCode::FAILURE
+    })?;
+    let program = hl_parser::parse(&source).map_err(|err| {
+        eprintln!("{}: {err}", hll_path.display());
+        ExitCode::FAILURE
+    })?;
+    Ok(program
+        .decls
+        .iter()
+        .any(|decl| matches!(decl, hl_parser::TopDecl::Service(_))))
 }
 
 /// Builds `hll_path`, writing the result to `target_dir/docker-compose.yml`
