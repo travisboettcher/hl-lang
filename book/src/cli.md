@@ -71,36 +71,59 @@ file's stem becomes its own output directory:
 `dist/jellyfin/docker-compose.yml`, `dist/syncthing/docker-compose.yml`,
 and so on.
 
+A file that declares no `service` — one holding only `template`/`network`
+declarations meant to be `use`d by others — is skipped rather than built:
+it would produce a Compose document with nothing in it (codegen only
+ever emits what a service actually references).
+
 ### Directory: co-located mode
 
 This mode is chosen automatically when the target directory holds **no**
-`.hll` files directly, but at least one immediate subdirectory that does
-— the layout a real homelab tends to use in practice, keeping each
-service's `.hll` source next to its other files (`.env`, bind-mounted
-config):
+`.hll` files directly — the layout a real homelab tends to use in
+practice, keeping each service's `.hll` source next to its other files
+(`.env`, bind-mounted config), often alongside a shared library of
+templates and networks `use`d by every service:
 
 ```
-services/
-  jellyfin/
-    jellyfin.hll
-    .env
-  syncthing/
-    syncthing.hll
+homelab/
+  shared/
+    network.hll
+    templates.hll
+  services/
+    jellyfin/
+      jellyfin.hll
+      .env
+    syncthing/
+      syncthing.hll
 ```
 
 ```sh
-hllc --build services/
+hllc --build homelab/
 ```
 
-With no `--out`, each subdirectory's `.hll` file builds in place, right
-back into that same subdirectory: `services/jellyfin/docker-compose.yml`,
-`services/syncthing/docker-compose.yml`. An explicit `--out <dir>` still
-remaps the whole tree, the same way flat mode's does, keyed by
-subdirectory name instead of file stem: `<out>/jellyfin/docker-compose.yml`.
+`hllc` recurses through the tree looking for **service directories** — a
+directory holding exactly one `.hll` file that declares a `service` —
+however many levels down they sit. A directory that isn't one itself
+(like `homelab/` or `services/` above, which hold no `.hll` files of
+their own) is recursed into; a *library* directory (like `shared/`,
+which holds `.hll` files but none of them declare a service) is
+recognized as such and skipped, not treated as a malformed service
+directory. Only `service` declarations count for this — a file that
+`use`s a shared library of templates is still a service directory in its
+own right.
 
-A subdirectory containing more than one `.hll` file is a hard error in
-this mode — it's ambiguous which one's output belongs directly in that
-subdirectory, so `hllc` won't guess.
+With no `--out`, each service directory's `.hll` file builds in place,
+right back into that same directory: `services/jellyfin/docker-compose.yml`,
+`services/syncthing/docker-compose.yml`. An explicit `--out <dir>` still
+remaps the whole tree, the same way flat mode's does, but preserving each
+service directory's path relative to the build root instead of flattening
+by name: `<out>/services/jellyfin/docker-compose.yml`.
+
+A directory containing more than one `.hll` file that declares a
+`service` is a hard error — it's ambiguous which one's output belongs
+directly in that directory, so `hllc` won't guess. A directory can freely
+mix one service file with any number of library files, though; only the
+count of *service*-declaring files matters.
 
 ### Generated files, and what `hllc` won't overwrite
 
@@ -151,10 +174,15 @@ regardless.
 `hllc` inspects the target directory once and picks a mode:
 
 - **Any `.hll` files directly inside it** → flat mode, `--out` required.
-- **No `.hll` files directly inside it, but at least one subdirectory
-  that has one** → co-located mode.
-- **Neither** (no `.hll` files anywhere within one level) → builds
-  nothing, successfully.
+  Files that declare no service are skipped.
+- **No `.hll` files directly inside it** → co-located mode, recursing
+  into subdirectories to find service directories at any depth. A
+  directory found along the way that declares no service (whether it
+  holds no `.hll` files, or only library ones) is recursed into rather
+  than treated as a service directory.
+- **No service directory found anywhere in the tree** → builds nothing,
+  successfully, but prints a line saying so — a directory build that
+  quietly does nothing is easy to mistake for one that worked.
 
 ## Exit codes
 

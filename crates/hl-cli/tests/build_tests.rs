@@ -310,6 +310,150 @@ fn build_directory_with_no_hll_files_anywhere_is_a_no_op_success() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// #89: the exact layout `book/src/getting-started.md` teaches —
+/// `homelab/shared/{network.hll,templates.hll}` (a library directory,
+/// declaring no service) alongside `homelab/services/<service>/*.hll`
+/// (real service directories one level *further* than the old
+/// one-level-only scan ever looked). Before this fix, `shared/`'s two
+/// `.hll` files hard-errored the whole build ("expected exactly one per
+/// co-located service directory"), and removing `shared/` still built
+/// nothing: `services/` itself holds no `.hll` files, so the old scan
+/// silently skipped it and exited 0.
+#[test]
+fn build_book_layout_with_library_directory_and_nested_services() {
+    let dir = scratch_dir("book-layout");
+    let shared_dir = dir.join("shared");
+    fs::create_dir_all(&shared_dir).unwrap();
+    fs::write(shared_dir.join("network.hll"), IMPORTS_NETWORK_HLL).unwrap();
+    fs::write(shared_dir.join("templates.hll"), IMPORTS_TEMPLATES_HLL).unwrap();
+
+    let services_dir = dir.join("services");
+    let jellyfin_dir = services_dir.join("jellyfin");
+    fs::create_dir_all(&jellyfin_dir).unwrap();
+    fs::write(jellyfin_dir.join("jellyfin.hll"), SYNCTHING_HLL).unwrap();
+    let syncthing_dir = services_dir.join("syncthing");
+    fs::create_dir_all(&syncthing_dir).unwrap();
+    fs::write(syncthing_dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: None,
+        force: false,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    for service_dir in [&jellyfin_dir, &syncthing_dir] {
+        let generated = service_dir.join("docker-compose.yml");
+        assert!(
+            generated.exists(),
+            "expected {} to exist",
+            generated.display()
+        );
+    }
+    assert!(
+        !shared_dir.join("docker-compose.yml").exists(),
+        "shared/ declares no service and shouldn't produce output"
+    );
+    assert!(!services_dir.join("docker-compose.yml").exists());
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// Same layout, but with `--out` given: each service directory's output
+/// lands under `<out>/<path-from-root>/`, preserving the tree's own
+/// relative structure rather than flattening it — the co-located
+/// equivalent of flat mode's per-file-stem remapping.
+#[test]
+fn build_book_layout_with_out_preserves_relative_structure() {
+    let dir = scratch_dir("book-layout-out");
+    let services_dir = dir.join("services");
+    let jellyfin_dir = services_dir.join("jellyfin");
+    fs::create_dir_all(&jellyfin_dir).unwrap();
+    fs::write(jellyfin_dir.join("jellyfin.hll"), SYNCTHING_HLL).unwrap();
+    let out_dir = dir.join("out");
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: Some(out_dir.clone()),
+        force: false,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let generated = out_dir
+        .join("services")
+        .join("jellyfin")
+        .join("docker-compose.yml");
+    assert!(
+        generated.exists(),
+        "expected {} to exist",
+        generated.display()
+    );
+    assert!(!jellyfin_dir.join("docker-compose.yml").exists());
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// #89: pointing `--build` (flat mode, since `shared/` holds `.hll`
+/// files directly) at a library directory used to produce one useless
+/// `docker-compose.yml` per file (`services: {}`, every declaration
+/// dropped). Both files here declare no service and should be skipped
+/// entirely, leaving the build a documented no-op rather than junk
+/// output a user might `docker compose up`.
+#[test]
+fn build_flat_directory_skips_library_only_files() {
+    let dir = scratch_dir("flat-library-only");
+    fs::write(dir.join("network.hll"), IMPORTS_NETWORK_HLL).unwrap();
+    fs::write(dir.join("templates.hll"), IMPORTS_TEMPLATES_HLL).unwrap();
+    let out_dir = dir.join("out");
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: Some(out_dir.clone()),
+        force: false,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert!(
+        !out_dir.exists() || fs::read_dir(&out_dir).unwrap().next().is_none(),
+        "expected no output to be written for a directory of library-only files"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// The flip side: a flat directory mixing one real service file with
+/// library-only files builds only the service, skipping the rest,
+/// rather than failing or producing junk for the others.
+#[test]
+fn build_flat_directory_builds_only_the_files_that_declare_a_service() {
+    let dir = scratch_dir("flat-mixed");
+    fs::write(dir.join("network.hll"), IMPORTS_NETWORK_HLL).unwrap();
+    fs::write(dir.join("templates.hll"), IMPORTS_TEMPLATES_HLL).unwrap();
+    fs::write(dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+    let out_dir = dir.join("out");
+
+    let code = run(Cli {
+        file: dir.clone(),
+        parse: false,
+        build: true,
+        out: Some(out_dir.clone()),
+        force: false,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let generated = out_dir.join("syncthing").join("docker-compose.yml");
+    assert!(generated.exists());
+    assert!(!out_dir.join("network").exists());
+    assert!(!out_dir.join("templates").exists());
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// #64: `fs::write` follows symlinks, so a `docker-compose.yml` replaced
 /// by a link to an unrelated file used to have that file truncated and
 /// overwritten by a plain `hllc --build <repo>`. Unix-only: there's no
