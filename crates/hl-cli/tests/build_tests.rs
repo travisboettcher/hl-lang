@@ -1020,3 +1020,68 @@ fn parse_does_not_panic_when_stdout_closes_early() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+/// `--build` with no `--out` prints the generated YAML through
+/// `write_stdout` to the process's real stdout. `run()` called in-process
+/// can't observe that (see `hllc_output`'s doc comment), so this has to
+/// go through the real binary — it's the only thing that would notice
+/// `write_stdout` silently doing nothing instead of writing.
+#[test]
+fn build_single_file_with_no_out_prints_yaml_to_real_stdout() {
+    let dir = scratch_dir("stdout-yaml");
+    let input = dir.join("syncthing.hll");
+    fs::write(&input, SYNCTHING_HLL).unwrap();
+
+    let output = hllc_output(&["--build", input.to_str().unwrap()]);
+    assert!(output.status.success());
+
+    let yaml = String::from_utf8(output.stdout).unwrap();
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(&yaml).expect("stdout should be valid YAML");
+    assert!(
+        value
+            .get("services")
+            .and_then(|s| s.get("syncthing"))
+            .is_some()
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// `write_stdout` treats a closed pipe (`BrokenPipe`) as a clean exit,
+/// but any *other* write failure is a real error and must still fail
+/// loudly. `/dev/full` always fails writes with `ENOSPC`, a distinct
+/// `io::ErrorKind` from `BrokenPipe` — the one write error that's both
+/// reliably reproducible and clearly not a closed reader, so this is
+/// what actually exercises the non-`BrokenPipe` arm of `write_stdout`'s
+/// match.
+#[test]
+#[cfg(unix)]
+fn build_reports_a_real_stdout_write_failure_instead_of_exiting_clean() {
+    let dir = scratch_dir("stdout-write-failure");
+    let input = dir.join("syncthing.hll");
+    fs::write(&input, SYNCTHING_HLL).unwrap();
+
+    let dev_full = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("this test requires /dev/full");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_hllc"))
+        .args(["--build", input.to_str().unwrap()])
+        .stdout(dev_full)
+        .output()
+        .expect("failed to run the hllc binary");
+
+    assert!(
+        !output.status.success(),
+        "a real stdout write failure should exit non-zero, got {:?}",
+        output.status
+    );
+    assert!(
+        !output.stderr.is_empty(),
+        "a real stdout write failure should print a diagnostic to stderr"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
