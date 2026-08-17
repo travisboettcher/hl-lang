@@ -28,6 +28,22 @@
 //! assert_eq!(tokens.first().unwrap().kind, TokenKind::Ident); // "service"
 //! assert_eq!(tokens.last().unwrap().kind, TokenKind::Eof);
 //! ```
+//!
+//! # Stability
+//!
+//! This crate is an implementation detail of the `hllc` compiler, not a
+//! library offered for outside use. It is never published to crates.io —
+//! a release is a git tag plus a GitHub Release carrying the `hllc`
+//! binary (`release-plz.toml`'s `[workspace] publish = false` +
+//! `git_only = true`) — and its version number only tracks `hllc`'s so
+//! the whole workspace moves in lockstep.
+//!
+//! **No semver guarantee applies to this Rust API.** Types, public
+//! fields, error enum variants, module paths, and function signatures
+//! may change in any release, including a patch. What the version number
+//! does promise is `.hll` source compatibility, the `hllc` CLI contract,
+//! and generated-Compose semantics; see "What a version number promises"
+//! in the repo README.
 
 mod error;
 mod lexer;

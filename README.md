@@ -144,6 +144,60 @@ change, and that merge cuts the actual tagged release with a rebuilt `hllc`
 binary attached. See `release-plz.toml` and the workflow's own comments for
 how the pieces fit together.
 
+Nothing here is published to crates.io. A "release" means a git tag plus a
+GitHub Release carrying the `hllc` binary — `release-plz.toml`'s
+`[workspace] publish = false` + `git_only = true` is what encodes that.
+
+## What a version number promises
+
+**1.0 means a stable `.hll` language and a stable `hllc` CLI — explicitly
+not a stable Rust API.**
+
+The product is the `hllc` compiler and the `.hll` files you feed it. The
+five crates under `crates/` are the implementation of that compiler, not a
+library offered to third parties, and they are versioned in lockstep with
+it purely so there's one number to reason about. Freezing their Rust API
+would mean that adding a single new diagnostic variant, or a single new
+built-in field to `ServiceFields`, is a breaking change — which is exactly
+the kind of change this project expects to keep making.
+
+Covered by the version number — a change that breaks any of these is a
+major bump (post-1.0), and must be called out either way:
+
+- **`.hll` source compatibility.** A `.hll` file that compiled before
+  still compiles, and still means the same thing.
+- **The `hllc` CLI contract.** Flag names and their semantics, positional
+  arguments, the shape of what lands on stdout vs. stderr, and exit codes.
+- **Generated-Compose semantics.** What the emitted YAML *does* when
+  `docker compose up` runs it: the services, images, ports, volumes,
+  networks, environment, and Traefik labels it describes.
+
+Not covered — these can change in any release, including a patch:
+
+- **Exact error text.** Wording, phrasing, span rendering, and hints in
+  diagnostics are free to improve. Don't grep for them; a machine-readable
+  diagnostic format would be a separate, deliberately-specified feature.
+- **Exact YAML key ordering and formatting.** Byte-for-byte output
+  stability isn't promised — only what the document means to Compose.
+  Diffing generated output across `hllc` versions may show churn.
+- **The Rust API of the `hl-*` crates.** Type layouts, public fields,
+  error enum variants (none are `#[non_exhaustive]`), function
+  signatures, module paths — all implementation detail, changeable at
+  will. Don't depend on these crates as libraries; depend on the `hllc`
+  binary and pin it to a tag.
+
+Because the Rust API is deliberately outside the contract, this repo does
+**not** run `cargo-semver-checks`: it would gate the one surface that is
+explicitly not promised, and would fail on precisely the changes the
+project wants to make freely.
+
+Pre-1.0 (`0.x`), the same three covered surfaces are what `semver-*`
+labels describe, but a breaking change is still just a minor bump, per
+the usual 0.x convention. Crossing to 1.0.0 is a deliberate act, not an
+arithmetic consequence of a `semver-major` label: `release.yml` refuses to
+bump `0.x` to `1.0.0` unless the merged PR also carries a `release-1.0`
+label. See CONTRIBUTING.md for how to pick a label.
+
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the language's grammar, and each
 crate's rustdoc (`crates/hl-lexer/src/lib.rs`, `crates/hl-parser/src/lib.rs`,
 `crates/hl-linker/src/lib.rs`, `crates/hl-codegen/src/lib.rs`) for

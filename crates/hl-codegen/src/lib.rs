@@ -10,6 +10,25 @@
 //! multiple services (mirroring how a real multi-service Compose
 //! project, e.g. an Authentik-style app+database pair, is one file
 //! today) — not one file per service.
+//!
+//! # Stability
+//!
+//! This crate is an implementation detail of the `hllc` compiler, not a
+//! library offered for outside use. It is never published to crates.io —
+//! a release is a git tag plus a GitHub Release carrying the `hllc`
+//! binary (`release-plz.toml`'s `[workspace] publish = false` +
+//! `git_only = true`) — and its version number only tracks `hllc`'s so
+//! the whole workspace moves in lockstep.
+//!
+//! **No semver guarantee applies to this Rust API.** Types, public
+//! fields, error enum variants, module paths, and function signatures
+//! may change in any release, including a patch. What the version number
+//! does promise is `.hll` source compatibility, the `hllc` CLI contract,
+//! and generated-Compose *semantics* — what the emitted document tells
+//! Compose to do. The exact bytes are not promised: key ordering,
+//! quoting, and formatting of the YAML may change without a major bump,
+//! so don't diff generated output across `hllc` versions expecting
+//! stability. See "What a version number promises" in the repo README.
 
 mod doc;
 mod interp;
