@@ -39,6 +39,7 @@ the result or writes it to disk. This is the one you'll use in practice.
 ```sh
 hllc --build jellyfin.hll                       # prints YAML to stdout
 hllc --build jellyfin.hll --out docker-compose.yml  # writes to a path
+hllc --build jellyfin.hll --out dist/               # writes dist/docker-compose.yml
 ```
 
 One input file always produces one output document (it may hold multiple
@@ -47,6 +48,11 @@ One input file always produces one output document (it may hold multiple
 building `syncthing.hll` from the [Imports](./imports.md) example
 produces the same output whether its templates live in the same file or
 across three `use`-connected ones.
+
+If `--out` names an existing directory, `hllc` writes `docker-compose.yml`
+inside it — the same convention directory mode uses, so `dist/` (the
+natural first guess) works whether the input is a single file or a whole
+directory.
 
 ### Directory: flat mode
 
@@ -183,6 +189,20 @@ regardless.
 - **No service directory found anywhere in the tree** → builds nothing,
   successfully, but prints a line saying so — a directory build that
   quietly does nothing is easy to mistake for one that worked.
+
+## Flag combinations
+
+`--parse` and `--build` select different modes and can't be combined.
+`--out` and `--force` only mean anything alongside `--build` — both
+require it, rather than silently doing nothing when it's missing.
+`hllc` rejects an invalid combination immediately, before touching any
+file:
+
+```sh
+$ hllc --out dist/ jellyfin.hll
+error: the following required arguments were not provided:
+  --build
+```
 
 ## Exit codes
 

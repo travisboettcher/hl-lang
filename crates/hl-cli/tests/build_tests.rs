@@ -889,16 +889,53 @@ fn build_refuses_a_hand_written_out_path() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// #88: an existing *directory* named as `--out` in single-file mode
+/// writes `docker-compose.yml` inside it, matching directory mode's own
+/// convention — `dist/` is the natural first guess for `--out` (every
+/// directory-build example in the book uses exactly this shape), and it
+/// previously failed with a bare `Is a directory (os error 21)`.
+#[test]
+fn build_single_file_writes_into_an_existing_out_directory() {
+    let dir = scratch_dir("out-is-existing-dir");
+    let input = dir.join("syncthing.hll");
+    fs::write(&input, SYNCTHING_HLL).unwrap();
+    let out_dir = dir.join("dist");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let code = run(Cli {
+        file: input,
+        parse: false,
+        build: true,
+        out: Some(out_dir.clone()),
+        force: false,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let generated = out_dir.join("docker-compose.yml");
+    assert!(
+        generated.exists(),
+        "expected {} to exist",
+        generated.display()
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// A path that exists but can't be read back for inspection — here a
-/// directory — is refused rather than assumed disposable: nothing about
-/// it could be shown to be generated output.
+/// permission-denied file — is refused rather than assumed disposable:
+/// nothing about it could be shown to be generated output. Unix-only:
+/// there's no portable way to make a file unreadable to its own owner.
+#[cfg(unix)]
 #[test]
 fn build_refuses_an_out_path_it_cannot_inspect() {
+    use std::os::unix::fs::PermissionsExt;
+
     let dir = scratch_dir("uninspectable-out");
     let input = dir.join("syncthing.hll");
     fs::write(&input, SYNCTHING_HLL).unwrap();
     let out = dir.join("docker-compose.yml");
-    fs::create_dir_all(&out).unwrap();
+    fs::write(&out, HAND_WRITTEN_COMPOSE).unwrap();
+    fs::set_permissions(&out, fs::Permissions::from_mode(0o000)).unwrap();
 
     let code = run(Cli {
         file: input,
@@ -907,8 +944,14 @@ fn build_refuses_an_out_path_it_cannot_inspect() {
         out: Some(out.clone()),
         force: false,
     });
+
+    fs::set_permissions(&out, fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(code, ExitCode::FAILURE);
-    assert!(out.is_dir(), "the existing path must be left alone");
+    assert_eq!(
+        fs::read_to_string(&out).unwrap(),
+        HAND_WRITTEN_COMPOSE,
+        "the existing file must be left alone"
+    );
 
     fs::remove_dir_all(&dir).ok();
 }
@@ -938,6 +981,107 @@ fn build_force_still_refuses_to_write_through_a_symlink() {
     });
     assert_eq!(code, ExitCode::FAILURE);
     assert_eq!(fs::read_to_string(&victim).unwrap(), "precious\n");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// #88: piping `--parse`'s AST dump into something that closes its end
+/// early (`head`, `less`, ...) — the only practical way to read what can
+/// be a many-thousand-line `{:#?}` dump — used to hand the user a Rust
+/// panic and backtrace the moment the reader closed the pipe, since
+/// `println!` panics on any stdout write error including a closed pipe.
+/// Reproduces that exact shape: closes the read end before the child
+/// (spawned as the real binary, since the panic lives in `println!`'s
+/// own machinery, not anything `run()` returns a `Result` for) has
+/// finished writing, and asserts a clean exit rather than a crash.
+#[test]
+fn parse_does_not_panic_when_stdout_closes_early() {
+    let dir = scratch_dir("epipe");
+    let input = dir.join("big.hll");
+    fs::write(&input, SYNCTHING_HLL).unwrap();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_hllc"))
+        .args(["--parse", input.to_str().unwrap()])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn hllc");
+
+    // Close the read end without reading anything, simulating `| head`
+    // closing its end as soon as it has what it wants — any write the
+    // child makes after this point observes a closed pipe.
+    drop(child.stdout.take());
+
+    let status = child.wait().expect("failed to wait on hllc");
+    assert!(
+        status.success(),
+        "expected a clean exit on a closed pipe, got {status:?}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// `--build` with no `--out` prints the generated YAML through
+/// `write_stdout` to the process's real stdout. `run()` called in-process
+/// can't observe that (see `hllc_output`'s doc comment), so this has to
+/// go through the real binary — it's the only thing that would notice
+/// `write_stdout` silently doing nothing instead of writing.
+#[test]
+fn build_single_file_with_no_out_prints_yaml_to_real_stdout() {
+    let dir = scratch_dir("stdout-yaml");
+    let input = dir.join("syncthing.hll");
+    fs::write(&input, SYNCTHING_HLL).unwrap();
+
+    let output = hllc_output(&["--build", input.to_str().unwrap()]);
+    assert!(output.status.success());
+
+    let yaml = String::from_utf8(output.stdout).unwrap();
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(&yaml).expect("stdout should be valid YAML");
+    assert!(
+        value
+            .get("services")
+            .and_then(|s| s.get("syncthing"))
+            .is_some()
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// `write_stdout` treats a closed pipe (`BrokenPipe`) as a clean exit,
+/// but any *other* write failure is a real error and must still fail
+/// loudly. `/dev/full` always fails writes with `ENOSPC`, a distinct
+/// `io::ErrorKind` from `BrokenPipe` — the one write error that's both
+/// reliably reproducible and clearly not a closed reader, so this is
+/// what actually exercises the non-`BrokenPipe` arm of `write_stdout`'s
+/// match.
+#[test]
+#[cfg(unix)]
+fn build_reports_a_real_stdout_write_failure_instead_of_exiting_clean() {
+    let dir = scratch_dir("stdout-write-failure");
+    let input = dir.join("syncthing.hll");
+    fs::write(&input, SYNCTHING_HLL).unwrap();
+
+    let dev_full = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("this test requires /dev/full");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_hllc"))
+        .args(["--build", input.to_str().unwrap()])
+        .stdout(dev_full)
+        .output()
+        .expect("failed to run the hllc binary");
+
+    assert!(
+        !output.status.success(),
+        "a real stdout write failure should exit non-zero, got {:?}",
+        output.status
+    );
+    assert!(
+        !output.stderr.is_empty(),
+        "a real stdout write failure should print a diagnostic to stderr"
+    );
 
     fs::remove_dir_all(&dir).ok();
 }
