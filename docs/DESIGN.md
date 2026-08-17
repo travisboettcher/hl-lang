@@ -152,12 +152,15 @@ token identity):
   comma itself is never optional when there *is* a next item; bare
   adjacency with no comma at all no longer implies continuation.
 
-Map-kind bodies (`raw { }`, and a `with`-invocation's own argument body,
-which reuses `raw`'s entry parsing) are exempt from the newline rule — their
-entries are conceptually key-value pairs in a dictionary, not named struct
-fields, and the compact one-line style (`{ puid: 1000, pgid: 100 }`) used
-throughout this doc's own worked examples stays valid, comma-separated, on
-one line.
+Map-kind bodies — `raw { }`, `volume { }`/`env { }`, and a `with`-invocation's
+own argument body (which reuses `raw`'s entry parsing) — are exempt from the
+newline rule — their entries are conceptually key-value pairs in a
+dictionary, not named struct fields, and the compact one-line style (`{
+puid: 1000, pgid: 100 }`) used throughout this doc's own worked examples
+stays valid, comma-separated, on one line. The comma between entries is
+optional here, unlike the comma-list rule just above: `{ "a": "/x" "b":
+"/y" }` (bare adjacency) and `{ "a": "/x", "b": "/y" }` (comma-separated)
+both parse to the same two entries (#81).
 
 ### Desugaring rules
 

@@ -790,6 +790,13 @@ impl<'src> Parser<'src> {
         let mut entries = Vec::new();
         while self.peek().kind != TokenKind::RBrace {
             entries.push(self.parse_literal_map_entry(schema)?);
+            // Mirrors `parse_raw_body`'s own comma handling: an optional
+            // comma between entries is tolerated, unifying this map-kind
+            // body with its `raw` sibling rather than requiring a
+            // newline (like `parse_struct_body`) or nothing at all (#81).
+            if self.peek().kind == TokenKind::Comma {
+                self.bump();
+            }
         }
         self.expect(TokenKind::RBrace)?;
         Ok(entries)

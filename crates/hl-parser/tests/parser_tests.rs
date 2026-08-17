@@ -490,6 +490,27 @@ fn volume_colon_canonical_entry() {
     );
 }
 
+/// #81: a comma between a map-kind body's entries is tolerated, same as
+/// `raw {}` and a `with`-invocation's argument body — previously this
+/// was a parse error (`expected a literal ..., found Comma`).
+#[test]
+fn volume_body_accepts_comma_between_entries() {
+    let program = parse_ok("service s {\n  volume { \"a\": \"/x\", \"b\": \"/y\" }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.volumes.entries.len(), 2);
+    assert_eq!(service.fields.volumes.entries[0].host.text(), "a");
+    assert_eq!(service.fields.volumes.entries[1].host.text(), "b");
+}
+
+/// #81: bare adjacency (no separator at all between entries) keeps
+/// working exactly as before — the comma is optional, not required.
+#[test]
+fn volume_body_still_accepts_bare_adjacency_between_entries() {
+    let program = parse_ok("service s {\n  volume { \"a\": \"/x\" \"b\": \"/y\" }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.volumes.entries.len(), 2);
+}
+
 #[test]
 fn env_equals_sugar_bare_entry() {
     let program = parse_ok("service s {\n  env PUID = \"1000\"\n}\n");
@@ -504,6 +525,16 @@ fn env_repeated_entries_accumulate() {
     let program = parse_ok("service s {\n  env PUID = \"1000\"\n  env PGID = \"100\"\n}\n");
     let service = as_service(&program.decls[0]);
     assert_eq!(service.fields.env.entries.len(), 2);
+}
+
+/// #81: same optional-comma unification as `volume`'s own canonical body.
+#[test]
+fn env_body_accepts_comma_between_entries() {
+    let program = parse_ok("service s {\n  env { PUID = \"1000\", PGID = \"100\" }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.env.entries.len(), 2);
+    assert_eq!(service.fields.env.entries[0].key.text(), "PUID");
+    assert_eq!(service.fields.env.entries[1].key.text(), "PGID");
 }
 
 #[test]
