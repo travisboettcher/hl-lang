@@ -45,8 +45,9 @@ pub use ast::{
     TopDecl, UseDecl, VolumeEntry, VolumeMap,
 };
 pub use compose::{
-    ComposeError, ComposedProgram, MapKeyCollision, SymbolResolver, compose, compose_with_resolver,
+    ComposeError, ComposedProgram, MAX_TEMPLATE_DEPTH, MapKeyCollision, SymbolResolver, compose,
+    compose_with_resolver,
 };
 pub use error::{Expected, ParseError};
 pub use hl_lexer::Span;
-pub use parser::parse;
+pub use parser::{MAX_RAW_VALUE_DEPTH, parse};

@@ -91,6 +91,18 @@ pub enum ParseError {
     /// `name` doesn't match any of that template's own declared
     /// parameters.
     UnknownTemplateParam { name: String, span: Span },
+    /// A `raw` value nested lists/maps deeper than
+    /// [`crate::parser::MAX_RAW_VALUE_DEPTH`].
+    ///
+    /// `raw` is schema-free, so its value grammar is the one genuinely
+    /// self-recursive production in the language, and it used to recurse
+    /// with no limit at all: a few kilobytes of `[[[[ ... ]]]]` overflowed
+    /// the stack and *aborted the process* rather than returning an error
+    /// an embedder could catch (#72). The limit is set far below the
+    /// depth that overflows, which also keeps the recursive drop of the
+    /// resulting `RawValue` tree safe — dropping is the other recursion
+    /// here, and it can't return an error at all.
+    RawValueTooDeep { limit: usize, span: Span },
 }
 
 impl From<LexError> for ParseError {
@@ -115,7 +127,8 @@ impl ParseError {
             | ParseError::DuplicateTemplateParam { second: span, .. }
             | ParseError::UnknownParamType { span, .. }
             | ParseError::ParamReferenceOutsideTemplate { span, .. }
-            | ParseError::UnknownTemplateParam { span, .. } => *span,
+            | ParseError::UnknownTemplateParam { span, .. }
+            | ParseError::RawValueTooDeep { span, .. } => *span,
         }
     }
 }
@@ -203,6 +216,11 @@ impl fmt::Display for ParseError {
             ParseError::UnknownTemplateParam { name, .. } => write!(
                 f,
                 "{}:{}: `${name}` does not name a declared parameter of this template",
+                span.line, span.col
+            ),
+            ParseError::RawValueTooDeep { limit, .. } => write!(
+                f,
+                "{}:{}: `raw` value nested more than {limit} levels deep",
                 span.line, span.col
             ),
         }
@@ -386,6 +404,18 @@ mod display_tests {
         assert_eq!(
             err.to_string(),
             "3:9: `$prot` does not name a declared parameter of this template"
+        );
+    }
+
+    #[test]
+    fn raw_value_too_deep_display() {
+        let err = ParseError::RawValueTooDeep {
+            limit: 128,
+            span: span(4, 12),
+        };
+        assert_eq!(
+            err.to_string(),
+            "4:12: `raw` value nested more than 128 levels deep"
         );
     }
 }

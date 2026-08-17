@@ -12,6 +12,32 @@ use crate::schema::{
     self, FieldKind, FieldResolution, FieldSchema, MapSide, SchemaKind, TypeSchema,
 };
 
+/// How deeply a `raw` value may nest `[`/`{` before
+/// [`ParseError::RawValueTooDeep`] stops it.
+///
+/// `raw`'s schema-free value grammar is the language's one genuinely
+/// self-recursive production, so it's the one place a caller controls
+/// the parser's stack depth. With no limit, a few kilobytes of
+/// `[[[[ ... ]]]]` overflowed the stack, and a stack overflow *aborts
+/// the process* — it isn't an error a library embedder can catch, which
+/// is what made this worth fixing for crates with public `parse()`/
+/// `link()` entry points (#72).
+///
+/// The margin under the real limit is load-bearing, and not only for
+/// parsing: dropping a nested [`RawValue`] recurses through drop glue,
+/// and `Drop` has no way to return an error, so the ceiling has to be
+/// low enough that *dropping* a maximally deep tree is safe too.
+///
+/// 128 is picked against measurement rather than by feel. The relevant
+/// floor isn't the main thread's 8 MiB stack but a spawned thread's
+/// default 2 MiB, since an embedder may well call `parse()` off the main
+/// thread: on that stack, a debug build parses and drops 256 levels but
+/// aborts at 512. 128 leaves roughly 4× headroom — it survives even a
+/// 512 KiB stack — while staying far beyond any legitimate use, since
+/// real `raw` blocks mirror Compose YAML and nest a handful of levels at
+/// most.
+pub const MAX_RAW_VALUE_DEPTH: usize = 128;
+
 /// Parses a complete hl-lang source file into a [`Program`].
 pub fn parse(source: &str) -> Result<Program, ParseError> {
     let tokens = Lexer::tokenize(source)?;
@@ -818,7 +844,7 @@ impl<'src> Parser<'src> {
     fn parse_raw_entry(&mut self) -> Result<RawEntry, ParseError> {
         let key = self.parse_key()?;
         self.expect(TokenKind::Colon)?;
-        let value = self.parse_raw_value()?;
+        let value = self.parse_raw_value(0)?;
         let span = Span {
             start: key.span().start,
             end: value.span().end,
@@ -832,14 +858,36 @@ impl<'src> Parser<'src> {
     /// milestone fully implements the grammar's generic `value ::=
     /// literal | list | statement` recursion, since `raw` is schema-free
     /// and has no fixed field list to check values against.
-    fn parse_raw_value(&mut self) -> Result<RawValue, ParseError> {
+    ///
+    /// `depth` is how many enclosing `[`/`{` this call sits inside, and
+    /// is capped at [`MAX_RAW_VALUE_DEPTH`]: this is real recursion over
+    /// attacker-shaped input, and without a limit a few kilobytes of
+    /// `[[[[ ... ]]]]` overflowed the stack and aborted the process
+    /// (#72). Every entry point passes `0`.
+    ///
+    /// The check is written against `level` — the 1-based level this
+    /// call itself occupies — rather than as `depth >= MAX`, which is
+    /// the same test but has an *equivalent mutant*: because `depth`
+    /// only ever rises one at a time, `==` and `>=` trigger at exactly
+    /// the same call, so no test could tell them apart and `cargo
+    /// mutants` reports the swap as missed coverage forever. Comparing
+    /// `level > MAX` moves every comparison mutant one level off the
+    /// real boundary, where the tests at and past the limit catch it.
+    fn parse_raw_value(&mut self, depth: usize) -> Result<RawValue, ParseError> {
+        let level = depth + 1;
+        if level > MAX_RAW_VALUE_DEPTH {
+            return Err(ParseError::RawValueTooDeep {
+                limit: MAX_RAW_VALUE_DEPTH,
+                span: self.peek().span,
+            });
+        }
         match self.peek().kind {
             TokenKind::LBracket => {
                 let open = self.expect(TokenKind::LBracket)?;
                 let mut items = Vec::new();
                 if self.peek().kind != TokenKind::RBracket {
                     loop {
-                        items.push(self.parse_raw_value()?);
+                        items.push(self.parse_raw_value(depth + 1)?);
                         if self.peek().kind == TokenKind::Comma {
                             self.bump();
                         } else {
@@ -862,7 +910,7 @@ impl<'src> Parser<'src> {
                 while self.peek().kind != TokenKind::RBrace {
                     let key = self.parse_key()?;
                     self.expect(TokenKind::Colon)?;
-                    let value = self.parse_raw_value()?;
+                    let value = self.parse_raw_value(depth + 1)?;
                     entries.push((key, value));
                     if self.peek().kind == TokenKind::Comma {
                         self.bump();

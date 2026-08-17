@@ -29,6 +29,31 @@ use crate::ast::{
 };
 use crate::schema::MapSide;
 
+/// How deep a chain of `with` invocations may nest before
+/// [`ComposeError::TemplateNestingTooDeep`] stops it.
+///
+/// Template resolution and invocation resolution are mutually
+/// recursive, one level per `with` hop. The cycle check bounds
+/// *repetition* — a template that reaches itself — but a plain chain
+/// `template t1 { with t0 }`, `template t2 { with t1 }`, ... repeats
+/// nothing, so it passed that check at every level and recursed until
+/// the stack overflowed. A stack overflow aborts the process rather than
+/// returning an error, which an embedder calling `parse()`/`link()` has
+/// no way to defend against (#72).
+///
+/// Same reasoning as [`crate::MAX_RAW_VALUE_DEPTH`], but a much smaller
+/// number, because these frames are far fatter than the parser's: on a
+/// spawned thread's default 2 MiB stack — the floor that matters, since
+/// an embedder may call `link()` off the main thread — a debug build
+/// resolves 128 levels but aborts at 192, so a "few hundred" ceiling
+/// would still overflow. 64 leaves roughly 4× headroom (it survives even
+/// a 512 KiB stack) and is still far beyond any chain anyone would write
+/// on purpose.
+///
+/// This bounds `with` *depth*, not breadth: a service or template can
+/// still list as many templates side by side as it likes.
+pub const MAX_TEMPLATE_DEPTH: usize = 64;
+
 /// The result of resolving every `template`/`with` composition in a
 /// [`Program`] — see [`compose`]. Every `Service` here has an empty
 /// `fields.with` and contains no [`Literal::Param`] anywhere; producing
@@ -80,6 +105,18 @@ pub enum ComposeError {
     /// `chain` lists the template names in resolution order, ending with
     /// the name that closes the cycle.
     TemplateCycle { chain: Vec<String>, span: Span },
+    /// A `with`-reference chain nested deeper than
+    /// [`MAX_TEMPLATE_DEPTH`] without repeating a template — so
+    /// [`Self::TemplateCycle`] never fires, and resolution used to
+    /// recurse until the stack gave out. Unlike a cycle, there's no
+    /// chain worth printing — a list of every template on the way down
+    /// is noise, not a diagnostic — so this reports the limit and the
+    /// template that hit it.
+    TemplateNestingTooDeep {
+        name: String,
+        limit: usize,
+        span: Span,
+    },
     /// An invocation's argument name isn't one of the target template's
     /// declared parameters. Per docs/DESIGN.md: "Templates must be fully
     /// applied at each call — no partial application, no currying."
@@ -236,6 +273,7 @@ impl ComposeError {
             | ComposeError::DuplicateServiceName { second: span, .. }
             | ComposeError::DuplicateNetworkName { second: span, .. }
             | ComposeError::TemplateCycle { span, .. }
+            | ComposeError::TemplateNestingTooDeep { span, .. }
             | ComposeError::UnknownTemplateArgument { span, .. }
             | ComposeError::MissingTemplateArgument { span, .. }
             | ComposeError::DuplicateTemplateArgument { second: span, .. }
@@ -280,6 +318,11 @@ impl fmt::Display for ComposeError {
                 span.line,
                 span.col,
                 chain.join(" -> ")
+            ),
+            ComposeError::TemplateNestingTooDeep { name, limit, .. } => write!(
+                f,
+                "{}:{}: `with` nesting deeper than {limit} levels (reached at template `{name}`)",
+                span.line, span.col
             ),
             ComposeError::UnknownTemplateArgument {
                 template, argument, ..
@@ -453,6 +496,19 @@ mod error_display_tests {
         assert_eq!(
             err.to_string(),
             "2:3: template composition cycle: a -> b -> a"
+        );
+    }
+
+    #[test]
+    fn template_nesting_too_deep_display() {
+        let err = ComposeError::TemplateNestingTooDeep {
+            name: "t0".to_string(),
+            limit: 64,
+            span: span(1, 10),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:10: `with` nesting deeper than 64 levels (reached at template `t0`)"
         );
     }
 
@@ -972,6 +1028,28 @@ fn resolve_template<'r, R: SymbolResolver>(
         chain.push(name.clone());
         return Err(ComposeError::TemplateCycle {
             chain,
+            span: decl.name.span,
+        });
+    }
+    // `in_progress` is pushed on entry and popped on the way out, so its
+    // length *is* the current nesting depth — the explicit depth counter
+    // this recursion needed (#72). The cycle check above bounds
+    // *repetition*, not depth: a non-cyclic chain `t0 <- t1 <- ... <- tN`
+    // passes it at every level and used to recurse until the stack
+    // overflowed, aborting the process instead of returning an error a
+    // library embedder could catch.
+    //
+    // Written against the 1-based level this call occupies rather than
+    // as `len() >= MAX`, which is the same test but has an *equivalent
+    // mutant*: `in_progress` only ever grows one at a time, so `==` and
+    // `>=` trigger at exactly the same call and no test could tell them
+    // apart. `level > MAX` moves every comparison mutant one level off
+    // the boundary, where the tests at and past the limit catch it.
+    let level = in_progress.len() + 1;
+    if level > MAX_TEMPLATE_DEPTH {
+        return Err(ComposeError::TemplateNestingTooDeep {
+            name: name.clone(),
+            limit: MAX_TEMPLATE_DEPTH,
             span: decl.name.span,
         });
     }
