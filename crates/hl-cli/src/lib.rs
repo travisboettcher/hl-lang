@@ -367,8 +367,8 @@ fn write_output(out_path: &Path, yaml: &str, force: bool) -> Result<(), ExitCode
 ///
 /// Errors are printed bare (`eprintln!("{err}")`), not wrapped with
 /// `path`'s own display like every other error site in this file:
-/// `hl_linker::LinkError`'s `Io`/`Parse`/`DuplicateAlias` variants
-/// already self-prefix with *their own* correct path, which may be an
+/// `hl_linker::LinkError`'s `Io`/`Parse`/`DuplicateAlias`/`PathEscape`
+/// variants already self-prefix with *their own* correct path, which may be an
 /// imported file rather than `path` itself, and both `LinkError::Compose`
 /// and `hl_codegen::CodegenError` only ever carry a `{line}:{col}`
 /// location with no file — accurate for a single file, but a composed

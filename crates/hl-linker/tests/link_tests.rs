@@ -244,6 +244,37 @@ fn missing_file_is_io_error() {
 }
 
 #[test]
+fn absolute_use_path_is_rejected() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "service.hll",
+        "use \"/etc/passwd\" as leak\nservice s {\n  image \"x\"\n}\n",
+    );
+
+    let err = link(Path::new("service.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        err,
+        LinkError::PathEscape { raw, .. } if raw == "/etc/passwd"
+    ));
+}
+
+#[test]
+fn dot_dot_use_path_escaping_the_entry_root_is_rejected() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "services/foo/service.hll",
+        "use \"../../../../../../etc/hostname\" as leak\nservice s {\n  image \"x\"\n}\n",
+    );
+
+    let err =
+        link(Path::new("services/foo/service.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        err,
+        LinkError::PathEscape { raw, .. } if raw == "../../../../../../etc/hostname"
+    ));
+}
+
+#[test]
 fn duplicate_alias_in_one_file_is_error() {
     let mut loader = InMemoryLoader::default();
     loader.add(
