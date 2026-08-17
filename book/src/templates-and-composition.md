@@ -58,8 +58,12 @@ zero-parameter template like `authenticated` needs no body — bare
 each call — there's no partial application or currying.
 
 A template's own body can itself `with` other templates, so templates
-compose. A template may also forward its own parameters into the
-templates it applies:
+compose — up to 64 levels of nesting, past which `hllc` reports an error
+instead of following the chain further. That's a bound on `with` *depth*,
+not on how many templates a single `with` list may name.
+
+A template may also forward its own parameters into the templates it
+applies:
 
 ```hll
 template linuxserver_app(puid: Number, pgid: Number) {

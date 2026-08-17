@@ -244,6 +244,11 @@ written — there's no validation, so a typo'd key or a value Compose
 doesn't understand won't be caught until `docker compose` itself rejects
 it.
 
+A `raw` value's lists and maps may nest up to 128 levels deep; past that
+`hllc` reports an error rather than following the nesting further. Real
+Compose structures nest a handful of levels, so this only ever comes up
+for generated or pathological input.
+
 ### `raw` wins over a built-in field of the same name
 
 A `raw` key may name a field `hll` already has (`image`,

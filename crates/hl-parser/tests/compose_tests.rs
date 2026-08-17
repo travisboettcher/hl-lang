@@ -519,6 +519,73 @@ fn template_cycle_three_hop_is_error() {
     }
 }
 
+// --- `with` nesting depth (#72) ---
+
+/// A linear chain `t0 <- t1 <- ... <- tN`, applied to a service via
+/// `with tN`. Nothing repeats, so the cycle check never fires and this
+/// is purely a depth question.
+fn template_chain_source(n: usize) -> String {
+    let mut source = String::from("template t0 {\n  image \"x\"\n}\n");
+    for i in 1..=n {
+        source.push_str(&format!("template t{i} {{\n  with t{}\n}}\n", i - 1));
+    }
+    source.push_str(&format!("service s {{\n  with t{n}\n}}\n"));
+    source
+}
+
+/// A chain right at the ceiling still composes — the limit bounds depth,
+/// it doesn't reject nesting.
+#[test]
+fn template_chain_at_the_depth_limit_composes() {
+    let composed = compose_ok(&template_chain_source(hl_parser::MAX_TEMPLATE_DEPTH - 1));
+    let service = single_service(&composed);
+    assert_eq!(
+        service
+            .fields
+            .image
+            .as_ref()
+            .unwrap()
+            .reference
+            .as_ref()
+            .unwrap()
+            .text(),
+        "x"
+    );
+}
+
+/// One level deeper is a catchable `ComposeError`. The cycle check can't
+/// catch this — a linear chain repeats nothing — so before the depth
+/// counter this recursed until the stack gave out and aborted the
+/// process.
+#[test]
+fn template_chain_past_the_depth_limit_is_an_error() {
+    let err = compose_err(&template_chain_source(hl_parser::MAX_TEMPLATE_DEPTH));
+    assert!(matches!(
+        err,
+        ComposeError::TemplateNestingTooDeep { limit, .. } if limit == hl_parser::MAX_TEMPLATE_DEPTH
+    ));
+}
+
+/// The depth the issue reproduced the abort at, well past where a
+/// release build's stack gave out.
+#[test]
+fn a_pathologically_deep_template_chain_errors_instead_of_aborting() {
+    let err = compose_err(&template_chain_source(20_000));
+    assert!(matches!(err, ComposeError::TemplateNestingTooDeep { .. }));
+}
+
+/// A cycle is still reported as a cycle, not as a depth overflow — the
+/// cycle check runs first, so the more specific diagnostic wins.
+#[test]
+fn a_cycle_is_still_a_cycle_not_a_depth_error() {
+    let err = compose_err(
+        "template a {\n  with b\n}\n\
+         template b {\n  with a\n}\n\
+         service s {\n  with a\n}\n",
+    );
+    assert!(matches!(err, ComposeError::TemplateCycle { .. }));
+}
+
 // --- unknown template / argument validation ---
 
 #[test]
