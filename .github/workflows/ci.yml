@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.1
         with:
           components: rustfmt, clippy, llvm-tools
 
@@ -82,7 +82,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.1
 
       - uses: Swatinem/rust-cache@v2
 
@@ -106,7 +106,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.1
 
       - uses: Swatinem/rust-cache@v2
 
@@ -125,6 +125,29 @@ jobs:
           name: mutants-report
           path: mutants.out
           if-no-files-found: ignore
+
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      # The pinned dev/CI toolchain (rust-toolchain.toml) is newer than
+      # the declared floor on purpose — this job is what actually keeps
+      # that floor honest rather than aspirational. rust-toolchain.toml
+      # would otherwise silently override the toolchain this job just
+      # installed (it takes precedence over `rustup default`), so
+      # RUSTUP_TOOLCHAIN forces the MSRV one for real.
+      - name: Install Rust (MSRV)
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check --workspace --all-targets
+        env:
+          RUSTUP_TOOLCHAIN: "1.88.0"
+        run: cargo check --workspace --all-targets
 
   deny:
     name: cargo-deny (advisories, licenses, bans)
@@ -146,6 +169,12 @@ jobs:
     runs-on: ubuntu-latest
     # 60s of fuzzing plus a nightly toolchain and cargo-fuzz build.
     timeout-minutes: 30
+    # rust-toolchain.toml pins a stable release for the rest of CI, but
+    # it takes precedence over `rustup default nightly` too (a toolchain
+    # file beats the default toolchain), which would otherwise silently
+    # hand cargo-fuzz's `-Z` flags to a stable rustc that rejects them.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     strategy:
       fail-fast: false
       matrix:

@@ -4,3 +4,8 @@ members = ["crates/*"]
 
 [workspace.package]
 license = "MIT OR Apache-2.0"
+# Let-chains (`&& let ...` in `if`/`while` conditions, used in
+# crates/hl-parser/src/compose.rs and crates/hl-cli/src/lib.rs) stabilized
+# in edition 2024 as of 1.88.0 — that's the real floor, not just edition
+# 2024's own 1.85 minimum.
+rust-version = "1.88"
