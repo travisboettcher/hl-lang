@@ -1418,11 +1418,29 @@ struct ListField {
     key: &'static str,
     take: fn(&mut ServiceFields) -> Vec<Reference>,
     set: fn(&mut ServiceFields, Vec<Reference>),
+    /// Whether repeats of an already-accumulated name are dropped
+    /// rather than appended (hl-lang#69). True for the set-like fields
+    /// — `networks`, `middleware`, `depends_on` — where naming the same
+    /// thing twice means exactly what naming it once means, so the
+    /// repeat is pure noise: it duplicated `networks:` entries and
+    /// `middlewares=` label values in the output, made a single
+    /// external network look like an ambiguity with itself, and (since
+    /// list size then doubled per composition level) turned a few
+    /// hundred bytes of nested `with` into an out-of-memory abort.
+    ///
+    /// False for `dns`, deliberately: order is observable there
+    /// (resolver priority), so its append semantics are left exactly as
+    /// they were even though a repeat is just as meaningless. False for
+    /// `expose.entrypoint` for the narrower reason that it wasn't part
+    /// of the decision on #69 — it has the same set-like shape and
+    /// could join later, but changing it isn't required by that fix.
+    dedupe: bool,
 }
 
 static LIST_FIELDS: &[ListField] = &[
     ListField {
         key: "expose.entrypoint",
+        dedupe: false,
         take: |f| {
             f.expose
                 .as_mut()
@@ -1448,31 +1466,39 @@ static LIST_FIELDS: &[ListField] = &[
     },
     ListField {
         key: "middleware",
+        dedupe: true,
         take: |f| std::mem::take(&mut f.middleware),
         set: |f, v| f.middleware = v,
     },
     ListField {
         key: "depends_on",
+        dedupe: true,
         take: |f| std::mem::take(&mut f.depends_on),
         set: |f, v| f.depends_on = v,
     },
     ListField {
         key: "networks",
+        dedupe: true,
         take: |f| std::mem::take(&mut f.networks),
         set: |f, v| f.networks = v,
     },
     ListField {
         key: "dns",
+        dedupe: false,
         take: |f| std::mem::take(&mut f.dns),
         set: |f, v| f.dns = v,
     },
 ];
 
 /// Merges one tier's [`ServiceFields`] into `acc`. List fields (`raw`,
-/// plus every [`LIST_FIELDS`] entry) always concatenate
-/// — see [`ComposeError::MapKeyCollision`]'s doc for why `raw` in
+/// plus every [`LIST_FIELDS`] entry) concatenate rather than collide —
+/// see [`ComposeError::MapKeyCollision`]'s doc for why `raw` in
 /// particular is never collision-checked, consistent with its existing
-/// intra-body no-uniqueness behavior.
+/// intra-body no-uniqueness behavior. The set-like reference lists
+/// concatenate *by distinct name*, dropping a repeat of a name an
+/// earlier tier (or an earlier entry of the same list) already
+/// contributed; see [`ListField::dedupe`] for which fields those are
+/// and why `dns` isn't one of them.
 fn merge_tier(
     acc: &mut MergeAcc,
     mut incoming: ServiceFields,
@@ -1493,11 +1519,38 @@ fn merge_tier(
     // relies on it (an empty list must round-trip as "field unset", not
     // as an `Expose` materialized to hold nothing), and
     // [`LIST_FIELDS`]'s `expose.entrypoint` `set` relies on it harder
-    // still — it reads `v[0]` for a span.
+    // still — it reads `v[0]` for a span. Deduping can't undermine
+    // that: a non-empty `values` whose every entry is dropped as a
+    // repeat can only happen when the accumulated list already held
+    // those names, i.e. was already non-empty.
     for field in LIST_FIELDS {
         let values = (field.take)(&mut incoming);
         if !values.is_empty() {
-            acc.lists.entry(field.key).or_default().extend(values);
+            let acc_values = acc.lists.entry(field.key).or_default();
+            if field.dedupe {
+                // First occurrence wins, so the accumulated order is
+                // still tier order (`defaults`, then each `with` target
+                // left-to-right, then the body's own list) with later
+                // repeats dropped — see [`ListField::dedupe`]. The
+                // linear scan is over a list whose length is now bounded
+                // by the number of *distinct* names, which is what makes
+                // this cheap and is the whole reason #69's exponential
+                // blowup stops here.
+                //
+                // Comparing by `Reference::name` alone is right because
+                // a qualified `networks [alias.name]` entry has already
+                // been rewritten to its resolved bare name by
+                // [`resolve_qualified_networks`] before any tier reaches
+                // this function, and the other deduped fields reject
+                // qualifiers outright.
+                for value in values {
+                    if !acc_values.iter().any(|held| held.name == value.name) {
+                        acc_values.push(value);
+                    }
+                }
+            } else {
+                acc_values.extend(values);
+            }
         }
     }
     merge_map(

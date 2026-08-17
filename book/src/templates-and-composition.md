@@ -123,7 +123,15 @@ Different field kinds merge differently:
 
 - **List fields** (`middleware`, `depends_on`, `networks`, `dns`)
   concatenate — no collision is possible, since there's nothing to
-  overwrite.
+  overwrite. The set-like ones — `middleware`, `depends_on` and
+  `networks` — concatenate *by distinct name*: naming the same network
+  in a template and again in the service's own body means what naming
+  it once means, so the repeat is dropped rather than emitted twice.
+  The first occurrence is the one kept, so the surviving order is still
+  `defaults`, then each `with` target left to right, then the body's own
+  entries. `dns` is the exception and keeps every entry, duplicates
+  included, because its order is resolver priority and is therefore
+  something you can observe.
 - **Map fields** (`volume`, `env`) merge key-by-key (or value-by-value
   for `volume`, since its uniqueness check is on the container-path
   side) — a genuine collision on the same key is the compile error case

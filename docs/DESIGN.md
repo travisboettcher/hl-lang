@@ -199,7 +199,9 @@ one line.
    reattaching elsewhere.
 4. **Repeatable-field accumulation** (semantic, not part of the CFG) —
    writing `volume`, `env`, `middleware`, or `depends_on` more than once in
-   one body appends, since those fields are list/map-kinded. Writing
+   one body appends, since those fields are list/map-kinded — subject to
+   the set-like lists' distinct-name rule under "Composition" below, which
+   drops a repeat of a name already present. Writing
    `image` or `restart` twice in the same body is a duplicate-scalar
    compile error.
 
@@ -276,7 +278,10 @@ Merge priority, lowest to highest:
    two of these on the same scalar/map field is a **compile error**
 3. the service's own body — always wins over everything
 
-List fields concatenate (no collision possible); map fields merge
+List fields concatenate (no collision possible) — the set-like ones
+(`middleware`, `depends_on`, `networks`) by *distinct* name, keeping the
+first occurrence, while `dns` keeps duplicates since its order is
+observable resolver priority; map fields merge
 key-by-key (or value-by-value for `volume`); scalar fields (`image`,
 `restart`) error on collision among explicit templates only. `expose`,
 the one built-in struct field with more than one sub-field, merges
