@@ -196,15 +196,14 @@ same two entries (#81).
    "..."`, the second comma starts a sibling field of `expose`, not a
    second entry point.
    A boolean struct field can always be set bare with no value, implying
-   `true` (e.g. `external` on `network`). Field-init shorthand (`{ port }`
-   standing in for `{ port: port }`, borrowed from Rust) and a bare
-   zero-field template invocation (`authenticated` with no `{ }`) are the
-   same grammar production as the comma-continuation case, disambiguated
-   only by schema lookup — one token of lookahead past the comma confirms
-   the next key genuinely names one of the nested type's own fields before
-   consuming it as part of this value; otherwise the comma (and whatever
-   follows) is left for the *enclosing* body, where a bare comma is never a
-   valid statement start and now correctly errors instead of silently
+   `true` (e.g. `external` on `network`). A bare zero-field template
+   invocation (`authenticated` with no `{ }`) is the same grammar
+   production as the comma-continuation case, disambiguated only by schema
+   lookup — one token of lookahead past the comma confirms the next key
+   genuinely names one of the nested type's own fields before consuming it
+   as part of this value; otherwise the comma (and whatever follows) is
+   left for the *enclosing* body, where a bare comma is never a valid
+   statement start and now correctly errors instead of silently
    reattaching elsewhere.
 4. **Repeatable-field accumulation** (semantic, not part of the CFG) —
    writing `volume`, `env`, `middleware`, or `depends_on` more than once in
