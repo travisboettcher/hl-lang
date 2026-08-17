@@ -1,0 +1,61 @@
+# cargo-deny configuration — advisories, licenses, and bans over the
+# full dependency graph. See https://embarkstudios.github.io/cargo-deny/
+# and the `deny` job in `.github/workflows/ci.yml`.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[advisories]
+# Deliberately empty: no advisory is ignored here. #76 raised
+# serde_yaml (crates/hl-codegen/Cargo.toml:10, deprecated by its own
+# author, "0.9.34+deprecated") as a still-open decision citing
+# RUSTSEC-2024-0370 — but that ID actually belongs to proc-macro-error,
+# a crate that isn't in this dependency tree, and the advisory
+# database (as of this writing) has no entry at all for serde_yaml
+# being unmaintained. There's nothing to ignore today; if RustSec ever
+# files one, an empty ignore list here means it surfaces in CI
+# immediately rather than being silently pre-suppressed.
+ignore = []
+
+[licenses]
+# Every license actually present in the dependency graph, verified via
+# `cargo deny check licenses` against this workspace's real Cargo.lock —
+# not a generic allow-list. All are permissive and compatible with the
+# workspace's own dual MIT/Apache-2.0 declaration (Cargo.toml's
+# [workspace.package]).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+# Left at the default ("warn") rather than "deny": the workspace's own
+# crates depend on each other by unversioned `path` deps (e.g.
+# crates/hl-cli/Cargo.toml's `hl-lexer = { path = "../hl-lexer" }`),
+# which trips this lint. cargo-deny's usual escape hatch,
+# allow-wildcard-paths, only exempts crates Cargo considers
+# unpublishable (`publish = false`) — and that field is deliberately
+# absent from every crate's Cargo.toml here: release-plz's
+# publishable_packages() filters out any `publish = false` package
+# before it ever reaches its git-tag/release logic, regardless of
+# release-plz.toml's own workspace-level publish/git_only config, which
+# silently broke the release pipeline the one time this repo tried it
+# (see 18800c9, "Drop per-crate publish = false: it silently disables
+# the release"). So there's no way to satisfy allow-wildcard-paths
+# without reintroducing that bug — "warn" still surfaces a real loose
+# external version requirement in CI output without hard-failing on
+# these internal ones.
+wildcards = "warn"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

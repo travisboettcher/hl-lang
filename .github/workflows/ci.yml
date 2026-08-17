@@ -149,6 +149,21 @@ jobs:
           RUSTUP_TOOLCHAIN: "1.88.0"
         run: cargo check --workspace --all-targets
 
+  deny:
+    name: cargo-deny (advisories, licenses, bans)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # deny.toml's [advisories] section deliberately ignores nothing —
+      # see its own comment and #76 for why (the serde_yaml decision
+      # that issue describes stays open; this job exists to surface it
+      # automatically if/when RustSec ever files an advisory for it).
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          command: check
+
   fuzz-smoke:
     name: fuzz smoke test (${{ matrix.target }})
     runs-on: ubuntu-latest

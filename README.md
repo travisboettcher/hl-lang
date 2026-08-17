@@ -105,6 +105,10 @@ cargo +nightly fuzz run --target x86_64-unknown-linux-gnu fuzz_pipeline -- -max_
 # mutants that hang rather than fail.
 cargo install cargo-mutants --locked
 cargo mutants --workspace --timeout-multiplier 3
+
+# Advisories, licenses, and dependency bans — see deny.toml.
+cargo install cargo-deny --locked
+cargo deny check
 ```
 
 Try the CLI (`hllc`) against an `.hll` file — `cargo run -p hl-cli --` runs
