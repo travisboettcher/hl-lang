@@ -22,6 +22,14 @@ pub enum LinkError {
         first: Span,
         second: Span,
     },
+    /// A `use` decl's path is absolute, or climbs (via `..`) above the
+    /// root the entry file's own path is relative to. `path` is the
+    /// importing file; `raw` is the offending path exactly as written.
+    PathEscape {
+        path: PathBuf,
+        raw: String,
+        span: Span,
+    },
     /// An error from the final [`hl_parser::compose_with_resolver`] pass.
     /// **Known limitation**: the wrapped error's own span(s) may belong
     /// to a *different* file than whichever one first comes to mind —
@@ -50,6 +58,14 @@ impl fmt::Display for LinkError {
                 second.col,
                 first.line,
                 first.col
+            ),
+            LinkError::PathEscape { path, raw, span } => write!(
+                f,
+                "{}:{}:{}: import path \"{raw}\" escapes the directory tree rooted at the entry \
+                 file (absolute paths and `..` above the root are not allowed)",
+                path.display(),
+                span.line,
+                span.col,
             ),
             LinkError::Compose(err) => write!(f, "{err}"),
         }
@@ -110,6 +126,21 @@ mod display_tests {
         assert_eq!(
             err.to_string(),
             "services/web.hll:5:3: duplicate alias `db` (first declared at 1:1)"
+        );
+    }
+
+    #[test]
+    fn path_escape_display() {
+        let err = LinkError::PathEscape {
+            path: PathBuf::from("services/web.hll"),
+            raw: "../../../../etc/passwd".to_string(),
+            span: span(1, 17),
+        };
+        assert_eq!(
+            err.to_string(),
+            "services/web.hll:1:17: import path \"../../../../etc/passwd\" escapes the \
+             directory tree rooted at the entry file (absolute paths and `..` above the \
+             root are not allowed)"
         );
     }
 

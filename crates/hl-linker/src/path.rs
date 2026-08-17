@@ -15,9 +15,29 @@ use std::path::{Component, Path, PathBuf};
 /// lexically collapses `.`/`..` components so two spellings of the same
 /// file (e.g. `a/b.hll` and `a/../a/b.hll`) resolve to the same
 /// [`PathBuf`] identity for the module graph's memoization.
-pub(crate) fn resolve_relative(from: &Path, raw: &str) -> PathBuf {
+///
+/// Returns `None` if `raw` is absolute, or if the normalized result still
+/// climbs above whatever root the entry file's own path is relative to
+/// (a leading `..` after collapsing) — both are treated as an attempt to
+/// escape the tree of files reachable from the entry point. This is
+/// lexical containment, not [`std::fs::canonicalize`]-based: it keeps
+/// [`crate::loader::FsLoader`] and [`crate::loader::InMemoryLoader`]'s
+/// identical path-identity behavior (see this module's own doc comment),
+/// at the cost of a known residual gap — a `..` *after* a symlinked
+/// component can still resolve outside the tree, since normalization
+/// never touches disk to see through the symlink. That's an accepted
+/// trade to preserve loader parity, not a bug to "fix" by adding
+/// `canonicalize` here.
+pub(crate) fn resolve_relative(from: &Path, raw: &str) -> Option<PathBuf> {
+    if Path::new(raw).is_absolute() {
+        return None;
+    }
     let base = from.parent().unwrap_or_else(|| Path::new(""));
-    normalize(&base.join(raw))
+    let resolved = normalize(&base.join(raw));
+    if matches!(resolved.components().next(), Some(Component::ParentDir)) {
+        return None;
+    }
+    Some(resolved)
 }
 
 /// Lexically collapses `.`/`..` components in `path`, without touching
@@ -52,7 +72,7 @@ mod tests {
         let from = Path::new("services/foo/service.hll");
         assert_eq!(
             resolve_relative(from, "../../shared/templates.hll"),
-            PathBuf::from("shared/templates.hll")
+            Some(PathBuf::from("shared/templates.hll"))
         );
     }
 
@@ -69,7 +89,7 @@ mod tests {
         let from = Path::new("templates/web.hll");
         assert_eq!(
             resolve_relative(from, "docker.hll"),
-            PathBuf::from("templates/docker.hll")
+            Some(PathBuf::from("templates/docker.hll"))
         );
     }
 
@@ -78,7 +98,27 @@ mod tests {
         let from = Path::new("service.hll");
         assert_eq!(
             resolve_relative(from, "templates.hll"),
-            PathBuf::from("templates.hll")
+            Some(PathBuf::from("templates.hll"))
         );
+    }
+
+    #[test]
+    fn absolute_raw_path_is_rejected() {
+        let from = Path::new("services/foo/service.hll");
+        assert_eq!(resolve_relative(from, "/etc/passwd"), None);
+    }
+
+    #[test]
+    fn dot_dot_climbing_above_the_entry_root_is_rejected() {
+        let from = Path::new("services/foo/service.hll");
+        assert_eq!(resolve_relative(from, "../../../../etc/hostname"), None);
+    }
+
+    #[test]
+    fn dot_dot_landing_exactly_on_the_root_is_rejected() {
+        // Normalizes to a bare `..`, which is still an escape attempt —
+        // there's no root-relative file that spelling could ever name.
+        let from = Path::new("a/service.hll");
+        assert_eq!(resolve_relative(from, "../.."), None);
     }
 }

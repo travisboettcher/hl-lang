@@ -148,7 +148,13 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
                             second: u.alias.span,
                         });
                     }
-                    let resolved = resolve_relative(&path, u.path.text());
+                    let resolved = resolve_relative(&path, u.path.text()).ok_or_else(|| {
+                        LinkError::PathEscape {
+                            path: path.clone(),
+                            raw: u.path.text().to_string(),
+                            span: u.path.span(),
+                        }
+                    })?;
                     let target_id = *path_to_id.entry(resolved.clone()).or_insert_with(|| {
                         let new_id = ModuleId(modules.len());
                         modules.push(Module::default());
