@@ -83,6 +83,14 @@ fn image_canonical_body_form() {
 }
 
 #[test]
+fn image_primary_value_shorthand_accepts_leading_colon() {
+    let program = parse_ok("service s {\n  image: \"foo/bar:latest\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    let image = service.fields.image.as_ref().unwrap();
+    assert_eq!(image.reference.as_ref().unwrap().text(), "foo/bar:latest");
+}
+
+#[test]
 fn duplicate_image_field_is_error() {
     let err = parse("service s {\n  image \"a\"\n  image \"b\"\n}\n").unwrap_err();
     assert!(matches!(
@@ -135,6 +143,15 @@ fn restart_primary_shorthand_string_policy() {
         .unwrap();
     assert_eq!(policy.text(), "unless-stopped");
     assert!(matches!(policy, Literal::Str(_, _)));
+}
+
+#[test]
+fn restart_primary_shorthand_accepts_leading_colon() {
+    let program = parse_ok("service s {\n  restart: unless-stopped\n}\n");
+    let service = as_service(&program.decls[0]);
+    let restart = service.fields.restart.as_ref().unwrap();
+    let policy = restart.policy.as_ref().unwrap();
+    assert_eq!(policy.text(), "unless-stopped");
 }
 
 #[test]
@@ -447,6 +464,18 @@ fn volume_arrow_sugar_bare_entry() {
 }
 
 #[test]
+fn volume_bare_entry_accepts_leading_colon() {
+    let program = parse_ok("service s {\n  volume: \"host\" -> \"container\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.volumes.entries.len(), 1);
+    assert_eq!(service.fields.volumes.entries[0].host.text(), "host");
+    assert_eq!(
+        service.fields.volumes.entries[0].container.text(),
+        "container"
+    );
+}
+
+#[test]
 fn volume_colon_canonical_entry() {
     let program = parse_ok("service s {\n  volume { \"syncthing-config\": \"/config\" }\n}\n");
     let service = as_service(&program.decls[0]);
@@ -523,6 +552,14 @@ fn volume_same_host_different_container_is_ok() {
 #[test]
 fn raw_allows_arbitrary_keys() {
     let program = parse_ok("service s {\n  raw {\n    privileged: true\n  }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.raw.entries.len(), 1);
+    assert_eq!(service.fields.raw.entries[0].key.text(), "privileged");
+}
+
+#[test]
+fn raw_accepts_leading_colon() {
+    let program = parse_ok("service s {\n  raw: {\n    privileged: true\n  }\n}\n");
     let service = as_service(&program.decls[0]);
     assert_eq!(service.fields.raw.entries.len(), 1);
     assert_eq!(service.fields.raw.entries[0].key.text(), "privileged");
