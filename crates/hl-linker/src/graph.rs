@@ -78,7 +78,7 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
     // parsed out of a module can be traced back to the file it came
     // from long after composition has merged it into a service that
     // borrowed fields from several files at once (#75).
-    let mut files = SourceMap::new();
+    let mut files = SourceMap::default();
     let mut path_to_id: HashMap<PathBuf, ModuleId> = HashMap::new();
     let mut queue: VecDeque<(ModuleId, PathBuf)> = VecDeque::new();
 

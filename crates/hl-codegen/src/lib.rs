@@ -420,12 +420,15 @@ fn resolve_networks(
 #[cfg(test)]
 mod error_display_tests {
     use super::*;
+    use hl_parser::FileId;
 
     fn span() -> Span {
         Span {
+            start: 0,
+            end: 0,
             line: 3,
             col: 5,
-            ..Span::default()
+            file: FileId::ANONYMOUS,
         }
     }
 
@@ -435,15 +438,16 @@ mod error_display_tests {
     /// in a file the user was never told about (#75).
     #[test]
     fn display_with_a_source_map_names_the_file() {
-        let mut files = SourceMap::new();
+        let mut files = SourceMap::default();
         let lib = files.intern("shared/templates.hll");
         let err = CodegenError::UnknownInterpolation {
             binding: "nmae".to_string(),
             span: Span {
+                start: 0,
+                end: 0,
                 line: 4,
                 col: 22,
                 file: lib,
-                ..Span::default()
             },
         };
         assert_eq!(
@@ -458,7 +462,7 @@ mod error_display_tests {
     /// `hl_parser::parse`, say) still renders, just without a path.
     #[test]
     fn display_with_a_source_map_falls_back_for_anonymous_spans() {
-        let mut files = SourceMap::new();
+        let mut files = SourceMap::default();
         files.intern("entry.hll");
         let err = CodegenError::MissingImage {
             service: "web".to_string(),

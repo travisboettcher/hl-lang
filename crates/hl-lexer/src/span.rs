@@ -55,12 +55,6 @@ pub struct SourceMap {
 }
 
 impl SourceMap {
-    /// Creates an empty map, in which every [`FileId`] resolves to
-    /// nothing.
-    pub fn new() -> Self {
-        SourceMap::default()
-    }
-
     /// Returns the [`FileId`] for `path`, adding it to the map if it
     /// isn't there yet. Interning the same path twice returns the same
     /// id, so callers don't have to memoize themselves.
@@ -160,7 +154,12 @@ impl fmt::Display for Location<'_> {
 /// file, which no `.hll` file will approach; past it, the lexer saturates
 /// rather than wrapping, so offsets degrade instead of pointing
 /// somewhere wrong.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// Deliberately *not* `Default`: a span with no position is not a
+/// meaningful value, and making one available would let a mutated
+/// `fn span(&self) -> Span` fabricate one (`cargo mutants` in CI treats
+/// that as an escaped mutant).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
     pub start: u32,
     pub end: u32,
@@ -205,16 +204,17 @@ mod tests {
     fn anonymous_is_the_default_and_resolves_to_nothing() {
         assert_eq!(FileId::default(), FileId::ANONYMOUS);
         assert!(FileId::ANONYMOUS.is_anonymous());
-        let mut files = SourceMap::new();
+        let mut files = SourceMap::default();
         assert!(files.is_empty());
         let real = files.intern("a.hll");
         assert!(!real.is_anonymous());
+        assert!(!files.is_empty());
         assert_eq!(files.path(FileId::ANONYMOUS), None);
     }
 
     #[test]
     fn interning_is_stable_and_deduplicating() {
-        let mut files = SourceMap::new();
+        let mut files = SourceMap::default();
         let a = files.intern("a.hll");
         let b = files.intern(PathBuf::from("dir/b.hll"));
         assert_eq!(files.intern("a.hll"), a);
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn locate_renders_path_line_col_when_the_file_is_known() {
-        let mut files = SourceMap::new();
+        let mut files = SourceMap::default();
         let a = files.intern("shared/base.hll");
         assert_eq!(
             span(2, 11, a).locate(Some(&files)).to_string(),
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn locate_falls_back_to_bare_line_col() {
-        let files = SourceMap::new();
+        let files = SourceMap::default();
         let anon = span(2, 11, FileId::ANONYMOUS);
         assert_eq!(anon.locate(None).to_string(), "2:11");
         assert_eq!(anon.locate(Some(&files)).to_string(), "2:11");
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn location_exposes_its_parts() {
-        let mut files = SourceMap::new();
+        let mut files = SourceMap::default();
         let a = files.intern("a.hll");
         let loc = span(3, 4, a).locate(Some(&files));
         assert_eq!(loc.path(), Some(Path::new("a.hll")));

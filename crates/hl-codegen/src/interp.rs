@@ -51,6 +51,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hl_parser::FileId;
 
     fn bindings() -> HashMap<&'static str, &'static str> {
         HashMap::from([("name", "syncthing")])
@@ -58,9 +59,11 @@ mod tests {
 
     fn span() -> Span {
         Span {
+            start: 0,
+            end: 0,
             line: 1,
             col: 1,
-            ..Span::default()
+            file: FileId::ANONYMOUS,
         }
     }
 

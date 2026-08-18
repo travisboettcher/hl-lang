@@ -464,13 +464,69 @@ impl std::error::Error for ComposeError {}
 #[cfg(test)]
 mod error_display_tests {
     use super::*;
+    use hl_lexer::FileId;
 
     fn span(line: u32, col: u32) -> Span {
         Span {
+            start: 0,
+            end: 0,
             line,
             col,
-            ..Span::default()
+            file: FileId::ANONYMOUS,
         }
+    }
+
+    /// A span in a file the map knows renders `path:line:col`, and each
+    /// location in a two-location error resolves independently — the
+    /// point of #75, since the two templates in a collision routinely
+    /// live in different files.
+    #[test]
+    fn display_with_a_source_map_names_each_location_s_file() {
+        let mut files = SourceMap::default();
+        let one = files.intern("t1.hll");
+        let two = files.intern("t2.hll");
+        let at = |line, col, file| Span {
+            start: 0,
+            end: 0,
+            line,
+            col,
+            file,
+        };
+        let err = ComposeError::FieldCollision {
+            field: "restart.policy",
+            first_template: "x".to_string(),
+            second_template: "y".to_string(),
+            first: at(2, 11, one),
+            second: at(2, 11, two),
+        };
+        assert_eq!(
+            err.display(&files).to_string(),
+            "t2.hll:2:11: field `restart.policy` set by both template `x` (at t1.hll:2:11) \
+             and template `y` — explicit templates must not conflict"
+        );
+        // Bare `Display` is what the single-file `compose` entry point
+        // gets, and is unchanged.
+        assert_eq!(
+            err.to_string(),
+            "2:11: field `restart.policy` set by both template `x` (at 2:11) and template `y` \
+             — explicit templates must not conflict"
+        );
+    }
+
+    /// A span whose file the map doesn't know still renders, just
+    /// without a path.
+    #[test]
+    fn display_with_a_source_map_falls_back_for_anonymous_spans() {
+        let mut files = SourceMap::default();
+        files.intern("entry.hll");
+        let err = ComposeError::UnknownTemplate {
+            name: "base".to_string(),
+            span: span(3, 2),
+        };
+        assert_eq!(
+            err.display(&files).to_string(),
+            "3:2: unknown template `base`"
+        );
     }
 
     #[test]

@@ -94,12 +94,15 @@ impl std::error::Error for LinkError {}
 mod display_tests {
     use super::*;
     use hl_parser::ComposeError;
+    use hl_parser::FileId;
 
     fn span(line: u32, col: u32) -> Span {
         Span {
+            start: 0,
+            end: 0,
             line,
             col,
-            ..Span::default()
+            file: FileId::ANONYMOUS,
         }
     }
 
@@ -166,14 +169,14 @@ mod display_tests {
                 name: "base".to_string(),
                 span: span(7, 2),
             },
-            &SourceMap::new(),
+            &SourceMap::default(),
         );
         assert_eq!(err.to_string(), "7:2: unknown template `base`");
     }
 
     #[test]
     fn compose_display_names_the_file_of_every_location() {
-        let mut files = SourceMap::new();
+        let mut files = SourceMap::default();
         let one = files.intern("t1.hll");
         let two = files.intern("t2.hll");
         let err = LinkError::compose(
@@ -182,16 +185,18 @@ mod display_tests {
                 first_template: "x".to_string(),
                 second_template: "y".to_string(),
                 first: Span {
+                    start: 0,
+                    end: 0,
                     line: 2,
                     col: 11,
                     file: one,
-                    ..Span::default()
                 },
                 second: Span {
+                    start: 0,
+                    end: 0,
                     line: 2,
                     col: 11,
                     file: two,
-                    ..Span::default()
                 },
             },
             &files,
