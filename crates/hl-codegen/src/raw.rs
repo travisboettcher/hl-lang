@@ -85,7 +85,7 @@ pub fn scalar_value(lit: &Literal) -> serde_yaml_ng::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hl_parser::Span;
+    use hl_parser::{FileId, Span};
 
     fn span() -> Span {
         Span {
@@ -93,6 +93,7 @@ mod tests {
             end: 0,
             line: 1,
             col: 1,
+            file: FileId::ANONYMOUS,
         }
     }
 

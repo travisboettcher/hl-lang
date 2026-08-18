@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use hl_lexer::{Lexer, Span, Token, TokenKind};
+use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
     EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Param, ParamType, Program, RawEntry,
@@ -45,7 +45,22 @@ pub const MAX_RAW_VALUE_DEPTH: usize = 128;
 /// before parsing can even start, stopping at the first one meant a
 /// second, later mistake could sit hidden for another run.
 pub fn parse(source: &str) -> Result<Program, ParseError> {
-    let tokens = Lexer::tokenize_collecting_errors(source).map_err(ParseError::Lex)?;
+    parse_in_file(source, FileId::ANONYMOUS)
+}
+
+/// [`parse`], stamping `file` into every [`Span`] the resulting AST
+/// carries.
+///
+/// This is the entry point the linker uses: it interns each module's
+/// path into a [`hl_lexer::SourceMap`] as it loads it and parses that
+/// module through here, so a span still knows which file it came from
+/// after composition has merged declarations from several modules into
+/// one service — which is what lets a diagnostic print `path:line:col`
+/// for *each* location it mentions, even when they're in different
+/// files (#75).
+pub fn parse_in_file(source: &str, file: FileId) -> Result<Program, ParseError> {
+    let tokens =
+        Lexer::tokenize_collecting_errors_in_file(source, file).map_err(ParseError::Lex)?;
     Parser::new(tokens).parse_program()
 }
 
@@ -211,6 +226,7 @@ impl<'src> Parser<'src> {
             end: name_tok.span.end,
             line: dollar.span.line,
             col: dollar.span.col,
+            file: dollar.span.file,
         };
         let name = name_tok.lexeme.to_string();
         match &self.template_params {
@@ -260,6 +276,7 @@ impl<'src> Parser<'src> {
                 end: name_tok.span.end,
                 line: qualifier.span.line,
                 col: qualifier.span.col,
+                file: qualifier.span.file,
             };
             return Ok(Reference {
                 qualifier: Some(qualifier),
@@ -390,6 +407,7 @@ impl<'src> Parser<'src> {
             end,
             line: start_span.line,
             col: start_span.col,
+            file: start_span.file,
         };
         Ok(TemplateInvocation {
             qualifier,
@@ -481,6 +499,7 @@ impl<'src> Parser<'src> {
             end: close.span.end,
             line: open.span.line,
             col: open.span.col,
+            file: open.span.file,
         };
         Ok((fields, span))
     }
@@ -587,6 +606,7 @@ impl<'src> Parser<'src> {
                 end: last_end,
                 line: start_span.line,
                 col: start_span.col,
+                file: start_span.file,
             };
             return Ok((fields, span));
         }
@@ -631,6 +651,7 @@ impl<'src> Parser<'src> {
             end: last_end,
             line: start_span.line,
             col: start_span.col,
+            file: start_span.file,
         };
         Ok((fields, span))
     }
@@ -863,6 +884,7 @@ impl<'src> Parser<'src> {
                 end: second.span().end,
                 line: first.span().line,
                 col: first.span().col,
+                file: first.span().file,
             };
             Ok((first, second, span))
         } else {
@@ -902,6 +924,7 @@ impl<'src> Parser<'src> {
             end: value.span().end,
             line: key.span().line,
             col: key.span().col,
+            file: key.span().file,
         };
         Ok(RawEntry { key, value, span })
     }
@@ -953,6 +976,7 @@ impl<'src> Parser<'src> {
                     end: close.span.end,
                     line: open.span.line,
                     col: open.span.col,
+                    file: open.span.file,
                 };
                 Ok(RawValue::List(items, span))
             }
@@ -974,6 +998,7 @@ impl<'src> Parser<'src> {
                     end: close.span.end,
                     line: open.span.line,
                     col: open.span.col,
+                    file: open.span.file,
                 };
                 Ok(RawValue::Map(entries, span))
             }
@@ -1019,6 +1044,7 @@ impl<'src> Parser<'src> {
             end: body_span.end,
             line: type_tok.span.line,
             col: type_tok.span.col,
+            file: type_tok.span.file,
         };
 
         match schema.type_name {
@@ -1054,6 +1080,7 @@ impl<'src> Parser<'src> {
             end: alias.span.end,
             line: use_tok.span.line,
             col: use_tok.span.col,
+            file: use_tok.span.file,
         };
         Ok(UseDecl { path, alias, span })
     }
@@ -1093,6 +1120,7 @@ impl<'src> Parser<'src> {
                     end,
                     line: stmt_start.line,
                     col: stmt_start.col,
+                    file: stmt_start.file,
                 },
             )
         } else if self.peek().kind == TokenKind::LBrace {
@@ -1107,6 +1135,7 @@ impl<'src> Parser<'src> {
             end: body_span.end,
             line: template_tok.span.line,
             col: template_tok.span.col,
+            file: template_tok.span.file,
         };
 
         Ok(TemplateDecl {

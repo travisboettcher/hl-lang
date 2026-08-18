@@ -309,6 +309,7 @@ impl std::error::Error for ParseError {}
 #[cfg(test)]
 mod display_tests {
     use super::*;
+    use hl_lexer::FileId;
 
     fn span(line: u32, col: u32) -> Span {
         Span {
@@ -316,6 +317,7 @@ mod display_tests {
             end: 0,
             line,
             col,
+            file: FileId::ANONYMOUS,
         }
     }
 

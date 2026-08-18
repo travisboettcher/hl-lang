@@ -55,9 +55,19 @@ use hl_parser::{ComposedProgram, compose_with_resolver};
 /// [`FileLoader`]) — eagerly, in one pass, before composing anything —
 /// then resolves every `template`/`with` composition and cross-file
 /// `alias.name` reference into one [`ComposedProgram`].
+///
+/// The returned [`ComposedProgram`] carries the graph's
+/// [`hl_parser::SourceMap`] in its `files` field, so a codegen
+/// diagnostic raised further down the pipeline can still name the file
+/// any span came from — including a field that a service inherited from
+/// a template in some imported file (#75). Errors raised here resolve
+/// their own spans the same way before rendering.
 pub fn link(entry: &Path, loader: &dyn FileLoader) -> Result<ComposedProgram, LinkError> {
     let mut graph = graph::build(entry, loader)?;
     let (networks, services) = graph.take_entry();
     let entry_scope = graph.entry_scope();
-    compose_with_resolver(networks, services, entry_scope, &graph).map_err(LinkError::Compose)
+    let mut composed = compose_with_resolver(networks, services, entry_scope, &graph)
+        .map_err(|err| LinkError::compose(err, graph.files()))?;
+    composed.files = graph.files().clone();
+    Ok(composed)
 }

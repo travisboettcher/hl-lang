@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use hl_lexer::Span;
+use hl_lexer::{SourceMap, Span};
 
 use crate::ast::{
     EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, ParamType, Program, RawMap, RawValue,
@@ -62,6 +62,15 @@ pub const MAX_TEMPLATE_DEPTH: usize = 64;
 pub struct ComposedProgram {
     pub networks: Vec<Network>,
     pub services: Vec<Service>,
+    /// Resolves the [`hl_lexer::FileId`] on any [`Span`] reachable from
+    /// this program back to the file it came from, so a codegen
+    /// diagnostic can name that file (#75).
+    ///
+    /// Empty for [`compose`], which is handed one already-parsed
+    /// [`Program`] and never learns where it came from; `hl_linker`'s
+    /// `link` fills it in with the module graph's own map, since that's
+    /// the layer that actually reads the files.
+    pub files: SourceMap,
 }
 
 /// An error raised while resolving `template`/`with` composition.
@@ -288,55 +297,67 @@ impl ComposeError {
             ComposeError::MapKeyCollision(details) => details.second,
         }
     }
-}
 
-impl fmt::Display for ComposeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let span = self.span();
+    /// Renders this error with each location it mentions resolved
+    /// against `files` — `path:line:col` instead of a bare `line:col`.
+    ///
+    /// A composed service's fields can come from any file in the `use`
+    /// graph, so the two locations in a collision error routinely live
+    /// in *different* files; naming both is the whole point of carrying
+    /// a [`FileId`](hl_lexer::FileId) on every [`Span`] (#75). Spans
+    /// whose file `files` doesn't know still render bare, which is what
+    /// the single-file [`Display`](fmt::Display) impl relies on.
+    pub fn display<'a>(&'a self, files: &'a SourceMap) -> impl fmt::Display + 'a {
+        DisplayComposeError {
+            error: self,
+            files: Some(files),
+        }
+    }
+
+    /// The one implementation behind both [`Self::display`] and the
+    /// [`Display`](fmt::Display) impl — every location goes through
+    /// [`Span::locate`], so the two renderings can't drift apart.
+    fn write(&self, f: &mut fmt::Formatter<'_>, files: Option<&SourceMap>) -> fmt::Result {
+        let at = self.span().locate(files);
         match self {
             ComposeError::UnknownTemplate { name, .. } => {
-                write!(f, "{}:{}: unknown template `{name}`", span.line, span.col)
+                write!(f, "{at}: unknown template `{name}`")
             }
             ComposeError::DuplicateTemplateName { name, first, .. } => write!(
                 f,
-                "{}:{}: duplicate template `{name}` (first declared at {}:{})",
-                span.line, span.col, first.line, first.col
+                "{at}: duplicate template `{name}` (first declared at {})",
+                first.locate(files)
             ),
             ComposeError::DuplicateServiceName { name, first, .. } => write!(
                 f,
-                "{}:{}: duplicate service `{name}` (first declared at {}:{})",
-                span.line, span.col, first.line, first.col
+                "{at}: duplicate service `{name}` (first declared at {})",
+                first.locate(files)
             ),
             ComposeError::DuplicateNetworkName { name, first, .. } => write!(
                 f,
-                "{}:{}: duplicate network `{name}` (first declared at {}:{})",
-                span.line, span.col, first.line, first.col
+                "{at}: duplicate network `{name}` (first declared at {})",
+                first.locate(files)
             ),
             ComposeError::TemplateCycle { chain, .. } => write!(
                 f,
-                "{}:{}: template composition cycle: {}",
-                span.line,
-                span.col,
+                "{at}: template composition cycle: {}",
                 chain.join(" -> ")
             ),
             ComposeError::TemplateNestingTooDeep { name, limit, .. } => write!(
                 f,
-                "{}:{}: `with` nesting deeper than {limit} levels (reached at template `{name}`)",
-                span.line, span.col
+                "{at}: `with` nesting deeper than {limit} levels (reached at template `{name}`)"
             ),
             ComposeError::UnknownTemplateArgument {
                 template, argument, ..
             } => write!(
                 f,
-                "{}:{}: unknown argument `{argument}` for template `{template}`",
-                span.line, span.col
+                "{at}: unknown argument `{argument}` for template `{template}`"
             ),
             ComposeError::MissingTemplateArgument {
                 template, param, ..
             } => write!(
                 f,
-                "{}:{}: missing required argument `{param}` for template `{template}`",
-                span.line, span.col
+                "{at}: missing required argument `{param}` for template `{template}`"
             ),
             ComposeError::DuplicateTemplateArgument {
                 template,
@@ -345,15 +366,14 @@ impl fmt::Display for ComposeError {
                 ..
             } => write!(
                 f,
-                "{}:{}: duplicate argument `{argument}` for template `{template}` (first set at {}:{})",
-                span.line, span.col, first.line, first.col
+                "{at}: duplicate argument `{argument}` for template `{template}` (first set at {})",
+                first.locate(files)
             ),
             ComposeError::TemplateArgumentNotScalar {
                 template, param, ..
             } => write!(
                 f,
-                "{}:{}: argument `{param}` for template `{template}` must be a scalar value (a list/map can't fill a single-value field)",
-                span.line, span.col
+                "{at}: argument `{param}` for template `{template}` must be a scalar value (a list/map can't fill a single-value field)"
             ),
             ComposeError::ArgumentTypeMismatch {
                 template,
@@ -363,8 +383,7 @@ impl fmt::Display for ComposeError {
                 ..
             } => write!(
                 f,
-                "{}:{}: argument `{param}` for template `{template}` must be a {expected} (found {found})",
-                span.line, span.col
+                "{at}: argument `{param}` for template `{template}` must be a {expected} (found {found})"
             ),
             ComposeError::FieldCollision {
                 field,
@@ -374,8 +393,8 @@ impl fmt::Display for ComposeError {
                 ..
             } => write!(
                 f,
-                "{}:{}: field `{field}` set by both template `{first_template}` (at {}:{}) and template `{second_template}` — explicit templates must not conflict",
-                span.line, span.col, first.line, first.col
+                "{at}: field `{field}` set by both template `{first_template}` (at {}) and template `{second_template}` — explicit templates must not conflict",
+                first.locate(files)
             ),
             ComposeError::MapKeyCollision(details) => {
                 let side_desc = match details.side {
@@ -384,43 +403,59 @@ impl fmt::Display for ComposeError {
                 };
                 write!(
                     f,
-                    "{}:{}: `{}` {side_desc} {:?} set by both template `{}` (at {}:{}) and template `{}` — explicit templates must not conflict",
-                    span.line,
-                    span.col,
+                    "{at}: `{}` {side_desc} {:?} set by both template `{}` (at {}) and template `{}` — explicit templates must not conflict",
                     details.field,
                     details.key,
                     details.first_template,
-                    details.first.line,
-                    details.first.col,
+                    details.first.locate(files),
                     details.second_template,
                 )
             }
             ComposeError::UnknownAlias { alias, .. } => {
-                write!(f, "{}:{}: unknown alias `{alias}`", span.line, span.col)
+                write!(f, "{at}: unknown alias `{alias}`")
             }
             ComposeError::UnsupportedQualifiedReference { field, alias, .. } => write!(
                 f,
-                "{}:{}: `{field}` doesn't support a qualified reference yet (`{alias}.` ...)",
-                span.line, span.col
+                "{at}: `{field}` doesn't support a qualified reference yet (`{alias}.` ...)"
             ),
             ComposeError::ParameterizedDefaults { param, .. } => write!(
                 f,
-                "{}:{}: template `defaults` must not declare parameters (`{param}`) — it's applied implicitly to every service, so there's no call site to bind them",
-                span.line, span.col
+                "{at}: template `defaults` must not declare parameters (`{param}`) — it's applied implicitly to every service, so there's no call site to bind them"
             ),
-            ComposeError::UnknownQualifiedNetwork { alias, name, .. } => write!(
-                f,
-                "{}:{}: no network `{name}` in `{alias}`",
-                span.line, span.col
-            ),
+            ComposeError::UnknownQualifiedNetwork { alias, name, .. } => {
+                write!(f, "{at}: no network `{name}` in `{alias}`")
+            }
             ComposeError::CollidingImportedNetwork { alias, name, .. } => write!(
                 f,
-                "{}:{}: `{alias}.{name}` collides with another network named `{name}` \
+                "{at}: `{alias}.{name}` collides with another network named `{name}` \
                  already in scope — networks are resolved by their bare name, so the \
-                 two can't be told apart; rename one of them",
-                span.line, span.col
+                 two can't be told apart; rename one of them"
             ),
         }
+    }
+}
+
+/// [`ComposeError::display`]'s return type: the error plus the map its
+/// spans resolve against.
+struct DisplayComposeError<'a> {
+    error: &'a ComposeError,
+    files: Option<&'a SourceMap>,
+}
+
+impl fmt::Display for DisplayComposeError<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.write(f, self.files)
+    }
+}
+
+impl fmt::Display for ComposeError {
+    /// Renders every location as a bare `line:col`, with no file — the
+    /// right thing for the single-file [`compose`] entry point, whose
+    /// spans have no file identity to render. A caller that has a
+    /// [`SourceMap`] (the linker, and through it the CLI) wants
+    /// [`ComposeError::display`] instead.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.write(f, None)
     }
 }
 
@@ -429,6 +464,7 @@ impl std::error::Error for ComposeError {}
 #[cfg(test)]
 mod error_display_tests {
     use super::*;
+    use hl_lexer::FileId;
 
     fn span(line: u32, col: u32) -> Span {
         Span {
@@ -436,7 +472,61 @@ mod error_display_tests {
             end: 0,
             line,
             col,
+            file: FileId::ANONYMOUS,
         }
+    }
+
+    /// A span in a file the map knows renders `path:line:col`, and each
+    /// location in a two-location error resolves independently — the
+    /// point of #75, since the two templates in a collision routinely
+    /// live in different files.
+    #[test]
+    fn display_with_a_source_map_names_each_location_s_file() {
+        let mut files = SourceMap::default();
+        let one = files.intern("t1.hll");
+        let two = files.intern("t2.hll");
+        let at = |line, col, file| Span {
+            start: 0,
+            end: 0,
+            line,
+            col,
+            file,
+        };
+        let err = ComposeError::FieldCollision {
+            field: "restart.policy",
+            first_template: "x".to_string(),
+            second_template: "y".to_string(),
+            first: at(2, 11, one),
+            second: at(2, 11, two),
+        };
+        assert_eq!(
+            err.display(&files).to_string(),
+            "t2.hll:2:11: field `restart.policy` set by both template `x` (at t1.hll:2:11) \
+             and template `y` — explicit templates must not conflict"
+        );
+        // Bare `Display` is what the single-file `compose` entry point
+        // gets, and is unchanged.
+        assert_eq!(
+            err.to_string(),
+            "2:11: field `restart.policy` set by both template `x` (at 2:11) and template `y` \
+             — explicit templates must not conflict"
+        );
+    }
+
+    /// A span whose file the map doesn't know still renders, just
+    /// without a path.
+    #[test]
+    fn display_with_a_source_map_falls_back_for_anonymous_spans() {
+        let mut files = SourceMap::default();
+        files.intern("entry.hll");
+        let err = ComposeError::UnknownTemplate {
+            name: "base".to_string(),
+            span: span(3, 2),
+        };
+        assert_eq!(
+            err.display(&files).to_string(),
+            "3:2: unknown template `base`"
+        );
     }
 
     #[test]
@@ -919,6 +1009,9 @@ pub fn compose_with_resolver<R: SymbolResolver>(
     Ok(ComposedProgram {
         networks: all_networks,
         services: composed,
+        // Composition never reads a file, so it has no paths to intern;
+        // the linker attaches its own map to what this returns.
+        files: SourceMap::default(),
     })
 }
 
@@ -926,9 +1019,11 @@ pub fn compose_with_resolver<R: SymbolResolver>(
 /// `networks [alias.name]` reference, kept together with the reference
 /// that pulled it in. The reference's own span is what
 /// [`ComposeError::CollidingImportedNetwork`] points at: the imported
-/// declaration itself lives in another file, and a [`Span`] carries no
-/// file identity, so its line/column would be read against the wrong
-/// source.
+/// declaration lives in another file, and the reference is the line the
+/// user would edit to resolve the collision. (Both spans now know which
+/// file they belong to — see [`hl_lexer::FileId`] — so pointing at the
+/// declaration instead would be renderable; it just isn't the more
+/// useful location.)
 struct ImportedNetwork {
     network: Network,
     alias: String,

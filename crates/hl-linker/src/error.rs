@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use hl_parser::{ComposeError, ParseError, Span};
+use hl_parser::{ComposeError, ParseError, SourceMap, Span};
 
 /// An error raised while loading and linking a `use` graph. Mirrors
 /// [`hl_parser::ParseError`]/[`ComposeError`]'s design (structured, no
@@ -30,14 +30,30 @@ pub enum LinkError {
         raw: String,
         span: Span,
     },
-    /// An error from the final [`hl_parser::compose_with_resolver`] pass.
-    /// **Known limitation**: the wrapped error's own span(s) may belong
-    /// to a *different* file than whichever one first comes to mind —
-    /// `Span` carries no file identity, so a compound error spanning two
-    /// imported files (e.g. a field collision between a template in one
-    /// file and one in another) can't be safely prefixed with a single
-    /// path. Rather than guess, this renders the bare underlying message.
-    Compose(ComposeError),
+    /// An error from the final [`hl_parser::compose_with_resolver`]
+    /// pass, or from a duplicate declaration caught while building the
+    /// module graph.
+    ///
+    /// Carries the graph's own [`SourceMap`] rather than a single path:
+    /// the wrapped error's spans may well belong to *different* files (a
+    /// field collision between a template in one imported file and one
+    /// in another is the canonical case), and each of them knows which,
+    /// so `Display` renders every location as its own `path:line:col`
+    /// instead of guessing one path for the lot (#75).
+    Compose {
+        source: ComposeError,
+        files: SourceMap,
+    },
+}
+
+impl LinkError {
+    /// Wraps `source` together with the map its spans resolve against.
+    pub(crate) fn compose(source: ComposeError, files: &SourceMap) -> LinkError {
+        LinkError::Compose {
+            source,
+            files: files.clone(),
+        }
+    }
 }
 
 impl fmt::Display for LinkError {
@@ -67,7 +83,7 @@ impl fmt::Display for LinkError {
                 span.line,
                 span.col,
             ),
-            LinkError::Compose(err) => write!(f, "{err}"),
+            LinkError::Compose { source, files } => write!(f, "{}", source.display(files)),
         }
     }
 }
@@ -78,6 +94,7 @@ impl std::error::Error for LinkError {}
 mod display_tests {
     use super::*;
     use hl_parser::ComposeError;
+    use hl_parser::FileId;
 
     fn span(line: u32, col: u32) -> Span {
         Span {
@@ -85,6 +102,7 @@ mod display_tests {
             end: 0,
             line,
             col,
+            file: FileId::ANONYMOUS,
         }
     }
 
@@ -145,11 +163,48 @@ mod display_tests {
     }
 
     #[test]
-    fn compose_display() {
-        let err = LinkError::Compose(ComposeError::UnknownTemplate {
-            name: "base".to_string(),
-            span: span(7, 2),
-        });
+    fn compose_display_without_a_known_file() {
+        let err = LinkError::compose(
+            ComposeError::UnknownTemplate {
+                name: "base".to_string(),
+                span: span(7, 2),
+            },
+            &SourceMap::default(),
+        );
         assert_eq!(err.to_string(), "7:2: unknown template `base`");
+    }
+
+    #[test]
+    fn compose_display_names_the_file_of_every_location() {
+        let mut files = SourceMap::default();
+        let one = files.intern("t1.hll");
+        let two = files.intern("t2.hll");
+        let err = LinkError::compose(
+            ComposeError::FieldCollision {
+                field: "restart.policy",
+                first_template: "x".to_string(),
+                second_template: "y".to_string(),
+                first: Span {
+                    start: 0,
+                    end: 0,
+                    line: 2,
+                    col: 11,
+                    file: one,
+                },
+                second: Span {
+                    start: 0,
+                    end: 0,
+                    line: 2,
+                    col: 11,
+                    file: two,
+                },
+            },
+            &files,
+        );
+        assert_eq!(
+            err.to_string(),
+            "t2.hll:2:11: field `restart.policy` set by both template `x` (at t1.hll:2:11) \
+             and template `y` — explicit templates must not conflict"
+        );
     }
 }

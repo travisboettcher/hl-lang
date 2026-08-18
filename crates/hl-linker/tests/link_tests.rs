@@ -176,7 +176,7 @@ fn imports_are_not_transitive() {
     let err = link(Path::new("service.hll"), &loader).expect_err("expected a link error");
     assert!(matches!(
         err,
-        LinkError::Compose(ComposeError::UnknownAlias { alias, .. }) if alias == "traefik"
+        LinkError::Compose { source: ComposeError::UnknownAlias { alias, .. }, .. } if alias == "traefik"
     ));
 }
 
@@ -302,7 +302,7 @@ fn unknown_qualified_network_is_error() {
     let err = link(Path::new("service.hll"), &loader).expect_err("expected a link error");
     assert!(matches!(
         err,
-        LinkError::Compose(ComposeError::UnknownQualifiedNetwork { alias, name, .. })
+        LinkError::Compose { source: ComposeError::UnknownQualifiedNetwork { alias, name, .. }, .. }
             if alias == "traefik" && name == "nonexistent"
     ));
 }
@@ -323,7 +323,7 @@ fn unknown_qualified_template_is_error() {
     let err = link(Path::new("service.hll"), &loader).expect_err("expected a link error");
     assert!(matches!(
         err,
-        LinkError::Compose(ComposeError::UnknownTemplate { name, .. })
+        LinkError::Compose { source: ComposeError::UnknownTemplate { name, .. }, .. }
             if name == "nonexistent"
     ));
 }
@@ -342,7 +342,7 @@ fn duplicate_service_name_in_one_file_is_error() {
     let err = link(Path::new("service.hll"), &loader).expect_err("expected a link error");
     assert!(matches!(
         err,
-        LinkError::Compose(ComposeError::DuplicateServiceName { name, .. }) if name == "web"
+        LinkError::Compose { source: ComposeError::DuplicateServiceName { name, .. }, .. } if name == "web"
     ));
 }
 
@@ -365,7 +365,7 @@ fn duplicate_service_name_in_an_imported_file_is_error() {
     let err = link(Path::new("service.hll"), &loader).expect_err("expected a link error");
     assert!(matches!(
         err,
-        LinkError::Compose(ComposeError::DuplicateServiceName { name, .. }) if name == "web"
+        LinkError::Compose { source: ComposeError::DuplicateServiceName { name, .. }, .. } if name == "web"
     ));
 }
 
@@ -384,7 +384,7 @@ fn duplicate_network_name_in_one_file_is_error() {
     let err = link(Path::new("service.hll"), &loader).expect_err("expected a link error");
     assert!(matches!(
         err,
-        LinkError::Compose(ComposeError::DuplicateNetworkName { name, .. }) if name == "proxy"
+        LinkError::Compose { source: ComposeError::DuplicateNetworkName { name, .. }, .. } if name == "proxy"
     ));
 }
 
@@ -407,7 +407,7 @@ fn duplicate_network_name_in_an_imported_file_is_error() {
     let err = link(Path::new("service.hll"), &loader).expect_err("expected a link error");
     assert!(matches!(
         err,
-        LinkError::Compose(ComposeError::DuplicateNetworkName { name, .. }) if name == "proxy"
+        LinkError::Compose { source: ComposeError::DuplicateNetworkName { name, .. }, .. } if name == "proxy"
     ));
 }
 
@@ -456,13 +456,16 @@ fn imported_network_colliding_with_a_local_one_is_error() {
     let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
     assert!(matches!(
         &err,
-        LinkError::Compose(ComposeError::CollidingImportedNetwork { alias, name, .. })
+        LinkError::Compose { source: ComposeError::CollidingImportedNetwork { alias, name, .. }, .. }
             if alias == "ext" && name == "proxy"
     ));
     // Points at the reference in the entry file, not at the imported
-    // declaration — a `Span` carries no file identity, so the imported
-    // one's line/column would be read against the wrong source.
-    let LinkError::Compose(compose_err) = &err else {
+    // declaration: the reference is the line the user would edit.
+    let LinkError::Compose {
+        source: compose_err,
+        ..
+    } = &err
+    else {
         panic!("expected a compose error, got {err:?}");
     };
     let span = compose_err.span();
@@ -486,7 +489,7 @@ fn two_imported_networks_sharing_a_bare_name_is_error() {
     let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
     assert!(matches!(
         err,
-        LinkError::Compose(ComposeError::CollidingImportedNetwork { alias, name, .. })
+        LinkError::Compose { source: ComposeError::CollidingImportedNetwork { alias, name, .. }, .. }
             if alias == "b" && name == "proxy"
     ));
 }
@@ -542,4 +545,109 @@ fn local_and_imported_networks_with_distinct_names_both_survive() {
         .map(|n| n.name.name.as_str())
         .collect();
     assert_eq!(names, vec!["internal", "shared"]);
+}
+
+/// The exact scenario from #75: two imported files each declare a
+/// template whose conflicting field sits at the *same* `line:col`, and a
+/// third file composes both. This used to render as
+/// `2:11: field ... (at 2:11)` — two different files, neither named, and
+/// a "first set at" location that read like a copy-paste mistake. Both
+/// locations now name their own file.
+#[test]
+fn field_collision_across_two_files_names_each_file() {
+    let mut loader = InMemoryLoader::default();
+    loader.add("t1.hll", "template x {\n  restart always\n}\n");
+    loader.add("t2.hll", "template y {\n  restart unless-stopped\n}\n");
+    loader.add(
+        "svc.hll",
+        "use \"t1.hll\" as one\n\
+         use \"t2.hll\" as two\n\
+         service web {\n  image \"nginx\"\n  with one.x, two.y\n}\n",
+    );
+
+    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
+    assert_eq!(
+        err.to_string(),
+        "t2.hll:2:11: field `restart.policy` set by both template `x` (at t1.hll:2:11) \
+         and template `y` — explicit templates must not conflict"
+    );
+}
+
+/// The map-field counterpart (`env`/`volume`), whose collision error
+/// likewise names two locations that can sit in two different files.
+#[test]
+fn map_key_collision_across_two_files_names_each_file() {
+    let mut loader = InMemoryLoader::default();
+    loader.add("a.hll", "template x {\n  env {\n    TZ = \"UTC\"\n  }\n}\n");
+    loader.add(
+        "b.hll",
+        "template y {\n  env {\n    TZ = \"Europe/Berlin\"\n  }\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"a.hll\" as a\n\
+         use \"b.hll\" as b\n\
+         service web {\n  image \"nginx\"\n  with a.x, b.y\n}\n",
+    );
+
+    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
+    let rendered = err.to_string();
+    assert!(
+        rendered.starts_with("b.hll:3:5: `env` key \"TZ\" set by both template `x` (at a.hll:3:5)"),
+        "expected both files named, got: {rendered}"
+    );
+}
+
+/// A duplicate declaration caught while the graph is still loading is
+/// reported against the file it was actually found in, imported or not —
+/// the entry file, which is all these errors could have named before, is
+/// not where these spans live.
+#[test]
+fn duplicate_template_in_an_imported_file_names_that_file() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "lib/shared.hll",
+        "template t {\n  image \"a\"\n}\n\
+         template t {\n  image \"b\"\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"lib/shared.hll\" as lib\n\
+         service web {\n  image \"nginx\"\n  with lib.t\n}\n",
+    );
+
+    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
+    assert_eq!(
+        err.to_string(),
+        "lib/shared.hll:4:10: duplicate template `t` (first declared at lib/shared.hll:1:10)"
+    );
+}
+
+/// The composed program carries the graph's own path table, so codegen —
+/// which runs after `link` and never reads a file itself — can still
+/// name the file any span it reports came from.
+#[test]
+fn composed_program_carries_the_graphs_source_map() {
+    let mut loader = InMemoryLoader::default();
+    loader.add("net.hll", "network proxy {\n  external\n}\n");
+    loader.add(
+        "svc.hll",
+        "use \"net.hll\" as ext\n\
+         service web {\n  image \"nginx\"\n  networks [ext.proxy]\n}\n",
+    );
+
+    let composed = link(Path::new("svc.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+    let files = &composed.files;
+    assert_eq!(files.len(), 2);
+    let image_span = composed.services[0].fields.image.as_ref().unwrap().span;
+    assert_eq!(
+        image_span.locate(Some(files)).path(),
+        Some(Path::new("svc.hll"))
+    );
+    let network_span = composed.networks[0].name.span;
+    assert_eq!(
+        network_span.locate(Some(files)).path(),
+        Some(Path::new("net.hll"))
+    );
 }

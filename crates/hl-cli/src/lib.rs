@@ -531,22 +531,29 @@ fn write_output(out_path: &Path, yaml: &str, force: bool) -> Result<(), ExitCode
 /// disk (which `write_output` would then recognize as generated).
 ///
 /// Errors are printed bare (`eprintln!("{err}")`), not wrapped with
-/// `path`'s own display like every other error site in this file:
+/// `path`'s own display like every other error site in this file: every
+/// error out of this pipeline names its own file(s) already, and that
+/// file may be an imported one rather than `path` itself.
 /// `hl_linker::LinkError`'s `Io`/`Parse`/`DuplicateAlias`/`PathEscape`
-/// variants already self-prefix with *their own* correct path, which may be an
-/// imported file rather than `path` itself, and both `LinkError::Compose`
-/// and `hl_codegen::CodegenError` only ever carry a `{line}:{col}`
-/// location with no file — accurate for a single file, but a composed
-/// service's fields can now originate from any file in the graph, so
-/// guessing `path` here would misattribute an error that actually came
-/// from an imported template.
+/// variants carry the path they're about directly, while
+/// `LinkError::Compose` and `hl_codegen::CodegenError` resolve each
+/// span's own [`hl_parser::FileId`] through the graph's
+/// `hl_parser::SourceMap` (#75) — so a composed service's fields report
+/// the file each one actually came from, including both sides of a
+/// two-location collision error, rather than one guessed path for the
+/// lot.
+///
+/// That map is why the codegen error is rendered through
+/// `CodegenError::display`: `generate` consumes the composed program, so
+/// the map is cloned out of it first (cheap — a handful of paths).
 fn build_yaml(path: &Path) -> Result<String, ExitCode> {
     let composed = hl_linker::link(path, &hl_linker::FsLoader).map_err(|err| {
         eprintln!("{err}");
         ExitCode::FAILURE
     })?;
+    let files = composed.files.clone();
     let generated = hl_codegen::generate(composed).map_err(|err| {
-        eprintln!("{err}");
+        eprintln!("{}", err.display(&files));
         ExitCode::FAILURE
     })?;
     Ok(format!("{GENERATED_HEADER}{}", generated.yaml))
