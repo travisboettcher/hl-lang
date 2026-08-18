@@ -5,7 +5,7 @@ use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 use crate::ast::{
     EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Param, ParamType, Program, RawEntry,
     RawMap, RawValue, Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation,
-    TopDecl, UseDecl, VolumeEntry, VolumeMap,
+    TopDecl, UseDecl, Volume, VolumeDriverOpt, VolumeEntry, VolumeMap,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -1049,10 +1049,13 @@ impl<'src> Parser<'src> {
 
         match schema.type_name {
             "network" => Ok(TopDecl::Network(lower_network(name, fields, span))),
+            "volume" => Ok(TopDecl::Volume(lower_volume(name, fields, span))),
             "service" => Ok(TopDecl::Service(Box::new(lower_service(
                 name, fields, span,
             )))),
-            _ => unreachable!("top_level_type only ever returns the network/service schemas"),
+            _ => {
+                unreachable!("top_level_type only ever returns the network/volume/service schemas")
+            }
         }
     }
 
@@ -1255,6 +1258,39 @@ fn lower_network(name: Ident, mut fields: StructFields, span: Span) -> Network {
         name,
         external,
         real_name,
+        span,
+    }
+}
+
+/// Lowers a top-level `volume` declaration's body. Deliberately shaped
+/// like [`lower_network`] — `external`/`name` are read exactly the same
+/// way — plus the two volume-only Compose knobs.
+fn lower_volume(name: Ident, mut fields: StructFields, span: Span) -> Volume {
+    let external = match fields.remove("external") {
+        Some(FieldValue::Flag(s)) => Some(s),
+        _ => None,
+    };
+    let real_name = match fields.remove("name") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
+    let driver = match fields.remove("driver") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
+    let driver_opts = match fields.remove("driver_opts") {
+        Some(FieldValue::LiteralMap(entries)) => entries
+            .into_iter()
+            .map(|(key, value, span)| VolumeDriverOpt { key, value, span })
+            .collect(),
+        _ => Vec::new(),
+    };
+    Volume {
+        name,
+        external,
+        real_name,
+        driver,
+        driver_opts,
         span,
     }
 }

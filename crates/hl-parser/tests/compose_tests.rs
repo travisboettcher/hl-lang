@@ -1111,17 +1111,46 @@ fn duplicate_top_level_network_name_is_error() {
     ));
 }
 
-/// A name may still be reused *across* declaration kinds — the three
-/// symbol tables are separate, and nothing looks a service up by a
-/// network's name or vice versa.
+/// #60: a named volume is resolved by its bare name too, and its
+/// declaration is what decides whether the volume is `external` or
+/// carries a `name:` override — so two declarations under one name are
+/// exactly as ambiguous as two networks are.
+#[test]
+fn duplicate_top_level_volume_name_is_error() {
+    let err = compose_err("volume data {}\nvolume data {\n  external\n}\n");
+    assert!(matches!(
+        err,
+        ComposeError::DuplicateVolumeName { name, .. } if name == "data"
+    ));
+}
+
+/// Top-level `volume` declarations reach the composed program in source
+/// order, for codegen to resolve named-volume mounts against.
+#[test]
+fn top_level_volumes_are_carried_through_composition() {
+    let composed = compose_ok("volume a {}\nvolume b {\n  external\n}\n");
+    let names: Vec<&str> = composed
+        .volumes
+        .iter()
+        .map(|v| v.name.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["a", "b"]);
+    assert!(composed.volumes[1].external.is_some());
+}
+
+/// A name may still be reused *across* declaration kinds — the symbol
+/// tables are separate, and nothing looks a service up by a network's
+/// or a volume's name or vice versa.
 #[test]
 fn same_name_across_different_declaration_kinds_is_fine() {
     let composed = compose_ok(
         "network shared {\n  external\n}\n\
+         volume shared {}\n\
          template shared {\n  restart always\n}\n\
-         service shared {\n  image \"x\"\n  with shared\n  networks [shared]\n}\n",
+         service shared {\n  image \"x\"\n  with shared\n  networks [shared]\n  volume \"shared\" -> \"/data\"\n}\n",
     );
     assert_eq!(composed.networks.len(), 1);
+    assert_eq!(composed.volumes.len(), 1);
     assert_eq!(composed.services.len(), 1);
 }
 

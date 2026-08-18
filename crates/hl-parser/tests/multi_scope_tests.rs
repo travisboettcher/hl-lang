@@ -172,8 +172,14 @@ fn same_named_templates_in_different_scopes_resolve_independently() {
     let s1 = parse_service("service s1 {\n  with a.t\n}\n", "s1");
     let s2 = parse_service("service s2 {\n  with b.t\n}\n", "s2");
 
-    let composed = compose_with_resolver(Vec::new(), vec![s1, s2], Scope::Service, &resolver)
-        .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
+    let composed = compose_with_resolver(
+        Vec::new(),
+        Vec::new(),
+        vec![s1, s2],
+        Scope::Service,
+        &resolver,
+    )
+    .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
 
     assert_eq!(
         composed.services[0]
@@ -237,8 +243,11 @@ fn same_named_templates_mid_resolution_in_different_scopes_do_not_false_cycle() 
     let resolver = FakeResolver { modules };
     let s = parse_service("service s {\n  with a.t\n}\n", "s");
 
-    let composed = compose_with_resolver(Vec::new(), vec![s], Scope::Service, &resolver)
-        .unwrap_or_else(|err| panic!("unexpected compose error (false-positive cycle?): {err}"));
+    let composed =
+        compose_with_resolver(Vec::new(), Vec::new(), vec![s], Scope::Service, &resolver)
+            .unwrap_or_else(|err| {
+                panic!("unexpected compose error (false-positive cycle?): {err}")
+            });
 
     // A's `t` own body (`image "image-a"`) always wins over its own
     // explicit `with b.t` tier — this also confirms B's `t` actually
@@ -318,8 +327,9 @@ fn template_qualified_reference_resolves_in_its_own_declaring_scope_not_the_invo
     let resolver = FakeResolver { modules };
     let s = parse_service("service s {\n  with templates.web\n}\n", "s");
 
-    let composed = compose_with_resolver(Vec::new(), vec![s], Scope::Service, &resolver)
-        .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
+    let composed =
+        compose_with_resolver(Vec::new(), Vec::new(), vec![s], Scope::Service, &resolver)
+            .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
 
     assert_eq!(composed.networks.len(), 1);
     assert_eq!(
@@ -377,7 +387,7 @@ fn imported_network_colliding_with_an_entry_network_is_error() {
         "s",
     );
 
-    let err = compose_with_resolver(vec![local], vec![s], Scope::Service, &resolver)
+    let err = compose_with_resolver(vec![local], Vec::new(), vec![s], Scope::Service, &resolver)
         .expect_err("expected a compose error");
     assert!(
         matches!(
@@ -428,7 +438,7 @@ fn two_imported_networks_sharing_a_bare_name_is_error() {
         "s",
     );
 
-    let err = compose_with_resolver(Vec::new(), vec![s], Scope::Service, &resolver)
+    let err = compose_with_resolver(Vec::new(), Vec::new(), vec![s], Scope::Service, &resolver)
         .expect_err("expected a compose error");
     assert!(
         matches!(
@@ -477,8 +487,14 @@ fn one_imported_network_pulled_in_twice_is_not_a_collision() {
         "s2",
     );
 
-    let composed = compose_with_resolver(Vec::new(), vec![s1, s2], Scope::Service, &resolver)
-        .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
+    let composed = compose_with_resolver(
+        Vec::new(),
+        Vec::new(),
+        vec![s1, s2],
+        Scope::Service,
+        &resolver,
+    )
+    .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
 
     // Pulled in twice, present once — the duplicate is recognized as the
     // same declaration and dropped rather than appended.
@@ -524,8 +540,9 @@ fn entry_and_imported_networks_with_distinct_names_both_survive() {
         "s",
     );
 
-    let composed = compose_with_resolver(vec![local], vec![s], Scope::Service, &resolver)
-        .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
+    let composed =
+        compose_with_resolver(vec![local], Vec::new(), vec![s], Scope::Service, &resolver)
+            .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
 
     let names: Vec<&str> = composed
         .networks

@@ -623,6 +623,67 @@ fn duplicate_template_in_an_imported_file_names_that_file() {
     );
 }
 
+/// #60: a named-volume mount has no `alias.name` form, so a `volume`
+/// declaration is only ever resolved from the *entry* file's own
+/// top-level declarations — the same rule a *bare* `networks [x]` entry
+/// already follows. The entry file's declarations reach the composed
+/// program in source order.
+#[test]
+fn entry_file_volume_declarations_reach_the_composed_program() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "templates.hll",
+        "template linuxserver_app {\n  env PUID = \"1000\"\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"templates.hll\" as common\n\
+         volume syncthing-config {\n  external\n}\n\
+         service syncthing {\n  \
+           with common.linuxserver_app\n  \
+           image \"lscr.io/linuxserver/syncthing\"\n  \
+           volume \"syncthing-config\" -> \"/config\"\n\
+         }\n",
+    );
+
+    let composed = link(Path::new("svc.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+    assert_eq!(composed.volumes.len(), 1);
+    assert_eq!(composed.volumes[0].name.name, "syncthing-config");
+    assert!(composed.volumes[0].external.is_some());
+    assert_eq!(
+        composed.volumes[0]
+            .name
+            .span
+            .locate(Some(&composed.files))
+            .path(),
+        Some(Path::new("svc.hll"))
+    );
+}
+
+/// A non-entry file's own `volume` declarations are parsed but inert —
+/// nothing can reach one across files — yet a redeclaration inside such
+/// a file is still a mistake worth reporting, exactly as a redeclared
+/// `service` in an imported file already is.
+#[test]
+fn duplicate_volume_in_an_imported_file_is_still_an_error() {
+    let mut loader = InMemoryLoader::default();
+    loader.add("lib.hll", "volume data {}\nvolume data {\n  external\n}\n");
+    loader.add(
+        "svc.hll",
+        "use \"lib.hll\" as lib\nservice web {\n  image \"nginx\"\n}\n",
+    );
+
+    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        err,
+        LinkError::Compose {
+            source: ComposeError::DuplicateVolumeName { ref name, .. },
+            ..
+        } if name == "data"
+    ));
+}
+
 /// The composed program carries the graph's own path table, so codegen —
 /// which runs after `link` and never reads a file itself — can still
 /// name the file any span it reports came from.

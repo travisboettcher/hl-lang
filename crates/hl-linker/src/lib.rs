@@ -64,9 +64,9 @@ use hl_parser::{ComposedProgram, compose_with_resolver};
 /// their own spans the same way before rendering.
 pub fn link(entry: &Path, loader: &dyn FileLoader) -> Result<ComposedProgram, LinkError> {
     let mut graph = graph::build(entry, loader)?;
-    let (networks, services) = graph.take_entry();
+    let (networks, volumes, services) = graph.take_entry();
     let entry_scope = graph.entry_scope();
-    let mut composed = compose_with_resolver(networks, services, entry_scope, &graph)
+    let mut composed = compose_with_resolver(networks, volumes, services, entry_scope, &graph)
         .map_err(|err| LinkError::compose(err, graph.files()))?;
     composed.files = graph.files().clone();
     Ok(composed)

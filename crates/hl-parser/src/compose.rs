@@ -24,7 +24,7 @@ use hl_lexer::{SourceMap, Span};
 
 use crate::ast::{
     EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, ParamType, Program, RawMap, RawValue,
-    Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl,
+    Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Volume,
     VolumeEntry, VolumeMap,
 };
 use crate::schema::MapSide;
@@ -61,6 +61,10 @@ pub const MAX_TEMPLATE_DEPTH: usize = 64;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComposedProgram {
     pub networks: Vec<Network>,
+    /// The program's top-level `volume` declarations, in source order —
+    /// what codegen resolves each service's named-volume mount against,
+    /// exactly as it resolves `networks [...]` against `networks` above.
+    pub volumes: Vec<Volume>,
     pub services: Vec<Service>,
     /// Resolves the [`hl_lexer::FileId`] on any [`Span`] reachable from
     /// this program back to the file it came from, so a codegen
@@ -105,6 +109,18 @@ pub enum ComposeError {
     /// reference to the same duplicated name could resolve to *different*
     /// declarations (#63).
     DuplicateNetworkName {
+        name: String,
+        first: Span,
+        second: Span,
+    },
+    /// Two top-level `volume` declarations share a name. Same reasoning
+    /// as [`Self::DuplicateNetworkName`]: a named volume is resolved by
+    /// its bare name, so two declarations under one name leave every
+    /// reference to it ambiguous — and, since a volume declaration is
+    /// what says whether the volume is `external` or carries a `name:`
+    /// override, silently picking one would silently pick a different
+    /// underlying Docker volume.
+    DuplicateVolumeName {
         name: String,
         first: Span,
         second: Span,
@@ -281,6 +297,7 @@ impl ComposeError {
             | ComposeError::DuplicateTemplateName { second: span, .. }
             | ComposeError::DuplicateServiceName { second: span, .. }
             | ComposeError::DuplicateNetworkName { second: span, .. }
+            | ComposeError::DuplicateVolumeName { second: span, .. }
             | ComposeError::TemplateCycle { span, .. }
             | ComposeError::TemplateNestingTooDeep { span, .. }
             | ComposeError::UnknownTemplateArgument { span, .. }
@@ -336,6 +353,11 @@ impl ComposeError {
             ComposeError::DuplicateNetworkName { name, first, .. } => write!(
                 f,
                 "{at}: duplicate network `{name}` (first declared at {})",
+                first.locate(files)
+            ),
+            ComposeError::DuplicateVolumeName { name, first, .. } => write!(
+                f,
+                "{at}: duplicate volume `{name}` (first declared at {})",
                 first.locate(files)
             ),
             ComposeError::TemplateCycle { chain, .. } => write!(
@@ -574,6 +596,19 @@ mod error_display_tests {
         assert_eq!(
             err.to_string(),
             "9:1: duplicate network `proxy` (first declared at 2:1)"
+        );
+    }
+
+    #[test]
+    fn duplicate_volume_name_display() {
+        let err = ComposeError::DuplicateVolumeName {
+            name: "data".to_string(),
+            first: span(2, 1),
+            second: span(9, 1),
+        };
+        assert_eq!(
+            err.to_string(),
+            "9:1: duplicate volume `data` (first declared at 2:1)"
         );
     }
 
@@ -897,12 +932,14 @@ impl SymbolResolver for SingleFileResolver {
 /// [`crate::parse`]'s own no-error-recovery precedent.
 pub fn compose(program: Program) -> Result<ComposedProgram, ComposeError> {
     let mut networks = Vec::new();
+    let mut volumes = Vec::new();
     let mut services = Vec::new();
     let mut templates: HashMap<String, TemplateDecl> = HashMap::new();
-    // Networks and services are kept as ordered `Vec`s (source order is
-    // load-bearing downstream), so unlike templates they need their own
-    // by-name tables purely to detect a redeclaration.
+    // Networks, volumes and services are kept as ordered `Vec`s (source
+    // order is load-bearing downstream), so unlike templates they need
+    // their own by-name tables purely to detect a redeclaration.
     let mut network_spans: HashMap<String, Span> = HashMap::new();
+    let mut volume_spans: HashMap<String, Span> = HashMap::new();
     let mut service_spans: HashMap<String, Span> = HashMap::new();
 
     for decl in program.decls {
@@ -917,6 +954,17 @@ pub fn compose(program: Program) -> Result<ComposedProgram, ComposeError> {
                 }
                 network_spans.insert(n.name.name.clone(), n.name.span);
                 networks.push(n);
+            }
+            TopDecl::Volume(v) => {
+                if let Some(&first) = volume_spans.get(&v.name.name) {
+                    return Err(ComposeError::DuplicateVolumeName {
+                        name: v.name.name.clone(),
+                        first,
+                        second: v.name.span,
+                    });
+                }
+                volume_spans.insert(v.name.name.clone(), v.name.span);
+                volumes.push(v);
             }
             TopDecl::Service(s) => {
                 if let Some(&first) = service_spans.get(&s.name.name) {
@@ -949,7 +997,7 @@ pub fn compose(program: Program) -> Result<ComposedProgram, ComposeError> {
     }
 
     let resolver = SingleFileResolver { templates };
-    compose_with_resolver(networks, services, (), &resolver)
+    compose_with_resolver(networks, volumes, services, (), &resolver)
 }
 
 /// The generalized merge engine: composes `services` (plus whatever
@@ -957,8 +1005,17 @@ pub fn compose(program: Program) -> Result<ComposedProgram, ComposeError> {
 /// resolve to) by resolving every name through `resolver`, starting from
 /// `entry_scope`. See [`SymbolResolver`]'s doc for the scoping contract
 /// this implements.
+///
+/// `volumes` is carried through untouched, unlike `networks`: a
+/// named-volume mount is written as a plain literal on the host side of
+/// a `volume` entry (`volume syncthing-config -> "/config"`), which has
+/// no `alias.name` form to resolve, so there is no cross-file volume
+/// import for this pass to chase. Like a *bare* `networks [x]` entry, a
+/// named-volume reference always resolves against the entry file's own
+/// top-level declarations, at codegen time.
 pub fn compose_with_resolver<R: SymbolResolver>(
     networks: Vec<Network>,
+    volumes: Vec<Volume>,
     services: Vec<Service>,
     entry_scope: R::Scope,
     resolver: &R,
@@ -1008,6 +1065,7 @@ pub fn compose_with_resolver<R: SymbolResolver>(
     }
     Ok(ComposedProgram {
         networks: all_networks,
+        volumes,
         services: composed,
         // Composition never reads a file, so it has no paths to intern;
         // the linker attaches its own map to what this returns.

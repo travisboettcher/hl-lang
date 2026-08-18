@@ -9,11 +9,12 @@ pub struct Program {
 }
 
 /// One top-level declaration. `Service`/`TemplateDecl` are boxed since
-/// they're much larger than `Network` (many optional/list fields) — keeps
-/// `TopDecl` itself small to pass around.
+/// they're much larger than `Network`/`Volume` (many optional/list
+/// fields) — keeps `TopDecl` itself small to pass around.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TopDecl {
     Network(Network),
+    Volume(Volume),
     Service(Box<Service>),
     Template(Box<TemplateDecl>),
     Use(UseDecl),
@@ -166,6 +167,48 @@ pub struct Network {
     /// mirroring how [`Image::reference`] staying `Option` defers
     /// "required" enforcement to a later stage.
     pub real_name: Option<Literal>,
+    pub span: Span,
+}
+
+/// A parsed top-level `volume` declaration — the named Docker volume a
+/// service's `volume name -> "/path"` entry refers to. Deliberately the
+/// same shape as [`Network`] (`external` flag plus an optional
+/// `real_name` override), since the two answer the same question about
+/// two different Compose top-level sections; `driver`/`driver_opts` are
+/// the extra Compose knobs that only exist on the volume side.
+///
+/// Note the *field* named `volume` inside a `service`/`template` body is
+/// a different, map-kind schema ([`VolumeMap`]) that happens to share
+/// the identifier — a top-level `volume x { ... }` declares the volume,
+/// a service-level `volume x -> "/path"` mounts it. Field lookup and
+/// top-level-type lookup are separate tables (`schema::resolve_field`
+/// vs. `schema::top_level_type`), so the two roles never collide.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Volume {
+    pub name: Ident,
+    /// `Some(span)` of the bare `external` flag if it was set; `None`
+    /// otherwise — bare-presence only, exactly like [`Network::external`].
+    pub external: Option<Span>,
+    /// The real underlying Docker volume name, set via the `name` field
+    /// (`volume media { name: "media_store" }`), when it differs from
+    /// `name.name` above. `None` means "use `name.name` verbatim" —
+    /// codegen applies that default, mirroring [`Network::real_name`].
+    pub real_name: Option<Literal>,
+    /// Compose's own `driver:` key for this volume (`local`, `nfs`, ...).
+    pub driver: Option<Literal>,
+    /// Compose's own `driver_opts:` map — a free-form `key: value` bag
+    /// whose meaning belongs entirely to the chosen driver, so it's
+    /// carried through verbatim rather than checked against any schema.
+    pub driver_opts: Vec<VolumeDriverOpt>,
+    pub span: Span,
+}
+
+/// One `key: value` entry inside a top-level `volume`'s `driver_opts`
+/// body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VolumeDriverOpt {
+    pub key: Literal,
+    pub value: Literal,
     pub span: Span,
 }
 

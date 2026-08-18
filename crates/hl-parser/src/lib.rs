@@ -62,7 +62,7 @@ pub mod schema;
 pub use ast::{
     EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Param, ParamType, Program, RawEntry,
     RawMap, RawValue, Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation,
-    TopDecl, UseDecl, VolumeEntry, VolumeMap,
+    TopDecl, UseDecl, Volume, VolumeDriverOpt, VolumeEntry, VolumeMap,
 };
 pub use compose::{
     ComposeError, ComposedProgram, MAX_TEMPLATE_DEPTH, MapKeyCollision, SymbolResolver, compose,

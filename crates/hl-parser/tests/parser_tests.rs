@@ -22,6 +22,13 @@ fn as_network(decl: &TopDecl) -> &hl_parser::Network {
     }
 }
 
+fn as_volume(decl: &TopDecl) -> &hl_parser::Volume {
+    match decl {
+        TopDecl::Volume(v) => v,
+        other => panic!("expected a Volume decl, got {other:?}"),
+    }
+}
+
 fn as_template(decl: &TopDecl) -> &TemplateDecl {
     match decl {
         TopDecl::Template(t) => t,
@@ -275,6 +282,126 @@ fn network_without_real_name_field_is_none() {
     let program = parse_ok("network internal {}\n");
     let network = as_network(&program.decls[0]);
     assert!(network.real_name.is_none());
+}
+
+// --- top-level `volume` declarations (#60) ---
+//
+// `volume` is the one identifier that names both a top-level
+// declaration type and a `service`/`template` field. These pin that the
+// two roles stay separate: the same word resolves through
+// `schema::top_level_type` in one position and `schema::resolve_field`
+// in the other, and neither leaks into the other's position.
+
+#[test]
+fn volume_decl_with_empty_body_parses() {
+    let program = parse_ok("volume syncthing-config {}\n");
+    let volume = as_volume(&program.decls[0]);
+    assert_eq!(volume.name.name, "syncthing-config");
+    assert!(volume.external.is_none());
+    assert!(volume.real_name.is_none());
+    assert!(volume.driver.is_none());
+    assert!(volume.driver_opts.is_empty());
+}
+
+/// `external`/`name` are read exactly as `network`'s are — same field
+/// names, same bare-flag/scalar kinds, same "unset means use the
+/// declaration's own identifier" deferral.
+#[test]
+fn volume_decl_external_and_real_name() {
+    let program = parse_ok("volume media {\n  external\n  name: \"media_store\"\n}\n");
+    let volume = as_volume(&program.decls[0]);
+    assert!(volume.external.is_some());
+    assert_eq!(volume.real_name.as_ref().unwrap().text(), "media_store");
+}
+
+#[test]
+fn volume_decl_driver_and_driver_opts() {
+    let program = parse_ok(
+        "volume backups {\n  \
+           driver \"local\"\n  \
+           driver_opts {\n    type: \"nfs\"\n    device: \":/exports/backups\"\n  }\n\
+         }\n",
+    );
+    let volume = as_volume(&program.decls[0]);
+    assert_eq!(volume.driver.as_ref().unwrap().text(), "local");
+    let opts: Vec<(&str, &str)> = volume
+        .driver_opts
+        .iter()
+        .map(|o| (o.key.text(), o.value.text()))
+        .collect();
+    assert_eq!(opts, vec![("type", "nfs"), ("device", ":/exports/backups")]);
+}
+
+#[test]
+fn volume_decl_needs_name() {
+    let err = parse("volume {\n  external\n}\n").unwrap_err();
+    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+}
+
+#[test]
+fn unknown_field_in_volume_decl_says_volume() {
+    let err = parse("volume v {\n  nope: \"x\"\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnknownField {
+            type_name: "volume",
+            ref field,
+            ..
+        } if field == "nope"
+    ));
+}
+
+/// The point of the whole two-roles arrangement: a top-level `volume`
+/// declaration and a service-level `volume` *mount* in the same file
+/// each parse as their own thing, in one parse.
+#[test]
+fn volume_decl_and_volume_field_coexist_in_one_file() {
+    let program = parse_ok(
+        "volume syncthing-config {}\n\
+         service syncthing {\n  \
+           image \"x\"\n  \
+           volume \"syncthing-config\" -> \"/config\"\n\
+         }\n",
+    );
+    assert_eq!(as_volume(&program.decls[0]).name.name, "syncthing-config");
+    let service = as_service(&program.decls[1]);
+    assert_eq!(service.fields.volumes.entries.len(), 1);
+    assert_eq!(
+        service.fields.volumes.entries[0].host.text(),
+        "syncthing-config"
+    );
+}
+
+/// The service-level field keeps its map-kind bare-entry sugar — the
+/// top-level declaration's struct-kind schema must not have displaced
+/// it. A `volume` field written the way a declaration is written is
+/// still a map entry missing its `->`.
+#[test]
+fn volume_field_still_requires_its_map_separator() {
+    let err = parse("service s {\n  volume \"a\"\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::MapEntryMissingSeparator {
+            type_name: "volume",
+            separator: TokenKind::Arrow,
+            ..
+        }
+    ));
+}
+
+/// And the reverse: a top-level `volume` body is a *struct* body, so a
+/// map entry written there is a parse error rather than being silently
+/// accepted as some map-kind sugar.
+#[test]
+fn map_entry_in_a_top_level_volume_body_is_error() {
+    let err = parse("volume v {\n  \"a\" -> \"b\"\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnknownField {
+            type_name: "volume",
+            ..
+        }
+    ));
 }
 
 fn entrypoints(expose: &Expose) -> Vec<&str> {

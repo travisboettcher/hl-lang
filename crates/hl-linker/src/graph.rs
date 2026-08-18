@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use hl_parser::{
     ComposeError, Ident, Network, Service, SourceMap, Span, SymbolResolver, TemplateDecl, TopDecl,
-    parse_in_file,
+    Volume, parse_in_file,
 };
 
 use crate::error::LinkError;
@@ -39,6 +39,15 @@ struct Module {
     /// not) since `compose_with_resolver` wants these as a plain,
     /// order-preserving `Vec`.
     entry_networks: Vec<Network>,
+    /// The entry module's own top-level `volume` decls, in source order.
+    /// Unlike networks there's no by-name companion map: a named-volume
+    /// mount is a plain literal with no `alias.name` form, so a volume
+    /// declaration is never the target of a *qualified* lookup, and only
+    /// the entry file's own declarations are ever resolved against (see
+    /// [`hl_parser::compose_with_resolver`]'s doc). A non-entry file's
+    /// `volume` decls are still parsed and duplicate-checked, then inert
+    /// — exactly like its `service` decls.
+    entry_volumes: Vec<Volume>,
 }
 
 pub(crate) struct Graph {
@@ -59,14 +68,15 @@ impl Graph {
         &self.files
     }
 
-    /// Takes ownership of the entry module's own networks/services,
-    /// leaving everything else (templates, by-name networks, aliases —
-    /// for every module, entry included) untouched for
+    /// Takes ownership of the entry module's own networks/volumes/
+    /// services, leaving everything else (templates, by-name networks,
+    /// aliases — for every module, entry included) untouched for
     /// [`SymbolResolver`] lookups during composition.
-    pub(crate) fn take_entry(&mut self) -> (Vec<Network>, Vec<Service>) {
+    pub(crate) fn take_entry(&mut self) -> (Vec<Network>, Vec<Volume>, Vec<Service>) {
         let entry = &mut self.modules[0];
         (
             std::mem::take(&mut entry.entry_networks),
+            std::mem::take(&mut entry.entry_volumes),
             std::mem::take(&mut entry.services),
         )
     }
@@ -106,6 +116,10 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
         // a duplicate check needs — a non-entry file's redeclared
         // service is still a mistake worth reporting.
         let mut service_spans: HashMap<String, Span> = HashMap::new();
+        // Same story for volumes: `entry_volumes` is only populated for
+        // the entry module, so a non-entry file's redeclared volume
+        // needs its own by-name table to be caught at all.
+        let mut volume_spans: HashMap<String, Span> = HashMap::new();
 
         for decl in program.decls {
             match decl {
@@ -130,6 +144,26 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
                         module.entry_networks.push(n.clone());
                     }
                     module.networks.insert(n.name.name.clone(), n);
+                }
+                TopDecl::Volume(v) => {
+                    if let Some(&first) = volume_spans.get(&v.name.name) {
+                        return Err(LinkError::compose(
+                            ComposeError::DuplicateVolumeName {
+                                name: v.name.name.clone(),
+                                first,
+                                second: v.name.span,
+                            },
+                            &files,
+                        ));
+                    }
+                    volume_spans.insert(v.name.name.clone(), v.name.span);
+                    if is_entry {
+                        module.entry_volumes.push(v);
+                    }
+                    // A non-entry file's own `volume` decls are parsed
+                    // but otherwise inert — a named-volume mount has no
+                    // qualified form, so nothing can reach one across
+                    // files.
                 }
                 TopDecl::Service(s) => {
                     if let Some(&first) = service_spans.get(&s.name.name) {
