@@ -66,8 +66,8 @@ fn build_single_file_writes_yaml_to_out_path() {
     assert_eq!(code, ExitCode::SUCCESS);
 
     let yaml = fs::read_to_string(&out).unwrap();
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(&yaml).expect("output should be valid YAML");
+    let value: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&yaml).expect("output should be valid YAML");
     assert!(
         value
             .get("services")
@@ -96,8 +96,8 @@ fn build_single_file_creates_missing_out_parent_directories() {
     assert_eq!(code, ExitCode::SUCCESS);
 
     let yaml = fs::read_to_string(&out).unwrap();
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(&yaml).expect("output should be valid YAML");
+    let value: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&yaml).expect("output should be valid YAML");
     assert!(
         value
             .get("services")
@@ -130,8 +130,8 @@ fn build_directory_writes_one_file_per_hll_input() {
         generated.display()
     );
     let yaml = fs::read_to_string(&generated).unwrap();
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(&yaml).expect("output should be valid YAML");
+    let value: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&yaml).expect("output should be valid YAML");
     assert!(
         value
             .get("services")
@@ -236,8 +236,8 @@ fn build_colocated_service_directories_writes_in_place_with_no_out() {
         generated.display()
     );
     let yaml = fs::read_to_string(&generated).unwrap();
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(&yaml).expect("output should be valid YAML");
+    let value: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&yaml).expect("output should be valid YAML");
     assert!(
         value
             .get("services")
@@ -732,8 +732,8 @@ fn build_output_starts_with_the_generated_header() {
         yaml.starts_with(GENERATED_HEADER),
         "output should start with the generated header, got:\n{yaml}"
     );
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(&yaml).expect("output should still be valid YAML");
+    let value: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&yaml).expect("output should still be valid YAML");
     assert!(
         value
             .get("services")
@@ -796,8 +796,8 @@ fn build_force_overwrites_a_hand_written_compose_file() {
 
     let yaml = fs::read_to_string(&compose).unwrap();
     assert!(yaml.starts_with(GENERATED_HEADER));
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(&yaml).expect("output should be valid YAML");
+    let value: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&yaml).expect("output should be valid YAML");
     assert!(
         value
             .get("services")
@@ -1036,8 +1036,8 @@ fn build_single_file_with_no_out_prints_yaml_to_real_stdout() {
     assert!(output.status.success());
 
     let yaml = String::from_utf8(output.stdout).unwrap();
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(&yaml).expect("stdout should be valid YAML");
+    let value: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&yaml).expect("stdout should be valid YAML");
     assert!(
         value
             .get("services")

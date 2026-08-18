@@ -1,7 +1,7 @@
 //! Golden integration tests: generate Compose YAML from real hl-lang
 //! fixtures and check it against the shape of the actual, currently
 //! deployed homelab services those fixtures are modeled on. Comparisons
-//! are between *parsed* YAML values, not raw strings — `serde_yaml`'s
+//! are between *parsed* YAML values, not raw strings — `serde_yaml_ng`'s
 //! scalar-quoting choices don't need to match the real files
 //! byte-for-byte, only semantically.
 
@@ -27,9 +27,9 @@ fn generate_err(source: &str) -> CodegenError {
 }
 
 fn assert_yaml_eq(actual: &str, expected: &str) {
-    let a: serde_yaml::Value = serde_yaml::from_str(actual)
+    let a: serde_yaml_ng::Value = serde_yaml_ng::from_str(actual)
         .unwrap_or_else(|err| panic!("actual output isn't valid YAML: {err}\n{actual}"));
-    let e: serde_yaml::Value = serde_yaml::from_str(expected).unwrap();
+    let e: serde_yaml_ng::Value = serde_yaml_ng::from_str(expected).unwrap();
     assert_eq!(
         a, e,
         "\n--- actual ---\n{actual}\n--- expected ---\n{expected}"
@@ -137,7 +137,7 @@ services:
 #[test]
 fn container_name_is_absent_when_unset() {
     let yaml = generate_from("service uptime-kuma {\n  image \"louislam/uptime-kuma:latest\"\n}\n");
-    let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
     assert!(
         parsed["services"]["uptime-kuma"]
             .as_mapping()
@@ -157,10 +157,10 @@ fn explicit_container_name_is_emitted() {
     let yaml = generate_from(
         "service it-tools {\n  image \"corentinth/it-tools:latest\"\n  container_name \"tools\"\n}\n",
     );
-    let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
     assert_eq!(
         parsed["services"]["it-tools"]["container_name"],
-        serde_yaml::Value::String("tools".to_string())
+        serde_yaml_ng::Value::String("tools".to_string())
     );
 }
 
@@ -267,11 +267,11 @@ fn two_declarations_sharing_one_real_name_are_not_ambiguous() {
          network b {\n  external\n  name: \"shared_real\"\n}\n\
          service s {\n  image \"x\"\n  networks [a, b]\n}\n",
     );
-    let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
     let labels = &value["services"]["s"]["labels"];
     assert_eq!(
         labels,
-        &serde_yaml::Value::from(vec!["traefik.docker.network=shared_real"])
+        &serde_yaml_ng::Value::from(vec!["traefik.docker.network=shared_real"])
     );
 }
 
@@ -374,7 +374,7 @@ fn comma_in_middleware_reference_is_error() {
 /// and the built-in is suppressed.
 ///
 /// Note this test would fail on the old behavior at `assert_yaml_eq`'s
-/// own parse step, not at the comparison: `serde_yaml` rejects a
+/// own parse step, not at the comparison: `serde_yaml_ng` rejects a
 /// duplicate mapping key.
 #[test]
 fn raw_key_shadowing_a_built_in_field_overrides_it() {
@@ -458,10 +458,10 @@ fn every_built_in_field_is_overridable_by_raw() {
            }\n\
          }\n",
     );
-    let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml)
+    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml)
         .unwrap_or_else(|err| panic!("output isn't valid YAML: {err}\n{yaml}"));
     let web = &parsed["services"]["web"];
-    let expected: serde_yaml::Value = serde_yaml::from_str(
+    let expected: serde_yaml_ng::Value = serde_yaml_ng::from_str(
         r#"
 image: raw-image
 container_name: raw-name
@@ -553,10 +553,10 @@ fn raw_leaves_built_in_fields_it_does_not_name_alone() {
            raw {\n    privileged: true\n    cap_add: [\"NET_ADMIN\"]\n  }\n\
          }\n",
     );
-    let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml)
+    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml)
         .unwrap_or_else(|err| panic!("output isn't valid YAML: {err}\n{yaml}"));
     let web = &parsed["services"]["web"];
-    let expected: serde_yaml::Value = serde_yaml::from_str(
+    let expected: serde_yaml_ng::Value = serde_yaml_ng::from_str(
         r#"
 image: nginx
 container_name: web-ctr
@@ -584,4 +584,115 @@ cap_add:
     )
     .unwrap();
     assert_eq!(web, &expected, "\n--- actual ---\n{yaml}");
+}
+
+/// Values that look like YAML structure — `: `, a leading/embedded `#`,
+/// a NUL byte, flow/indicator characters — have to survive the round
+/// trip *as data*, on every channel a user-supplied string can reach:
+/// `container_name`, `env` values, volume paths, an external network's
+/// real `name` (which also lands inside a Traefik label), and both keys
+/// and values inside `raw`. If the serializer ever emitted one of these
+/// unquoted, the reparse below wouldn't just differ — it would come back
+/// with a different *shape* (an extra nested mapping, a truncated value
+/// where a `#` started a comment), which is exactly the YAML-structure
+/// injection this pins shut.
+///
+/// This is the invariant #126 had to preserve when the workspace moved
+/// off the deprecated `serde_yaml` to `serde_yaml_ng`, so it's asserted
+/// here rather than left implicit in the fixture-shaped tests above —
+/// it's the property that has to hold across *any* future swap of the
+/// underlying YAML library, not just that one.
+///
+/// A literal newline isn't covered because it can't reach codegen: the
+/// lexer rejects a raw newline inside a string literal
+/// (`LexError::UnterminatedString`) and there are no escape sequences,
+/// so no `.hll` source can express one.
+#[test]
+fn yaml_hostile_values_round_trip_as_data_not_structure() {
+    let yaml = generate_from(
+        "network shared {\n  \
+           external\n  \
+           name: \"net: with # hash\"\n\
+         }\n\
+         service web {\n  \
+           image \"nginx\"\n  \
+           container_name \"ctr: name # here\"\n  \
+           env COLON = \"value: with colon\"\n  \
+           env HASH = \"value # with hash\"\n  \
+           env NUL = \"value\0with nul\"\n  \
+           env FLOW = \"[a, b]{c: d}\"\n  \
+           env ANCHOR = \"&anchor *alias\"\n  \
+           volume \"vol: name\" -> \"/mnt/# hash\"\n  \
+           networks [shared]\n  \
+           raw {\n    \
+             colon_val: \"raw: colon value\"\n    \
+             hash_val: \"raw # hash value\"\n    \
+             nul_val: \"raw\0nul\"\n    \
+             nested: {\n      \
+               \"key: with colon\": \"v1\"\n      \
+               \"key # with hash\": \"v2\"\n    \
+             }\n  \
+           }\n\
+         }\n",
+    );
+    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml)
+        .unwrap_or_else(|err| panic!("output isn't valid YAML: {err}\n{yaml}"));
+    let web = &parsed["services"]["web"];
+
+    /// Shorthand for the YAML string a value is expected to come back as.
+    fn s(text: &str) -> serde_yaml_ng::Value {
+        serde_yaml_ng::Value::String(text.to_string())
+    }
+
+    assert_eq!(web["container_name"], s("ctr: name # here"));
+
+    let env: Vec<&str> = web["environment"]
+        .as_sequence()
+        .expect("environment is a sequence")
+        .iter()
+        .map(|v| v.as_str().expect("env entry is a string"))
+        .collect();
+    assert_eq!(
+        env,
+        vec![
+            "COLON=value: with colon",
+            "HASH=value # with hash",
+            "NUL=value\0with nul",
+            "FLOW=[a, b]{c: d}",
+            "ANCHOR=&anchor *alias",
+        ],
+        "\n--- actual ---\n{yaml}"
+    );
+
+    assert_eq!(
+        web["volumes"],
+        serde_yaml_ng::Value::Sequence(vec![s("vol: name:/mnt/# hash")]),
+        "\n--- actual ---\n{yaml}"
+    );
+    assert_eq!(web["colon_val"], s("raw: colon value"));
+    assert_eq!(web["hash_val"], s("raw # hash value"));
+    assert_eq!(web["nul_val"], s("raw\0nul"));
+    assert_eq!(web["nested"]["key: with colon"], s("v1"));
+    assert_eq!(web["nested"]["key # with hash"], s("v2"));
+
+    // The external network's real name reaches the output twice: once as
+    // `networks.shared.name`, once inside the computed Traefik label.
+    assert_eq!(parsed["networks"]["shared"]["name"], s("net: with # hash"));
+    assert!(
+        web["labels"]
+            .as_sequence()
+            .expect("labels is a sequence")
+            .contains(&s("traefik.docker.network=net: with # hash")),
+        "\n--- actual ---\n{yaml}"
+    );
+
+    // The named volume's key survives at the top level too — a `#` there
+    // would otherwise comment out the rest of the mapping.
+    assert!(
+        parsed["volumes"]
+            .as_mapping()
+            .expect("top-level volumes is a mapping")
+            .contains_key(s("vol: name")),
+        "\n--- actual ---\n{yaml}"
+    );
 }

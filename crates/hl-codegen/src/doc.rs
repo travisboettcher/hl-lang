@@ -50,7 +50,7 @@ pub(crate) struct ComposeServiceDoc {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dns: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub expose: Vec<serde_yaml::Value>,
+    pub expose: Vec<serde_yaml_ng::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -67,7 +67,7 @@ pub(crate) struct ComposeServiceDoc {
     /// keeps that from happening, and every construction of this struct
     /// has to call it.
     #[serde(flatten)]
-    pub raw: IndexMap<String, serde_yaml::Value>,
+    pub raw: IndexMap<String, serde_yaml_ng::Value>,
 }
 
 impl ComposeServiceDoc {

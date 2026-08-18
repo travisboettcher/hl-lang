@@ -1,5 +1,5 @@
 //! Transcribes `raw`'s schema-free [`RawValue`] tree into
-//! [`serde_yaml::Value`] — mechanical passthrough, no domain modeling,
+//! [`serde_yaml_ng::Value`] — mechanical passthrough, no domain modeling,
 //! matching `raw`'s own design intent (arbitrary Compose service keys
 //! the compiler has no opinion about, e.g. `privileged`/`devices`/
 //! `security_opt` in the real `cadvisor` service).
@@ -15,7 +15,7 @@ use crate::{CodegenError, interp};
 pub fn to_yaml(
     value: &RawValue,
     bindings: &HashMap<&str, &str>,
-) -> Result<serde_yaml::Value, CodegenError> {
+) -> Result<serde_yaml_ng::Value, CodegenError> {
     match value {
         RawValue::Literal(lit) => literal_to_yaml(lit, bindings),
         RawValue::List(items, _) => {
@@ -23,18 +23,18 @@ pub fn to_yaml(
             for item in items {
                 out.push(to_yaml(item, bindings)?);
             }
-            Ok(serde_yaml::Value::Sequence(out))
+            Ok(serde_yaml_ng::Value::Sequence(out))
         }
         RawValue::Map(entries, _) => {
-            let mut map = serde_yaml::Mapping::new();
+            let mut map = serde_yaml_ng::Mapping::new();
             for (key, val) in entries {
                 let resolved_key = interp::resolve(key.text(), bindings, key.span())?;
                 map.insert(
-                    serde_yaml::Value::String(resolved_key),
+                    serde_yaml_ng::Value::String(resolved_key),
                     to_yaml(val, bindings)?,
                 );
             }
-            Ok(serde_yaml::Value::Mapping(map))
+            Ok(serde_yaml_ng::Value::Mapping(map))
         }
     }
 }
@@ -48,16 +48,16 @@ pub fn to_yaml(
 fn literal_to_yaml(
     lit: &Literal,
     bindings: &HashMap<&str, &str>,
-) -> Result<serde_yaml::Value, CodegenError> {
+) -> Result<serde_yaml_ng::Value, CodegenError> {
     match lit {
-        Literal::Number { value, .. } => Ok(serde_yaml::Value::Number((*value).into())),
+        Literal::Number { value, .. } => Ok(serde_yaml_ng::Value::Number((*value).into())),
         Literal::Ident(text, span) if text == "true" || text == "false" => {
             let _ = span; // no interpolation needed for a bool literal
-            Ok(serde_yaml::Value::Bool(text == "true"))
+            Ok(serde_yaml_ng::Value::Bool(text == "true"))
         }
         Literal::Str(_, span) | Literal::Ident(_, span) => {
             let resolved = interp::resolve(lit.text(), bindings, *span)?;
-            Ok(serde_yaml::Value::String(resolved))
+            Ok(serde_yaml_ng::Value::String(resolved))
         }
         // Composition is supposed to have substituted this away already,
         // so reaching here means a hole in that invariant rather than
@@ -75,10 +75,10 @@ fn literal_to_yaml(
 /// port list) — numbers stay numbers, everything else is a plain string
 /// with no bool coercion (unlike [`literal_to_yaml`], which is scoped to
 /// `raw`'s more permissive passthrough semantics).
-pub fn scalar_value(lit: &Literal) -> serde_yaml::Value {
+pub fn scalar_value(lit: &Literal) -> serde_yaml_ng::Value {
     match lit {
-        Literal::Number { value, .. } => serde_yaml::Value::Number((*value).into()),
-        _ => serde_yaml::Value::String(lit.text().to_string()),
+        Literal::Number { value, .. } => serde_yaml_ng::Value::Number((*value).into()),
+        _ => serde_yaml_ng::Value::String(lit.text().to_string()),
     }
 }
 
@@ -104,35 +104,35 @@ mod tests {
     fn literal_transcribes_to_scalar() {
         let lit = Literal::Str("unconfined".to_string(), span());
         let yaml = to_yaml(&RawValue::Literal(lit), &bindings()).unwrap();
-        assert_eq!(yaml, serde_yaml::Value::String("unconfined".to_string()));
+        assert_eq!(yaml, serde_yaml_ng::Value::String("unconfined".to_string()));
     }
 
     #[test]
     fn true_ident_becomes_bool() {
         let lit = Literal::Ident("true".to_string(), span());
         let yaml = to_yaml(&RawValue::Literal(lit), &bindings()).unwrap();
-        assert_eq!(yaml, serde_yaml::Value::Bool(true));
+        assert_eq!(yaml, serde_yaml_ng::Value::Bool(true));
     }
 
     #[test]
     fn false_ident_becomes_bool() {
         let lit = Literal::Ident("false".to_string(), span());
         let yaml = to_yaml(&RawValue::Literal(lit), &bindings()).unwrap();
-        assert_eq!(yaml, serde_yaml::Value::Bool(false));
+        assert_eq!(yaml, serde_yaml_ng::Value::Bool(false));
     }
 
     #[test]
     fn other_ident_stays_string_not_bool() {
         let lit = Literal::Ident("unconfined".to_string(), span());
         let yaml = to_yaml(&RawValue::Literal(lit), &bindings()).unwrap();
-        assert_eq!(yaml, serde_yaml::Value::String("unconfined".to_string()));
+        assert_eq!(yaml, serde_yaml_ng::Value::String("unconfined".to_string()));
     }
 
     #[test]
     fn quoted_true_stays_string() {
         let lit = Literal::Str("true".to_string(), span());
         let yaml = to_yaml(&RawValue::Literal(lit), &bindings()).unwrap();
-        assert_eq!(yaml, serde_yaml::Value::String("true".to_string()));
+        assert_eq!(yaml, serde_yaml_ng::Value::String("true".to_string()));
     }
 
     /// A `Literal::Param` reaching codegen is a compiler-invariant
@@ -157,7 +157,9 @@ mod tests {
         let yaml = to_yaml(&RawValue::List(items, span()), &bindings()).unwrap();
         assert_eq!(
             yaml,
-            serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("/dev/kmsg".to_string())])
+            serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::String(
+                "/dev/kmsg".to_string()
+            )])
         );
     }
 
@@ -168,11 +170,11 @@ mod tests {
             RawValue::Literal(Literal::Str("unconfined".to_string(), span())),
         )];
         let yaml = to_yaml(&RawValue::Map(entries, span()), &bindings()).unwrap();
-        let mut expected = serde_yaml::Mapping::new();
+        let mut expected = serde_yaml_ng::Mapping::new();
         expected.insert(
-            serde_yaml::Value::String("seccomp".to_string()),
-            serde_yaml::Value::String("unconfined".to_string()),
+            serde_yaml_ng::Value::String("seccomp".to_string()),
+            serde_yaml_ng::Value::String("unconfined".to_string()),
         );
-        assert_eq!(yaml, serde_yaml::Value::Mapping(expected));
+        assert_eq!(yaml, serde_yaml_ng::Value::Mapping(expected));
     }
 }
