@@ -22,7 +22,8 @@ guide is built on top of).
 
 **The full pipeline is implemented**: lexer → parser → template/`with`
 composition → cross-file `use` imports → codegen → CLI. A `.hll` file can
-declare `network`/`service`/`image`/`expose`/`volume`/`env`/`restart`/`raw`,
+declare
+`network`/`service`/`image`/`expose`/`publish`/`volume`/`env`/`restart`/`raw`,
 compose reusable `template`s onto a service via `with`, and `use` another
 `.hll` file under a local alias to reuse its templates/networks across
 files (`use "docker.hll" as traefik`, then e.g.

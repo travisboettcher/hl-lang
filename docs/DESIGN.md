@@ -41,9 +41,9 @@ Punctuation: { } [ ] ( ) : = -> , . $
 
 - `template` is the *only* reserved word in the entire language. Everything
   else that looks like a keyword (`service`, `network`, `image`, `volume`,
-  `env`, `restart`, `expose`, `middleware`, `depends_on`, `networks`, `dns`,
-  `container_name`, `with`, `as`, `external`, `use`, `raw`, `defaults`,
-  ...) is an ordinary `IDENT`,
+  `publish`, `env`, `restart`, `expose`, `middleware`, `depends_on`,
+  `networks`, `dns`, `container_name`, `with`, `as`, `external`, `use`,
+  `raw`, `defaults`, ...) is an ordinary `IDENT`,
   resolved against a schema table at parse time — not a lexer-level
   keyword. `with`, `as`, `external`, and `use` are *contextual* keywords,
   meaningful only in the grammar position expected (the same technique as
@@ -152,9 +152,10 @@ token identity):
   comma itself is never optional when there *is* a next item; bare
   adjacency with no comma at all no longer implies continuation.
 
-Map-kind bodies — `raw { }`, `volume { }`/`env { }`, and a `with`-invocation's
-own argument body (which reuses `raw`'s entry parsing) — are exempt from the
-newline rule in the *opposite* direction from the comma-list rule above:
+Map-kind bodies — `raw { }`, `volume { }`/`publish { }`/`env { }`, and a
+`with`-invocation's own argument body (which reuses `raw`'s entry
+parsing) — are exempt from the newline rule in the *opposite* direction
+from the comma-list rule above:
 their entries are conceptually key-value pairs in a dictionary, not named
 struct fields, and either a comma *or* a newline (not just a comma) is
 enough to separate them, so the compact one-line style (`{ puid: 1000, pgid:
@@ -206,8 +207,8 @@ same two entries (#81).
    statement start and now correctly errors instead of silently
    reattaching elsewhere.
 4. **Repeatable-field accumulation** (semantic, not part of the CFG) —
-   writing `volume`, `env`, `middleware`, or `depends_on` more than once in
-   one body appends, since those fields are list/map-kinded — subject to
+   writing `volume`, `publish`, `env`, `middleware`, or `depends_on` more
+   than once in one body appends, since those fields are list/map-kinded — subject to
    the set-like lists' distinct-name rule under "Composition" below, which
    drops a repeat of a name already present. Writing
    `image` or `restart` twice in the same body is a duplicate-scalar
@@ -222,6 +223,7 @@ same two entries (#81).
 | `image` | struct | `ref` | — | — | no |
 | `expose` | struct | `port` | — | — | no |
 | `volume` | map | — | `->` | value (container path) | no |
+| `publish` | map | — | `->` | value (container port) | no |
 | `env` | map | — | `=` | key | no |
 | `restart` | struct | `policy` | — | — | no |
 | `with` | struct | `templates` (list of nested instantiations) | — | — | no |
@@ -236,6 +238,21 @@ value is what's emitted and the built-in one is dropped, which keeps
 adding a row to this table from breaking files that were already
 reaching for `raw` in that row's absence (see the `raw` section of the
 book's Built-in Fields page).
+
+`publish` and `expose` are separate rows on purpose, not two spellings
+of one concept: `publish` is Compose's `ports:` (published on the host,
+reachable from the LAN) and `expose` is Compose's `expose:` (visible to
+other containers on the same network) plus the Traefik router labels.
+A homelab needs both — much of it sits behind Traefik and wants
+`expose`, while Pi-hole on 53, a Syncthing sync port, or a game server
+is reached directly and wants `publish` (#84). `publish` borrows
+`volume`'s `->` separator and its value-side uniqueness because it's the
+same shape, a host-side resource mapped onto a container-side one;
+uniqueness lands on the container port rather than the host one because
+a protocol suffix rides on the container half of a Compose short-syntax
+mapping (`53:53/udp`), so checking the host side would reject one host
+port serving both protocols — exactly the configuration the field exists
+to express.
 
 `expose`'s own `entrypoint` sub-field is a list of references too
 (`entrypoint web, web-secure`), for the same reason it isn't a scalar
@@ -290,7 +307,7 @@ List fields concatenate (no collision possible) — the set-like ones
 (`middleware`, `depends_on`, `networks`, `expose.entrypoint`) by
 *distinct* name, keeping the first occurrence, while `dns` keeps
 duplicates since its order is observable resolver priority; map fields merge
-key-by-key (or value-by-value for `volume`); scalar fields (`image`,
+key-by-key (or value-by-value for `volume` and `publish`); scalar fields (`image`,
 `restart`) error on collision among explicit templates only. `expose`,
 the one built-in struct field with more than one sub-field, merges
 per sub-field (`port`/`host`/`entrypoint` independently) rather than as
@@ -487,7 +504,7 @@ readability choice, not a different construct.
    bare-value/list (primary-field shorthand) or a `{ field: value, ... }`
    body, recursing into nested blocks. A schema table drives both parsing
    and validation. Covers every built-in type (`network`, `service`,
-   `image`, `expose`, `volume`, `env`, `restart`, `raw`), full
+   `image`, `expose`, `publish`, `volume`, `env`, `restart`, `raw`), full
    `template`/`with` composition, and `use`/alias-qualified references
    (see Composition and Imports, above) — purely syntactic, no name
    resolution.

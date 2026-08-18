@@ -102,7 +102,8 @@ body if you want a bare list in the middle.
 
 `expose.port` becomes Compose's `expose:` entry (the port is reachable
 from other containers on the same network — it isn't published to the
-host). `expose.host`, if set, generates a Traefik router-rule label
+host; for that, see [`publish`](#publish) below). `expose.host`, if set,
+generates a Traefik router-rule label
 (`Host(...)`,) routing that hostname to this service; `expose.entrypoint`,
 if non-empty, restricts that router to the named Traefik entry points
 instead of all of them.
@@ -121,6 +122,64 @@ that joins entry points, so a comma inside one name would splice an
 extra entry into the label. (`entrypoint "web,web-secure"` is therefore
 an error — write `entrypoint web, web-secure`.) A comma is rejected in a
 `middleware` name for the same reason.
+
+## `publish`
+
+Map-kind. Bare-entry separator: `->` (host port → container port).
+Uniqueness is checked on the **container port** (the value side), the
+same convention `volume` uses for its own `host -> container` mapping.
+
+`publish` is Compose's `ports:` key — the port really is published on
+the Docker host, reachable from the LAN. That's the opposite of
+[`expose`](#expose) above, which is Compose's `expose:` (visible to
+other containers on the same network only) plus the Traefik routing
+labels. A service behind Traefik wants `expose`; a service reached
+directly — Pi-hole on 53, Syncthing's sync port, a game server — wants
+`publish`. Setting both is fine and means both things.
+
+```hll,build
+service pihole {
+  image "pihole/pihole:latest"
+  publish 53 -> "53/tcp"
+  publish 53 -> "53/udp"
+  publish 8081 -> 80
+  restart unless-stopped
+}
+```
+
+```yaml
+services:
+  pihole:
+    image: pihole/pihole:latest
+    restart: unless-stopped
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "8081:80"
+```
+
+Repeating `publish` accumulates entries rather than overwriting — a
+service with several published ports (Jellyfin's 8096 and 8920,
+Syncthing's 8384 and 22000) writes one line each.
+
+Both sides are written as you'd write them in Compose's short syntax,
+and both go through to the generated `host:container` string unchanged.
+A protocol suffix belongs on the container side, quoted so it lexes as
+one value (`publish 53 -> "53/udp"` → `"53:53/udp"`). Quoting the host
+side works the same way if you need to pin an interface
+(`publish "127.0.0.1:8081" -> 80`).
+
+Checking uniqueness on the container side rather than the host one is
+deliberate: Docker's own conflict is on the host port, but the protocol
+suffix rides on the container half of the mapping, so a host-side check
+would reject the perfectly legal pair in the example above. The
+trade-off is the mirror image — publishing one container port on two
+different host ports (`8080 -> 80` *and* `8081 -> 80`) is rejected as a
+duplicate; reach for [`raw`](#raw)'s `ports:` if you genuinely need it.
+
+There's no single-value shorthand: `publish 8096` is an error, not
+"8096 on both sides". `volume` requires both sides of its mapping too,
+and both fields follow the same rule.
 
 ## `volume`
 
@@ -263,9 +322,9 @@ for generated or pathological input.
 
 A `raw` key may name a field `hll` already has (`image`,
 `container_name`, `restart`, `environment`, `volumes`, `networks`,
-`dns`, `expose`, `depends_on`, `labels`). When it does, the `raw` value
-is what's emitted and the built-in one is dropped — the key appears
-exactly once:
+`dns`, `ports`, `expose`, `depends_on`, `labels`). When it does, the
+`raw` value is what's emitted and the built-in one is dropped — the key
+appears exactly once:
 
 ```hll,fragment
 image "nginx"
@@ -274,11 +333,13 @@ raw {
 }
 ```
 
-This is what makes `raw` a durable escape hatch. A file that writes
-`raw { ports: [...] }` today, because there's no dedicated `ports`
-field yet, keeps working unchanged the day one is added — so gaining a
-built-in field is never a breaking change for files that were working
-around its absence.
+This is what makes `raw` a durable escape hatch, and it isn't
+hypothetical: files that wrote `raw { ports: [...] }` before
+[`publish`](#publish) existed keep compiling to exactly the same output
+now that it does — gaining a built-in field is never a breaking change
+for files that were working around its absence. The same holds for
+whichever Compose key gets a field next, so reaching for `raw` today
+costs nothing later.
 
 Note that `raw`'s value **replaces** the built-in one; it never merges
 with it. That's worth knowing for `labels` in particular, since `hll`

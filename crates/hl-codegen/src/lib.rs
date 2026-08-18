@@ -302,6 +302,18 @@ fn generate_service(
         volume_entries.push(format!("{host}:{container}"));
     }
 
+    // Compose short syntax, `"host:container"` — quoted, since YAML
+    // reads a bare `8096:8096` as a sexagesimal integer rather than as a
+    // port mapping. A protocol suffix (`publish 53 -> "53/udp"`) rides
+    // along on the container half untouched, which is where Compose's
+    // own short syntax puts it.
+    let mut publish_entries = Vec::with_capacity(fields.publish.entries.len());
+    for p in &fields.publish.entries {
+        let host = interp::resolve(p.host.text(), &bindings, p.host.span())?;
+        let container = interp::resolve(p.container.text(), &bindings, p.container.span())?;
+        publish_entries.push(format!("{host}:{container}"));
+    }
+
     let (compose_networks, network_docs, docker_network) =
         resolve_networks(&fields.networks, declared_networks, name, service.span)?;
 
@@ -332,6 +344,7 @@ fn generate_service(
         volumes: volume_entries,
         networks: compose_networks,
         dns,
+        ports: publish_entries,
         expose,
         depends_on,
         labels,
