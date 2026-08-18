@@ -16,6 +16,13 @@ name: Release
 # immutable-releases feature locks a published release's assets
 # immediately, so uploading to it afterward fails.
 #
+# One bump is gated rather than computed: 0.x -> 1.0.0. `semver-major`
+# on a 0.x version would otherwise ship 1.0.0 off a routine label, so
+# `open-version-bump-pr` refuses it unless the merged PR also carries a
+# `release-1.0` label. semver-label.yml runs the same check pre-merge so
+# the mistake is usually caught on the PR; this one is the backstop, and
+# the only one that sees the real version at merge time.
+#
 # The version bump lands via a real PR merge rather than a direct push
 # to main so this keeps working under branch protection that requires
 # PRs/status checks — it just never needs a human to click merge.
@@ -72,6 +79,15 @@ jobs:
           elif grep -qx "semver-minor" <<<"$labels"; then bump=minor
           elif grep -qx "semver-patch" <<<"$labels"; then bump=patch
           fi
+          # The opt-in override for the one bump that can't be undone:
+          # 0.x -> 1.0.0. Read here alongside the semver-* labels so the
+          # next step has it; enforced there, where the current version
+          # is known. See "Crossing to 1.0" in CONTRIBUTING.md.
+          if grep -qx "release-1.0" <<<"$labels"; then
+            echo "release_1_0=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_1_0=false" >> "$GITHUB_OUTPUT"
+          fi
           if [ -z "$bump" ]; then
             echo "No semver-major/minor/patch label found on PR #${pr_number:-?} (or no associated PR) — skipping release for this merge."
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -101,6 +117,32 @@ jobs:
           set -euo pipefail
           current=$(grep -m1 '^version' crates/hl-cli/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
           IFS='.' read -r major minor patch <<<"$current"
+          # Declaring 1.0 is a decision, not an arithmetic consequence of
+          # a label. Without this gate, a routine `semver-major` on 0.2.2
+          # ships 1.0.0 — freezing the .hll language and the hllc CLI (see
+          # the README's "What a version number promises") with nothing
+          # between the label and the announcement. Require an explicit
+          # `release-1.0` label alongside `semver-major` for that one
+          # transition; every other bump, 0.x or 1.x+, is unaffected.
+          if [ "${{ steps.label.outputs.bump }}" = "major" ] \
+             && [ "$major" -eq 0 ] \
+             && [ "${{ steps.label.outputs.release_1_0 }}" != "true" ]; then
+            echo "Refusing to bump $current -> 1.0.0."
+            echo
+            echo "PR #${{ steps.label.outputs.pr_number }} carries \`semver-major\` while the current version is"
+            echo "still 0.x, so this merge would cut the first 1.0.0 release. 1.0 is a"
+            echo "commitment to a frozen .hll language and hllc CLI contract, so it needs"
+            echo "to be deliberate rather than a side effect of a label."
+            echo
+            echo "If 1.0 was intended: add the \`release-1.0\` label to PR #${{ steps.label.outputs.pr_number }} and re-run"
+            echo "this workflow (Actions -> this run -> Re-run failed jobs)."
+            echo
+            echo "If it was not: the change is breaking but should stay in 0.x — relabel"
+            echo "PR #${{ steps.label.outputs.pr_number }} \`semver-minor\` (the 0.x convention for a breaking change)"
+            echo "and re-run this workflow."
+            echo "::error::Refusing to bump $current -> 1.0.0: PR #${{ steps.label.outputs.pr_number }} has \`semver-major\` but not \`release-1.0\`. Add \`release-1.0\` and re-run to cut 1.0.0, or relabel \`semver-minor\` to stay in 0.x. See CONTRIBUTING.md, 'Crossing to 1.0'."
+            exit 1
+          fi
           case "${{ steps.label.outputs.bump }}" in
             major) major=$((major + 1)); minor=0; patch=0 ;;
             minor) minor=$((minor + 1)); patch=0 ;;

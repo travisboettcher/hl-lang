@@ -32,6 +32,26 @@
 //! let program = hl_parser::parse(source).expect("valid hl-lang source");
 //! assert_eq!(program.decls.len(), 1);
 //! ```
+//!
+//! # Stability
+//!
+//! This crate is an implementation detail of the `hllc` compiler, not a
+//! library offered for outside use. It is never published to crates.io —
+//! a release is a git tag plus a GitHub Release carrying the `hllc`
+//! binary (`release-plz.toml`'s `[workspace] publish = false` +
+//! `git_only = true`) — and its version number only tracks `hllc`'s so
+//! the whole workspace moves in lockstep.
+//!
+//! **No semver guarantee applies to this Rust API.** Types, public
+//! fields, error enum variants, module paths, and function signatures
+//! may change in any release, including a patch. That is deliberate and
+//! load-bearing here in particular: the AST types re-exported below have
+//! all-public fields, and neither [`ParseError`] nor [`ComposeError`] is
+//! `#[non_exhaustive]`, so adding a built-in field or a new diagnostic —
+//! routine work for this project — would otherwise be a breaking change.
+//! What the version number does promise is `.hll` source compatibility,
+//! the `hllc` CLI contract, and generated-Compose semantics; see "What a
+//! version number promises" in the repo README.
 
 mod ast;
 pub mod compose;

@@ -2,6 +2,23 @@
 //! the CLI's actual logic is testable and growable (more subcommands and
 //! options are expected once the parser/codegen stages exist) independent
 //! of process-level concerns like `std::env::args` and exit codes.
+//!
+//! # Stability
+//!
+//! The stable, promised surface of this project is the `hllc` *binary*
+//! this crate produces — its flags, its exit codes, and what it writes
+//! to stdout vs. stderr — together with `.hll` source compatibility and
+//! the semantics of the Compose document it generates. That contract is
+//! spelled out under "What a version number promises" in the repo
+//! README.
+//!
+//! This crate's Rust API is not part of it. Nothing here is published to
+//! crates.io — a release is a git tag plus a GitHub Release carrying the
+//! binary (`release-plz.toml`'s `[workspace] publish = false` +
+//! `git_only = true`) — and **no semver guarantee applies to these
+//! types, fields, or signatures**; they may change in any release,
+//! including a patch. Depend on the binary, pinned to a tag, not on the
+//! crate.
 
 use std::fs;
 use std::path::{Path, PathBuf};

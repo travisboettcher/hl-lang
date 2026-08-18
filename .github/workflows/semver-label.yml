@@ -8,6 +8,12 @@ name: Semver label
 # three labels, so release.yml never finds itself trying to release a PR
 # with no bump size to apply. Mark this job as a required status check
 # in the repo's branch protection settings for main.
+#
+# It also mirrors release.yml's 0.x -> 1.0.0 gate: while the version is
+# still 0.x, `semver-major` needs an accompanying `release-1.0` label,
+# since it would otherwise cut 1.0.0 off a routine label. Catching that
+# here means it shows up on the PR rather than as a failed release job
+# after merge; release.yml enforces it again for real.
 
 on:
   pull_request:
@@ -54,6 +60,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v7
+
       - name: Check labels
         env:
           LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
@@ -66,3 +74,26 @@ jobs:
           fi
           name=$(jq -r '[.[] | select(.name | startswith("semver-"))][0].name' <<<"$LABELS_JSON")
           echo "OK: $name"
+
+          # Pre-merge mirror of release.yml's 0.x -> 1.0.0 gate, so the
+          # mistake surfaces on the PR instead of as a failed release job
+          # after merge. release.yml still enforces it independently —
+          # labels can change between this check and the merge, and only
+          # that job sees the version as of the merge commit.
+          has_release_1_0=$(jq '[.[] | select(.name == "release-1.0")] | length' <<<"$LABELS_JSON")
+          current=$(grep -m1 '^version' crates/hl-cli/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          major=${current%%.*}
+
+          if [ "$name" = "semver-major" ] && [ "$major" -eq 0 ] && [ "$has_release_1_0" -eq 0 ]; then
+            echo "::error::\`semver-major\` on $current would cut 1.0.0 when this merges, freezing the .hll language and hllc CLI contract. If that's intended, add the \`release-1.0\` label too; if not, use \`semver-minor\` (the 0.x convention for a breaking change). See CONTRIBUTING.md, 'Crossing to 1.0'."
+            exit 1
+          fi
+
+          if [ "$has_release_1_0" -ne 0 ] && [ "$name" != "semver-major" ]; then
+            echo "::error::The \`release-1.0\` label only means anything alongside \`semver-major\` — it is the override for the 0.x -> 1.0.0 bump, and does nothing on a \`$name\` PR. Remove it, or switch to \`semver-major\` if 1.0.0 is what this PR should cut."
+            exit 1
+          fi
+
+          if [ "$has_release_1_0" -ne 0 ]; then
+            echo "OK: release-1.0 present — merging this PR will cut 1.0.0 from $current."
+          fi
