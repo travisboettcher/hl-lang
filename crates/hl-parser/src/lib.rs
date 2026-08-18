@@ -69,5 +69,5 @@ pub use compose::{
     compose_with_resolver,
 };
 pub use error::{Expected, ParseError};
-pub use hl_lexer::Span;
-pub use parser::{MAX_RAW_VALUE_DEPTH, parse};
+pub use hl_lexer::{FileId, Location, SourceMap, Span};
+pub use parser::{MAX_RAW_VALUE_DEPTH, parse, parse_in_file};

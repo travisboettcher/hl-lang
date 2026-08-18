@@ -312,10 +312,9 @@ mod display_tests {
 
     fn span(line: u32, col: u32) -> Span {
         Span {
-            start: 0,
-            end: 0,
             line,
             col,
+            ..Span::default()
         }
     }
 
