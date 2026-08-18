@@ -28,8 +28,12 @@ jobs:
     # auto-generated PR forever failing it, and its `gh pr merge --auto`
     # would never fire. Same author + title-marker exemption as
     # semver-label.yml (see that file's comment on why it's checked
-    # against `repository_owner` rather than `github-actions[bot]`), so
-    # an external contributor can't spoof it.
+    # against `repository_owner` rather than `github-actions[bot]`, and
+    # on the precondition that fallback carries), so an external
+    # contributor can't spoof it. Same `RELEASE_BOT_LOGIN` repository
+    # variable overrides it here: unset, this behaves exactly as before;
+    # set, it is what makes the exemption survive a transfer to an
+    # organisation, where `repository_owner` would match no PR author.
     #
     # Dependabot is exempt for the same reason (#96): a dependency bump
     # legitimately closes no issue. Unlike semver-label.yml, this applies
@@ -38,7 +42,7 @@ jobs:
     # no bearing on whether an issue exists to close. `user.login` is set
     # by GitHub, so a contributor can't spoof it with a lookalike branch.
     if: |
-      !(github.event.pull_request.user.login == github.repository_owner &&
+      !(github.event.pull_request.user.login == (vars.RELEASE_BOT_LOGIN || github.repository_owner) &&
         contains(github.event.pull_request.title, '[release-bump]')) &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest

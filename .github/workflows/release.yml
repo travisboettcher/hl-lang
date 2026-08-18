@@ -9,9 +9,8 @@ name: Release
 # itself a push to main, which re-triggers this workflow — that second
 # run is recognized by the `[release-bump]` marker in the squash commit
 # message and runs `publish-release` instead: `release-plz release` tags
-# and creates the GitHub Release as a draft (a no-op if that version's
-# tag already exists, so this can never double-release), then the
-# actual `hllc` binary is built, attached, and the release published.
+# and creates the GitHub Release as a draft, then the actual `hllc`
+# binary is built, attached, and the release published.
 # It has to stay a draft until the binary's attached — GitHub's
 # immutable-releases feature locks a published release's assets
 # immediately, so uploading to it afterward fails.
@@ -27,6 +26,41 @@ name: Release
 # to main so this keeps working under branch protection that requires
 # PRs/status checks — it just never needs a human to click merge.
 #
+# ## Why there is no `concurrency:` block (#79)
+#
+# This workflow only triggers on pushes to main, so `github.ref` is
+# always `refs/heads/main` and every run would land in the same
+# concurrency group. GitHub keeps at most one *pending* run per group:
+# merge three PRs in quick succession and the middle run is cancelled
+# outright — no bump PR, no release, and no failure to notice. Worse, a
+# bump PR's own merge push shares that group too, so a queued
+# `publish-release` could be cancelled after the version bump had
+# already merged, leaving main's manifests at a version with no tag and
+# no release. Runs are therefore left to overlap, and made safe to:
+#
+#   * The version to release is `max(newest v* tag, main's manifest, the
+#     open bump PR's version)` rather than main's manifest alone, which
+#     lags a release behind until the bump PR merges. The tag is the
+#     authoritative record of what actually shipped; taking the max on
+#     top of it means overlapping runs never compute the same number and
+#     never lose a larger bump to a smaller one.
+#   * Every run shares one `release/version-bump` branch, re-cut from
+#     that run's own commit and force-pushed under `--force-with-lease`,
+#     so at most one bump PR is ever open. Two open bump PRs would both
+#     edit the same `version =` line from the same base and neither
+#     would auto-merge. A run that loses the lease race re-reads the
+#     branch and retries, so it can only ever raise the pending version.
+#   * A squash merge applies the bump PR's diff to main as of the merge,
+#     so whichever run wins the race, the release cut from that merge
+#     contains every commit merged before it. Nothing is dropped; rapid
+#     merges collapse into one shared release instead.
+#
+# `workflow_dispatch` runs `publish-release` on demand. That is the
+# manual repair for the one state nothing re-triggers on its own: a bump
+# PR merged but its publish run never finished, so main's manifests sit
+# ahead of the newest tag. `open-version-bump-pr` emits a warning
+# whenever it sees that state.
+#
 # `open-version-bump-pr` authenticates as a `RELEASE_PLZ_TOKEN` PAT
 # (fine-grained, this repo only, Contents + Pull requests: read/write)
 # instead of the default GITHUB_TOKEN: GitHub blocks the default token
@@ -36,11 +70,15 @@ name: Release
 # workflow opening a PR, passing its own CI, and self-merging unwatched.
 # A PAT is attributed to a real account, so the PR it opens behaves like
 # any other PR. `publish-release` doesn't create PRs, so it stays on
-# GITHUB_TOKEN.
+# GITHUB_TOKEN. Which account that is matters to semver-label.yml and
+# linked-issue.yml, which exempt the bump PR from their required checks
+# by author — see the precondition recorded in those files.
 
 on:
   push:
     branches: [main]
+  # Republish on demand: see "Why there is no concurrency block" above.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -49,19 +87,22 @@ permissions:
   contents: write
   pull-requests: write
 
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   open-version-bump-pr:
     name: open version-bump PR
-    if: ${{ !contains(github.event.head_commit.message, '[release-bump]') }}
+    if: ${{ github.event_name == 'push' && !contains(github.event.head_commit.message, '[release-bump]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # One shared branch, deliberately not named after the version it
+      # carries: it is re-pointed at a higher version rather than joined
+      # by a second branch when merges overlap. See the header comment.
+      BUMP_BRANCH: release/version-bump
     steps:
       - uses: actions/checkout@v7
         with:
+          # Full history *and tags* — the version to release is derived
+          # from the newest `v*` tag, not just from main's manifest.
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
@@ -110,78 +151,209 @@ jobs:
         with:
           tool: release-plz
 
-      - name: Compute next version and bump every crate
+      - name: Compute next version, bump every crate, push the bump branch
         if: steps.label.outputs.skip == 'false'
         id: version
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          BUMP: ${{ steps.label.outputs.bump }}
+          RELEASE_1_0: ${{ steps.label.outputs.release_1_0 }}
+          SOURCE_PR: ${{ steps.label.outputs.pr_number }}
         run: |
           set -euo pipefail
-          current=$(grep -m1 '^version' crates/hl-cli/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
-          IFS='.' read -r major minor patch <<<"$current"
-          # Declaring 1.0 is a decision, not an arithmetic consequence of
-          # a label. Without this gate, a routine `semver-major` on 0.2.2
-          # ships 1.0.0 — freezing the .hll language and the hllc CLI (see
-          # the README's "What a version number promises") with nothing
-          # between the label and the announcement. Require an explicit
-          # `release-1.0` label alongside `semver-major` for that one
-          # transition; every other bump, 0.x or 1.x+, is unaffected.
-          if [ "${{ steps.label.outputs.bump }}" = "major" ] \
-             && [ "$major" -eq 0 ] \
-             && [ "${{ steps.label.outputs.release_1_0 }}" != "true" ]; then
-            echo "Refusing to bump $current -> 1.0.0."
-            echo
-            echo "PR #${{ steps.label.outputs.pr_number }} carries \`semver-major\` while the current version is"
-            echo "still 0.x, so this merge would cut the first 1.0.0 release. 1.0 is a"
-            echo "commitment to a frozen .hll language and hllc CLI contract, so it needs"
-            echo "to be deliberate rather than a side effect of a label."
-            echo
-            echo "If 1.0 was intended: add the \`release-1.0\` label to PR #${{ steps.label.outputs.pr_number }} and re-run"
-            echo "this workflow (Actions -> this run -> Re-run failed jobs)."
-            echo
-            echo "If it was not: the change is breaking but should stay in 0.x — relabel"
-            echo "PR #${{ steps.label.outputs.pr_number }} \`semver-minor\` (the 0.x convention for a breaking change)"
-            echo "and re-run this workflow."
-            echo "::error::Refusing to bump $current -> 1.0.0: PR #${{ steps.label.outputs.pr_number }} has \`semver-major\` but not \`release-1.0\`. Add \`release-1.0\` and re-run to cut 1.0.0, or relabel \`semver-minor\` to stay in 0.x. See CONTRIBUTING.md, 'Crossing to 1.0'."
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # `fetch-depth: 0` already brings the tags along, but the version
+          # this job computes is derived from them — so fetch them here in
+          # their own right rather than as a side effect of a checkout
+          # option that could be tuned later without anyone connecting it
+          # to "the release came out one version too low".
+          git fetch --tags --force --quiet origin
+          # Absent until the first bump branch is ever pushed, and absent
+          # again whenever the repo auto-deletes the head branch after the
+          # bump PR merges — both are normal, so the "couldn't find remote
+          # ref" that fetch prints for them is not worth logging.
+          git fetch --force --quiet origin \
+            "+refs/heads/$BUMP_BRANCH:refs/remotes/origin/$BUMP_BRANCH" 2>/dev/null || true
+
+          read_version() {
+            grep -m1 '^version' "$1" | sed -E 's/version = "(.*)"/\1/'
+          }
+
+          base_sha=$(git rev-parse HEAD)
+          git checkout -B "$BUMP_BRANCH" --quiet
+
+          pushed=false
+          for attempt in 1 2 3; do
+            git reset --hard --quiet "$base_sha"
+
+            # What actually shipped. release-plz tags hl-cli as `vX.Y.Z`
+            # (release-plz.toml's git_tag_name) and the other four crates
+            # as `<crate>-vX.Y.Z`, so the bare-v pattern selects exactly
+            # the releases. Empty before the first release ever.
+            tag_version=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1 | sed 's/^v//')
+            # What main claims. Equal to tag_version in steady state, one
+            # release ahead in the window between a bump PR merging and
+            # its publish run tagging.
+            main_version=$(read_version crates/hl-cli/Cargo.toml)
+            # What an already-open bump PR is about to release. Read off
+            # the branch rather than the PR title so it can't drift.
+            pending_version=""
+            pending_pr=$(gh pr list --state open --head "$BUMP_BRANCH" --json number --jq '.[0].number // empty')
+            if [ -n "$pending_pr" ] && git rev-parse --verify --quiet "refs/remotes/origin/$BUMP_BRANCH" >/dev/null; then
+              git show "refs/remotes/origin/$BUMP_BRANCH:crates/hl-cli/Cargo.toml" > "$RUNNER_TEMP/pending-cargo.toml"
+              pending_version=$(read_version "$RUNNER_TEMP/pending-cargo.toml")
+            fi
+
+            # The next version has to clear all three: the last release,
+            # whatever main already claims, and whatever the open bump PR
+            # is about to claim. Taking the max is what keeps overlapping
+            # runs from computing the same number or from force-pushing a
+            # smaller bump over a larger one.
+            current=$(printf '%s\n%s\n%s\n' "$tag_version" "$main_version" "$pending_version" \
+              | grep -v '^$' | sort -V | tail -n1)
+            echo "last tag: ${tag_version:-<none>} | main: $main_version | open bump PR: ${pending_version:-<none>} -> bumping from $current"
+
+            if [ -n "$tag_version" ] && [ "$main_version" != "$tag_version" ]; then
+              echo "::warning::main is at $main_version but the newest tag is v$tag_version. Either a publish run for v$main_version is still in flight (it will catch up on its own), or it never finished — in which case run this workflow manually (Actions -> Release -> Run workflow) to tag and publish v$main_version. This run is unaffected: it bumps from $current, so it cannot collide with it."
+            fi
+
+            IFS='.' read -r major minor patch <<<"$current"
+            # Declaring 1.0 is a decision, not an arithmetic consequence of
+            # a label. Without this gate, a routine `semver-major` on 0.2.2
+            # ships 1.0.0 — freezing the .hll language and the hllc CLI (see
+            # the README's "What a version number promises") with nothing
+            # between the label and the announcement. Require an explicit
+            # `release-1.0` label alongside `semver-major` for that one
+            # transition; every other bump, 0.x or 1.x+, is unaffected.
+            if [ "$BUMP" = "major" ] && [ "$major" -eq 0 ] && [ "$RELEASE_1_0" != "true" ]; then
+              echo "Refusing to bump $current -> 1.0.0."
+              echo
+              echo "PR #$SOURCE_PR carries \`semver-major\` while the current version is"
+              echo "still 0.x, so this merge would cut the first 1.0.0 release. 1.0 is a"
+              echo "commitment to a frozen .hll language and hllc CLI contract, so it needs"
+              echo "to be deliberate rather than a side effect of a label."
+              echo
+              echo "If 1.0 was intended: add the \`release-1.0\` label to PR #$SOURCE_PR and re-run"
+              echo "this workflow (Actions -> this run -> Re-run failed jobs)."
+              echo
+              echo "If it was not: the change is breaking but should stay in 0.x — relabel"
+              echo "PR #$SOURCE_PR \`semver-minor\` (the 0.x convention for a breaking change)"
+              echo "and re-run this workflow."
+              echo "::error::Refusing to bump $current -> 1.0.0: PR #$SOURCE_PR has \`semver-major\` but not \`release-1.0\`. Add \`release-1.0\` and re-run to cut 1.0.0, or relabel \`semver-minor\` to stay in 0.x. See CONTRIBUTING.md, 'Crossing to 1.0'."
+              exit 1
+            fi
+            case "$BUMP" in
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              patch) patch=$((patch + 1)) ;;
+            esac
+            next="$major.$minor.$patch"
+
+            release-plz set-version \
+              "hl-lexer@$next" "hl-parser@$next" "hl-codegen@$next" \
+              "hl-linker@$next" "hl-cli@$next"
+            # Refreshes Cargo.lock's own copy of each bumped crate's version
+            # (cargo rewrites it for any local path package on any build/check
+            # invocation) so it doesn't drift from Cargo.toml.
+            cargo check --workspace --quiet
+
+            # Explicit paths, not `git add -A`: the only files this commit
+            # should ever carry are the five manifests release-plz just
+            # rewrote plus the lockfile cargo refreshed. `-A` would sweep in
+            # anything else those two left in the tree.
+            git add crates/*/Cargo.toml Cargo.lock
+            git commit --quiet -m "chore(release): v$next [release-bump]"
+
+            # An empty expected value means "this ref must not exist yet",
+            # which is the first-ever-bump case. Anything else means the
+            # branch has to still be where the reads above saw it.
+            expected=$(git rev-parse --verify --quiet "refs/remotes/origin/$BUMP_BRANCH" || true)
+            if git push --force-with-lease="refs/heads/$BUMP_BRANCH:$expected" \
+                 origin "HEAD:refs/heads/$BUMP_BRANCH"; then
+              pushed=true
+              break
+            fi
+
+            # Another run re-pointed the branch between the reads above and
+            # this push. Refresh and go round again: the max() above picks
+            # up its version, so the retry can only ever raise the pending
+            # bump, never lower it.
+            echo "::notice::$BUMP_BRANCH moved under this run (attempt $attempt/3); re-reading it and recomputing."
+            git fetch --force --quiet origin \
+              "+refs/heads/$BUMP_BRANCH:refs/remotes/origin/$BUMP_BRANCH"
+          done
+
+          if [ "$pushed" != "true" ]; then
+            echo "::error::Could not update $BUMP_BRANCH after 3 attempts — another run kept winning the race. Re-run this workflow; it will recompute from whatever the bump PR now holds."
             exit 1
           fi
-          case "${{ steps.label.outputs.bump }}" in
-            major) major=$((major + 1)); minor=0; patch=0 ;;
-            minor) minor=$((minor + 1)); patch=0 ;;
-            patch) patch=$((patch + 1)) ;;
-          esac
-          next="$major.$minor.$patch"
-          echo "next=$next" >> "$GITHUB_OUTPUT"
-          release-plz set-version \
-            "hl-lexer@$next" "hl-parser@$next" "hl-codegen@$next" \
-            "hl-linker@$next" "hl-cli@$next"
-          # Refreshes Cargo.lock's own copy of each bumped crate's version
-          # (cargo rewrites it for any local path package on any build/check
-          # invocation) so it doesn't drift from Cargo.toml.
-          cargo check --workspace --quiet
 
-      - name: Open the version-bump PR and auto-merge it
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the version-bump PR and auto-merge it
         if: steps.label.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          NEXT: ${{ steps.version.outputs.next }}
+          BUMP: ${{ steps.label.outputs.bump }}
+          SOURCE_PR: ${{ steps.label.outputs.pr_number }}
         run: |
           set -euo pipefail
-          next="${{ steps.version.outputs.next }}"
-          bump="${{ steps.label.outputs.bump }}"
-          branch="release/v$next"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$branch"
-          git add -A
-          git commit -m "chore(release): v$next [release-bump]"
-          git push -u origin "$branch"
-          gh pr create --base main --head "$branch" \
-            --title "chore(release): v$next [release-bump]" \
-            --body "Automated $bump version bump to v$next, from #${{ steps.label.outputs.pr_number }}'s \`semver-$bump\` label. Auto-merges once CI passes; merging cuts the v$next release."
+          title="chore(release): v$NEXT [release-bump]"
+
+          pr=$(gh pr list --state open --head "$BUMP_BRANCH" --json number --jq '.[0].number // empty')
+          if [ -n "$pr" ]; then
+            # A bump PR from an earlier merge is still open and this run has
+            # just re-pointed its branch at a higher version. Update it in
+            # place rather than opening a second one — two open bump PRs
+            # would edit the same version line and neither could auto-merge.
+            # Its body keeps the earlier merges' attribution; this run
+            # appends its own.
+            body=$(gh pr view "$pr" --json body --jq .body)
+            gh pr edit "$pr" --title "$title" \
+              --body "$body"$'\n'"- re-pointed to v$NEXT by #$SOURCE_PR (\`semver-$BUMP\`)"
+          else
+            # Read the number back off `gh pr create`'s own output (it
+            # prints the new PR's URL) rather than re-listing: a PR that
+            # was created a moment ago does not always show up in the
+            # next `gh pr list` immediately, and an empty number here
+            # would silently skip enabling auto-merge below.
+            pr_url=$(gh pr create --base main --head "$BUMP_BRANCH" \
+              --title "$title" \
+              --body "Automated version bump, opened by \`.github/workflows/release.yml\`. Auto-merges once CI passes; merging cuts the release.
+
+          Every merge to main while this PR is open re-points its branch at a higher version instead of opening a second bump PR, so the release this cuts covers all of them.
+
+          - v$NEXT from #$SOURCE_PR (\`semver-$BUMP\`)" | tail -n1)
+            pr="${pr_url##*/}"
+            case "$pr" in
+              ''|*[!0-9]*)
+                pr=$(gh pr list --state open --head "$BUMP_BRANCH" --json number --jq '.[0].number // empty') ;;
+            esac
+          fi
+
+          if [ -z "$pr" ]; then
+            echo "::error::Could not determine the version-bump PR's number, so auto-merge was not enabled on it. Find the open PR from $BUMP_BRANCH and merge it by hand — merging it cuts the v$NEXT release."
+            exit 1
+          fi
+
+          # Already enabled if this run reused an open PR; asking twice is
+          # harmless but pointless, and skipping it keeps the retry loop
+          # below meaningful only for the case it exists for.
+          if [ -n "$(gh pr view "$pr" --json autoMergeRequest --jq '.autoMergeRequest // empty')" ]; then
+            echo "Auto-merge already enabled on #$pr."
+            exit 0
+          fi
+
           # GitHub computes a fresh PR's mergeable status asynchronously,
           # so enabling auto-merge in the same breath as creating it can
           # transiently fail with "Pull request is in unstable status" —
           # retry a few times rather than leaving the PR to merge by hand.
           for attempt in 1 2 3 4 5; do
-            if gh pr merge "$branch" --auto --squash; then
+            if gh pr merge "$pr" --auto --squash; then
               break
             fi
             if [ "$attempt" -eq 5 ]; then
@@ -193,7 +365,7 @@ jobs:
 
   publish-release:
     name: tag, create GitHub Release, attach hllc binary
-    if: ${{ contains(github.event.head_commit.message, '[release-bump]') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release-bump]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -222,8 +394,36 @@ jobs:
         run: |
           set -euo pipefail
           version=$(grep -m1 '^version' crates/hl-cli/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
-          cp target/release/hllc hllc-linux-x86_64
-          gh release upload "v$version" hllc-linux-x86_64 --clobber
+          asset=hllc-linux-x86_64
+
+          # This job has to be safe to run twice for the same version: a
+          # manual re-run, a workflow_dispatch repair, or two overlapping
+          # bump PRs that collapsed onto one version all get here with the
+          # release already made. Tagging is idempotent — `release-plz
+          # release` no-ops on an existing tag — but attaching the binary
+          # is not: GitHub's immutable-releases feature locks a release's
+          # assets the moment it stops being a draft, so `gh release upload
+          # --clobber` against an already-published release is rejected.
+          # Decide from the release's real state instead of assuming this
+          # is the first run.
+          if ! release_json=$(gh release view "v$version" --json isDraft,assets 2>/dev/null); then
+            echo "::error::No GitHub Release for v$version, and release-plz did not create one — it no-ops when the tag already exists. Delete tag v$version and re-run to recut it, or create the release by hand."
+            exit 1
+          fi
+          is_draft=$(jq -r '.isDraft' <<<"$release_json")
+          has_asset=$(jq -r --arg a "$asset" '[.assets[]? | select(.name == $a)] | length' <<<"$release_json")
+
+          if [ "$is_draft" != "true" ]; then
+            if [ "$has_asset" -gt 0 ]; then
+              echo "::notice::v$version is already published with $asset attached — nothing left to do."
+              exit 0
+            fi
+            echo "::error::v$version is already published but carries no $asset asset, and immutable releases means one cannot be added now. Attach it by hand from a local 'cargo build --release', or delete the release and its tag and re-run this workflow."
+            exit 1
+          fi
+
+          cp target/release/hllc "$asset"
+          gh release upload "v$version" "$asset" --clobber
           # release-plz's own release body comes from each crate's
           # CHANGELOG.md, which this workflow never actually updates
           # (versions are bumped from a PR label, not conventional
