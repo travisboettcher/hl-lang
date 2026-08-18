@@ -15,7 +15,8 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use hl_parser::{
-    ComposeError, Ident, Network, Service, Span, SymbolResolver, TemplateDecl, TopDecl, parse,
+    ComposeError, Ident, Network, Service, SourceMap, Span, SymbolResolver, TemplateDecl, TopDecl,
+    parse_in_file,
 };
 
 use crate::error::LinkError;
@@ -42,11 +43,20 @@ struct Module {
 
 pub(crate) struct Graph {
     modules: Vec<Module>,
+    /// Every module's path, interned as it was loaded, so the
+    /// [`hl_parser::FileId`] stamped into that module's spans resolves
+    /// back to a path a diagnostic can print (#75).
+    files: SourceMap,
 }
 
 impl Graph {
     pub(crate) fn entry_scope(&self) -> ModuleId {
         ModuleId(0)
+    }
+
+    /// The path table every span in this graph resolves against.
+    pub(crate) fn files(&self) -> &SourceMap {
+        &self.files
     }
 
     /// Takes ownership of the entry module's own networks/services,
@@ -64,6 +74,11 @@ impl Graph {
 
 pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, LinkError> {
     let mut modules: Vec<Module> = vec![Module::default()];
+    // Grows alongside `modules`, one interned path per module, so a span
+    // parsed out of a module can be traced back to the file it came
+    // from long after composition has merged it into a service that
+    // borrowed fields from several files at once (#75).
+    let mut files = SourceMap::new();
     let mut path_to_id: HashMap<PathBuf, ModuleId> = HashMap::new();
     let mut queue: VecDeque<(ModuleId, PathBuf)> = VecDeque::new();
 
@@ -77,7 +92,8 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
             path: path.clone(),
             message: err.to_string(),
         })?;
-        let program = parse(&source).map_err(|err| LinkError::Parse {
+        let file = files.intern(path.clone());
+        let program = parse_in_file(&source, file).map_err(|err| LinkError::Parse {
             path: path.clone(),
             source: err,
         })?;
@@ -101,11 +117,14 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
                     // bare and qualified references disagreeing about
                     // which declaration is the real one (#63).
                     if let Some(prev) = module.networks.get(&n.name.name) {
-                        return Err(LinkError::Compose(ComposeError::DuplicateNetworkName {
-                            name: n.name.name.clone(),
-                            first: prev.name.span,
-                            second: n.name.span,
-                        }));
+                        return Err(LinkError::compose(
+                            ComposeError::DuplicateNetworkName {
+                                name: n.name.name.clone(),
+                                first: prev.name.span,
+                                second: n.name.span,
+                            },
+                            &files,
+                        ));
                     }
                     if is_entry {
                         module.entry_networks.push(n.clone());
@@ -114,11 +133,14 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
                 }
                 TopDecl::Service(s) => {
                     if let Some(&first) = service_spans.get(&s.name.name) {
-                        return Err(LinkError::Compose(ComposeError::DuplicateServiceName {
-                            name: s.name.name.clone(),
-                            first,
-                            second: s.name.span,
-                        }));
+                        return Err(LinkError::compose(
+                            ComposeError::DuplicateServiceName {
+                                name: s.name.name.clone(),
+                                first,
+                                second: s.name.span,
+                            },
+                            &files,
+                        ));
                     }
                     service_spans.insert(s.name.name.clone(), s.name.span);
                     if is_entry {
@@ -130,11 +152,14 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
                 }
                 TopDecl::Template(t) => {
                     if let Some(prev) = module.templates.get(&t.name.name) {
-                        return Err(LinkError::Compose(ComposeError::DuplicateTemplateName {
-                            name: t.name.name.clone(),
-                            first: prev.name.span,
-                            second: t.name.span,
-                        }));
+                        return Err(LinkError::compose(
+                            ComposeError::DuplicateTemplateName {
+                                name: t.name.name.clone(),
+                                first: prev.name.span,
+                                second: t.name.span,
+                            },
+                            &files,
+                        ));
                     }
                     module.templates.insert(t.name.name.clone(), *t);
                 }
@@ -170,7 +195,7 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
         modules[id.0] = module;
     }
 
-    Ok(Graph { modules })
+    Ok(Graph { modules, files })
 }
 
 impl SymbolResolver for Graph {
