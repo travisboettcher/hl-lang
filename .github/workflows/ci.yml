@@ -165,6 +165,26 @@ jobs:
         with:
           command: check
 
+  prose-lint:
+    name: prose lint (vale, Google style)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned rather than @latest: a new Vale release changing a rule's
+      # behavior shouldn't turn this job red on an unrelated PR.
+      - name: Install Vale
+        run: go install github.com/errata-ai/vale/v3/cmd/vale@v3.17.1
+
+      # The Google style package itself isn't vendored (see .gitignore) —
+      # only the project vocabulary under .vale/styles/config is checked in.
+      - name: vale sync
+        run: vale sync
+
+      - name: vale
+        run: vale .
+
   fuzz-smoke:
     name: fuzz smoke test (${{ matrix.target }})
     runs-on: ubuntu-latest
