@@ -233,3 +233,40 @@ raised it:
   path on each is what tells them apart, and it points at the file the
   field was really written in, which may be an imported one you never
   opened.
+
+## Warnings
+
+Not everything `hllc` has to say is fatal. Some things you can write are
+legal, deliberately dropped, and worth telling you about anyway — a
+declaration that compiles to nothing at all looks exactly like one you
+forgot to write. Those are **warnings**: printed to stderr in the same
+`path:line:col:` shape as errors, with a `warning:` marker after the
+location, and with no effect on the exit code or the output. A build
+that raises only warnings still writes its files and still exits 0, so
+warnings can't break a CI gate:
+
+```text
+shared/common.hll:1:10: warning: template `defaults` is declared in an imported file and is not applied — `defaults` is only looked up in the entry file; give it an ordinary name and apply it with `with`
+shared/common.hll:6:9: warning: service `db` is declared in an imported file and is not compiled — only the entry file's services are built
+jellyfin.hll:2:9: warning: network `unused` is declared but no service references it, so it is not emitted — add it to a service's `networks [...]` list, or remove the declaration
+```
+
+There are three of them today, one per construct that a stage drops on
+purpose:
+
+- a `service` in an imported file (only the entry file's are built — see
+  [Imports](./imports.md#only-the-entry-files-services-are-built)),
+- a `template defaults` in an imported file (`defaults` is looked up only
+  in the entry file),
+- a top-level `network` no service references (the `networks:` section is
+  built from services' references).
+
+There is no flag to silence them yet. When one is telling you about
+something you meant, the fix is to write it in a way that doesn't drop
+anything — the warning text names it in each case.
+
+A fourth construct that used to be dropped this way — `middleware` or
+`expose.entrypoint` on a service with no `expose.host` — is a hard
+**error** instead, because a middleware with no router is never
+something you can have meant. See
+[`expose`](./built-in-fields.md#expose).

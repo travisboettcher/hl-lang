@@ -136,17 +136,25 @@ across the import to name the other one.
 The implicit `defaults` template (see
 [Templates & Composition](./templates-and-composition.md)) is looked up
 only in the entry file — the one `hllc` was actually pointed at. A
-`template defaults { ... }` in an imported file is **silently ignored**:
-nothing errors, the services just don't get those fields. This falls out
-of `defaults` having no invocation to resolve — there's no `with
+`template defaults { ... }` in an imported file is **ignored**: nothing
+errors, the services just don't get those fields. This falls out of
+`defaults` having no invocation to resolve — there's no `with
 common.defaults` to write, and no alias for the lookup to go through.
+
+It isn't silent, though. `hllc` prints a warning naming the file it
+found the unused `defaults` in, and carries on (see
+[Warnings](./cli.md#warnings)):
+
+```text
+common.hll:1:10: warning: template `defaults` is declared in an imported file and is not applied — `defaults` is only looked up in the entry file; give it an ordinary name and apply it with `with`
+```
 
 So if several service files should share a set of baseline fields, give
 the shared template an ordinary name and apply it explicitly:
 
 ```hll,file=common.hll,group=defaults-not-shared
 # common.hll — naming this template `defaults` instead would leave it
-# silently unapplied in every file that imports this one
+# unapplied (and warned about) in every file that imports this one
 template baseline {
   restart unless-stopped
 }
@@ -163,3 +171,23 @@ service syncthing {
 ```
 
 Each file may still declare its own `defaults` for its own services.
+
+## Only the entry file's services are built
+
+`use` shares *declarations* — templates and networks — not services.
+Only the file `hllc` was pointed at contributes `service` blocks to the
+output; a `service` in an imported file is parsed (so its syntax and
+duplicate names are still checked) and then dropped, since nothing can
+reference a service across files in the first place.
+
+That's another warning rather than an error — the imported file is
+usually still doing its real job as a template library:
+
+```text
+common.hll:6:9: warning: service `db` is declared in an imported file and is not compiled — only the entry file's services are built
+```
+
+If you meant to build that service, point `hllc` at its own file (or, in
+a directory build, give it a directory of its own — see
+[The `hllc` CLI](./cli.md#directory-co-located-mode)); if you meant to
+share it, what you want is a `template`, applied with `with`.

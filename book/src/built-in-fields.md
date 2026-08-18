@@ -108,9 +108,26 @@ if non-empty, restricts that router to the named Traefik entry points
 instead of all of them.
 
 `expose.host` is what switches Traefik routing on at all. With no `host`
-set there's no router, so neither `entrypoint` nor `middleware` produces
-a label — they're silently dropped rather than emitted against a router
-that doesn't exist.
+set there's no router, so neither `entrypoint` nor `middleware` has
+anything to attach to — and setting either without a host is a **compile
+error**, not a service built without them:
+
+```hll,ignore
+service web {
+  image "nginx"
+  expose 80                  # no `as "web.example.com"` — no router
+  middleware forwardAuth-authentik
+}
+```
+
+```text
+web.hll:4:14: service `web` sets `middleware` but has no `expose.host`, so there is no Traefik router to attach it to — add a host (`expose <port> as "web.example.com"`) or drop the `middleware`
+```
+
+Earlier versions emitted no `labels:` key at all here and exited 0, so a
+service whose author forgot `as "..."` deployed with its authentication
+quietly missing. Add the host, or drop the `middleware`/`entrypoint` —
+both spellings are things you can mean; the pair without a host isn't.
 
 Because `host` is spliced directly into the router rule
 (``Host(`...`)``, which has no escape for its own backtick delimiter),
@@ -194,16 +211,20 @@ dns ["192.168.50.182"]
   that's Traefik's file-provider reference convention, applied
   unconditionally, so write the bare middleware name and let `hllc` add
   it. Like `expose`'s `entrypoint` — which joins its own list the same
-  way, just without the `@file` suffix — `middleware` generates nothing at
-  all unless `expose.host` is set: with no host there's no router to
-  attach anything to.
+  way, just without the `@file` suffix — `middleware` requires
+  `expose.host`: with no host there's no router to attach anything to, so
+  naming a middleware anyway is a compile error (see
+  [`expose`](#expose) above).
 - `depends_on` names a same-file sibling `service` this one depends on —
   it's not cross-file, and doesn't accept a qualified `alias.name`.
 - `networks` references a top-level `network` declared in the same
   program (see above). If exactly one referenced network is `external`,
   its real name also drives the `traefik.docker.network=` label; more
   than one `external` network on the same service is a compile error
-  (ambiguous which one Traefik should target).
+  (ambiguous which one Traefik should target). The generated
+  `networks:` section is built from these references, so a `network` no
+  service names never appears in the output — that's a warning on stderr,
+  not an error (see [Warnings](./cli.md#warnings)).
 - `dns` sets Compose's own per-service `dns:` key — a resolver override,
   e.g. for a network with a local DNS server.
 

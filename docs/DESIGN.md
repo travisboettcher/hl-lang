@@ -364,6 +364,14 @@ use "docker.hll" as traefik
   them. Two files each declaring an unrelated `network proxy` stay
   legal; the error only fires when a qualified reference actually brings
   one across an import into the other's company.
+- **`use` shares declarations, not services.** Only the entry file's own
+  `service` blocks are compiled; one in an imported file is parsed (so
+  duplicate names and syntax are still checked) and then dropped, since
+  nothing resolves a service across files anyway. Likewise the implicit
+  `defaults` template is looked up only in the entry module — it has no
+  invocation to carry an alias, so there is no `with common.defaults` to
+  write and an imported `defaults` applies to nothing. Both are
+  warnings, not errors; see Diagnostics, below.
 
 ## Worked examples
 
@@ -545,6 +553,38 @@ readability choice, not a different construct.
    paths the user named, so an unguarded write silently destroys the
    hand-written files it happened to find. Rebuilding is unaffected:
    `hllc`'s own output carries the header and is overwritten as before.
+
+## Diagnostics
+
+Most diagnostics are hard errors: a stage returns one, the pipeline
+stops, and `hllc` exits non-zero having printed it to stderr. Every one
+of them carries a span, and every span carries the identity of the file
+it was lexed from, so a location renders as `path:line:col` even when
+the offending field came from a template in an imported file the user
+never opened.
+
+Alongside that, each stage can accumulate **warnings** — non-fatal
+diagnostics for constructs the compiler deliberately drops. They are
+returned with the stage's success value (`hl_linker::Linked::warnings`,
+`hl_codegen::GeneratedProgram::warnings`), rendered exactly like errors
+with a `warning:` marker after the location, and printed to stderr by
+`hllc` without touching its exit code or its output. Three constructs
+warn today: a `service` in a non-entry file, a `defaults` template in a
+non-entry file, and a top-level `network` no service references (the
+`networks:` section is assembled from services' references, so an
+unreferenced declaration is emitted nowhere).
+
+The channel is deliberately minimal. There is no way to promote a
+warning to an error and no `--quiet`/`-W`/`-A` style suppression yet;
+warnings are a named enum per stage precisely so a later suppression
+scheme has something to filter on.
+
+The fourth construct of this shape is *not* a warning: `middleware` or
+`expose.entrypoint` on a service with no `expose.host` is a hard error.
+Both fields only exist as labels on a Traefik router, and `expose.host`
+is what creates that router, so there is no reading under which the pair
+means something — while quietly dropping them shipped a service with its
+forward-auth missing and nothing to say so.
 
 ## Future work
 
