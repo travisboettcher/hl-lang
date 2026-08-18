@@ -52,5 +52,5 @@ mod token;
 
 pub use error::LexError;
 pub use lexer::Lexer;
-pub use span::Span;
+pub use span::{FileId, Location, SourceMap, Span};
 pub use token::{Token, TokenKind};

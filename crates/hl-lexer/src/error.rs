@@ -71,6 +71,7 @@ mod display_tests {
             end: 0,
             line: 2,
             col: 4,
+            file: crate::FileId::ANONYMOUS,
         }
     }
 

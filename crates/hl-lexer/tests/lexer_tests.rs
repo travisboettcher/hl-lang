@@ -389,7 +389,7 @@ fn eof_span_is_zero_width_at_end() {
     let eof = tokens.last().unwrap();
     assert_eq!(eof.kind, TokenKind::Eof);
     assert_eq!(eof.span.start, eof.span.end);
-    assert_eq!(eof.span.start, "a".len());
+    assert_eq!(eof.span.start as usize, "a".len());
 }
 
 #[test]
@@ -404,7 +404,10 @@ fn empty_input_eof_span_is_zero() {
 fn string_span_includes_quotes_but_lexeme_does_not() {
     let tok = single_token(r#""hello""#);
     assert_eq!(tok.lexeme.len(), 5); // "hello" without quotes
-    assert_eq!(tok.span.end - tok.span.start, tok.lexeme.len() + 2);
+    assert_eq!(
+        (tok.span.end - tok.span.start) as usize,
+        tok.lexeme.len() + 2
+    );
 }
 
 // --- iterator fusing behavior ---

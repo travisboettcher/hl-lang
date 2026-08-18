@@ -2,8 +2,18 @@ use std::iter::Peekable;
 use std::str::CharIndices;
 
 use crate::error::LexError;
-use crate::span::Span;
+use crate::span::{FileId, Span};
 use crate::token::{Token, TokenKind};
+
+/// Narrows a byte offset into a [`Span`]'s `u32` field, saturating
+/// rather than wrapping (see [`Span`]'s "Why `u32` offsets"). A source
+/// file over 4 GiB would have to exist for this to do anything at all;
+/// if one ever did, a clamped offset is a wrong-but-bounded position
+/// rather than one that has wrapped around to point at the start of the
+/// file.
+fn offset(byte: usize) -> u32 {
+    u32::try_from(byte).unwrap_or(u32::MAX)
+}
 
 /// Scans hl-lang source text into a stream of [`Token`]s.
 ///
@@ -29,17 +39,34 @@ pub struct Lexer<'src> {
     line: u32,
     col: u32,
     done: bool,
+    /// Stamped into every [`Span`] this lexer produces, so positions
+    /// stay attributable once more than one file is in play.
+    file: FileId,
 }
 
 impl<'src> Lexer<'src> {
-    /// Creates a new lexer over `source`.
+    /// Creates a new lexer over `source`, whose spans carry no file
+    /// identity ([`FileId::ANONYMOUS`]).
     pub fn new(source: &'src str) -> Self {
+        Lexer::new_in_file(source, FileId::ANONYMOUS)
+    }
+
+    /// Creates a new lexer over `source`, stamping `file` into every
+    /// span it produces.
+    ///
+    /// `file` comes from a [`crate::SourceMap`] the caller owns — see
+    /// `hl_linker`'s module graph, which interns each module's path as
+    /// it loads it so a diagnostic can name the file a span belongs to
+    /// even after composition has merged declarations from several of
+    /// them into one service.
+    pub fn new_in_file(source: &'src str, file: FileId) -> Self {
         Lexer {
             source,
             chars: source.char_indices().peekable(),
             line: 1,
             col: 1,
             done: false,
+            file,
         }
     }
 
@@ -65,7 +92,17 @@ impl<'src> Lexer<'src> {
     pub fn tokenize_collecting_errors(
         source: &'src str,
     ) -> Result<Vec<Token<'src>>, Vec<LexError>> {
-        let mut lexer = Lexer::new(source);
+        Lexer::tokenize_collecting_errors_in_file(source, FileId::ANONYMOUS)
+    }
+
+    /// [`Self::tokenize_collecting_errors`], stamping `file` into every
+    /// span produced — the entry point `hl_parser::parse_in_file` (and
+    /// through it the linker) uses.
+    pub fn tokenize_collecting_errors_in_file(
+        source: &'src str,
+        file: FileId,
+    ) -> Result<Vec<Token<'src>>, Vec<LexError>> {
+        let mut lexer = Lexer::new_in_file(source, file);
         let mut tokens = Vec::new();
         let mut errors = Vec::new();
         loop {
@@ -172,10 +209,11 @@ impl<'src> Lexer<'src> {
                     kind: TokenKind::Eof,
                     lexeme: &self.source[pos..pos],
                     span: Span {
-                        start: pos,
-                        end: pos,
+                        start: offset(pos),
+                        end: offset(pos),
                         line,
                         col,
+                        file: self.file,
                     },
                 });
             }
@@ -188,10 +226,11 @@ impl<'src> Lexer<'src> {
                     kind: $kind,
                     lexeme: &self.source[start..first_end],
                     span: Span {
-                        start,
-                        end: first_end,
+                        start: offset(start),
+                        end: offset(first_end),
                         line,
                         col,
+                        file: self.file,
                     },
                 })
             }};
@@ -217,19 +256,21 @@ impl<'src> Lexer<'src> {
                         kind: TokenKind::Arrow,
                         lexeme: &self.source[start..end],
                         span: Span {
-                            start,
-                            end,
+                            start: offset(start),
+                            end: offset(end),
                             line,
                             col,
+                            file: self.file,
                         },
                     })
                 } else {
                     Err(LexError::DanglingDash {
                         span: Span {
-                            start,
-                            end: first_end,
+                            start: offset(start),
+                            end: offset(first_end),
                             line,
                             col,
+                            file: self.file,
                         },
                     })
                 }
@@ -242,10 +283,11 @@ impl<'src> Lexer<'src> {
             c => Err(LexError::UnexpectedChar {
                 ch: c,
                 span: Span {
-                    start,
-                    end: first_end,
+                    start: offset(start),
+                    end: offset(first_end),
                     line,
                     col,
+                    file: self.file,
                 },
             }),
         }
@@ -271,10 +313,11 @@ impl<'src> Lexer<'src> {
             kind,
             lexeme,
             span: Span {
-                start,
-                end,
+                start: offset(start),
+                end: offset(end),
                 line,
                 col,
+                file: self.file,
             },
         }
     }
@@ -294,10 +337,11 @@ impl<'src> Lexer<'src> {
             kind: TokenKind::Number,
             lexeme,
             span: Span {
-                start,
-                end,
+                start: offset(start),
+                end: offset(end),
                 line,
                 col,
+                file: self.file,
             },
         }
     }
@@ -319,20 +363,22 @@ impl<'src> Lexer<'src> {
                         kind: TokenKind::Str,
                         lexeme: &self.source[content_start..content_end],
                         span: Span {
-                            start,
-                            end,
+                            start: offset(start),
+                            end: offset(end),
                             line,
                             col,
+                            file: self.file,
                         },
                     });
                 }
                 Some('\n') | None => {
                     return Err(LexError::UnterminatedString {
                         span: Span {
-                            start,
-                            end: content_end,
+                            start: offset(start),
+                            end: offset(content_end),
                             line,
                             col,
+                            file: self.file,
                         },
                     });
                 }
