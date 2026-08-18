@@ -218,14 +218,27 @@ same two entries (#81).
 | Type | Kind | Primary field | Separator | Uniqueness side | Needs name |
 |---|---|---|---|---|---|
 | `network` | struct | — | — | — | yes |
+| `volume` (top-level declaration) | struct | — | — | — | yes |
 | `service` | struct | — | — | — | yes |
 | `image` | struct | `ref` | — | — | no |
 | `expose` | struct | `port` | — | — | no |
-| `volume` | map | — | `->` | value (container path) | no |
+| `volume` (`service`/`template` field) | map | — | `->` | value (container path) | no |
+| `driver_opts` (inside a `volume` declaration) | map | — | `:` | key | no |
 | `env` | map | — | `=` | key | no |
 | `restart` | struct | `policy` | — | — | no |
 | `with` | struct | `templates` (list of nested instantiations) | — | — | no |
 | `raw` | map | — | `:` | none (schema-free, passthrough) | no |
+
+`volume` has two rows because the identifier plays two roles: at the top
+level it *declares* a named Docker volume (`volume syncthing-config {
+external, name: "...", driver: "...", driver_opts { ... } }`), and
+inside a `service`/`template` body it *mounts* one. That's not an
+ambiguity in the grammar — a top-level type name is only ever looked up
+through `schema::top_level_type`, a field name only ever through
+`schema::resolve_field` against the enclosing type's own field list, and
+neither table is consulted in the other's position. `network` has no
+equivalent pair today only because no field is literally called
+`network` (a service's list field is `networks`).
 
 `raw`'s "no uniqueness checking" is a *parser*-level statement: its own
 entries are unchecked against each other and against any other field.
@@ -387,6 +400,8 @@ network traefik-net {
   name: "docker_default"
 }
 
+volume syncthing-config {}
+
 template internal_web(port: Number) {
   networks [traefik-net]
   restart unless-stopped
@@ -443,6 +458,8 @@ template linuxserver_app(puid: Number, pgid: Number) {
 # syncthing.hll
 use "templates.hll" as common
 
+volume syncthing-config {}
+
 service syncthing {
   with common.internal_web { port: 8384 }, common.authenticated, common.linuxserver_app { puid: 1000, pgid: 100 }
   image "lscr.io/linuxserver/syncthing:latest"
@@ -463,6 +480,8 @@ wrapped across multiple lines instead, one template per line, as long as
 every line but the last ends with a trailing comma:
 
 ```
+volume syncthing-config {}
+
 service syncthing {
   with common.internal_web { port: 8384 },
        common.authenticated,
@@ -487,7 +506,8 @@ readability choice, not a different construct.
    bare-value/list (primary-field shorthand) or a `{ field: value, ... }`
    body, recursing into nested blocks. A schema table drives both parsing
    and validation. Covers every built-in type (`network`, `service`,
-   `image`, `expose`, `volume`, `env`, `restart`, `raw`), full
+   `image`, `expose`, `volume` (both its top-level declaration and its
+   `service`-field forms), `env`, `restart`, `raw`), full
    `template`/`with` composition, and `use`/alias-qualified references
    (see Composition and Imports, above) — purely syntactic, no name
    resolution.
@@ -505,6 +525,16 @@ readability choice, not a different construct.
 5. **Codegen** (`crates/hl-codegen`) — walks a composed program and emits
    one Compose YAML document per input file (which may hold multiple
    services), with Traefik labels on each service's own `labels:` list.
+   This is also where the two by-name reference checks live, since both
+   are whole-program questions a single service's syntax can't answer: a
+   `networks [x]` entry must resolve to a top-level `network x`
+   (`UnknownNetwork`), and a `volume` entry whose host side names a
+   *named* Docker volume — anything not starting `/` or `.` — must
+   resolve to a top-level `volume x` (`UnknownVolume`). Each referenced
+   declaration contributes its entry, options included, to the document's
+   top-level `networks:`/`volumes:` section; a declared-but-unreferenced
+   one is emitted by neither. Bind-mount paths are passed through
+   untouched and need no declaration, exactly as Docker requires none.
 6. **CLI** (`crates/hl-cli`, binary name `hllc`) — `hllc <file.hll>` lexes
    and prints tokens; `hllc --parse <file.hll>` parses and pretty-prints
    the AST; `hllc --build <file.hll> [--out <path>]` runs the full

@@ -10,8 +10,8 @@ the rules behind them.
 A `.hll` file is a sequence of top-level declarations. There are three
 kinds:
 
-- A **named declaration** — a `service` or a `network` — gives a type and
-  a name, followed by a body: `service jellyfin { ... }`.
+- A **named declaration** — a `service`, a `network` or a `volume` —
+  gives a type and a name, followed by a body: `service jellyfin { ... }`.
 - A **template declaration** starts with the word `template`, the *one*
   reserved word in the whole language (see [Reserved words](#reserved-words)
   below): `template internal_web(port: Number) { ... }`.
@@ -113,6 +113,12 @@ volume "/mnt/media" -> "/data"     # host path -> container path
 env PUID = "1000"                  # key = value
 ```
 
+(Note that `volume` here is the *field* that mounts something into a
+service. A `volume` written at the top level of a file, outside any
+service body, is a different thing — the declaration of a named Docker
+volume, whose body is an ordinary struct body. See
+[`volume`](./built-in-fields.md#volume).)
+
 Writing either of these more than once in the same body accumulates
 entries rather than overwriting — a service can have several `volume`
 lines and several `env` lines. The same is true of `middleware` and
@@ -139,6 +145,8 @@ Two rules govern whitespace and punctuation, and both matter in practice:
   continuation.
 
 ```hll
+volume syncthing-config {}
+
 service syncthing {
   with internal_web { port: 8384 },
        authenticated,

@@ -5,12 +5,18 @@ its default, and what it produces in the generated Compose YAML. See
 [Syntax Basics](./syntax-basics.md) for the shorthand forms referenced
 below (primary-value, secondary-field, map-style).
 
-## `service` and `network`
+## `service`, `network` and `volume`
 
-`service` and `network` are the two top-level declaration types — both
-require a name (`service jellyfin { ... }`, `network traefik-net { ...
-}`) and a body. A `template` body accepts exactly the same set of fields
-as `service` — see [Templates & Composition](./templates-and-composition.md).
+`service`, `network` and `volume` are the three top-level declaration
+types — each requires a name (`service jellyfin { ... }`, `network
+traefik-net { ... }`, `volume syncthing-config { ... }`) and a body. A
+`template` body accepts exactly the same set of fields as `service` —
+see [Templates & Composition](./templates-and-composition.md).
+
+Note that `volume` names two different things depending on where it's
+written: at the top level it *declares* a named Docker volume (this
+section), while inside a `service`/`template` body it *mounts* one — the
+map-kind [`volume` field](#volume) further down.
 
 ### `network` fields
 
@@ -33,6 +39,43 @@ network traefik-net {
   name: "docker_default"
 }
 ```
+
+### `volume` declaration fields
+
+| Field | Accepts | Default |
+|---|---|---|
+| `external` | bare flag (no value) | unset (`false`) |
+| `name` | string | the volume's own `hll` identifier |
+| `driver` | string | unset (Compose's own default, `local`) |
+| `driver_opts` | map body (`key: value`) | empty |
+
+`external` and `name` mean exactly what they mean on a `network`: the
+first marks a volume Docker already manages rather than one this file's
+Compose output should create, the second is the real underlying Docker
+volume name when it differs from the identifier you declared it under.
+`driver`/`driver_opts` are passed straight through to Compose:
+
+```hll
+volume syncthing-config {}
+
+volume media {
+  external
+  name: "media_store"
+}
+
+volume backups {
+  driver "local"
+  driver_opts {
+    type: "nfs"
+    o: "addr=192.168.50.10,rw"
+    device: ":/exports/backups"
+  }
+}
+```
+
+Every named volume a service mounts must have one of these — see the
+[`volume` field](#volume) below for what counts as a named volume and
+why the declaration is required.
 
 ## `image`
 
@@ -129,16 +172,61 @@ path). Uniqueness is checked on the **container path** (the value side)
 — Docker itself refuses two mounts at the same container path, but
 allows the same host path mounted more than once.
 
-```hll,fragment
-volume "/mnt/media" -> "/data"        # bind mount
-volume "syncthing-config" -> "/config" # named volume
+```hll
+volume syncthing-config {}
+
+service syncthing {
+  image "lscr.io/linuxserver/syncthing:latest"
+  volume "/mnt/media" -> "/data"         # bind mount
+  volume "syncthing-config" -> "/config" # named volume
+}
 ```
 
-Repeating `volume` accumulates entries rather than overwriting. A host
-side starting with neither `/` nor `.` is treated as a named Docker
-volume and added to the Compose document's top-level `volumes:` section
-automatically — so `./jellyfin` and `../shared` are bind mounts just as
-`/mnt/media` is, not only absolute paths.
+Repeating `volume` accumulates entries rather than overwriting.
+
+A host side starting with neither `/` nor `.` is a **named Docker
+volume**; anything else is a bind mount, so `./jellyfin` and `../shared`
+are bind mounts just as `/mnt/media` is, not only absolute paths.
+
+A named volume must have a matching top-level `volume` declaration
+somewhere in the same file, exactly as a `networks [x]` entry must have
+a matching top-level `network` declaration. Referencing one that isn't
+declared is a compile error:
+
+```text
+syncthing.hll:6:10: service `syncthing` references undeclared volume `snycthing-config`
+```
+
+That's what catches a typo or an accidental collision: before the
+declaration was required, `snycthing-config` simply became a second,
+empty volume, and two services that happened to write the same string
+were indistinguishable from two services deliberately sharing one. Now
+sharing is stated explicitly — both services reference the one
+declaration:
+
+```hll
+volume shared-media {}
+
+service jellyfin {
+  image "jellyfin/jellyfin:latest"
+  volume "shared-media" -> "/data"
+}
+
+service sonarr {
+  image "lscr.io/linuxserver/sonarr:latest"
+  volume "shared-media" -> "/media"
+}
+```
+
+Bind mounts need no declaration at all — they name a host path, not
+something Docker manages, and Docker itself requires no pre-declaration
+for one.
+
+Each *referenced* named volume becomes an entry in the Compose
+document's top-level `volumes:` section, carrying whatever `external`/
+`name`/`driver`/`driver_opts` its declaration set. A declared but never
+mounted volume isn't emitted, the same way an unreferenced `network`
+declaration isn't.
 
 ## `env`
 

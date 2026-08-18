@@ -78,6 +78,8 @@ or start a new one — either works, since `hllc --build` treats one input
 file as one Compose document that may hold multiple services:
 
 ```hll,build
+volume uptime-kuma-data {}
+
 service jellyfin {
   image "jellyfin/jellyfin:latest"
   expose 8096 as "media.example.com"
@@ -94,6 +96,13 @@ service uptime-kuma {
 }
 ```
 
+`uptime-kuma-data` names a Docker-managed *named volume* rather than a
+host path, so it needs the top-level `volume uptime-kuma-data {}`
+declaration at the top of the file — the same way a `networks [x]` entry
+needs a `network x { ... }`. `jellyfin`'s `/mnt/media` is a bind mount
+(it starts with a `/`) and needs no declaration. See
+[`volume`](./built-in-fields.md#volume) for the full rule.
+
 ## Removing repetition with a template
 
 Both services above repeat `restart unless-stopped`, and a real homelab
@@ -106,6 +115,8 @@ for:
 template defaults {
   restart unless-stopped
 }
+
+volume uptime-kuma-data {}
 
 service jellyfin {
   image "jellyfin/jellyfin:latest"

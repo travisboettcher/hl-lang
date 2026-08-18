@@ -62,6 +62,8 @@ template linuxserver_app(puid: Number, pgid: Number) {
 # syncthing.hll
 use "templates.hll" as common
 
+volume syncthing-config {}
+
 service syncthing {
   with common.internal_web { port: 8384 }, common.authenticated, common.linuxserver_app { puid: 1000, pgid: 100 }
   image "lscr.io/linuxserver/syncthing:latest"
@@ -72,6 +74,13 @@ service syncthing {
 Compiling `syncthing.hll` with `hllc --build` produces byte-identical
 output to writing all three declarations in one file — `use` is purely
 an organizational tool, not a different composition mechanism.
+
+Note where `volume syncthing-config {}` lives: in `syncthing.hll`, the
+entry file, not in the shared `templates.hll`. A `network` can be
+imported and referenced as `alias.name`, but a named-volume mount is
+written as a plain name on the host side of a `volume` entry, with no
+qualified form — so a named volume always resolves against the entry
+file's own top-level declarations.
 
 ## Two rules that matter for multi-file layouts
 

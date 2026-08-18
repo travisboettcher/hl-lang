@@ -6,6 +6,11 @@ network traefik-net {
   name: "docker_default"
 }
 
+# A named Docker volume needs a top-level declaration, exactly like a
+# network does — a bare name on the host side of a `volume` entry is a
+# *reference* to this, not a declaration of its own.
+volume syncthing-config {}
+
 template internal_web(port: Number) {
   networks [traefik-net]
   restart unless-stopped

@@ -44,6 +44,8 @@ template authenticated {
 `with` merges one or more templates onto a service:
 
 ```hll
+volume syncthing-config {}
+
 service syncthing {
   with internal_web { port: 8384 }, authenticated
   image "lscr.io/linuxserver/syncthing:latest"
@@ -168,14 +170,16 @@ service it-tools {
 
 ## A complete example
 
-Putting it together — a network, three templates, and a service that
-composes all three:
+Putting it together — a network, a named volume, three templates, and a
+service that composes all three:
 
 ```hll,build
 network traefik-net {
   external
   name: "docker_default"
 }
+
+volume syncthing-config {}
 
 template internal_web(port: Number) {
   networks [traefik-net]

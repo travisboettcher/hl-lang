@@ -7,6 +7,12 @@
 
 use "templates.hll" as common
 
+# Named volumes are resolved against the *entry* file's own top-level
+# declarations (a named-volume mount has no `alias.name` form to import
+# through), so this declaration lives here rather than alongside the
+# templates.
+volume syncthing-config {}
+
 service syncthing {
   with common.internal_web { port: 8384 }, common.authenticated, common.linuxserver_app { puid: 1000, pgid: 100 }
   image "lscr.io/linuxserver/syncthing:latest"
