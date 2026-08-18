@@ -124,6 +124,23 @@ error message, say). A new example needs one of these, not just prose
 describing it — and reach for `,ignore` only when the block genuinely
 can't compile, since an ignored block is exactly the kind that rots.
 
+## Prose style
+
+`README.md`, `CONTRIBUTING.md`, `docs/DESIGN.md`, and `book/src/*.md` are
+checked with [Vale](https://vale.sh) against the Google developer
+documentation style guide. Install it with `go install
+github.com/errata-ai/vale/v3/cmd/vale@latest`, then run `vale sync` once to
+fetch the style rules (they're not vendored) and `vale .` from the repo
+root to lint. `.vale.ini` scopes the check to those files, so generated
+`CHANGELOG.md`s and the PR template aren't linted. A project-specific term
+(`homelab`, `codegen`, `Traefik`, and the like) belongs in
+`.vale/styles/config/vocabularies/Base/accept.txt`, not an inline
+suppression comment.
+
+Vale isn't wired into CI and its findings aren't required reading before a
+PR — treat it as an optional pass for prose you're already touching, not a
+gate.
+
 ## License
 
 By contributing, you agree your contribution is licensed under the same
