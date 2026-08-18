@@ -157,10 +157,9 @@ mod tests {
 
     fn span() -> Span {
         Span {
-            start: 0,
-            end: 0,
             line: 1,
             col: 1,
+            ..Span::default()
         }
     }
 

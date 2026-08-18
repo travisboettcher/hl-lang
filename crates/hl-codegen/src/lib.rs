@@ -39,8 +39,7 @@ mod volume;
 use std::collections::HashMap;
 use std::fmt;
 
-use hl_parser::Span;
-use hl_parser::{ComposedProgram, Network, Reference, Service};
+use hl_parser::{ComposedProgram, Network, Reference, Service, SourceMap, Span};
 use indexmap::IndexMap;
 
 /// The result of running codegen on a [`ComposedProgram`]: one combined
@@ -117,18 +116,34 @@ impl CodegenError {
             | CodegenError::UnsafeLabelValue { span, .. } => *span,
         }
     }
-}
 
-impl fmt::Display for CodegenError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let span = self.span();
+    /// Renders this error with each location it mentions resolved
+    /// against `files` — `path:line:col` instead of a bare `line:col`.
+    ///
+    /// Codegen runs on an already-composed program, whose fields may
+    /// have come from any file in the `use` graph: a `{{binding}}` typo
+    /// inside an imported template used to report a line number in a
+    /// file the user never opened, with nothing to say which one (#75).
+    /// The map to pass is [`ComposedProgram::files`], which
+    /// `hl_linker::link` fills in.
+    pub fn display<'a>(&'a self, files: &'a SourceMap) -> impl fmt::Display + 'a {
+        DisplayCodegenError {
+            error: self,
+            files: Some(files),
+        }
+    }
+
+    /// The one implementation behind both [`Self::display`] and the
+    /// [`Display`](fmt::Display) impl — every location goes through
+    /// [`Span::locate`], so the two renderings can't drift apart.
+    fn write(&self, f: &mut fmt::Formatter<'_>, files: Option<&SourceMap>) -> fmt::Result {
+        let at = self.span().locate(files);
         match self {
             CodegenError::UnknownNetwork {
                 service, network, ..
             } => write!(
                 f,
-                "{}:{}: service `{service}` references undeclared network `{network}`",
-                span.line, span.col
+                "{at}: service `{service}` references undeclared network `{network}`"
             ),
             CodegenError::AmbiguousExternalNetwork {
                 service,
@@ -136,25 +151,18 @@ impl fmt::Display for CodegenError {
                 ..
             } => write!(
                 f,
-                "{}:{}: service `{service}` declares more than one external network ({}) — which real network name should `traefik.docker.network` use?",
-                span.line,
-                span.col,
+                "{at}: service `{service}` declares more than one external network ({}) — which real network name should `traefik.docker.network` use?",
                 candidates.join(", ")
             ),
-            CodegenError::UnknownInterpolation { binding, .. } => write!(
-                f,
-                "{}:{}: unknown interpolation `{{{{{binding}}}}}`",
-                span.line, span.col
-            ),
-            CodegenError::MissingImage { service, .. } => write!(
-                f,
-                "{}:{}: service `{service}` has no `image` set",
-                span.line, span.col
-            ),
+            CodegenError::UnknownInterpolation { binding, .. } => {
+                write!(f, "{at}: unknown interpolation `{{{{{binding}}}}}`")
+            }
+            CodegenError::MissingImage { service, .. } => {
+                write!(f, "{at}: service `{service}` has no `image` set")
+            }
             CodegenError::UnsubstitutedParameter { param, .. } => write!(
                 f,
-                "{}:{}: template parameter `${param}` was never bound to an argument",
-                span.line, span.col
+                "{at}: template parameter `${param}` was never bound to an argument"
             ),
             // The offending character is rendered with `Debug` rather
             // than wrapped in backticks like every other quoted name
@@ -182,11 +190,34 @@ impl fmt::Display for CodegenError {
                 };
                 write!(
                     f,
-                    "{}:{}: `{field}` must not contain {character:?} — it would change the meaning of the generated Traefik label{hint}",
-                    span.line, span.col
+                    "{at}: `{field}` must not contain {character:?} — it would change the meaning of the generated Traefik label{hint}"
                 )
             }
         }
+    }
+}
+
+/// [`CodegenError::display`]'s return type: the error plus the map its
+/// spans resolve against.
+struct DisplayCodegenError<'a> {
+    error: &'a CodegenError,
+    files: Option<&'a SourceMap>,
+}
+
+impl fmt::Display for DisplayCodegenError<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.write(f, self.files)
+    }
+}
+
+impl fmt::Display for CodegenError {
+    /// Renders every location as a bare `line:col`, with no file — all
+    /// a caller that composed a lone [`hl_parser::Program`] could say
+    /// anyway. A caller that has a [`SourceMap`] (the CLI, from
+    /// [`ComposedProgram::files`]) wants [`CodegenError::display`]
+    /// instead.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.write(f, None)
     }
 }
 
@@ -392,11 +423,51 @@ mod error_display_tests {
 
     fn span() -> Span {
         Span {
-            start: 0,
-            end: 0,
             line: 3,
             col: 5,
+            ..Span::default()
         }
+    }
+
+    /// A composed service's fields can come from any file in the `use`
+    /// graph, so codegen's own diagnostics resolve each span against the
+    /// program's [`SourceMap`] rather than reporting a bare `line:col`
+    /// in a file the user was never told about (#75).
+    #[test]
+    fn display_with_a_source_map_names_the_file() {
+        let mut files = SourceMap::new();
+        let lib = files.intern("shared/templates.hll");
+        let err = CodegenError::UnknownInterpolation {
+            binding: "nmae".to_string(),
+            span: Span {
+                line: 4,
+                col: 22,
+                file: lib,
+                ..Span::default()
+            },
+        };
+        assert_eq!(
+            err.display(&files).to_string(),
+            "shared/templates.hll:4:22: unknown interpolation `{{nmae}}`"
+        );
+        // The bare `Display` is unchanged, for a caller with no map.
+        assert_eq!(err.to_string(), "4:22: unknown interpolation `{{nmae}}`");
+    }
+
+    /// A span whose file the map doesn't know (an anonymous one from
+    /// `hl_parser::parse`, say) still renders, just without a path.
+    #[test]
+    fn display_with_a_source_map_falls_back_for_anonymous_spans() {
+        let mut files = SourceMap::new();
+        files.intern("entry.hll");
+        let err = CodegenError::MissingImage {
+            service: "web".to_string(),
+            span: span(),
+        };
+        assert_eq!(
+            err.display(&files).to_string(),
+            "3:5: service `web` has no `image` set"
+        );
     }
 
     #[test]

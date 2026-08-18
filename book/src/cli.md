@@ -220,8 +220,16 @@ raised it:
 - **Link errors** about a file as a whole (an import that won't load, a
   duplicate alias) name that file, which may be an imported one rather
   than the file you passed on the command line.
-- **Compose and codegen errors** print `line:col: message` with no path
-  at all. A composed service's fields can come from any file in the
-  `use` graph, so naming one would mean guessing — and guessing wrong is
-  worse than saying nothing. Attaching real file identity to these
-  positions is tracked as future work.
+- **Compose and codegen errors** print `path:line:col: message`, and
+  every position they mention carries its own path. A composed service's
+  fields can come from any file in the `use` graph, so an error about
+  two of them routinely straddles two files:
+
+  ```text
+  t2.hll:2:11: field `restart.policy` set by both template `x` (at t1.hll:2:11) and template `y` — explicit templates must not conflict
+  ```
+
+  Both positions here are line 2, column 11 — in different files. The
+  path on each is what tells them apart, and it points at the file the
+  field was really written in, which may be an imported one you never
+  opened.

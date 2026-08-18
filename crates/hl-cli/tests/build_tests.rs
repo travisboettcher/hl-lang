@@ -1085,3 +1085,72 @@ fn build_reports_a_real_stdout_write_failure_instead_of_exiting_clean() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+/// The diagnostic side of #75, end to end: a field collision between two
+/// *imported* templates now names the file each location is in, rather
+/// than printing two bare `line:col` pairs (identical ones, in this
+/// case) for two positions in two different files.
+#[test]
+fn compose_error_across_imported_files_names_both_files() {
+    let dir = scratch_dir("cross-file-collision");
+    fs::write(dir.join("t1.hll"), "template x {\n  restart always\n}\n").unwrap();
+    fs::write(
+        dir.join("t2.hll"),
+        "template y {\n  restart unless-stopped\n}\n",
+    )
+    .unwrap();
+    let entry = dir.join("svc.hll");
+    fs::write(
+        &entry,
+        "use \"t1.hll\" as one\n\
+         use \"t2.hll\" as two\n\
+         service web {\n  image \"nginx\"\n  with one.x, two.y\n}\n",
+    )
+    .unwrap();
+
+    let output = hllc_output(&["--build", entry.to_str().unwrap()]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected = format!(
+        "{}:2:11: field `restart.policy` set by both template `x` (at {}:2:11) \
+         and template `y` — explicit templates must not conflict\n",
+        dir.join("t2.hll").display(),
+        dir.join("t1.hll").display(),
+    );
+    assert_eq!(stderr, expected);
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// Same for a codegen error raised inside an imported template: the
+/// position is in a file the user never opened, so the message has to
+/// say which one.
+#[test]
+fn codegen_error_inside_an_imported_template_names_that_file() {
+    let dir = scratch_dir("cross-file-codegen");
+    fs::write(
+        dir.join("lib.hll"),
+        "template t {\n  container_name \"{{nmae}}\"\n}\n",
+    )
+    .unwrap();
+    let entry = dir.join("svc.hll");
+    fs::write(
+        &entry,
+        "use \"lib.hll\" as l\n\
+         service web {\n  image \"nginx\"\n  with l.t\n}\n",
+    )
+    .unwrap();
+
+    let output = hllc_output(&["--build", entry.to_str().unwrap()]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr,
+        format!(
+            "{}:2:18: unknown interpolation `{{{{nmae}}}}`\n",
+            dir.join("lib.hll").display()
+        )
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
