@@ -19,8 +19,9 @@
 //!      service jellyfin {\n  image \"jellyfin/jellyfin\"\n  networks [traefik.traefik-net]\n}\n",
 //! );
 //!
-//! let composed = link(std::path::Path::new("service.hll"), &loader).unwrap();
-//! assert_eq!(composed.services.len(), 1);
+//! let linked = link(std::path::Path::new("service.hll"), &loader).unwrap();
+//! assert_eq!(linked.program.services.len(), 1);
+//! assert!(linked.warnings.is_empty());
 //! ```
 //!
 //! # Stability
@@ -43,31 +44,56 @@ mod error;
 mod graph;
 mod loader;
 mod path;
+mod warning;
 
 pub use error::LinkError;
 pub use loader::{FileLoader, FsLoader, InMemoryLoader};
+pub use warning::LinkWarning;
 
 use std::path::Path;
 
 use hl_parser::{ComposedProgram, compose_with_resolver};
 
+/// What [`link`] produces: the composed program, plus every non-fatal
+/// diagnostic raised on the way to it.
+///
+/// The warnings ride *alongside* the program rather than inside it
+/// because [`ComposedProgram`] belongs to `hl-parser`, which knows
+/// nothing about `use` graphs — this is the linker's own channel, and it
+/// is the whole of the non-fatal machinery this stage needs (#80). The
+/// caller decides what to do with the list; `hllc` prints each entry to
+/// stderr and carries on, exit code untouched.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Linked {
+    pub program: ComposedProgram,
+    /// In load order — the entry file first, then each imported file as
+    /// it was reached. Empty for the overwhelmingly common case of a
+    /// graph with nothing dropped.
+    pub warnings: Vec<LinkWarning>,
+}
+
 /// Loads `entry` and its whole transitive `use` graph via `loader` (see
 /// [`FileLoader`]) — eagerly, in one pass, before composing anything —
 /// then resolves every `template`/`with` composition and cross-file
-/// `alias.name` reference into one [`ComposedProgram`].
+/// `alias.name` reference into one [`ComposedProgram`], returned inside a
+/// [`Linked`] together with any [`LinkWarning`]s.
 ///
 /// The returned [`ComposedProgram`] carries the graph's
 /// [`hl_parser::SourceMap`] in its `files` field, so a codegen
 /// diagnostic raised further down the pipeline can still name the file
 /// any span came from — including a field that a service inherited from
-/// a template in some imported file (#75). Errors raised here resolve
-/// their own spans the same way before rendering.
-pub fn link(entry: &Path, loader: &dyn FileLoader) -> Result<ComposedProgram, LinkError> {
+/// a template in some imported file (#75). Errors and warnings raised
+/// here resolve their own spans the same way before rendering.
+pub fn link(entry: &Path, loader: &dyn FileLoader) -> Result<Linked, LinkError> {
     let mut graph = graph::build(entry, loader)?;
     let (networks, services) = graph.take_entry();
+    let warnings = graph.take_warnings();
     let entry_scope = graph.entry_scope();
     let mut composed = compose_with_resolver(networks, services, entry_scope, &graph)
         .map_err(|err| LinkError::compose(err, graph.files()))?;
     composed.files = graph.files().clone();
-    Ok(composed)
+    Ok(Linked {
+        program: composed,
+        warnings,
+    })
 }

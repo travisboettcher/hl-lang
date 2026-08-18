@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use hl_linker::{InMemoryLoader, LinkError, link};
+use hl_linker::{InMemoryLoader, LinkError, LinkWarning, link};
 use hl_parser::ComposeError;
 
 fn image_of(composed: &hl_parser::ComposedProgram, index: usize) -> &str {
@@ -36,7 +36,8 @@ fn two_hop_template_and_network_resolution() {
     );
 
     let composed = link(Path::new("service.hll"), &loader)
-        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
 
     assert_eq!(image_of(&composed, 0), "jellyfin/jellyfin");
     assert_eq!(composed.networks.len(), 1);
@@ -68,7 +69,8 @@ fn three_hop_template_reuse_through_an_imported_templates_file() {
     );
 
     let composed = link(Path::new("service.hll"), &loader)
-        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
 
     assert_eq!(image_of(&composed, 0), "jellyfin/jellyfin");
     assert_eq!(
@@ -118,7 +120,8 @@ fn template_qualified_reference_resolves_in_its_own_declaring_file_not_the_invok
     );
 
     let composed = link(Path::new("service.hll"), &loader)
-        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
 
     assert_eq!(composed.networks.len(), 1);
     assert_eq!(
@@ -138,7 +141,8 @@ fn implicit_defaults_template_applies_through_the_module_graph() {
     );
 
     let composed = link(Path::new("service.hll"), &loader)
-        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
 
     assert_eq!(
         composed.services[0]
@@ -196,7 +200,8 @@ fn cyclic_use_graph_composes_successfully() {
     );
 
     let composed = link(Path::new("a.hll"), &loader)
-        .unwrap_or_else(|err| panic!("unexpected link error (does the graph loader hang or false-error on a cyclic use graph?): {err}"));
+        .unwrap_or_else(|err| panic!("unexpected link error (does the graph loader hang or false-error on a cyclic use graph?): {err}"))
+        .program;
 
     assert_eq!(image_of(&composed, 0), "from-a");
 }
@@ -220,7 +225,8 @@ fn relative_paths_resolve_against_each_importing_files_own_directory() {
     );
 
     let composed = link(Path::new("services/foo/service.hll"), &loader)
-        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
 
     assert_eq!(
         composed.networks[0].real_name.as_ref().unwrap().text(),
@@ -428,7 +434,8 @@ fn same_network_name_in_two_modules_is_fine() {
     );
 
     let composed = link(Path::new("service.hll"), &loader)
-        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
     assert_eq!(composed.networks.len(), 1);
 }
 
@@ -513,7 +520,8 @@ fn one_imported_network_referenced_by_several_services_is_fine() {
     );
 
     let composed = link(Path::new("svc.hll"), &loader)
-        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
     assert_eq!(composed.networks.len(), 1);
     assert_eq!(
         composed.networks[0].real_name.as_ref().unwrap().text(),
@@ -538,7 +546,8 @@ fn local_and_imported_networks_with_distinct_names_both_survive() {
     );
 
     let composed = link(Path::new("svc.hll"), &loader)
-        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
     let names: Vec<&str> = composed
         .networks
         .iter()
@@ -637,7 +646,8 @@ fn composed_program_carries_the_graphs_source_map() {
     );
 
     let composed = link(Path::new("svc.hll"), &loader)
-        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
     let files = &composed.files;
     assert_eq!(files.len(), 2);
     let image_span = composed.services[0].fields.image.as_ref().unwrap().span;
@@ -649,5 +659,108 @@ fn composed_program_carries_the_graphs_source_map() {
     assert_eq!(
         network_span.locate(Some(files)).path(),
         Some(Path::new("net.hll"))
+    );
+}
+
+/// #80: an imported file's own `service` decls are dropped — only the
+/// entry file's are built — so a user who moved a service into a library
+/// file got no output for it and, until now, no diagnostic either.
+#[test]
+fn a_service_in_an_imported_file_warns() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "lib.hll",
+        "template baseline {\n  restart unless-stopped\n}\n\
+         service db {\n  image \"postgres\"\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"lib.hll\" as common\n\
+         service web {\n  with common.baseline\n  image \"nginx\"\n}\n",
+    );
+
+    let linked = link(Path::new("svc.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+
+    // The entry file's own service is unaffected by the warning.
+    assert_eq!(linked.program.services.len(), 1);
+    assert_eq!(image_of(&linked.program, 0), "nginx");
+    assert!(
+        matches!(
+            linked.warnings.as_slice(),
+            [LinkWarning::ImportedService { service, .. }] if service == "db"
+        ),
+        "expected one imported-service warning, got: {:?}",
+        linked.warnings
+    );
+    assert_eq!(
+        linked.warnings[0]
+            .display(&linked.program.files)
+            .to_string(),
+        "lib.hll:4:9: warning: service `db` is declared in an imported file and is not compiled \
+         — only the entry file's services are built"
+    );
+}
+
+/// #80: `defaults` is looked up only in the entry module, so an
+/// imported one contributes nothing to any service — the imported
+/// `restart` below never reaches `web`.
+#[test]
+fn a_defaults_template_in_an_imported_file_warns() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "lib.hll",
+        "template defaults {\n  restart unless-stopped\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"lib.hll\" as common\nservice web {\n  image \"nginx\"\n}\n",
+    );
+
+    let linked = link(Path::new("svc.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+
+    assert!(linked.program.services[0].fields.restart.is_none());
+    assert!(
+        matches!(
+            linked.warnings.as_slice(),
+            [LinkWarning::ImportedDefaults { .. }]
+        ),
+        "expected one imported-defaults warning, got: {:?}",
+        linked.warnings
+    );
+    assert_eq!(
+        linked.warnings[0]
+            .display(&linked.program.files)
+            .to_string(),
+        "lib.hll:1:10: warning: template `defaults` is declared in an imported file and is not \
+         applied — `defaults` is only looked up in the entry file; give it an ordinary name and \
+         apply it with `with`"
+    );
+}
+
+/// The entry file's own `defaults` and services are exactly what the
+/// warnings are *not* about: an ordinary single-purpose graph stays
+/// silent.
+#[test]
+fn an_ordinary_graph_produces_no_warnings() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "lib.hll",
+        "template baseline {\n  restart unless-stopped\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"lib.hll\" as common\n\
+         template defaults {\n  env TZ = \"UTC\"\n}\n\
+         service web {\n  with common.baseline\n  image \"nginx\"\n}\n",
+    );
+
+    let linked = link(Path::new("svc.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+    assert!(
+        linked.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        linked.warnings
     );
 }

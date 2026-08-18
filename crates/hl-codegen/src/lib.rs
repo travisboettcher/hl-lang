@@ -35,18 +35,30 @@ mod interp;
 mod labels;
 mod raw;
 mod volume;
+mod warning;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use hl_parser::{ComposedProgram, Network, Reference, Service, SourceMap, Span};
 use indexmap::IndexMap;
 
+pub use warning::CodegenWarning;
+
 /// The result of running codegen on a [`ComposedProgram`]: one combined
-/// Compose document.
+/// Compose document, plus every non-fatal diagnostic raised while
+/// producing it.
+///
+/// The warnings live here, on the stage's own success value, rather than
+/// in a separate return channel — that is the whole of codegen's
+/// non-fatal machinery (#80). `hllc` prints each one to stderr and leaves
+/// its exit code alone.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GeneratedProgram {
     pub yaml: String,
+    /// In declaration order. Empty for the overwhelmingly common case of
+    /// a program with nothing dropped.
+    pub warnings: Vec<CodegenWarning>,
 }
 
 /// `(network identifier, its Compose doc)` pairs to merge into the
@@ -103,6 +115,27 @@ pub enum CodegenError {
         character: char,
         span: Span,
     },
+    /// A service sets `middleware` or `expose.entrypoint` without an
+    /// `expose.host` to hang a router off.
+    ///
+    /// Both fields only ever reach Traefik as labels *on* a router, and
+    /// `expose.host` is what creates that router — so with no host there
+    /// is nothing to attach them to and no label to emit. Until #80 that
+    /// was handled by emitting nothing at all, which meant a service
+    /// whose author forgot `as "host.example.com"` deployed with its
+    /// authentication middleware quietly absent: valid output, wrong
+    /// service, no diagnostic. A router-less `middleware` is never
+    /// something a user can have meant, so it's an error rather than a
+    /// warning — the one case of the four in #80 that is.
+    ///
+    /// `field` is the offending field's name (`middleware` or
+    /// `expose.entrypoint`) and `span` points at its first entry, which
+    /// is the line to either delete or pair with a host.
+    RouterFieldWithoutHost {
+        service: String,
+        field: &'static str,
+        span: Span,
+    },
 }
 
 impl CodegenError {
@@ -113,7 +146,8 @@ impl CodegenError {
             | CodegenError::UnknownInterpolation { span, .. }
             | CodegenError::MissingImage { span, .. }
             | CodegenError::UnsubstitutedParameter { span, .. }
-            | CodegenError::UnsafeLabelValue { span, .. } => *span,
+            | CodegenError::UnsafeLabelValue { span, .. }
+            | CodegenError::RouterFieldWithoutHost { span, .. } => *span,
         }
     }
 
@@ -193,6 +227,10 @@ impl CodegenError {
                     "{at}: `{field}` must not contain {character:?} — it would change the meaning of the generated Traefik label{hint}"
                 )
             }
+            CodegenError::RouterFieldWithoutHost { service, field, .. } => write!(
+                f,
+                "{at}: service `{service}` sets `{field}` but has no `expose.host`, so there is no Traefik router to attach it to — add a host (`expose <port> as \"{service}.example.com\"`) or drop the `{field}`"
+            ),
         }
     }
 }
@@ -226,10 +264,14 @@ impl std::error::Error for CodegenError {}
 /// Generates one combined Compose document from `program`. Pure — no
 /// I/O — mirroring `hl_parser::compose::compose`'s own by-value,
 /// side-effect-free signature.
+///
+/// Any [`CodegenWarning`] raised on the way rides out on the returned
+/// [`GeneratedProgram`]; nothing here stops for one.
 pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenError> {
     let mut services = IndexMap::new();
     let mut networks: IndexMap<String, doc::NetworkDoc> = IndexMap::new();
     let mut volumes: IndexMap<String, Option<()>> = IndexMap::new();
+    let mut referenced_networks: HashSet<&str> = HashSet::new();
 
     for service in &program.services {
         let (service_doc, network_docs, named_volumes) =
@@ -240,8 +282,27 @@ pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenErr
         for vol_name in named_volumes {
             volumes.entry(vol_name).or_insert(None);
         }
+        for r in &service.fields.networks {
+            referenced_networks.insert(r.name.as_str());
+        }
         services.insert(service.name.name.clone(), service_doc);
     }
+
+    // `networks:` is assembled from what services reference, never from
+    // the declarations themselves, so a declaration nothing reaches is
+    // simply absent from the output — indistinguishable from having
+    // forgotten to declare it (#80). Checked against the *references*
+    // rather than against `networks` above so the diagnostic survives a
+    // future change to how the docs are keyed.
+    let warnings = program
+        .networks
+        .iter()
+        .filter(|decl| !referenced_networks.contains(decl.name.name.as_str()))
+        .map(|decl| CodegenWarning::UnusedNetwork {
+            network: decl.name.name.clone(),
+            span: decl.name.span,
+        })
+        .collect();
 
     let compose_doc = doc::ComposeDoc {
         services,
@@ -250,7 +311,7 @@ pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenErr
     };
     let yaml = serde_yaml_ng::to_string(&compose_doc)
         .expect("ComposeDoc only contains strings/maps/numbers; serialization cannot fail");
-    Ok(GeneratedProgram { yaml })
+    Ok(GeneratedProgram { yaml, warnings })
 }
 
 fn generate_service(
@@ -571,6 +632,24 @@ mod error_display_tests {
         assert_eq!(
             err.to_string(),
             "3:5: `expose.entrypoint` must not contain '`' — it would change the meaning of the generated Traefik label"
+        );
+    }
+
+    /// #80: the error that replaced the old silent drop names the field,
+    /// the service, and the fix — the missing `expose.host` is not
+    /// something the service body shows on its face.
+    #[test]
+    fn router_field_without_host_display() {
+        let err = CodegenError::RouterFieldWithoutHost {
+            service: "web".to_string(),
+            field: "middleware",
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: service `web` sets `middleware` but has no `expose.host`, so there is no \
+             Traefik router to attach it to — add a host (`expose <port> as \
+             \"web.example.com\"`) or drop the `middleware`"
         );
     }
 

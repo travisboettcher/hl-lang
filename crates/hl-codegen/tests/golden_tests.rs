@@ -5,7 +5,7 @@
 //! scalar-quoting choices don't need to match the real files
 //! byte-for-byte, only semantically.
 
-use hl_codegen::{CodegenError, generate};
+use hl_codegen::{CodegenError, CodegenWarning, generate};
 use hl_parser::{compose, parse};
 
 const SYNCTHING: &str = include_str!("../../hl-parser/tests/fixtures/syncthing.hll");
@@ -694,5 +694,103 @@ fn yaml_hostile_values_round_trip_as_data_not_structure() {
             .expect("top-level volumes is a mapping")
             .contains_key(s("vol: name")),
         "\n--- actual ---\n{yaml}"
+    );
+}
+
+/// #80: `middleware` with no `expose.host` used to compile to a service
+/// with no `labels:` key at all — the auth middleware the user asked for
+/// silently absent from a deployment that otherwise looked fine. There
+/// is no router for it to attach to, so this is a build failure now.
+#[test]
+fn middleware_without_a_host_is_an_error() {
+    let err = generate_err("service w {\n  image \"n\"\n  expose 80\n  middleware auth\n}\n");
+    assert!(
+        matches!(
+            &err,
+            CodegenError::RouterFieldWithoutHost {
+                service,
+                field: "middleware",
+                ..
+            } if service == "w"
+        ),
+        "expected a router-less middleware error, got: {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "4:14: service `w` sets `middleware` but has no `expose.host`, so there is no Traefik \
+         router to attach it to — add a host (`expose <port> as \"w.example.com\"`) or drop the \
+         `middleware`"
+    );
+}
+
+/// The same rule for the other router-attached field, and the one
+/// reported first when a service sets both — a host-less `expose` block
+/// is exactly the shape a forgotten `as "..."` leaves behind.
+#[test]
+fn entrypoint_without_a_host_is_an_error() {
+    let err = generate_err(
+        "service w {\n  image \"n\"\n  expose 80, entrypoint: web-secure\n  middleware auth\n}\n",
+    );
+    assert!(
+        matches!(
+            err,
+            CodegenError::RouterFieldWithoutHost {
+                field: "expose.entrypoint",
+                ..
+            }
+        ),
+        "expected the entrypoint to be reported first, got: {err:?}"
+    );
+}
+
+/// A service that sets neither router-attached field is unaffected — no
+/// host, no router, no labels, and no diagnostic.
+#[test]
+fn a_hostless_service_without_router_fields_still_builds() {
+    let yaml = generate_from("service w {\n  image \"n\"\n  expose 80\n}\n");
+    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert!(parsed["services"]["w"].get("labels").is_none());
+}
+
+/// #80: `networks:` is assembled from what services reference, so a
+/// declaration nothing references never reaches the output. That stays
+/// true — it's a warning, and the build still succeeds.
+#[test]
+fn an_unreferenced_network_warns_but_still_builds() {
+    let program =
+        parse("network unused {\n  external\n}\nservice w {\n  image \"n\"\n}\n").unwrap();
+    let composed = compose(program).unwrap();
+    let generated = generate(composed).expect("an unused network is not an error");
+
+    assert!(
+        matches!(
+            generated.warnings.as_slice(),
+            [CodegenWarning::UnusedNetwork { network, .. }] if network == "unused"
+        ),
+        "expected one unused-network warning, got: {:?}",
+        generated.warnings
+    );
+    assert_eq!(
+        generated.warnings[0].to_string(),
+        "1:9: warning: network `unused` is declared but no service references it, so it is not \
+         emitted — add it to a service's `networks [...]` list, or remove the declaration"
+    );
+    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&generated.yaml).unwrap();
+    assert!(parsed.get("networks").is_none());
+}
+
+/// A network a service actually names is emitted, and says nothing.
+#[test]
+fn a_referenced_network_produces_no_warning() {
+    let program = parse(
+        "network proxy {\n  external\n}\nservice w {\n  image \"n\"\n  networks [proxy]\n}\n",
+    )
+    .unwrap();
+    let composed = compose(program).unwrap();
+    let generated = generate(composed).unwrap();
+    assert!(
+        generated.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        generated.warnings
     );
 }
