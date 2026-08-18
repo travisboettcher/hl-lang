@@ -1122,6 +1122,83 @@ fn compose_error_across_imported_files_names_both_files() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// #60, end to end through the real binary: an undeclared named-volume
+/// reference fails the build with a `path:line:col`-located message,
+/// rendered through the same `SourceMap` machinery as every other
+/// codegen diagnostic. The `.hll` here is the exact "before" of this
+/// change — it compiled silently until the top-level declaration became
+/// mandatory.
+#[test]
+fn build_reports_an_undeclared_named_volume_with_its_path_line_and_col() {
+    let dir = scratch_dir("unknown-volume");
+    let entry = dir.join("syncthing.hll");
+    fs::write(
+        &entry,
+        "volume syncthing-config {}\n\
+         service syncthing {\n  \
+           image \"lscr.io/linuxserver/syncthing\"\n  \
+           volume \"snycthing-config\" -> \"/config\"\n\
+         }\n",
+    )
+    .unwrap();
+
+    let output = hllc_output(&["--build", entry.to_str().unwrap()]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr,
+        format!(
+            "{}:4:10: service `syncthing` references undeclared volume `snycthing-config`\n",
+            entry.display()
+        )
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// The other half: with the declaration present, the same file builds
+/// and the named volume lands in the document's top-level `volumes:`
+/// section carrying its declaration's options.
+#[test]
+fn build_emits_a_declared_volumes_options_in_the_top_level_section() {
+    let dir = scratch_dir("declared-volume");
+    let entry = dir.join("syncthing.hll");
+    fs::write(
+        &entry,
+        "volume syncthing-config {\n  external\n  name: \"sync_store\"\n}\n\
+         service syncthing {\n  \
+           image \"lscr.io/linuxserver/syncthing\"\n  \
+           volume \"syncthing-config\" -> \"/config\"\n\
+         }\n",
+    )
+    .unwrap();
+    let out = dir.join("docker-compose.yml");
+
+    let code = run(Cli {
+        file: entry,
+        parse: false,
+        build: true,
+        out: Some(out.clone()),
+        force: false,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let yaml = fs::read_to_string(&out).unwrap();
+    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert_eq!(
+        parsed["volumes"]["syncthing-config"]["name"],
+        serde_yaml_ng::Value::String("sync_store".to_string()),
+        "\n--- actual ---\n{yaml}"
+    );
+    assert_eq!(
+        parsed["volumes"]["syncthing-config"]["external"],
+        serde_yaml_ng::Value::Bool(true),
+        "\n--- actual ---\n{yaml}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// Same for a codegen error raised inside an imported template: the
 /// position is in a file the user never opened, so the message has to
 /// say which one.

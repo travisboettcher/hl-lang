@@ -10,8 +10,14 @@ pub(crate) struct ComposeDoc {
     pub services: IndexMap<String, ComposeServiceDoc>,
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub networks: IndexMap<String, NetworkDoc>,
+    /// `None` for a volume whose declaration sets no options at all,
+    /// which serializes as a bare `volume-name:` key with a null value —
+    /// Compose's own idiom for "just create it with the defaults", and
+    /// what this section emitted before top-level `volume` declarations
+    /// existed. A declaration that *does* set something serializes the
+    /// [`VolumeDoc`] instead.
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
-    pub volumes: IndexMap<String, Option<()>>,
+    pub volumes: IndexMap<String, Option<VolumeDoc>>,
 }
 
 #[derive(Serialize)]
@@ -23,6 +29,35 @@ pub(crate) struct NetworkDoc {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub external: bool,
+}
+
+/// One entry in the top-level `volumes:` section, mirroring
+/// [`NetworkDoc`] field for field where the two Compose sections agree
+/// (`name`, `external`) and adding the two knobs only volumes have.
+#[derive(Serialize, Default, PartialEq)]
+pub(crate) struct VolumeDoc {
+    /// The real underlying Docker volume name, when it differs from this
+    /// volume's own hl-lang identifier (the map key it's stored under in
+    /// [`ComposeDoc::volumes`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub external: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    #[serde(skip_serializing_if = "IndexMap::is_empty")]
+    pub driver_opts: IndexMap<String, String>,
+}
+
+impl VolumeDoc {
+    /// Whether this declaration set no options at all — in which case
+    /// [`ComposeDoc::volumes`] stores `None` and emits the bare
+    /// `volume-name:` key instead of an empty `{}` mapping. Both are
+    /// valid Compose, but the bare key is the idiomatic spelling and the
+    /// one this section has always emitted.
+    pub(crate) fn is_empty(&self) -> bool {
+        *self == VolumeDoc::default()
+    }
 }
 
 #[derive(Serialize, Default)]

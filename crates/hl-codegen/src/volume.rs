@@ -1,10 +1,16 @@
 //! Classifies a `volume` entry's host side as a named volume or a bind
 //! mount, confirmed against the real homelab: `syncthing-config` (a bare
-//! identifier, no leading `/` or `.`) is a named volume needing a
-//! top-level `volumes: { syncthing-config: }` declaration; `/home/x/y`
-//! and `./jellyfin` are both bind-mount paths needing no such
-//! declaration — matching Docker's own convention for telling the two
-//! apart.
+//! identifier, no leading `/` or `.`) is a named volume; `/home/x/y` and
+//! `./jellyfin` are both bind-mount paths — matching Docker's own
+//! convention for telling the two apart.
+//!
+//! Since #60 this is only the *first* half of the question. A host side
+//! classified as a named volume is a reference that must resolve to a
+//! top-level `volume` declaration (`hl_codegen::resolve_volumes`, and
+//! `CodegenError::UnknownVolume` when it doesn't); it no longer conjures
+//! its own `volumes:` entry out of the string alone. A bind-mount path
+//! is unchanged and needs no declaration, exactly as Docker requires
+//! none.
 
 /// `Some(name)` if `host` is a named-volume identifier; `None` if it's a
 /// bind-mount path.
