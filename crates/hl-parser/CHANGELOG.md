@@ -10,7 +10,7 @@ notes are produced from GitHub's own generate-notes API instead (see
 
 ## [Unreleased]
 
-## [0.11.1] - 2026-08-15
+## [0.11.2] - 2026-08-15
 
 ### Added
 
