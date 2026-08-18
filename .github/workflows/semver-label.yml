@@ -37,6 +37,19 @@ jobs:
     # [bot]`. The author + title-marker check together mean an external
     # contributor can't spoof this by naming their own PR the same way.
     #
+    # PRECONDITION (#79): falling back to `repository_owner` is only
+    # correct while this repo lives under a personal account whose login
+    # is also the account that owns RELEASE_PLZ_TOKEN. Transfer it to an
+    # organisation and `repository_owner` becomes the org name, which
+    # matches no PR author — the `[release-bump]` PR would start failing
+    # this required check, `gh pr merge --auto` would never fire, and
+    # releases would stop, several layers removed from the symptom. Set
+    # the `RELEASE_BOT_LOGIN` repository variable (Settings -> Secrets
+    # and variables -> Actions -> Variables) to the login of whoever
+    # owns RELEASE_PLZ_TOKEN and this keeps working; unset, it behaves
+    # exactly as before. linked-issue.yml carries the same fallback and
+    # reads the same variable.
+    #
     # Dependabot's `github-actions` PRs are exempt too (#96): they change
     # CI configuration only and can't affect the shipped binary, so
     # releasing for one would publish a new version with byte-identical
@@ -53,7 +66,7 @@ jobs:
     # `.../actions/checkout-7`). `user.login` is set by GitHub and can't
     # be spoofed by a contributor branch named to look the same way.
     if: |
-      !(github.event.pull_request.user.login == github.repository_owner &&
+      !(github.event.pull_request.user.login == (vars.RELEASE_BOT_LOGIN || github.repository_owner) &&
         contains(github.event.pull_request.title, '[release-bump]')) &&
       !(github.event.pull_request.user.login == 'dependabot[bot]' &&
         startsWith(github.head_ref, 'dependabot/github_actions/'))
