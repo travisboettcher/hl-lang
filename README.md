@@ -62,8 +62,14 @@ chmod +x hllc
 ```
 
 Consumers (CI, a local deploy step) should pin to a specific tag rather than
-`latest` for reproducibility. See "Building & testing" below to build from
-source instead — e.g. for a platform with no release binary.
+`latest` for reproducibility.
+
+**Linux x86-64 is the only platform this project tests or supports.** Every
+CI job runs on `ubuntu-latest`, and the binary above is the only one a
+release ships. The workspace is plain Rust, so `cargo build --workspace`
+(see "Building & testing" below) may well work on macOS or Windows too —
+but that's untested and unsupported today; expect rough edges, particularly
+around filesystem path handling.
 
 ## Building & testing
 

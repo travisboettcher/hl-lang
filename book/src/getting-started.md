@@ -19,8 +19,9 @@ this chapter can just call `hllc` directly. Pin to a specific release tag
 instead of `latest` for anything you intend to keep reproducible (CI, a
 deploy script).
 
-If you're on a platform with no prebuilt binary, or want to build from
-source, see the main repository's README.
+Linux x86-64 is the only platform this project tests or supports — see the
+main repository's README. If you're on a different platform, building from
+source (also covered in the README) may work, but it's untested.
 
 ## Your first service
 
