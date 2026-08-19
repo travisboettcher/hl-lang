@@ -49,6 +49,22 @@ pub(crate) struct ComposeServiceDoc {
     pub networks: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dns: Vec<String>,
+    /// `publish host -> container` entries, as Compose short-syntax
+    /// `host:container` strings — one string per mapping, never a
+    /// nested `{ target, published }` mapping.
+    ///
+    /// Typed `String` rather than [`serde_yaml_ng::Value`] (which
+    /// `expose` below uses) precisely because a port *mapping* is never
+    /// a number: the whole `53:53` is one scalar. YAML 1.1's
+    /// sexagesimal rule would have read that as the integer 3233, which
+    /// is the classic reason Compose's own docs tell you to quote port
+    /// mappings — but the rule was dropped in YAML 1.2 and Compose's
+    /// parser explicitly refuses to honor it ("Base 60 floats are a bad
+    /// idea, were dropped in YAML 1.2, and are purposefully unsupported
+    /// here" — `go-yaml/yaml` v3's `resolve.go`), so a plain scalar
+    /// reaches Compose as the string it is.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub expose: Vec<serde_yaml_ng::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -110,6 +126,7 @@ impl ComposeServiceDoc {
             volumes,
             networks,
             dns,
+            ports,
             expose,
             depends_on,
             labels,
@@ -138,6 +155,9 @@ impl ComposeServiceDoc {
         }
         if raw.contains_key("dns") {
             dns.clear();
+        }
+        if raw.contains_key("ports") {
+            ports.clear();
         }
         if raw.contains_key("expose") {
             expose.clear();

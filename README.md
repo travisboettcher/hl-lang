@@ -24,7 +24,7 @@ underlying the user guide.
 **The compiler implements the full pipeline**: lexer → parser →
 template/`with` composition → cross-file `use` imports → codegen →
 command-line tool. A `.hll` file can declare
-`network`/`service`/`image`/`expose`/`volume`/`env`/`restart`/`raw`,
+`network`/`service`/`image`/`expose`/`publish`/`volume`/`env`/`restart`/`raw`,
 combine reusable `template`s onto a service via `with`, and `use` another
 `.hll` file under a local alias to reuse its templates/networks across
 files (`use "docker.hll" as traefik`, then for example

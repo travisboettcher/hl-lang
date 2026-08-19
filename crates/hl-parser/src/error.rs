@@ -55,9 +55,27 @@ pub enum ParseError {
     /// A top-level declaration's type name isn't `network` or `service`.
     UnknownTopLevelType { name: String, span: Span },
     /// A struct-kind type's body used a field name not in its schema.
+    ///
+    /// The message names the `raw { <field>: ... }` escape hatch, for
+    /// every unrecognized field rather than any particular one (#84):
+    /// `raw` passes an arbitrary Compose key through verbatim, so
+    /// whenever the unknown name is a real Compose key `hll` has no
+    /// dedicated field for yet, that one line is the fix — and a file
+    /// written that way keeps compiling unchanged if the field is later
+    /// added, since a `raw` key overrides the built-in of the same name.
+    /// Without the hint this error was a dead end even when a one-line
+    /// workaround existed.
     UnknownField {
         type_name: &'static str,
         field: String,
+        /// Whether the body this field was written in is one that
+        /// actually accepts a `raw` block, so the hint is only offered
+        /// where it would compile. Filled in from the schema
+        /// ([`crate::schema::supports_raw`]) rather than by naming
+        /// `service`/`template` here, so a future type that gains (or
+        /// loses) a schema-free passthrough field stays consistent with
+        /// no change to this variant.
+        raw_escape_hatch: bool,
         span: Span,
     },
     /// A single-occurrence field (a scalar, a bare flag, or a
@@ -211,11 +229,27 @@ impl fmt::Display for ParseError {
                 )
             }
             ParseError::UnknownField {
-                type_name, field, ..
+                type_name,
+                field,
+                raw_escape_hatch,
+                ..
             } => {
+                // Offered for every unrecognized name, not a curated
+                // list of known-missing Compose keys (#84): `raw` is
+                // schema-free, so it's the answer to *whichever* key
+                // turns out to be missing, and a typo'd field name costs
+                // nothing to see it beside.
+                let hint = if *raw_escape_hatch {
+                    format!(
+                        " — if `{field}` is a Compose key with no `hll` field yet, pass it \
+                         through with `raw {{ {field}: ... }}`"
+                    )
+                } else {
+                    String::new()
+                };
                 write!(
                     f,
-                    "{}:{}: unknown field {field:?} on `{type_name}`",
+                    "{}:{}: unknown field {field:?} on `{type_name}`{hint}",
                     span.line, span.col
                 )
             }
@@ -398,14 +432,35 @@ mod display_tests {
         );
     }
 
+    /// A body that accepts `raw` gets the escape-hatch hint, spelled
+    /// with the offending field's own name so it's copy-pasteable (#84).
     #[test]
-    fn unknown_field_display() {
+    fn unknown_field_display_names_the_raw_escape_hatch() {
         let err = ParseError::UnknownField {
             type_name: "service",
-            field: "bogus".to_string(),
+            field: "ports".to_string(),
+            raw_escape_hatch: true,
             span: span(4, 2),
         };
-        assert_eq!(err.to_string(), "4:2: unknown field \"bogus\" on `service`");
+        assert_eq!(
+            err.to_string(),
+            "4:2: unknown field \"ports\" on `service` — if `ports` is a Compose key with no \
+             `hll` field yet, pass it through with `raw { ports: ... }`"
+        );
+    }
+
+    /// A body with no `raw` field of its own (`expose`, `image`,
+    /// `network`, ...) doesn't get it — writing `raw { ... }` there
+    /// wouldn't compile, so suggesting it would just be a second error.
+    #[test]
+    fn unknown_field_display_omits_the_hint_where_raw_isnt_accepted() {
+        let err = ParseError::UnknownField {
+            type_name: "expose",
+            field: "bogus".to_string(),
+            raw_escape_hatch: false,
+            span: span(4, 2),
+        };
+        assert_eq!(err.to_string(), "4:2: unknown field \"bogus\" on `expose`");
     }
 
     #[test]

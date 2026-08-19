@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
-    EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Param, ParamType, Program, RawEntry,
-    RawMap, RawValue, Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation,
-    TopDecl, UseDecl, VolumeEntry, VolumeMap,
+    EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Param, ParamType, Program,
+    PublishEntry, PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Service,
+    ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, UseDecl, VolumeEntry, VolumeMap,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -680,6 +680,7 @@ impl<'src> Parser<'src> {
                 return Err(ParseError::UnknownField {
                     type_name: schema.type_name,
                     field: key_text,
+                    raw_escape_hatch: schema::supports_raw(schema),
                     span: key_span,
                 });
             }
@@ -1279,6 +1280,19 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         Some(FieldValue::Scalar(lit)) => Some(lit),
         _ => None,
     };
+    let publish = match fields.remove("publish") {
+        Some(FieldValue::LiteralMap(entries)) => PublishMap {
+            entries: entries
+                .into_iter()
+                .map(|(host, container, span)| PublishEntry {
+                    host,
+                    container,
+                    span,
+                })
+                .collect(),
+        },
+        _ => PublishMap::default(),
+    };
     let volumes = match fields.remove("volume") {
         Some(FieldValue::LiteralMap(entries)) => VolumeMap {
             entries: entries
@@ -1332,6 +1346,7 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         image,
         expose,
         restart,
+        publish,
         volumes,
         env,
         raw,

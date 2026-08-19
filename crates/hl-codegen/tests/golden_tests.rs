@@ -366,6 +366,67 @@ fn comma_in_middleware_reference_is_error() {
     ));
 }
 
+/// #84: `publish` becomes Compose's `ports:` — a host-published port,
+/// the thing `expose:` deliberately isn't. Modeled on Pi-hole, the
+/// issue's own motivating case: a service reached directly on the LAN
+/// rather than through Traefik, on both protocols of one host port plus
+/// an admin UI on a remapped one.
+///
+/// `expose` is untouched by this: the service below sets both, and each
+/// lands in its own Compose key with its own meaning.
+#[test]
+fn publish_becomes_the_compose_ports_list() {
+    let yaml = generate_from(
+        "service pihole {\n  \
+           image \"pihole/pihole:latest\"\n  \
+           publish 53 -> \"53/tcp\"\n  \
+           publish 53 -> \"53/udp\"\n  \
+           publish 8081 -> 80\n  \
+           expose 80\n  \
+           restart unless-stopped\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  pihole:
+    image: pihole/pihole:latest
+    restart: unless-stopped
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "8081:80"
+    expose:
+      - 80
+"#,
+    );
+}
+
+/// A `publish` entry inherited from a template resolves its `{{name}}`
+/// interpolation and `$param` substitution like every other value slot,
+/// rather than being passed through verbatim.
+#[test]
+fn publish_entries_from_a_template_are_fully_resolved() {
+    let yaml = generate_from(
+        "template published(port: Number) {\n  publish $port -> $port\n}\n\
+         service jellyfin {\n  \
+           image \"jellyfin/jellyfin:latest\"\n  \
+           with published { port: 8096 }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    ports:
+      - "8096:8096"
+"#,
+    );
+}
+
 /// #68: `raw` used to be flattened in on top of the built-in fields
 /// without checking for collisions, so a `raw` key naming one of them
 /// emitted that key *twice* in the same mapping — invalid YAML that
@@ -442,6 +503,7 @@ fn every_built_in_field_is_overridable_by_raw() {
            volume \"web-data\" -> \"/data\"\n  \
            networks [traefik-net]\n  \
            dns [\"192.168.50.182\"]\n  \
+           publish 8080 -> 8080\n  \
            expose 8080 as \"web.example.com\"\n  \
            depends_on database\n  \
            raw {\n    \
@@ -452,6 +514,7 @@ fn every_built_in_field_is_overridable_by_raw() {
              volumes: [\"raw-vol:/raw\"]\n    \
              networks: [\"raw-net\"]\n    \
              dns: [\"1.1.1.1\"]\n    \
+             ports: [\"7777:7777\"]\n    \
              expose: [9999]\n    \
              depends_on: [\"raw-dep\"]\n    \
              labels: [\"raw.label=1\"]\n  \
@@ -474,6 +537,8 @@ networks:
   - raw-net
 dns:
   - 1.1.1.1
+ports:
+  - "7777:7777"
 expose:
   - 9999
 depends_on:
@@ -548,6 +613,7 @@ fn raw_leaves_built_in_fields_it_does_not_name_alone() {
            volume \"web-data\" -> \"/data\"\n  \
            networks [traefik-net]\n  \
            dns [\"192.168.50.182\"]\n  \
+           publish 8080 -> 8080\n  \
            expose 8080 as \"web.example.com\"\n  \
            depends_on database\n  \
            raw {\n    privileged: true\n    cap_add: [\"NET_ADMIN\"]\n  }\n\
@@ -569,6 +635,8 @@ networks:
   - traefik-net
 dns:
   - 192.168.50.182
+ports:
+  - "8080:8080"
 expose:
   - 8080
 depends_on:

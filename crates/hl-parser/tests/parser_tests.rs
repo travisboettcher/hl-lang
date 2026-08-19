@@ -163,6 +163,30 @@ fn unknown_struct_field_is_error() {
     ));
 }
 
+/// #84: whatever the unrecognized name is, the message points at the
+/// `raw { ... }` passthrough — the workaround that already existed but
+/// that this error never mentioned, turning a dead end into a one-line
+/// fix for any Compose key `hll` has no field for yet.
+#[test]
+fn unknown_field_on_a_service_suggests_the_raw_escape_hatch() {
+    let err = parse("service s {\n  cpu_shares: 512\n}\n").unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("raw { cpu_shares: ... }"),
+        "expected the `raw` hint spelled with the offending field's own name, got: {message}"
+    );
+}
+
+/// But only where a `raw` block would actually compile: `expose`'s own
+/// body has no `raw` field, so suggesting one there would just be a
+/// second error.
+#[test]
+fn unknown_field_on_a_nested_type_has_no_raw_hint() {
+    let err = parse("service s {\n  expose { bogus: 1 }\n}\n").unwrap_err();
+    let message = err.to_string();
+    assert_eq!(message, "2:12: unknown field \"bogus\" on `expose`");
+}
+
 // --- expose / `as` alias ---
 
 #[test]
@@ -661,6 +685,93 @@ fn volume_same_host_different_container_is_ok() {
         parse_ok("service s {\n  volume \"a\" -> \"/data1\"\n  volume \"a\" -> \"/data2\"\n}\n");
     let service = as_service(&program.decls[0]);
     assert_eq!(service.fields.volumes.entries.len(), 2);
+}
+
+// --- maps: publish (#84) ---
+
+#[test]
+fn publish_arrow_sugar_bare_entry() {
+    let program = parse_ok("service s {\n  publish 8096 -> 8096\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.publish.entries.len(), 1);
+    assert_eq!(service.fields.publish.entries[0].host.text(), "8096");
+    assert_eq!(service.fields.publish.entries[0].container.text(), "8096");
+}
+
+#[test]
+fn publish_bare_entry_accepts_leading_colon() {
+    let program = parse_ok("service s {\n  publish: 8081 -> 80\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.publish.entries.len(), 1);
+    assert_eq!(service.fields.publish.entries[0].host.text(), "8081");
+    assert_eq!(service.fields.publish.entries[0].container.text(), "80");
+}
+
+#[test]
+fn publish_colon_canonical_body() {
+    let program = parse_ok("service s {\n  publish { 8384: 8384, 22000: 22000 }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.publish.entries.len(), 2);
+    assert_eq!(service.fields.publish.entries[0].host.text(), "8384");
+    assert_eq!(service.fields.publish.entries[1].container.text(), "22000");
+}
+
+/// Repeating the field accumulates rather than being a duplicate-scalar
+/// error — the whole point of #84's "a service can only expose one".
+#[test]
+fn publish_repeats_accumulate() {
+    let program = parse_ok("service s {\n  publish 8096 -> 8096\n  publish 8920 -> 8920\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.publish.entries.len(), 2);
+}
+
+/// A quoted side carries a protocol suffix (`53:53/udp` in Compose's own
+/// short syntax) — which is also why uniqueness is checked on the
+/// container side, so both protocols on one host port stay expressible.
+#[test]
+fn publish_accepts_a_quoted_protocol_suffix_on_the_container_side() {
+    let program =
+        parse_ok("service s {\n  publish 53 -> \"53/tcp\"\n  publish 53 -> \"53/udp\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.publish.entries.len(), 2);
+    assert_eq!(service.fields.publish.entries[0].container.text(), "53/tcp");
+    assert_eq!(service.fields.publish.entries[1].container.text(), "53/udp");
+}
+
+#[test]
+fn publish_duplicate_container_port_is_error() {
+    let err =
+        parse("service s {\n  publish 8096 -> 8096\n  publish 8097 -> 8096\n}\n").unwrap_err();
+    match err {
+        ParseError::DuplicateMapKey {
+            type_name: "publish",
+            side: MapSide::Value,
+            value,
+            ..
+        } => assert_eq!(value, "8096"),
+        other => panic!("expected DuplicateMapKey on publish container port, got {other:?}"),
+    }
+}
+
+#[test]
+fn publish_entry_missing_separator_is_an_error() {
+    let err = parse("service s {\n  publish 8096\n}\n").unwrap_err();
+    match err {
+        ParseError::MapEntryMissingSeparator {
+            type_name: "publish",
+            separator: TokenKind::Arrow,
+            span,
+        } => assert_eq!((span.line, span.col), (2, 11)),
+        other => panic!("expected MapEntryMissingSeparator, got {other:?}"),
+    }
+}
+
+/// A `template` body accepts exactly the same fields as a `service` one.
+#[test]
+fn publish_is_accepted_in_a_template_body() {
+    let program = parse_ok("template t {\n  publish 8096 -> 8096\n}\n");
+    let template = as_template(&program.decls[0]);
+    assert_eq!(template.fields.publish.entries.len(), 1);
 }
 
 // --- raw ---

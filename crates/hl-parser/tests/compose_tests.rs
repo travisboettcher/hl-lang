@@ -169,6 +169,44 @@ fn explicit_templates_volume_container_path_collision_is_error() {
     }
 }
 
+/// #84: `publish` merges exactly like `volume` — keyed on the container
+/// port, since that's the side its schema checks uniqueness on.
+#[test]
+fn explicit_templates_publish_container_port_collision_is_error() {
+    let err = compose_err(
+        "template a {\n  publish 8096 -> 8096\n}\n\
+         template b {\n  publish 9096 -> 8096\n}\n\
+         service s {\n  with a, b\n}\n",
+    );
+    match err {
+        ComposeError::MapKeyCollision(details) => {
+            assert_eq!(details.field, "publish");
+            assert_eq!(details.side, MapSide::Value);
+            assert_eq!(details.key, "8096");
+        }
+        other => panic!("expected MapKeyCollision, got {other:?}"),
+    }
+}
+
+/// Non-colliding entries accumulate across tiers, and a `$param` in
+/// either half of a mapping is substituted like any other literal slot.
+#[test]
+fn publish_accumulates_across_tiers_and_substitutes_params() {
+    let composed = compose_ok(
+        "template ports(p: Number) {\n  publish $p -> $p\n}\n\
+         service s {\n  with ports { p: 8384 }\n  publish 22000 -> 22000\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries: Vec<(&str, &str)> = service
+        .fields
+        .publish
+        .entries
+        .iter()
+        .map(|e| (e.host.text(), e.container.text()))
+        .collect();
+    assert_eq!(entries, vec![("8384", "8384"), ("22000", "22000")]);
+}
+
 // --- container_name (#17) ---
 
 /// `container_name` merges like any other scalar field: the service's

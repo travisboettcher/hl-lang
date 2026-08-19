@@ -102,10 +102,10 @@ body if you want a bare list in the middle.
 
 `expose.port` becomes Compose's `expose:` entry—the port is reachable
 from other containers on the same network, but it isn't published to
-the host. If set, `expose.host` generates a Traefik router-rule label
-(`Host(...)`,) routing that hostname to this service. If non-empty,
-`expose.entrypoint` restricts that router to the named Traefik entry
-points instead of all of them.
+the host. For that, see [`publish`](#publish). If set, `expose.host`
+generates a Traefik router-rule label (`Host(...)`,) routing that
+hostname to this service. If non-empty, `expose.entrypoint` restricts
+that router to the named Traefik entry points instead of all of them.
 
 `expose.host` is what switches Traefik routing on at all. With no `host`
 set there's no router, so neither `entrypoint` nor `middleware` produces
@@ -121,6 +121,66 @@ joins entry points, so a comma inside one name would splice an extra
 entry into the label. (`entrypoint "web,web-secure"` is therefore an
 error—write `entrypoint web, web-secure`.) `hllc` rejects a comma in a
 `middleware` name for the same reason.
+
+## `publish`
+
+Map-kind. Bare-entry separator: `->`, which points from the host port to
+the container port. `hllc` checks uniqueness on the **container port**,
+the value side, the same convention `volume` follows for its own
+`host -> container` mapping.
+
+`publish` is Compose's `ports:` key, which puts the port on the Docker
+host where the rest of the local network can reach it. That's the
+opposite of [`expose`](#expose), Compose's `expose:` key, which reaches
+only other containers on the same network, plus the Traefik routing
+labels. A service behind Traefik wants `expose`. A service that takes
+traffic directly, such as Pi-hole on 53, Syncthing's sync port, or a
+game server, wants `publish`. Setting both is fine and means both
+things.
+
+```hll,build
+service pihole {
+  image "pihole/pihole:latest"
+  publish 53 -> "53/tcp"
+  publish 53 -> "53/udp"
+  publish 8081 -> 80
+  restart unless-stopped
+}
+```
+
+```yaml
+services:
+  pihole:
+    image: pihole/pihole:latest
+    restart: unless-stopped
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "8081:80"
+```
+
+Repeating `publish` accumulates entries rather than overwriting. A
+service with several published ports, such as Jellyfin's 8096 and 8920
+or Syncthing's 8384 and 22000, gets one line each.
+
+Write both sides exactly as you'd write them in Compose's short syntax.
+`hllc` passes both through to the generated `host:container` string
+unchanged. A protocol suffix belongs on the container side, quoted so it
+lexes as one value: `publish 53 -> "53/udp"` yields `"53:53/udp"`.
+Quoting the host side works the same way when you need to pin an
+interface, as in `publish "127.0.0.1:8081" -> 80`.
+
+Checking uniqueness on the container side rather than the host one is
+deliberate. Docker itself conflicts on the host port, but the protocol
+suffix rides on the container half of the mapping, so a host-side check
+would reject the legal pair in the preceding example. The trade-off is
+the mirror image: `hllc` rejects one container port published on two
+different host ports, `8080 -> 80` *and* `8081 -> 80`, as a duplicate.
+Reach for [`raw`](#raw)'s `ports:` when you genuinely need that.
+
+There's no single-value shorthand. `publish 8096` is an error, not
+"8096 on both sides." `volume` requires both sides of its mapping too,
+and both fields follow the same rule.
 
 ## `volume`
 
@@ -168,7 +228,7 @@ restart unless-stopped
 
 Writing `image` or `restart` more than once in the same body is a
 compile error, since both are scalar fields, not repeatable—unlike
-`volume`/`env`/`middleware`/`depends_on`.
+`volume`/`publish`/`env`/`middleware`/`depends_on`.
 
 ## `middleware`, `depends_on`, `networks`, `dns`
 
@@ -266,8 +326,8 @@ ever comes up for generated or pathological input.
 
 A `raw` key may name a field `hll` already has: `image`,
 `container_name`, `restart`, `environment`, `volumes`, `networks`,
-`dns`, `expose`, `depends_on`, or `labels`. When it does, the `raw`
-value is what's emitted, and `hllc` drops the built-in one—the key
+`dns`, `ports`, `expose`, `depends_on`, or `labels`. When it does, the
+`raw` value is what's emitted, and `hllc` drops the built-in one—the key
 appears exactly once:
 
 ```hll,fragment
@@ -277,11 +337,13 @@ raw {
 }
 ```
 
-This is what makes `raw` a durable escape hatch. A file that writes
-`raw { ports: [...] }` today, because there's no dedicated `ports`
-field yet, keeps working unchanged the day `hllc` adds one—so gaining a
-built-in field is never a breaking change for files that were working
-around its absence.
+This is what makes `raw` a durable escape hatch, and it isn't
+hypothetical. Files that wrote `raw { ports: [...] }` before
+[`publish`](#publish) existed still compile to exactly the same output
+now that it does, so gaining a built-in field is never a breaking change
+for files that were working around its absence. The same holds for
+whichever Compose key gets a field next, so reaching for `raw` today
+costs nothing later.
 
 Note that `raw`'s value **replaces** the built-in one. It never merges
 with it. That's worth knowing for `labels` in particular, since `hll`
