@@ -175,7 +175,9 @@ jobs:
       # Pinned rather than @latest: a new Vale release changing a rule's
       # behavior shouldn't turn this job red on an unrelated PR.
       - name: Install Vale
-        run: go install github.com/errata-ai/vale/v3/cmd/vale@v3.17.1
+        run: |
+          go install github.com/errata-ai/vale/v3/cmd/vale@v3.17.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       # The Google style package itself isn't vendored (see .gitignore) —
       # only the project vocabulary under .vale/styles/config is checked in.
