@@ -165,6 +165,31 @@ jobs:
         with:
           command: check
 
+  prose-lint:
+    name: prose lint (vale, Google style)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # `reporter: local` keeps this job read-only, matching the
+      # `contents: read` default above — `github-pr-check`, the
+      # action's own default reporter, needs `checks`/`pull-requests`
+      # write access to annotate the PR. `fail_level: any` fails on
+      # any alert, not just errors: the baseline this repo maintains
+      # is zero Vale findings of any severity. `filter_mode: nofilter`
+      # gates the whole tree rather than just diff-added lines — the
+      # default `added` needs a git-diff reviewdog doesn't have under
+      # `reporter: local` and errors out ("diff command is empty").
+      # `vale sync` (the action's default) fetches the Google style
+      # package at run time — it isn't vendored, see .gitignore.
+      - uses: vale-cli/vale-action@518a9136acc6e6668ce7c00d367051e0941e87ff # v3.0.0
+        with:
+          version: 3.17.1
+          reporter: local
+          filter_mode: nofilter
+          fail_level: any
+
   fuzz-smoke:
     name: fuzz smoke test (${{ matrix.target }})
     runs-on: ubuntu-latest
