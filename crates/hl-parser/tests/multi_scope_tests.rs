@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 
 use hl_parser::{
-    ComposeError, Ident, Network, Service, Span, SymbolResolver, TemplateDecl, TopDecl,
+    ComposeError, Ident, Network, Service, Span, SymbolResolver, TemplateDecl, TopDecl, Volume,
     compose_with_resolver, parse,
 };
 
@@ -36,6 +36,7 @@ enum Scope {
 struct Module {
     templates: HashMap<String, TemplateDecl>,
     networks: HashMap<String, Network>,
+    volumes: HashMap<String, Volume>,
     aliases: HashMap<String, Scope>,
 }
 
@@ -86,19 +87,44 @@ impl SymbolResolver for FakeResolver {
         name: &str,
         span: Span,
     ) -> Result<&Network, ComposeError> {
-        let target_scope = *self.modules[&scope]
-            .aliases
-            .get(&qualifier.name)
-            .ok_or_else(|| ComposeError::UnknownAlias {
-                alias: qualifier.name.clone(),
-                span: qualifier.span,
-            })?;
+        let target_scope = self.alias_target(scope, qualifier)?;
         self.modules[&target_scope]
             .networks
             .get(name)
             .ok_or_else(|| ComposeError::UnknownTemplate {
                 name: name.to_string(),
                 span,
+            })
+    }
+
+    fn resolve_qualified_volume(
+        &self,
+        scope: Scope,
+        qualifier: &Ident,
+        name: &str,
+        span: Span,
+    ) -> Result<&Volume, ComposeError> {
+        let target_scope = self.alias_target(scope, qualifier)?;
+        self.modules[&target_scope]
+            .volumes
+            .get(name)
+            .ok_or_else(|| ComposeError::UnknownQualifiedVolume {
+                alias: qualifier.name.clone(),
+                name: name.to_string(),
+                span,
+            })
+    }
+}
+
+impl FakeResolver {
+    fn alias_target(&self, scope: Scope, qualifier: &Ident) -> Result<Scope, ComposeError> {
+        self.modules[&scope]
+            .aliases
+            .get(&qualifier.name)
+            .copied()
+            .ok_or_else(|| ComposeError::UnknownAlias {
+                alias: qualifier.name.clone(),
+                span: qualifier.span,
             })
     }
 }
@@ -125,6 +151,18 @@ fn parse_network(source: &str, name: &str) -> Network {
         }
     }
     panic!("network `{name}` not found in source: {source}");
+}
+
+fn parse_volume(source: &str, name: &str) -> Volume {
+    let program = parse(source).unwrap_or_else(|err| panic!("unexpected parse error: {err}"));
+    for decl in program.decls {
+        if let TopDecl::Volume(v) = decl
+            && v.name.name == name
+        {
+            return v;
+        }
+    }
+    panic!("no volume named {name} in source");
 }
 
 fn parse_service(source: &str, name: &str) -> Service {
@@ -550,4 +588,103 @@ fn entry_and_imported_networks_with_distinct_names_both_survive() {
         .map(|n| n.name.name.as_str())
         .collect();
     assert_eq!(names, vec!["internal", "shared"]);
+}
+/// The volume side of the same contract: a qualified named-volume host
+/// resolves through the resolver's own alias table, gets rewritten to
+/// the resolved declaration's bare name, and pulls that declaration into
+/// the composed program alongside the entry scope's own.
+#[test]
+fn qualified_volume_host_resolves_and_pulls_its_declaration_in() {
+    let imported = parse_volume(
+        "volume media {\n  external\n  name: \"media_store\"\n}\n",
+        "media",
+    );
+    let local = parse_volume("volume config {}\n", "config");
+
+    let mut modules = HashMap::new();
+    modules.insert(
+        Scope::Docker,
+        Module {
+            volumes: HashMap::from([("media".to_string(), imported)]),
+            ..Default::default()
+        },
+    );
+    modules.insert(
+        Scope::Service,
+        Module {
+            aliases: HashMap::from([("storage".to_string(), Scope::Docker)]),
+            ..Default::default()
+        },
+    );
+
+    let resolver = FakeResolver { modules };
+    let s = parse_service(
+        "service s {\n  \
+           image \"x\"\n  \
+           volume config -> \"/config\"\n  \
+           volume storage.media -> \"/data\"\n\
+         }\n",
+        "s",
+    );
+
+    let composed =
+        compose_with_resolver(Vec::new(), vec![local], vec![s], Scope::Service, &resolver)
+            .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
+
+    let names: Vec<&str> = composed
+        .volumes
+        .iter()
+        .map(|v| v.name.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["config", "media"]);
+    let hosts: Vec<&str> = composed.services[0]
+        .fields
+        .volumes
+        .entries
+        .iter()
+        .map(|e| e.host.text())
+        .collect();
+    assert_eq!(hosts, vec!["config", "media"]);
+}
+
+/// And the collision rule reaches volumes too: the entry scope's own
+/// `media` and an imported `media` are one Compose key claimed by two
+/// declarations.
+#[test]
+fn imported_volume_colliding_with_an_entry_volume_is_error() {
+    let imported = parse_volume("volume media {\n  name: \"imported_real\"\n}\n", "media");
+    let local = parse_volume("volume media {\n  name: \"local_real\"\n}\n", "media");
+
+    let mut modules = HashMap::new();
+    modules.insert(
+        Scope::Docker,
+        Module {
+            volumes: HashMap::from([("media".to_string(), imported)]),
+            ..Default::default()
+        },
+    );
+    modules.insert(
+        Scope::Service,
+        Module {
+            aliases: HashMap::from([("storage".to_string(), Scope::Docker)]),
+            ..Default::default()
+        },
+    );
+
+    let resolver = FakeResolver { modules };
+    let s = parse_service(
+        "service s {\n  image \"x\"\n  volume storage.media -> \"/data\"\n}\n",
+        "s",
+    );
+
+    let err = compose_with_resolver(Vec::new(), vec![local], vec![s], Scope::Service, &resolver)
+        .expect_err("expected a compose error");
+    assert!(
+        matches!(
+            &err,
+            ComposeError::CollidingImportedVolume { alias, name, .. }
+                if alias == "storage" && name == "media"
+        ),
+        "expected CollidingImportedVolume, got {err:?}"
+    );
 }

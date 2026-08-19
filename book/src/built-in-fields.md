@@ -257,21 +257,29 @@ volume syncthing-config {}
 
 service syncthing {
   image "lscr.io/linuxserver/syncthing:latest"
-  volume "/mnt/media" -> "/data"         # bind mount
-  volume "syncthing-config" -> "/config" # named volume
+  volume "/mnt/media" -> "/data"       # bind mount
+  volume syncthing-config -> "/config" # named volume
 }
 ```
 
-Repeating `volume` accumulates entries rather than overwriting. `hllc`
-treats a host side starting with neither `/` nor `.` as a **named Docker
-volume** and everything else as a bind mount—so `./jellyfin` and
-`../shared` are bind mounts just as `/mnt/media` is, not only absolute
-paths.
+Repeating `volume` accumulates entries rather than overwriting.
 
-Every named volume needs a matching top-level `volume` declaration
-somewhere in the same file, exactly as a `networks [x]` entry needs a
-matching top-level `network` declaration. Reference one you never
-declared and `hllc` reports a compile error:
+The two entries in that example differ in one visible way, and it's the
+only thing `hllc` goes by: **quoting**. A quoted host side is a path on
+the machine Compose runs on, whatever the path looks like. An unquoted
+one is an identifier naming a **named Docker volume**, exactly as an
+entry in a `networks [x]` list names a network. So `volume "media" ->
+"/data"` mounts a host path called `media`, while `volume media ->
+"/data"` mounts the volume declared as `volume media { ... }`.
+
+Only the unquoted form takes an `alias.name` qualifier, since only a
+reference names something an `.hll` file declares. See
+[Imports](./imports.md) for importing a volume across files.
+
+Every named volume needs a matching top-level `volume` declaration—in
+the file that mounts it, or in a file it imports—exactly as a
+`networks [x]` entry needs a matching top-level `network` declaration.
+Reference one you never declared and `hllc` reports a compile error:
 
 ```text
 syncthing.hll:6:10: service `syncthing` references undeclared volume `snycthing-config`
@@ -282,25 +290,27 @@ asked for the declaration, `snycthing-config` quietly became a second,
 empty volume, and two services that happened to write the same string
 looked exactly like two services deliberately sharing one. Now each file
 states the sharing outright, with both services naming the one
-declaration:
+declaration—and a misspelling has nothing to resolve to:
 
 ```hll
 volume shared-media {}
 
 service jellyfin {
   image "jellyfin/jellyfin:latest"
-  volume "shared-media" -> "/data"
+  volume shared-media -> "/data"
 }
 
 service sonarr {
   image "lscr.io/linuxserver/sonarr:latest"
-  volume "shared-media" -> "/media"
+  volume shared-media -> "/media"
 }
 ```
 
 Bind mounts need no declaration at all. They name a host path rather
 than something Docker manages, and Docker itself asks for no
-pre-declaration either.
+pre-declaration either. `hllc` passes a quoted host side through to
+Compose as written, so `./jellyfin`, `../shared`, and `/mnt/media` all
+behave the way Compose's own short syntax says they do.
 
 `hllc` gives every *referenced* named volume an entry in the Compose
 document's top-level `volumes:` section, carrying whatever `external`,

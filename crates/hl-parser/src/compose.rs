@@ -25,7 +25,7 @@ use hl_lexer::{SourceMap, Span};
 use crate::ast::{
     EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, ParamType, Program, PublishEntry,
     PublishMap, RawMap, RawValue, Reference, Restart, Service, ServiceFields, TemplateDecl,
-    TemplateInvocation, TopDecl, Volume, VolumeEntry, VolumeMap,
+    TemplateInvocation, TopDecl, Volume, VolumeEntry, VolumeHost, VolumeMap,
 };
 use crate::schema::MapSide;
 
@@ -61,9 +61,11 @@ pub const MAX_TEMPLATE_DEPTH: usize = 64;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComposedProgram {
     pub networks: Vec<Network>,
-    /// The program's top-level `volume` declarations, in source order —
-    /// what codegen resolves each service's named-volume mount against,
-    /// exactly as it resolves `networks [...]` against `networks` above.
+    /// The program's top-level `volume` declarations — the entry file's
+    /// own first, in source order, then any an `alias.name` mount
+    /// imported — and what codegen resolves each service's named-volume
+    /// mount against, exactly as it resolves `networks [...]` against
+    /// `networks` above.
     pub volumes: Vec<Volume>,
     pub services: Vec<Service>,
     /// Resolves the [`hl_lexer::FileId`] on any [`Span`] reachable from
@@ -273,6 +275,33 @@ pub enum ComposeError {
         name: String,
         span: Span,
     },
+    /// A qualified named-volume mount (`volume alias.name -> "/path"`)
+    /// whose `alias` resolved to a real imported scope, but no `volume`
+    /// named `name` exists there. The volume-side twin of
+    /// [`Self::UnknownQualifiedNetwork`], raised in exactly the same
+    /// place and for exactly the same reason.
+    UnknownQualifiedVolume {
+        alias: String,
+        name: String,
+        span: Span,
+    },
+    /// A qualified named-volume mount resolved to an imported `volume`,
+    /// but another `volume` with the same bare name is already in scope
+    /// — the entry file's own declaration, or one pulled in through a
+    /// different alias.
+    ///
+    /// The volume-side twin of [`Self::CollidingImportedNetwork`], and
+    /// unavoidable for the same reason: an imported volume keeps its own
+    /// bare name as its key in the generated `volumes:` section, and
+    /// codegen resolves every named-volume mount by bare name against
+    /// one flat list of declarations. Two volumes sharing one bare name
+    /// would be one Compose key claimed by two different declarations,
+    /// with the first silently winning.
+    CollidingImportedVolume {
+        alias: String,
+        name: String,
+        span: Span,
+    },
 }
 
 /// Details for [`ComposeError::MapKeyCollision`], boxed out of the enum
@@ -311,7 +340,9 @@ impl ComposeError {
             | ComposeError::UnsupportedQualifiedReference { span, .. }
             | ComposeError::ParameterizedDefaults { span, .. }
             | ComposeError::UnknownQualifiedNetwork { span, .. }
-            | ComposeError::CollidingImportedNetwork { span, .. } => *span,
+            | ComposeError::CollidingImportedNetwork { span, .. }
+            | ComposeError::UnknownQualifiedVolume { span, .. }
+            | ComposeError::CollidingImportedVolume { span, .. } => *span,
             ComposeError::MapKeyCollision(details) => details.second,
         }
     }
@@ -452,6 +483,15 @@ impl ComposeError {
                 f,
                 "{at}: `{alias}.{name}` collides with another network named `{name}` \
                  already in scope — networks are resolved by their bare name, so the \
+                 two can't be told apart; rename one of them"
+            ),
+            ComposeError::UnknownQualifiedVolume { alias, name, .. } => {
+                write!(f, "{at}: no volume `{name}` in `{alias}`")
+            }
+            ComposeError::CollidingImportedVolume { alias, name, .. } => write!(
+                f,
+                "{at}: `{alias}.{name}` collides with another volume named `{name}` \
+                 already in scope — volumes are resolved by their bare name, so the \
                  two can't be told apart; rename one of them"
             ),
         }
@@ -814,6 +854,34 @@ mod error_display_tests {
              apart; rename one of them"
         );
     }
+
+    /// The two volume-side twins read exactly like their network
+    /// counterparts above, so the pair is one family of diagnostic
+    /// rather than two.
+    #[test]
+    fn unknown_qualified_volume_display() {
+        let err = ComposeError::UnknownQualifiedVolume {
+            alias: "storage".to_string(),
+            name: "media".to_string(),
+            span: span(2, 2),
+        };
+        assert_eq!(err.to_string(), "2:2: no volume `media` in `storage`");
+    }
+
+    #[test]
+    fn colliding_imported_volume_display() {
+        let err = ComposeError::CollidingImportedVolume {
+            alias: "storage".to_string(),
+            name: "media".to_string(),
+            span: span(7, 10),
+        };
+        assert_eq!(
+            err.to_string(),
+            "7:10: `storage.media` collides with another volume named `media` already in \
+             scope — volumes are resolved by their bare name, so the two can't be told \
+             apart; rename one of them"
+        );
+    }
 }
 
 /// Resolves names against a whole-program symbol table, generalized over
@@ -861,6 +929,19 @@ pub trait SymbolResolver {
         name: &str,
         span: Span,
     ) -> Result<&Network, ComposeError>;
+
+    /// Resolves a *qualified* named-volume mount (`volume alias.name ->
+    /// "/path"`). The exact counterpart of
+    /// [`Self::resolve_qualified_network`], down to when it's called:
+    /// never for a bare/unqualified host, which resolves against the
+    /// entry file's own declarations at codegen time.
+    fn resolve_qualified_volume(
+        &self,
+        scope: Self::Scope,
+        qualifier: &Ident,
+        name: &str,
+        span: Span,
+    ) -> Result<&Volume, ComposeError>;
 }
 
 /// The [`SymbolResolver`] backing the plain [`compose`] entry point: a
@@ -910,6 +991,19 @@ impl SymbolResolver for SingleFileResolver {
         _name: &str,
         _span: Span,
     ) -> Result<&Network, ComposeError> {
+        Err(ComposeError::UnknownAlias {
+            alias: qualifier.name.clone(),
+            span: qualifier.span,
+        })
+    }
+
+    fn resolve_qualified_volume(
+        &self,
+        _scope: (),
+        qualifier: &Ident,
+        _name: &str,
+        _span: Span,
+    ) -> Result<&Volume, ComposeError> {
         Err(ComposeError::UnknownAlias {
             alias: qualifier.name.clone(),
             span: qualifier.span,
@@ -1007,13 +1101,11 @@ pub fn compose(program: Program) -> Result<ComposedProgram, ComposeError> {
 /// `entry_scope`. See [`SymbolResolver`]'s doc for the scoping contract
 /// this implements.
 ///
-/// `volumes` is carried through untouched, unlike `networks`: a
-/// named-volume mount is written as a plain literal on the host side of
-/// a `volume` entry (`volume syncthing-config -> "/config"`), which has
-/// no `alias.name` form to resolve, so there is no cross-file volume
-/// import for this pass to chase. Like a *bare* `networks [x]` entry, a
-/// named-volume reference always resolves against the entry file's own
-/// top-level declarations, at codegen time.
+/// `volumes` grows the same way `networks` does, and for the same
+/// reason: a named-volume mount's host side is a [`Reference`] (`volume
+/// alias.name -> "/config"`), so an imported `volume` declaration has to
+/// be pulled into the program the mount belongs to before codegen can
+/// resolve it there.
 pub fn compose_with_resolver<R: SymbolResolver>(
     networks: Vec<Network>,
     volumes: Vec<Volume>,
@@ -1022,7 +1114,7 @@ pub fn compose_with_resolver<R: SymbolResolver>(
     resolver: &R,
 ) -> Result<ComposedProgram, ComposeError> {
     let mut cache: HashMap<(R::Scope, String), ServiceFields> = HashMap::new();
-    let mut extra_networks: Vec<ImportedNetwork> = Vec::new();
+    let mut imports = Imports::default();
     let mut composed = Vec::with_capacity(services.len());
     for service in services {
         composed.push(compose_service(
@@ -1030,43 +1122,18 @@ pub fn compose_with_resolver<R: SymbolResolver>(
             entry_scope,
             resolver,
             &mut cache,
-            &mut extra_networks,
+            &mut imports,
         )?);
     }
 
     let mut all_networks = networks;
-    for imported in extra_networks {
-        match all_networks
-            .iter()
-            .find(|n| n.name.name == imported.network.name.name)
-        {
-            // Already pulled in: the same imported declaration reached
-            // here more than once, because more than one service (or
-            // more than one `networks [...]` entry) referenced it. One
-            // network named once, not a collision.
-            Some(already) if *already == imported.network => {}
-            // A *different* declaration is already in scope under this
-            // bare name. Codegen resolves a service's `networks [...]`
-            // entries by bare name against this one flat list, so the
-            // two are indistinguishable there and the first — the entry
-            // file's own, since its declarations come first — silently
-            // wins (#71). That produced Compose output for a network the
-            // user never asked for, plus a missing
-            // `traefik.docker.network` label, with no diagnostic
-            // anywhere. Reject it instead.
-            Some(_) => {
-                return Err(ComposeError::CollidingImportedNetwork {
-                    alias: imported.alias,
-                    name: imported.network.name.name,
-                    span: imported.reference,
-                });
-            }
-            None => all_networks.push(imported.network),
-        }
-    }
+    merge_imported(&mut all_networks, imports.networks)?;
+    let mut all_volumes = volumes;
+    merge_imported(&mut all_volumes, imports.volumes)?;
+
     Ok(ComposedProgram {
         networks: all_networks,
-        volumes,
+        volumes: all_volumes,
         services: composed,
         // Composition never reads a file, so it has no paths to intern;
         // the linker attaches its own map to what this returns.
@@ -1074,19 +1141,94 @@ pub fn compose_with_resolver<R: SymbolResolver>(
     })
 }
 
-/// A `network` an entry-file service reached through a qualified
-/// `networks [alias.name]` reference, kept together with the reference
-/// that pulled it in. The reference's own span is what
-/// [`ComposeError::CollidingImportedNetwork`] points at: the imported
+/// A declaration an entry-file service reached through a qualified
+/// reference (`networks [alias.name]`, `volume alias.name -> "/path"`),
+/// kept together with the reference that pulled it in. The reference's
+/// own span is what the colliding-import errors point at: the imported
 /// declaration lives in another file, and the reference is the line the
 /// user would edit to resolve the collision. (Both spans now know which
 /// file they belong to — see [`hl_lexer::FileId`] — so pointing at the
 /// declaration instead would be renderable; it just isn't the more
 /// useful location.)
-struct ImportedNetwork {
-    network: Network,
+struct Imported<D> {
+    decl: D,
     alias: String,
     reference: Span,
+}
+
+/// Everything a service's qualified references dragged in from other
+/// files, accumulated across a whole program's composition and folded
+/// into the finished [`ComposedProgram`]'s own declaration lists by
+/// [`merge_imported`].
+#[derive(Default)]
+struct Imports {
+    networks: Vec<Imported<Network>>,
+    volumes: Vec<Imported<Volume>>,
+}
+
+/// A top-level declaration a qualified reference can import: one that
+/// codegen later re-resolves *by bare name* against one flat list, which
+/// is exactly what makes two same-named imports a problem worth naming.
+trait ImportableDecl: Clone + PartialEq {
+    /// What this declaration is called, and what a Compose section keys
+    /// it under.
+    fn decl_name(&self) -> &str;
+    /// The error to raise when a different declaration already holds
+    /// this bare name.
+    fn collision(alias: String, name: String, span: Span) -> ComposeError;
+}
+
+impl ImportableDecl for Network {
+    fn decl_name(&self) -> &str {
+        &self.name.name
+    }
+
+    fn collision(alias: String, name: String, span: Span) -> ComposeError {
+        ComposeError::CollidingImportedNetwork { alias, name, span }
+    }
+}
+
+impl ImportableDecl for Volume {
+    fn decl_name(&self) -> &str {
+        &self.name.name
+    }
+
+    fn collision(alias: String, name: String, span: Span) -> ComposeError {
+        ComposeError::CollidingImportedVolume { alias, name, span }
+    }
+}
+
+/// Folds every imported declaration into `all`, rejecting a bare-name
+/// collision with one already there.
+fn merge_imported<D: ImportableDecl>(
+    all: &mut Vec<D>,
+    imported: Vec<Imported<D>>,
+) -> Result<(), ComposeError> {
+    for entry in imported {
+        match all.iter().find(|d| d.decl_name() == entry.decl.decl_name()) {
+            // Already pulled in: the same imported declaration reached
+            // here more than once, because more than one service (or
+            // more than one reference) named it. One declaration named
+            // once, not a collision.
+            Some(already) if *already == entry.decl => {}
+            // A *different* declaration is already in scope under this
+            // bare name. Codegen resolves references by bare name
+            // against this one flat list, so the two are
+            // indistinguishable there and the first — the entry file's
+            // own, since its declarations come first — silently wins
+            // (#71). For a network that produced Compose output the user
+            // never asked for, plus a missing `traefik.docker.network`
+            // label, with no diagnostic anywhere; for a volume it would
+            // mount a different underlying volume than the one named.
+            // Reject it instead.
+            Some(_) => {
+                let name = entry.decl.decl_name().to_string();
+                return Err(D::collision(entry.alias, name, entry.reference));
+            }
+            None => all.push(entry.decl),
+        }
+    }
+    Ok(())
 }
 
 fn compose_service<R: SymbolResolver>(
@@ -1094,7 +1236,7 @@ fn compose_service<R: SymbolResolver>(
     scope: R::Scope,
     resolver: &R,
     cache: &mut HashMap<(R::Scope, String), ServiceFields>,
-    extra_networks: &mut Vec<ImportedNetwork>,
+    imports: &mut Imports,
 ) -> Result<Service, ComposeError> {
     let mut acc = MergeAcc::default();
     let mut in_progress = Vec::new();
@@ -1122,26 +1264,19 @@ fn compose_service<R: SymbolResolver>(
             resolver,
             cache,
             &mut in_progress,
-            extra_networks,
+            imports,
         )?;
         merge_tier(&mut acc, resolved, &Tier::Defaults)?;
     }
 
     for inv in &service.fields.with {
-        let resolved = resolve_invocation(
-            inv,
-            scope,
-            resolver,
-            cache,
-            &mut in_progress,
-            extra_networks,
-        )?;
+        let resolved = resolve_invocation(inv, scope, resolver, cache, &mut in_progress, imports)?;
         merge_tier(&mut acc, resolved, &Tier::Explicit(inv.name.name.clone()))?;
     }
 
     let mut own = service.fields;
     own.with.clear();
-    resolve_qualified_networks(&mut own, scope, resolver, extra_networks)?;
+    resolve_qualified_references(&mut own, scope, resolver, imports)?;
     merge_tier(&mut acc, own, &Tier::Own)?;
 
     Ok(Service {
@@ -1170,7 +1305,7 @@ fn resolve_template<'r, R: SymbolResolver>(
     resolver: &'r R,
     cache: &mut HashMap<(R::Scope, String), ServiceFields>,
     in_progress: &mut Vec<(R::Scope, String)>,
-    extra_networks: &mut Vec<ImportedNetwork>,
+    imports: &mut Imports,
 ) -> Result<ServiceFields, ComposeError> {
     let name = &decl.name.name;
     let cache_key = (scope, name.clone());
@@ -1211,13 +1346,12 @@ fn resolve_template<'r, R: SymbolResolver>(
 
     let mut acc = MergeAcc::default();
     for inv in &decl.fields.with {
-        let resolved =
-            resolve_invocation(inv, scope, resolver, cache, in_progress, extra_networks)?;
+        let resolved = resolve_invocation(inv, scope, resolver, cache, in_progress, imports)?;
         merge_tier(&mut acc, resolved, &Tier::Explicit(inv.name.name.clone()))?;
     }
     let mut own = decl.fields.clone();
     own.with.clear();
-    resolve_qualified_networks(&mut own, scope, resolver, extra_networks)?;
+    resolve_qualified_references(&mut own, scope, resolver, imports)?;
     merge_tier(&mut acc, own, &Tier::Own)?;
 
     in_progress.pop();
@@ -1240,7 +1374,7 @@ fn resolve_invocation<R: SymbolResolver>(
     resolver: &R,
     cache: &mut HashMap<(R::Scope, String), ServiceFields>,
     in_progress: &mut Vec<(R::Scope, String)>,
-    extra_networks: &mut Vec<ImportedNetwork>,
+    imports: &mut Imports,
 ) -> Result<ServiceFields, ComposeError> {
     let (target_scope, decl) =
         resolver.resolve_template(scope, inv.qualifier.as_ref(), &inv.name.name, inv.span)?;
@@ -1284,23 +1418,18 @@ fn resolve_invocation<R: SymbolResolver>(
         }
     }
 
-    let mut fields = resolve_template(
-        decl,
-        target_scope,
-        resolver,
-        cache,
-        in_progress,
-        extra_networks,
-    )?;
+    let mut fields = resolve_template(decl, target_scope, resolver, cache, in_progress, imports)?;
     substitute_params(&mut fields, &args, &decl.name.name)?;
     Ok(fields)
 }
 
-/// Resolves every *qualified* `networks [alias.name]` entry in `fields`
-/// against `scope` (rewriting it to an unqualified, resolved bare
-/// reference so [`merge_tier`] never needs to know imports exist), and
-/// rejects a qualified `middleware`/`depends_on`/`dns`/
-/// `expose.entrypoint` entry outright — see
+/// Resolves every *qualified* reference in `fields` against `scope` — a
+/// `networks [alias.name]` entry and a `volume alias.name -> "/path"`
+/// mount's host side are the two the language has — rewriting each to an
+/// unqualified, resolved bare reference so [`merge_tier`] never needs to
+/// know imports exist, and recording the declaration it reached in
+/// `imports`. Qualified `middleware`/`depends_on`/`dns`/
+/// `expose.entrypoint` entries are rejected outright — see
 /// [`ComposeError::UnsupportedQualifiedReference`]'s doc for why those
 /// have no cross-file meaning yet. Runs exactly once per scope, at
 /// the point that scope's own directly-written fields are merged (its
@@ -1308,18 +1437,32 @@ fn resolve_invocation<R: SymbolResolver>(
 /// induction, every `ServiceFields` [`merge_tier`] ever sees has already
 /// passed through this, transitively, since a `with`-list target's own
 /// qualified references were already resolved when *it* was resolved.
-fn resolve_qualified_networks<R: SymbolResolver>(
+fn resolve_qualified_references<R: SymbolResolver>(
     fields: &mut ServiceFields,
     scope: R::Scope,
     resolver: &R,
-    extra_networks: &mut Vec<ImportedNetwork>,
+    imports: &mut Imports,
 ) -> Result<(), ComposeError> {
     for r in &mut fields.networks {
         if let Some(qualifier) = r.qualifier.take() {
             let network = resolver.resolve_qualified_network(scope, &qualifier, &r.name, r.span)?;
             r.name = network.name.name.clone();
-            extra_networks.push(ImportedNetwork {
-                network: network.clone(),
+            imports.networks.push(Imported {
+                decl: network.clone(),
+                alias: qualifier.name.clone(),
+                reference: r.span,
+            });
+        }
+    }
+    for entry in &mut fields.volumes.entries {
+        let VolumeHost::Named(r) = &mut entry.host else {
+            continue;
+        };
+        if let Some(qualifier) = r.qualifier.take() {
+            let volume = resolver.resolve_qualified_volume(scope, &qualifier, &r.name, r.span)?;
+            r.name = volume.name.name.clone();
+            imports.volumes.push(Imported {
+                decl: volume.clone(),
                 alias: qualifier.name.clone(),
                 reference: r.span,
             });
@@ -1383,7 +1526,13 @@ fn substitute_params(
         substitute_literal(cn, args, template_name)?;
     }
     for v in &mut fields.volumes.entries {
-        substitute_literal(&mut v.host, args, template_name)?;
+        // Only a bind-mount host has a literal to substitute into. A
+        // named-volume host is a `Reference`, exactly like a `networks
+        // [x]` entry, and references are never parameterized — the
+        // grammar has no `$param` in reference position anywhere.
+        if let VolumeHost::BindMount(host) = &mut v.host {
+            substitute_literal(host, args, template_name)?;
+        }
         substitute_literal(&mut v.container, args, template_name)?;
     }
     for p in &mut fields.publish.entries {
@@ -1526,8 +1675,8 @@ fn substitute_raw_value(value: &mut RawValue, args: &HashMap<&str, &RawValue>) {
 //
 // Everything below here is completely unaware imports exist: it always
 // operates on already-resolved `ServiceFields` (any qualified
-// `networks` entry has already been rewritten to a plain resolved
-// reference by `resolve_qualified_networks`, and a qualified
+// `networks` entry or named-volume host has already been rewritten to a
+// plain resolved reference by `resolve_qualified_references`, and a qualified
 // `middleware`/`depends_on` entry can never reach here at all, having
 // already been rejected). Kept byte-for-byte the same as before imports
 // existed, deliberately, since it's the single largest, most-tested
@@ -1878,7 +2027,7 @@ fn merge_tier(
                 // Comparing by `Reference::name` alone is right because
                 // a qualified `networks [alias.name]` entry has already
                 // been rewritten to its resolved bare name by
-                // [`resolve_qualified_networks`] before any tier reaches
+                // [`resolve_qualified_references`] before any tier reaches
                 // this function, and the other deduped fields reject
                 // qualifiers outright.
                 for value in values {

@@ -292,9 +292,9 @@ fn declared_volume_options_reach_the_top_level_volumes_section() {
          volume plain {}\n\
          service jellyfin {\n  \
            image \"jellyfin/jellyfin:latest\"\n  \
-           volume \"media\" -> \"/data\"\n  \
-           volume \"backups\" -> \"/backups\"\n  \
-           volume \"plain\" -> \"/plain\"\n\
+           volume media -> \"/data\"\n  \
+           volume backups -> \"/backups\"\n  \
+           volume plain -> \"/plain\"\n\
          }\n",
     );
     assert_yaml_eq(
@@ -330,7 +330,7 @@ fn undeclared_named_volume_reference_is_error() {
         "volume syncthing-config {}\n\
          service syncthing {\n  \
            image \"x\"\n  \
-           volume \"snycthing-config\" -> \"/config\"\n\
+           volume snycthing-config -> \"/config\"\n\
          }\n",
     );
     assert!(matches!(
@@ -348,8 +348,8 @@ fn unknown_volume_error_points_at_the_offending_reference() {
         "volume known {}\n\
          service s {\n  \
            image \"x\"\n  \
-           volume \"known\" -> \"/a\"\n  \
-           volume \"nope\" -> \"/b\"\n\
+           volume known -> \"/a\"\n  \
+           volume nope -> \"/b\"\n\
          }\n",
     );
     let span = err.span();
@@ -370,8 +370,8 @@ fn unknown_volume_error_points_at_the_offending_reference() {
 fn one_volume_shared_by_two_services_is_declared_once() {
     let yaml = generate_from(
         "volume shared-media {}\n\
-         service jellyfin {\n  image \"jellyfin/jellyfin\"\n  volume \"shared-media\" -> \"/data\"\n}\n\
-         service sonarr {\n  image \"lscr.io/linuxserver/sonarr\"\n  volume \"shared-media\" -> \"/media\"\n}\n",
+         service jellyfin {\n  image \"jellyfin/jellyfin\"\n  volume shared-media -> \"/data\"\n}\n\
+         service sonarr {\n  image \"lscr.io/linuxserver/sonarr\"\n  volume shared-media -> \"/media\"\n}\n",
     );
     assert_yaml_eq(
         &yaml,
@@ -431,14 +431,33 @@ fn declared_but_unreferenced_volume_is_not_emitted() {
     );
 }
 
-/// Classification runs on the *interpolated* host, so a `{{name}}`-built
-/// volume name is validated (and emitted) under the name it actually
-/// resolves to.
+/// A *quoted* host side is a bind-mount path whatever its content, with
+/// no leading `/` or `.` required and no declaration looked for — the
+/// distinction is syntactic now, not a guess at the string's shape. So
+/// `"media"` is a path, and the same word unquoted would be a reference.
 #[test]
-fn interpolated_named_volume_resolves_against_the_interpolated_name() {
+fn a_quoted_host_is_a_bind_mount_whatever_it_says() {
+    let yaml = generate_from("service s {\n  image \"x\"\n  volume \"media\" -> \"/data\"\n}\n");
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  s:
+    image: x
+    volumes:
+      - media:/data
+"#,
+    );
+}
+
+/// A bind-mount path is an ordinary value, so `{{name}}` interpolates
+/// into it like anywhere else. (A named-volume *reference* has no
+/// interpolated form: it's an identifier resolved against a declaration,
+/// exactly like a `networks [x]` entry.)
+#[test]
+fn interpolation_reaches_a_bind_mount_path() {
     let yaml = generate_from(
-        "volume syncthing-config {}\n\
-         service syncthing {\n  image \"x\"\n  volume \"{{name}}-config\" -> \"/config\"\n}\n",
+        "service syncthing {\n  image \"x\"\n  volume \"/srv/{{name}}\" -> \"/config\"\n}\n",
     );
     assert_yaml_eq(
         &yaml,
@@ -447,10 +466,7 @@ services:
   syncthing:
     image: x
     volumes:
-      - syncthing-config:/config
-
-volumes:
-  syncthing-config:
+      - /srv/syncthing:/config
 "#,
     );
 }
@@ -622,7 +638,7 @@ fn publish_and_a_declared_named_volume_compose_together() {
            image \"lscr.io/linuxserver/syncthing:latest\"\n  \
            publish 8384 -> 8384\n  \
            publish 22000 -> \"22000/tcp\"\n  \
-           volume \"syncthing-config\" -> \"/config\"\n  \
+           volume syncthing-config -> \"/config\"\n  \
            volume \"/mnt/media\" -> \"/data\"\n\
          }\n",
     );
@@ -720,7 +736,7 @@ fn every_built_in_field_is_overridable_by_raw() {
            container_name \"web-ctr\"\n  \
            restart unless-stopped\n  \
            env PUID = \"1000\"\n  \
-           volume \"web-data\" -> \"/data\"\n  \
+           volume web-data -> \"/data\"\n  \
            networks [traefik-net]\n  \
            dns [\"192.168.50.182\"]\n  \
            publish 8080 -> 8080\n  \
@@ -784,7 +800,7 @@ fn raw_override_keeps_the_top_level_volume_and_network_declarations() {
          volume web-data {}\n\
          service web {\n  \
            image \"nginx\"\n  \
-           volume \"web-data\" -> \"/data\"\n  \
+           volume web-data -> \"/data\"\n  \
            networks [traefik-net]\n  \
            raw {\n    \
              volumes: [\"web-data:/elsewhere\"]\n    \
@@ -832,7 +848,7 @@ fn raw_leaves_built_in_fields_it_does_not_name_alone() {
            container_name \"web-ctr\"\n  \
            restart unless-stopped\n  \
            env PUID = \"1000\"\n  \
-           volume \"web-data\" -> \"/data\"\n  \
+           volume web-data -> \"/data\"\n  \
            networks [traefik-net]\n  \
            dns [\"192.168.50.182\"]\n  \
            publish 8080 -> 8080\n  \

@@ -63,7 +63,7 @@ pub use ast::{
     EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Param, ParamType, Program,
     PublishEntry, PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Service,
     ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, UseDecl, Volume, VolumeDriverOpt,
-    VolumeEntry, VolumeMap,
+    VolumeEntry, VolumeHost, VolumeMap,
 };
 pub use compose::{
     ComposeError, ComposedProgram, MAX_TEMPLATE_DEPTH, MapKeyCollision, SymbolResolver, compose,

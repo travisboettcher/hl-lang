@@ -76,6 +76,15 @@ pub struct TypeSchema {
     /// Which side of a map entry is uniqueness-checked; `None` only for
     /// `raw`, which is schema-free and checks nothing.
     pub uniqueness: Option<MapSide>,
+    /// Map-kind types only: whether a bare `IDENT` on the *key* side of
+    /// an entry is a reference to a top-level declaration
+    /// ([`crate::ast::VolumeHost::Named`]) rather than an ordinary
+    /// literal — which also lets it carry an `alias.` qualifier.
+    ///
+    /// True for [`VOLUME`] alone. `env`/`publish`/`driver_opts`/`raw`
+    /// keys are plain literal values with nothing to resolve against, so
+    /// they keep the ordinary all-literal entry parsing.
+    pub key_may_be_reference: bool,
     /// A bare keyword (no colon) that aliases to a named secondary
     /// field, e.g. `("as", "host")` on `expose`: `expose 8096 as "..."`
     /// desugars to `expose { port: 8096, host: "..." }`. Kept as schema
@@ -102,6 +111,7 @@ pub static IMAGE: TypeSchema = TypeSchema {
     primary_field: Some("ref"),
     map_separator: None,
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
@@ -138,6 +148,7 @@ pub static EXPOSE: TypeSchema = TypeSchema {
     primary_field: Some("port"),
     map_separator: None,
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: Some(("as", "host")),
     needs_name: false,
     schema_free: false,
@@ -154,15 +165,23 @@ pub static RESTART: TypeSchema = TypeSchema {
     primary_field: Some("policy"),
     map_separator: None,
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
 };
 
-/// The `volume` *field* on a `service`/`template`: `volume "host" ->
-/// "container"` / `volume { "host": "container" }`. Uniqueness on the
-/// value (container path) side, matching Docker's own
+/// The `volume` *field* on a `service`/`template`: `volume "/host/path"
+/// -> "/container"` / `volume { "/host/path": "/container" }` for a bind
+/// mount, `volume named-volume -> "/container"` for a named one.
+/// Uniqueness on the value (container path) side, matching Docker's own
 /// same-container-path constraint.
+///
+/// The one map-kind type with [`TypeSchema::key_may_be_reference`] set:
+/// a bare `IDENT` on the host side is a reference to a top-level
+/// `volume` declaration rather than a literal, so it can be
+/// `alias.`-qualified like any other cross-file reference. See
+/// [`crate::ast::VolumeHost`].
 ///
 /// Not to be confused with [`VOLUME_DECL`], the top-level `volume name
 /// { ... }` declaration this field's named-volume entries resolve
@@ -177,6 +196,7 @@ pub static VOLUME: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: Some(TokenKind::Arrow),
     uniqueness: Some(MapSide::Value),
+    key_may_be_reference: true,
     bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
@@ -206,6 +226,7 @@ pub static PUBLISH: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: Some(TokenKind::Arrow),
     uniqueness: Some(MapSide::Value),
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
@@ -220,6 +241,7 @@ pub static ENV: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: Some(TokenKind::Equals),
     uniqueness: Some(MapSide::Key),
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
@@ -234,6 +256,7 @@ pub static RAW: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: Some(TokenKind::Colon),
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: false,
     schema_free: true,
@@ -262,6 +285,7 @@ pub static NETWORK: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: None,
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: true,
     schema_free: false,
@@ -282,6 +306,7 @@ pub static DRIVER_OPTS: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: Some(TokenKind::Colon),
     uniqueness: Some(MapSide::Key),
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
@@ -324,6 +349,7 @@ pub static VOLUME_DECL: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: None,
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: true,
     schema_free: false,
@@ -343,6 +369,7 @@ pub static WITH: TypeSchema = TypeSchema {
     primary_field: Some("templates"),
     map_separator: None,
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
@@ -425,6 +452,7 @@ pub static SERVICE: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: None,
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: true,
     schema_free: false,
@@ -441,6 +469,7 @@ pub static TEMPLATE: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: None,
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: true,
     schema_free: false,

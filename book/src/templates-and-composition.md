@@ -49,7 +49,7 @@ volume syncthing-config {}
 service syncthing {
   with internal_web { port: 8384 }, authenticated
   image "lscr.io/linuxserver/syncthing:latest"
-  volume "syncthing-config" -> "/config"
+  volume syncthing-config -> "/config"
 }
 ```
 
@@ -201,7 +201,7 @@ template linuxserver_app(puid: Number, pgid: Number) {
 service syncthing {
   with internal_web { port: 8384 }, authenticated, linuxserver_app { puid: 1000, pgid: 100 }
   image "lscr.io/linuxserver/syncthing:latest"
-  volume "syncthing-config" -> "/config"
+  volume syncthing-config -> "/config"
 }
 ```
 

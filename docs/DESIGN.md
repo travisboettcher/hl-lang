@@ -246,6 +246,15 @@ consults neither table in the other's position. `network` has no
 equivalent pair today only because no field goes by the literal name
 `network`, since a service's list field is `networks`.
 
+The `volume` field is also the one map-kind type whose *key* side isn't
+restricted to a literal. Its host side is either a string, meaning a
+bind-mount path, or an identifier, optionally `alias.`-qualified,
+meaning a reference to a top-level `volume`
+declaration—`TypeSchema::key_may_be_reference`, true for that one type,
+is what selects the entry parser that draws the distinction. Every other
+map key—`env`, `publish`, `driver_opts`, `raw`—stays a plain literal,
+since none of them names anything an `.hll` file declares.
+
 `raw`'s "no uniqueness checking" is a *parser*-level statement: the
 parser never checks its own entries against each other or against any
 other field. Codegen does have one rule about them, because YAML forces
@@ -372,7 +381,8 @@ use "docker.hll" as traefik
   own location*, never the entry file's location or the directory the
   compiler ran from.
 - `alias.name` qualifies any reference that would otherwise be a bare
-  `IDENT`: a `networks [...]` entry (`networks [traefik.traefik-net]`)
+  `IDENT`: a `networks [...]` entry (`networks [traefik.traefik-net]`),
+  a named-volume mount's host side (`volume storage.media -> "/data"`),
   or a `with` invocation's target (`with common.internal_web { ... }`).
   `middleware`/`depends_on` don't support a qualified form—neither has
   a coherent cross-file meaning (`depends_on` names a same-file sibling
@@ -390,14 +400,16 @@ use "docker.hll" as traefik
   and `templates.hll` uses `docker.hll`, `service.hll` can't write
   `docker.hll`'s alias itself. Only `templates.hll`'s own template
   bodies can, via the preceding lexical-scoping rule.
-- **An imported network keeps its own bare name**, and a service's
-  `networks [...]` entries resolve against that bare name, so two
-  networks can't share one. A file that pulls in `ext.proxy` while also
-  declaring its own `network proxy`—or that pulls in both `a.proxy`
-  and `b.proxy`—is a compile error rather than a silent pick between
-  them. Two files each declaring an unrelated `network proxy` stay
-  legal. The error only fires when a qualified reference actually
-  brings one across an import into the other's company.
+- **An imported network or volume keeps its own bare name**, and a
+  service's `networks [...]` entries and named-volume mounts resolve
+  against that bare name, so two of either can't share one. A file that
+  pulls in `ext.proxy` while also declaring its own `network proxy`—or
+  that pulls in both `a.proxy` and `b.proxy`—is a compile error rather
+  than a silent pick between them, and `storage.media` against a local
+  `volume media` is the same error on the volume side. Two files each
+  declaring an unrelated `network proxy` stay legal. The error only
+  fires when a qualified reference actually brings one across an import
+  into the other's company.
 - **`use` shares declarations, not services.** The compiler builds only
   the entry file's own `service` blocks. It parses one in an imported
   file, so duplicate names and syntax still get checked, and then drops
@@ -451,7 +463,7 @@ template linuxserver_app(puid: Number, pgid: Number) {
 service syncthing {
   with internal_web { port: 8384 }, authenticated, linuxserver_app { puid: 1000, pgid: 100 }
   image "lscr.io/linuxserver/syncthing:latest"
-  volume "syncthing-config" -> "/config"
+  volume syncthing-config -> "/config"
 }
 ```
 
@@ -493,7 +505,7 @@ volume syncthing-config {}
 service syncthing {
   with common.internal_web { port: 8384 }, common.authenticated, common.linuxserver_app { puid: 1000, pgid: 100 }
   image "lscr.io/linuxserver/syncthing:latest"
-  volume "syncthing-config" -> "/config"
+  volume syncthing-config -> "/config"
 }
 ```
 
@@ -517,7 +529,7 @@ service syncthing {
        common.authenticated,
        common.linuxserver_app { puid: 1000, pgid: 100 }
   image "lscr.io/linuxserver/syncthing:latest"
-  volume "syncthing-config" -> "/config"
+  volume syncthing-config -> "/config"
 }
 ```
 
@@ -559,10 +571,10 @@ readability choice, not a different construct.
    Codegen also hosts the two by-name reference checks, since each asks
    a whole-program question a single service's syntax can't answer. A
    `networks [x]` entry has to resolve to a top-level `network x`, or
-   codegen reports `UnknownNetwork`. A `volume` entry whose host side
-   names a *named* Docker volume, meaning anything not starting with `/`
-   or `.`, has to resolve to a top-level `volume x`, or codegen reports
-   `UnknownVolume`. Every referenced declaration contributes its own
+   codegen reports `UnknownNetwork`. A `volume` entry whose host side is
+   a named-volume reference, meaning an unquoted identifier rather than
+   a quoted path, has to resolve to a top-level `volume x`, or codegen
+   reports `UnknownVolume`. Every referenced declaration contributes its own
    entry, options included, to the document's top-level `networks:` or
    `volumes:` section, and neither section carries a declaration nothing
    references. Bind-mount paths pass straight through and need no

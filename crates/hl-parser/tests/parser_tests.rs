@@ -1,7 +1,8 @@
 use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    Expected, Expose, Literal, ParamType, ParseError, TemplateDecl, TopDecl, UseDecl, parse,
+    Expected, Expose, Literal, ParamType, ParseError, TemplateDecl, TopDecl, UseDecl, VolumeHost,
+    parse,
 };
 
 fn parse_ok(source: &str) -> hl_parser::Program {
@@ -384,7 +385,7 @@ fn volume_decl_and_volume_field_coexist_in_one_file() {
         "volume syncthing-config {}\n\
          service syncthing {\n  \
            image \"x\"\n  \
-           volume \"syncthing-config\" -> \"/config\"\n\
+           volume syncthing-config -> \"/config\"\n\
          }\n",
     );
     assert_eq!(as_volume(&program.decls[0]).name.name, "syncthing-config");
@@ -394,6 +395,68 @@ fn volume_decl_and_volume_field_coexist_in_one_file() {
         service.fields.volumes.entries[0].host.text(),
         "syncthing-config"
     );
+}
+
+/// The host side is split by *syntax*, not by the string's shape: an
+/// unquoted identifier is a reference to a declaration, a quoted string
+/// is a path. The two forms sit side by side in one body here so the
+/// split can't be mistaken for a property of the content — `"media"`
+/// would have been a named volume under the old leading-`/`-or-`.`
+/// heuristic, and is unambiguously a bind mount now that it's quoted.
+#[test]
+fn volume_host_is_a_reference_when_unquoted_and_a_path_when_quoted() {
+    let program = parse_ok(
+        "service s {\n  \
+           volume media -> \"/data\"\n  \
+           volume \"media\" -> \"/other\"\n  \
+           volume \"/mnt/x\" -> \"/x\"\n\
+         }\n",
+    );
+    let entries = &as_service(&program.decls[0]).fields.volumes.entries;
+    assert!(matches!(
+        &entries[0].host,
+        VolumeHost::Named(r) if r.name == "media" && r.qualifier.is_none()
+    ));
+    assert!(matches!(&entries[1].host, VolumeHost::BindMount(lit) if lit.text() == "media"));
+    assert!(matches!(&entries[2].host, VolumeHost::BindMount(lit) if lit.text() == "/mnt/x"));
+}
+
+/// And a named-volume host takes the same `alias.name` qualifier every
+/// other cross-file reference does — the parser records it; the linker
+/// resolves it.
+#[test]
+fn volume_host_can_be_alias_qualified() {
+    let program = parse_ok(
+        "use \"shared.hll\" as common\n\
+         service s {\n  volume common.media -> \"/data\"\n}\n",
+    );
+    let entries = &as_service(&program.decls[1]).fields.volumes.entries;
+    let VolumeHost::Named(r) = &entries[0].host else {
+        panic!("expected a named-volume host, got {:?}", entries[0].host);
+    };
+    assert_eq!(r.qualifier.as_ref().unwrap().name, "common");
+    assert_eq!(r.name, "media");
+}
+
+/// The canonical map-body form takes both host kinds too, since it goes
+/// through the same entry parser as the bare-entry sugar.
+#[test]
+fn volume_map_body_takes_both_host_kinds() {
+    let program =
+        parse_ok("service s {\n  volume {\n    media: \"/data\"\n    \"/mnt/x\": \"/x\"\n  }\n}\n");
+    let entries = &as_service(&program.decls[0]).fields.volumes.entries;
+    assert!(matches!(&entries[0].host, VolumeHost::Named(r) if r.name == "media"));
+    assert!(matches!(&entries[1].host, VolumeHost::BindMount(_)));
+}
+
+/// A `publish` entry's key side stays a plain literal — the
+/// reference-capable key is `volume`'s alone, so a bare identifier here
+/// is still just a value.
+#[test]
+fn publish_keys_are_still_plain_literals() {
+    let program = parse_ok("service s {\n  publish 8096 -> 8096\n}\n");
+    let entries = &as_service(&program.decls[0]).fields.publish.entries;
+    assert_eq!(entries[0].host.text(), "8096");
 }
 
 /// The service-level field keeps its map-kind bare-entry sugar — the

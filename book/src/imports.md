@@ -67,7 +67,7 @@ volume syncthing-config {}
 service syncthing {
   with common.internal_web { port: 8384 }, common.authenticated, common.linuxserver_app { puid: 1000, pgid: 100 }
   image "lscr.io/linuxserver/syncthing:latest"
-  volume "syncthing-config" -> "/config"
+  volume syncthing-config -> "/config"
 }
 ```
 
@@ -75,12 +75,36 @@ Compiling `syncthing.hll` with `hllc --build` produces byte-identical
 output to writing all three declarations in one file—`use` is purely
 an organizational tool, not a different composition mechanism.
 
-Note where `volume syncthing-config {}` lives: in `syncthing.hll`, the
-entry file, rather than in the shared `templates.hll`. You can import a
-`network` and reference it as `alias.name`, but a named-volume mount
-takes a plain name on the host side of a `volume` entry, with no
-qualified form—so a named volume always resolves against the entry
-file's own top-level declarations.
+A named volume is a *reference*, not a string, so it imports the same
+way a `network` does. The preceding example declares
+`volume syncthing-config {}` in the entry file and mounts it by its bare
+name, which resolves against that file's own declarations. Move the
+declaration into a shared file and the mount picks up the alias:
+
+```hll,file=storage.hll,group=imported-volume
+# storage.hll
+volume media {
+  external
+  name: "media_store"
+}
+```
+
+```hll,file=jellyfin.hll,group=imported-volume,entry
+# jellyfin.hll
+use "storage.hll" as storage
+
+service jellyfin {
+  image "jellyfin/jellyfin:latest"
+  volume storage.media -> "/data"
+}
+```
+
+The imported declaration's own options—`external`, `name`, `driver`,
+`driver_opts`—come with it into the generated `volumes:` section. Only
+the *unquoted* form is a reference: a quoted host side, such as
+`volume "/mnt/media" -> "/data"`, is a bind-mount path, which names
+something on the host rather than anything an `.hll` file declares, so
+it takes no alias.
 
 ## Two rules that matter for multi-file layouts
 
@@ -108,7 +132,7 @@ for whatever *it* references, and a service file needs `use` declarations
 only for what *it* references directly—importing a template doesn't
 also import that template's own imports.
 
-## Two networks can't share one bare name
+## Two networks, or two volumes, can't share one bare name
 
 An imported `network` keeps its own bare name in the generated
 Compose—`net.traefik-net` becomes the `traefik-net` key under
@@ -139,6 +163,16 @@ Note this only triggers when a qualified reference actually pulls the
 imported network in. Two files each declaring their own `network proxy`
 is perfectly normal, and stays legal for as long as nothing reaches
 across the import to name the other one.
+
+Named volumes follow the same rule, word for word, because an imported
+`volume` likewise keeps its own bare name as its key under `volumes:`.
+Mounting `storage.media` in a file that also declares its own
+`volume media { ... }` is the same ambiguity, and `hllc` reports it the
+same way:
+
+```text
+jellyfin.hll:6:10: `storage.media` collides with another volume named `media` already in scope — volumes are resolved by their bare name, so the two can't be told apart; rename one of them
+```
 
 ## `defaults` is the one template `use` can't share
 

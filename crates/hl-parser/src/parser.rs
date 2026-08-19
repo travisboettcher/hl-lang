@@ -6,7 +6,7 @@ use crate::ast::{
     EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Param, ParamType, Program,
     PublishEntry, PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Service,
     ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, UseDecl, Volume, VolumeDriverOpt,
-    VolumeEntry, VolumeMap,
+    VolumeEntry, VolumeHost, VolumeMap,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -74,8 +74,14 @@ enum FieldValue {
     Flag(Span),
     /// A single-occurrence nested struct-kind field (image/expose/restart).
     Struct(StructFields, Span),
-    /// An accumulating nested map-kind field (volume/env): (key, value, entry span).
+    /// An accumulating nested map-kind field (env/publish/driver_opts):
+    /// (key, value, entry span).
     LiteralMap(Vec<(Literal, Literal, Span)>),
+    /// An accumulating `volume` field: same shape as [`Self::LiteralMap`]
+    /// except the key side is a [`VolumeHost`], which the parser has
+    /// already split into a bind-mount literal or a named-volume
+    /// reference (see [`schema::TypeSchema::key_may_be_reference`]).
+    MountMap(Vec<(VolumeHost, Literal, Span)>),
     /// An accumulating nested schema-free map-kind field (raw).
     Raw(RawMap),
     /// An accumulating reference-list field (middleware/depends_on/networks/dns).
@@ -95,6 +101,7 @@ impl FieldValue {
             FieldValue::Flag(span) => *span,
             FieldValue::Struct(_, span) => *span,
             FieldValue::LiteralMap(_)
+            | FieldValue::MountMap(_)
             | FieldValue::Raw(_)
             | FieldValue::RefList(_)
             | FieldValue::TemplateInvocations(_) => {
@@ -814,6 +821,23 @@ impl<'src> Parser<'src> {
                 }
                 Ok(())
             }
+            SchemaKind::Map if nested.key_may_be_reference => {
+                let entries = if self.peek().kind == TokenKind::LBrace {
+                    self.parse_map_body(|p| p.parse_mount_map_entry(nested))?
+                } else if self.at_value_start() {
+                    vec![self.parse_mount_map_entry(nested)?]
+                } else {
+                    return Err(self.unexpected(Expected::Description("a value or `{`")));
+                };
+                let bucket = match fields
+                    .entry(field.name)
+                    .or_insert_with(|| FieldValue::MountMap(Vec::new()))
+                {
+                    FieldValue::MountMap(v) => v,
+                    _ => unreachable!("field kind is stable for a given field name"),
+                };
+                merge_map_entries(nested, bucket, entries)
+            }
             SchemaKind::Map => {
                 let entries = if self.peek().kind == TokenKind::LBrace {
                     self.parse_literal_map_body(nested)?
@@ -822,7 +846,14 @@ impl<'src> Parser<'src> {
                 } else {
                     return Err(self.unexpected(Expected::Description("a value or `{`")));
                 };
-                merge_literal_map_entries(nested, fields, field.name, entries)
+                let bucket = match fields
+                    .entry(field.name)
+                    .or_insert_with(|| FieldValue::LiteralMap(Vec::new()))
+                {
+                    FieldValue::LiteralMap(v) => v,
+                    _ => unreachable!("field kind is stable for a given field name"),
+                };
+                merge_map_entries(nested, bucket, entries)
             }
         }
     }
@@ -867,41 +898,73 @@ impl<'src> Parser<'src> {
         self.parse_map_body(|p| p.parse_literal_map_entry(schema))
     }
 
-    /// One `volume`/`env` entry, in either its canonical form (`key ":"
-    /// value`) or its bare-entry sugar form (`value <sep> value`, e.g.
-    /// `"host" -> "container"` or `PUID = "1000"`).
+    /// One `env`/`publish`/`driver_opts` entry, in either its canonical
+    /// form (`key ":" value`) or its bare-entry sugar form (`value <sep>
+    /// value`, e.g. `PUID = "1000"` or `8096 -> 8096`).
     fn parse_literal_map_entry(
         &mut self,
         schema: &'static TypeSchema,
     ) -> Result<(Literal, Literal, Span), ParseError> {
+        let first = self.parse_literal()?;
+        let span = first.span();
+        self.expect_map_separator(schema, span)?;
+        let second = self.parse_literal()?;
+        let entry_span = join_spans(span, second.span());
+        Ok((first, second, entry_span))
+    }
+
+    /// One `volume` entry — the same two forms as
+    /// [`Self::parse_literal_map_entry`], except the host side is a
+    /// [`VolumeHost`]: a quoted string (or other literal) is a
+    /// bind-mount path, and a bare `IDENT` is a reference to a top-level
+    /// `volume` declaration, optionally `alias.`-qualified. See
+    /// [`VolumeHost`]'s own doc for why that distinction is drawn here,
+    /// at parse time, rather than from the string's shape later on.
+    fn parse_mount_map_entry(
+        &mut self,
+        schema: &'static TypeSchema,
+    ) -> Result<(VolumeHost, Literal, Span), ParseError> {
+        let host = if self.peek().kind == TokenKind::Ident {
+            VolumeHost::Named(self.parse_reference()?)
+        } else {
+            VolumeHost::BindMount(self.parse_literal()?)
+        };
+        let span = host.span();
+        self.expect_map_separator(schema, span)?;
+        let container = self.parse_literal()?;
+        let entry_span = join_spans(span, container.span());
+        Ok((host, container, entry_span))
+    }
+
+    /// Consumes the separator between a map entry's two sides — either
+    /// the canonical `:` or the type's own bare-entry separator (`->`
+    /// for `volume`/`publish`, `=` for `env`).
+    ///
+    /// `key_span` is the entry's own first value, which is where a
+    /// missing separator is reported, rather than wherever the next
+    /// (mismatched) token happens to be — a missing separator is only
+    /// ever this entry's own fault, but reporting the *next* token's
+    /// position (typically the start of the next field, often on a
+    /// different line entirely) reads as if that next field were the
+    /// mistake instead (#87). The concrete separator token is named
+    /// directly, rather than the schema-internal phrase "the map's
+    /// bare-entry separator".
+    fn expect_map_separator(
+        &mut self,
+        schema: &'static TypeSchema,
+        key_span: Span,
+    ) -> Result<(), ParseError> {
         let sep = schema
             .map_separator
             .expect("map-kind schema must define a separator");
-        let first = self.parse_literal()?;
         if self.peek().kind == TokenKind::Colon || self.peek().kind == sep {
             self.bump();
-            let second = self.parse_literal()?;
-            let span = Span {
-                start: first.span().start,
-                end: second.span().end,
-                line: first.span().line,
-                col: first.span().col,
-                file: first.span().file,
-            };
-            Ok((first, second, span))
+            Ok(())
         } else {
-            // Anchored at the entry's own first value, not wherever the
-            // next (mismatched) token happens to be — a missing separator
-            // is only ever this entry's own fault, but reporting the
-            // *next* token's position (typically the start of the next
-            // field, often on a different line entirely) reads as if
-            // that next field were the mistake instead (#87). The
-            // concrete separator token is named directly, rather than
-            // the schema-internal phrase "the map's bare-entry separator".
             Err(ParseError::MapEntryMissingSeparator {
                 type_name: schema.type_name,
                 separator: sep,
-                span: first.span(),
+                span: key_span,
             })
         }
     }
@@ -1204,31 +1267,56 @@ impl<'src> Parser<'src> {
     }
 }
 
-fn merge_literal_map_entries(
+/// Joins two spans into one covering both, taking the line/col/file of
+/// the first — the shape every multi-token construct in this parser
+/// builds by hand.
+fn join_spans(start: Span, end: Span) -> Span {
+    Span {
+        start: start.start,
+        end: end.end,
+        line: start.line,
+        col: start.col,
+        file: start.file,
+    }
+}
+
+/// The key side of a map entry, for the uniqueness check below.
+/// Implemented for both a plain [`Literal`] (`env`/`publish`/
+/// `driver_opts`) and a [`VolumeHost`] (`volume`), so one merge routine
+/// serves every map-kind field rather than one per key representation.
+trait MapEntryKey {
+    fn key_text(&self) -> &str;
+}
+
+impl MapEntryKey for Literal {
+    fn key_text(&self) -> &str {
+        self.text()
+    }
+}
+
+impl MapEntryKey for VolumeHost {
+    fn key_text(&self) -> &str {
+        self.text()
+    }
+}
+
+fn merge_map_entries<K: MapEntryKey>(
     nested: &'static TypeSchema,
-    fields: &mut StructFields,
-    field_name: &'static str,
-    new_entries: Vec<(Literal, Literal, Span)>,
+    bucket: &mut Vec<(K, Literal, Span)>,
+    new_entries: Vec<(K, Literal, Span)>,
 ) -> Result<(), ParseError> {
     let side = nested
         .uniqueness
         .expect("volume/env schemas must define a uniqueness side");
-    let bucket = match fields
-        .entry(field_name)
-        .or_insert_with(|| FieldValue::LiteralMap(Vec::new()))
-    {
-        FieldValue::LiteralMap(v) => v,
-        _ => unreachable!("field kind is stable for a given field name"),
-    };
     for (key, value, span) in new_entries {
         let check = match side {
-            MapSide::Key => key.text(),
+            MapSide::Key => key.key_text(),
             MapSide::Value => value.text(),
         }
         .to_string();
         let dup = bucket.iter().find(|(k, v, _)| {
             let existing = match side {
-                MapSide::Key => k.text(),
+                MapSide::Key => k.key_text(),
                 MapSide::Value => v.text(),
             };
             existing == check
@@ -1331,7 +1419,7 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         _ => PublishMap::default(),
     };
     let volumes = match fields.remove("volume") {
-        Some(FieldValue::LiteralMap(entries)) => VolumeMap {
+        Some(FieldValue::MountMap(entries)) => VolumeMap {
             entries: entries
                 .into_iter()
                 .map(|(host, container, span)| VolumeEntry {

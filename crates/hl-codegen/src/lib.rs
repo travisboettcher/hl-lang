@@ -34,13 +34,14 @@ mod doc;
 mod interp;
 mod labels;
 mod raw;
-mod volume;
 mod warning;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use hl_parser::{ComposedProgram, Network, Reference, Service, SourceMap, Span, Volume, VolumeMap};
+use hl_parser::{
+    ComposedProgram, Network, Reference, Service, SourceMap, Span, Volume, VolumeHost, VolumeMap,
+};
 use indexmap::IndexMap;
 
 pub use warning::CodegenWarning;
@@ -85,22 +86,21 @@ pub enum CodegenError {
         span: Span,
     },
     /// A service's `volume name -> "/path"` entry names a *named*
-    /// volume — a host side with no leading `/` or `.`, the same
-    /// convention Docker itself uses to tell a named volume from a bind
-    /// mount — with no matching top-level `volume` declaration in the
-    /// same program.
+    /// volume — an unquoted identifier on the host side, per
+    /// [`hl_parser::VolumeHost`] — with no matching top-level `volume`
+    /// declaration in the same program.
     ///
     /// The exact analogue of [`Self::UnknownNetwork`], and for the same
-    /// reason (#60): a bare identifier there used to become a real
-    /// Compose named volume on sight, deduplicated only by exact string
-    /// equality, so `snycthing-config` for `syncthing-config` silently
-    /// produced a *second*, empty volume rather than sharing the first
-    /// — and two services that happened to write the same string were
+    /// reason (#60): a name there used to become a real Compose named
+    /// volume on sight, deduplicated only by exact string equality, so
+    /// `snycthing-config` for `syncthing-config` silently produced a
+    /// *second*, empty volume rather than sharing the first — and two
+    /// services that happened to write the same string were
     /// indistinguishable from two services deliberately sharing one
     /// volume. Requiring the declaration makes both cases say which one
-    /// they mean. Bind-mount paths are unaffected: they name a host
-    /// path, not a Docker-managed volume, and Docker itself requires no
-    /// declaration for them.
+    /// they mean. Bind-mount paths are unaffected: a quoted host side
+    /// names a path on the host, not a Docker-managed volume, and Docker
+    /// itself requires no declaration for one.
     UnknownVolume {
         service: String,
         volume: String,
@@ -449,17 +449,14 @@ fn generate_service(
 /// `host:container` mount strings, plus the `(name, doc)` pairs to merge
 /// into the program's top-level `volumes:` section.
 ///
-/// The direct counterpart of [`resolve_networks`], one step further in:
-/// a `volume` entry's host side is only a *reference* to a declaration
-/// when it names a Docker-managed named volume rather than a bind-mount
-/// path, so [`volume::classify_named_volume`] decides which entries need
-/// resolving at all. A bind mount is passed through untouched and
-/// contributes nothing to `volumes:`, exactly as before — Docker itself
-/// requires no declaration for a host path.
-///
-/// Classification runs on the *interpolated* host, so `volume
-/// "{{name}}-config" -> "/config"` is validated (and emitted) under the
-/// name it actually resolves to.
+/// The direct counterpart of [`resolve_networks`], differing only in
+/// that not every entry is a reference: which entries are is settled by
+/// then, in the parser, by which token the host side was written as (see
+/// [`hl_parser::VolumeHost`]). A [`VolumeHost::Named`] resolves against
+/// `declared` exactly as a `networks [x]` entry resolves against the
+/// program's `network` declarations; a [`VolumeHost::BindMount`] passes
+/// through untouched and contributes nothing to `volumes:`, since Docker
+/// itself requires no declaration for a host path.
 fn resolve_volumes(
     volumes: &VolumeMap,
     declared: &[Volume],
@@ -470,35 +467,42 @@ fn resolve_volumes(
     let mut docs = Vec::new();
 
     for v in &volumes.entries {
-        let host = interp::resolve(v.host.text(), bindings, v.host.span())?;
         let container = interp::resolve(v.container.text(), bindings, v.container.span())?;
-        if let Some(vol_name) = volume::classify_named_volume(&host) {
-            let decl = declared
-                .iter()
-                .find(|d| d.name.name == vol_name)
-                .ok_or_else(|| CodegenError::UnknownVolume {
-                    service: service_name.to_string(),
-                    volume: vol_name.to_string(),
-                    // The offending host literal itself, not the
-                    // enclosing service — same choice #70 made for
-                    // `UnknownNetwork`.
-                    span: v.host.span(),
-                })?;
-            let vol_doc = doc::VolumeDoc {
-                name: decl.real_name.as_ref().map(|l| l.text().to_string()),
-                external: decl.external.is_some(),
-                driver: decl.driver.as_ref().map(|l| l.text().to_string()),
-                driver_opts: decl
-                    .driver_opts
+        let host = match &v.host {
+            // A bind-mount path is an ordinary value and interpolates
+            // like every other one (`volume "/srv/{{name}}" -> "/data"`).
+            VolumeHost::BindMount(lit) => interp::resolve(lit.text(), bindings, lit.span())?,
+            VolumeHost::Named(r) => {
+                let decl = declared
                     .iter()
-                    .map(|o| (o.key.text().to_string(), o.value.text().to_string()))
-                    .collect(),
-            };
-            docs.push((
-                decl.name.name.clone(),
-                (!vol_doc.is_empty()).then_some(vol_doc),
-            ));
-        }
+                    .find(|d| d.name.name == r.name)
+                    .ok_or_else(|| {
+                        CodegenError::UnknownVolume {
+                            service: service_name.to_string(),
+                            volume: r.name.clone(),
+                            // The offending reference itself, not the
+                            // enclosing service — same choice #70 made for
+                            // `UnknownNetwork`.
+                            span: r.span,
+                        }
+                    })?;
+                let vol_doc = doc::VolumeDoc {
+                    name: decl.real_name.as_ref().map(|l| l.text().to_string()),
+                    external: decl.external.is_some(),
+                    driver: decl.driver.as_ref().map(|l| l.text().to_string()),
+                    driver_opts: decl
+                        .driver_opts
+                        .iter()
+                        .map(|o| (o.key.text().to_string(), o.value.text().to_string()))
+                        .collect(),
+                };
+                docs.push((
+                    decl.name.name.clone(),
+                    (!vol_doc.is_empty()).then_some(vol_doc),
+                ));
+                decl.name.name.clone()
+            }
+        };
         entries.push(format!("{host}:{container}"));
     }
 

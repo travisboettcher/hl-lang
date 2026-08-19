@@ -109,12 +109,17 @@ natural-looking separator instead of a colon:
 
 ```hll,fragment
 volume "/mnt/media" -> "/data"     # host path -> container path
+volume media -> "/media"           # named volume -> container path
 publish 8096 -> 8096               # host port -> container port
 env PUID = "1000"                  # key = value
 ```
 
-`volume` here is the *field* that mounts something into a service. A
-`volume` at the top level of a file, outside any service body, is a
+`volume` is the one map-style field whose key side can be either. A
+quoted host is a path. An unquoted one is an identifier referring to a
+named Docker volume, and needs a declaration to refer to.
+
+`volume` here is also the *field* that mounts something into a service.
+A `volume` at the top level of a file, outside any service body, is a
 different thing—the declaration of a named Docker volume, whose body is
 an ordinary struct body. See [`volume`](./built-in-fields.md#volume).
 
@@ -151,7 +156,7 @@ service syncthing {
        authenticated,
        linuxserver_app { puid: 1000, pgid: 100 }
   image "lscr.io/linuxserver/syncthing:latest"
-  volume "syncthing-config" -> "/config"
+  volume syncthing-config -> "/config"
 }
 ```
 

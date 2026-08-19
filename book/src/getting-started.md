@@ -91,7 +91,7 @@ service jellyfin {
 service uptime-kuma {
   image "louislam/uptime-kuma:latest"
   expose 3001 as "status.example.com"
-  volume "uptime-kuma-data" -> "/app/data"
+  volume uptime-kuma-data -> "/app/data"
   restart unless-stopped
 }
 ```
@@ -129,7 +129,7 @@ service jellyfin {
 service uptime-kuma {
   image "louislam/uptime-kuma:latest"
   expose 3001 as "status.example.com"
-  volume "uptime-kuma-data" -> "/app/data"
+  volume uptime-kuma-data -> "/app/data"
 }
 ```
 
