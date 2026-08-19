@@ -275,6 +275,202 @@ fn two_declarations_sharing_one_real_name_are_not_ambiguous() {
     );
 }
 
+// --- named volumes (#60) ---
+
+/// A named volume's own declaration is what fills its entry in the
+/// top-level `volumes:` section, exactly as a `network` declaration
+/// fills its entry in `networks:` — same `external`/`name` fields, same
+/// meaning, plus the two knobs only volumes have.
+#[test]
+fn declared_volume_options_reach_the_top_level_volumes_section() {
+    let yaml = generate_from(
+        "volume media {\n  external\n  name: \"media_store\"\n}\n\
+         volume backups {\n  \
+           driver \"local\"\n  \
+           driver_opts {\n    type: \"nfs\"\n    device: \":/exports/backups\"\n  }\n\
+         }\n\
+         volume plain {}\n\
+         service jellyfin {\n  \
+           image \"jellyfin/jellyfin:latest\"\n  \
+           volume media -> \"/data\"\n  \
+           volume backups -> \"/backups\"\n  \
+           volume plain -> \"/plain\"\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    volumes:
+      - media:/data
+      - backups:/backups
+      - plain:/plain
+
+volumes:
+  media:
+    name: media_store
+    external: true
+  backups:
+    driver: local
+    driver_opts:
+      type: nfs
+      device: ":/exports/backups"
+  plain:
+"#,
+    );
+}
+
+/// The motivating case: a typo'd (or simply undeclared) named-volume
+/// reference is a hard error now, not a second, silently-created volume.
+#[test]
+fn undeclared_named_volume_reference_is_error() {
+    let err = generate_err(
+        "volume syncthing-config {}\n\
+         service syncthing {\n  \
+           image \"x\"\n  \
+           volume snycthing-config -> \"/config\"\n\
+         }\n",
+    );
+    assert!(matches!(
+        err,
+        CodegenError::UnknownVolume { ref service, ref volume, .. }
+            if service == "syncthing" && volume == "snycthing-config"
+    ));
+}
+
+/// It points at the offending host literal, not at the enclosing
+/// service — the same choice #70 made for `UnknownNetwork`.
+#[test]
+fn unknown_volume_error_points_at_the_offending_reference() {
+    let err = generate_err(
+        "volume known {}\n\
+         service s {\n  \
+           image \"x\"\n  \
+           volume known -> \"/a\"\n  \
+           volume nope -> \"/b\"\n\
+         }\n",
+    );
+    let span = err.span();
+    assert_eq!(
+        (span.line, span.col),
+        (5, 10),
+        "expected the span of `\"nope\"`, got {}:{}",
+        span.line,
+        span.col
+    );
+}
+
+/// One declaration, two services: the shared volume appears once in
+/// `volumes:` and both services mount it. Before #60 this was
+/// indistinguishable from two services that happened to write the same
+/// string; now it's stated by referencing one declaration.
+#[test]
+fn one_volume_shared_by_two_services_is_declared_once() {
+    let yaml = generate_from(
+        "volume shared-media {}\n\
+         service jellyfin {\n  image \"jellyfin/jellyfin\"\n  volume shared-media -> \"/data\"\n}\n\
+         service sonarr {\n  image \"lscr.io/linuxserver/sonarr\"\n  volume shared-media -> \"/media\"\n}\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  jellyfin:
+    image: jellyfin/jellyfin
+    volumes:
+      - shared-media:/data
+  sonarr:
+    image: lscr.io/linuxserver/sonarr
+    volumes:
+      - shared-media:/media
+
+volumes:
+  shared-media:
+"#,
+    );
+}
+
+/// Bind mounts are entirely unaffected by the declaration requirement:
+/// absolute, `./`-relative and `../`-relative host paths all pass
+/// straight through, and none of them puts anything in `volumes:`.
+#[test]
+fn bind_mount_paths_need_no_declaration() {
+    let yaml = generate_from(
+        "service jellyfin {\n  \
+           image \"jellyfin/jellyfin\"\n  \
+           volume \"/mnt/media\" -> \"/data\"\n  \
+           volume \"./config\" -> \"/config\"\n  \
+           volume \"../shared\" -> \"/shared\"\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  jellyfin:
+    image: jellyfin/jellyfin
+    volumes:
+      - /mnt/media:/data
+      - ./config:/config
+      - ../shared:/shared
+"#,
+    );
+}
+
+/// A declared volume nothing mounts isn't emitted — same as an
+/// unreferenced `network` declaration.
+#[test]
+fn declared_but_unreferenced_volume_is_not_emitted() {
+    let yaml = generate_from("volume unused {}\nservice s {\n  image \"x\"\n}\n");
+    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert!(
+        parsed.get("volumes").is_none(),
+        "expected no top-level volumes section, got:\n{yaml}"
+    );
+}
+
+/// A *quoted* host side is a bind-mount path whatever its content, with
+/// no leading `/` or `.` required and no declaration looked for — the
+/// distinction is syntactic now, not a guess at the string's shape. So
+/// `"media"` is a path, and the same word unquoted would be a reference.
+#[test]
+fn a_quoted_host_is_a_bind_mount_whatever_it_says() {
+    let yaml = generate_from("service s {\n  image \"x\"\n  volume \"media\" -> \"/data\"\n}\n");
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  s:
+    image: x
+    volumes:
+      - media:/data
+"#,
+    );
+}
+
+/// A bind-mount path is an ordinary value, so `{{name}}` interpolates
+/// into it like anywhere else. (A named-volume *reference* has no
+/// interpolated form: it's an identifier resolved against a declaration,
+/// exactly like a `networks [x]` entry.)
+#[test]
+fn interpolation_reaches_a_bind_mount_path() {
+    let yaml = generate_from(
+        "service syncthing {\n  image \"x\"\n  volume \"/srv/{{name}}\" -> \"/config\"\n}\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  syncthing:
+    image: x
+    volumes:
+      - /srv/syncthing:/config
+"#,
+    );
+}
+
 #[test]
 fn missing_image_is_error() {
     let err = generate_err("service s {\n}\n");
@@ -427,6 +623,45 @@ services:
     );
 }
 
+/// #84's `publish` and #60's top-level `volume` declaration are
+/// unrelated features that landed in the same release, so one service
+/// using both at once is the case neither one's own tests cover: the
+/// host-published port lands in `ports:` and the declared named volume
+/// still reaches both the service's `volumes:` list and the document's
+/// top-level `volumes:` section, each carrying its own declaration's
+/// settings.
+#[test]
+fn publish_and_a_declared_named_volume_compose_together() {
+    let yaml = generate_from(
+        "volume syncthing-config {\n  driver \"local\"\n}\n\
+         service syncthing {\n  \
+           image \"lscr.io/linuxserver/syncthing:latest\"\n  \
+           publish 8384 -> 8384\n  \
+           publish 22000 -> \"22000/tcp\"\n  \
+           volume syncthing-config -> \"/config\"\n  \
+           volume \"/mnt/media\" -> \"/data\"\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  syncthing:
+    image: lscr.io/linuxserver/syncthing:latest
+    volumes:
+      - syncthing-config:/config
+      - /mnt/media:/data
+    ports:
+      - "8384:8384"
+      - "22000:22000/tcp"
+
+volumes:
+  syncthing-config:
+    driver: local
+"#,
+    );
+}
+
 /// #68: `raw` used to be flattened in on top of the built-in fields
 /// without checking for collisions, so a `raw` key naming one of them
 /// emitted that key *twice* in the same mapping — invalid YAML that
@@ -494,13 +729,14 @@ services:
 fn every_built_in_field_is_overridable_by_raw() {
     let yaml = generate_from(
         "network traefik-net {\n  external\n  name: \"docker_default\"\n}\n\
+         volume web-data {}\n\
          service database {\n  image \"postgres\"\n}\n\
          service web {\n  \
            image \"nginx\"\n  \
            container_name \"web-ctr\"\n  \
            restart unless-stopped\n  \
            env PUID = \"1000\"\n  \
-           volume \"web-data\" -> \"/data\"\n  \
+           volume web-data -> \"/data\"\n  \
            networks [traefik-net]\n  \
            dns [\"192.168.50.182\"]\n  \
            publish 8080 -> 8080\n  \
@@ -561,9 +797,10 @@ labels:
 fn raw_override_keeps_the_top_level_volume_and_network_declarations() {
     let yaml = generate_from(
         "network traefik-net {\n  external\n  name: \"docker_default\"\n}\n\
+         volume web-data {}\n\
          service web {\n  \
            image \"nginx\"\n  \
-           volume \"web-data\" -> \"/data\"\n  \
+           volume web-data -> \"/data\"\n  \
            networks [traefik-net]\n  \
            raw {\n    \
              volumes: [\"web-data:/elsewhere\"]\n    \
@@ -604,13 +841,14 @@ volumes:
 fn raw_leaves_built_in_fields_it_does_not_name_alone() {
     let yaml = generate_from(
         "network traefik-net {\n  external\n  name: \"docker_default\"\n}\n\
+         volume web-data {}\n\
          service database {\n  image \"postgres\"\n}\n\
          service web {\n  \
            image \"nginx\"\n  \
            container_name \"web-ctr\"\n  \
            restart unless-stopped\n  \
            env PUID = \"1000\"\n  \
-           volume \"web-data\" -> \"/data\"\n  \
+           volume web-data -> \"/data\"\n  \
            networks [traefik-net]\n  \
            dns [\"192.168.50.182\"]\n  \
            publish 8080 -> 8080\n  \
@@ -658,8 +896,8 @@ cap_add:
 /// a NUL byte, flow/indicator characters — have to survive the round
 /// trip *as data*, on every channel a user-supplied string can reach:
 /// `container_name`, `env` values, volume paths, an external network's
-/// real `name` (which also lands inside a Traefik label), and both keys
-/// and values inside `raw`. If the serializer ever emitted one of these
+/// or volume's real `name` (the network's also lands inside a Traefik
+/// label), and both keys and values inside `raw`. If the serializer ever emitted one of these
 /// unquoted, the reparse below wouldn't just differ — it would come back
 /// with a different *shape* (an extra nested mapping, a truncated value
 /// where a `#` started a comment), which is exactly the YAML-structure
@@ -682,6 +920,9 @@ fn yaml_hostile_values_round_trip_as_data_not_structure() {
            external\n  \
            name: \"net: with # hash\"\n\
          }\n\
+         volume hostile-vol {\n  \
+           name: \"vol: name # hash\"\n\
+         }\n\
          service web {\n  \
            image \"nginx\"\n  \
            container_name \"ctr: name # here\"\n  \
@@ -690,7 +931,7 @@ fn yaml_hostile_values_round_trip_as_data_not_structure() {
            env NUL = \"value\0with nul\"\n  \
            env FLOW = \"[a, b]{c: d}\"\n  \
            env ANCHOR = \"&anchor *alias\"\n  \
-           volume \"vol: name\" -> \"/mnt/# hash\"\n  \
+           volume hostile-vol -> \"/mnt/# hash\"\n  \
            networks [shared]\n  \
            raw {\n    \
              colon_val: \"raw: colon value\"\n    \
@@ -734,7 +975,7 @@ fn yaml_hostile_values_round_trip_as_data_not_structure() {
 
     assert_eq!(
         web["volumes"],
-        serde_yaml_ng::Value::Sequence(vec![s("vol: name:/mnt/# hash")]),
+        serde_yaml_ng::Value::Sequence(vec![s("hostile-vol:/mnt/# hash")]),
         "\n--- actual ---\n{yaml}"
     );
     assert_eq!(web["colon_val"], s("raw: colon value"));
@@ -754,13 +995,14 @@ fn yaml_hostile_values_round_trip_as_data_not_structure() {
         "\n--- actual ---\n{yaml}"
     );
 
-    // The named volume's key survives at the top level too — a `#` there
-    // would otherwise comment out the rest of the mapping.
-    assert!(
-        parsed["volumes"]
-            .as_mapping()
-            .expect("top-level volumes is a mapping")
-            .contains_key(s("vol: name")),
+    // A named volume's own key is an `.hll` identifier since #60 made
+    // the top-level declaration mandatory, so the hostile characters now
+    // reach the output through its `name:` override instead — the exact
+    // same channel as the network's, and a `#` there would otherwise
+    // comment out the rest of the mapping.
+    assert_eq!(
+        parsed["volumes"]["hostile-vol"]["name"],
+        s("vol: name # hash"),
         "\n--- actual ---\n{yaml}"
     );
 }

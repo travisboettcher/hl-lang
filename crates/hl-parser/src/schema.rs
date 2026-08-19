@@ -76,6 +76,15 @@ pub struct TypeSchema {
     /// Which side of a map entry is uniqueness-checked; `None` only for
     /// `raw`, which is schema-free and checks nothing.
     pub uniqueness: Option<MapSide>,
+    /// Map-kind types only: whether a bare `IDENT` on the *key* side of
+    /// an entry is a reference to a top-level declaration
+    /// ([`crate::ast::VolumeHost::Named`]) rather than an ordinary
+    /// literal — which also lets it carry an `alias.` qualifier.
+    ///
+    /// True for [`VOLUME`] alone. `env`/`publish`/`driver_opts`/`raw`
+    /// keys are plain literal values with nothing to resolve against, so
+    /// they keep the ordinary all-literal entry parsing.
+    pub key_may_be_reference: bool,
     /// A bare keyword (no colon) that aliases to a named secondary
     /// field, e.g. `("as", "host")` on `expose`: `expose 8096 as "..."`
     /// desugars to `expose { port: 8096, host: "..." }`. Kept as schema
@@ -102,6 +111,7 @@ pub static IMAGE: TypeSchema = TypeSchema {
     primary_field: Some("ref"),
     map_separator: None,
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
@@ -138,6 +148,7 @@ pub static EXPOSE: TypeSchema = TypeSchema {
     primary_field: Some("port"),
     map_separator: None,
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: Some(("as", "host")),
     needs_name: false,
     schema_free: false,
@@ -154,14 +165,30 @@ pub static RESTART: TypeSchema = TypeSchema {
     primary_field: Some("policy"),
     map_separator: None,
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
 };
 
-/// `volume "host" -> "container"` / `volume { "host": "container" }`.
+/// The `volume` *field* on a `service`/`template`: `volume "/host/path"
+/// -> "/container"` / `volume { "/host/path": "/container" }` for a bind
+/// mount, `volume named-volume -> "/container"` for a named one.
 /// Uniqueness on the value (container path) side, matching Docker's own
 /// same-container-path constraint.
+///
+/// The one map-kind type with [`TypeSchema::key_may_be_reference`] set:
+/// a bare `IDENT` on the host side is a reference to a top-level
+/// `volume` declaration rather than a literal, so it can be
+/// `alias.`-qualified like any other cross-file reference. See
+/// [`crate::ast::VolumeHost`].
+///
+/// Not to be confused with [`VOLUME_DECL`], the top-level `volume name
+/// { ... }` declaration this field's named-volume entries resolve
+/// against. The two share an identifier but never a lookup table: a
+/// field name is resolved through [`resolve_field`] against the
+/// enclosing type's own field list, a top-level type name through
+/// [`top_level_type`], and neither ever consults the other.
 pub static VOLUME: TypeSchema = TypeSchema {
     type_name: "volume",
     kind: SchemaKind::Map,
@@ -169,6 +196,7 @@ pub static VOLUME: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: Some(TokenKind::Arrow),
     uniqueness: Some(MapSide::Value),
+    key_may_be_reference: true,
     bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
@@ -198,6 +226,7 @@ pub static PUBLISH: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: Some(TokenKind::Arrow),
     uniqueness: Some(MapSide::Value),
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
@@ -212,6 +241,7 @@ pub static ENV: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: Some(TokenKind::Equals),
     uniqueness: Some(MapSide::Key),
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
@@ -226,6 +256,7 @@ pub static RAW: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: Some(TokenKind::Colon),
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: false,
     schema_free: true,
@@ -254,6 +285,71 @@ pub static NETWORK: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: None,
     uniqueness: None,
+    key_may_be_reference: false,
+    bare_keyword_alias: None,
+    needs_name: true,
+    schema_free: false,
+};
+
+/// A top-level `volume` declaration's `driver_opts { key: value }` body
+/// — Compose's own free-form per-driver option bag. Map-kind with a `:`
+/// separator (so, like `raw`, its bare-entry and canonical forms are the
+/// same thing) and key-side uniqueness, like `env`: two entries can't
+/// both claim the same option name. Unlike `raw` it is *not*
+/// `schema_free`, because the values are plain literals rather than
+/// arbitrarily nested YAML — Compose's `driver_opts` is a flat
+/// string→string map.
+pub static DRIVER_OPTS: TypeSchema = TypeSchema {
+    type_name: "driver_opts",
+    kind: SchemaKind::Map,
+    fields: &[],
+    primary_field: None,
+    map_separator: Some(TokenKind::Colon),
+    uniqueness: Some(MapSide::Key),
+    key_may_be_reference: false,
+    bare_keyword_alias: None,
+    needs_name: false,
+    schema_free: false,
+};
+
+/// A top-level `volume name { ... }` declaration — the declaration a
+/// service's named-volume mount (`volume syncthing-config -> "/config"`)
+/// has to resolve against, exactly as a `networks [x]` entry resolves
+/// against [`NETWORK`]. `external` and `name` mean precisely what they
+/// mean on a `network` (see [`NETWORK`]'s doc and
+/// [`crate::ast::Volume::real_name`]); `driver`/`driver_opts` are the
+/// two extra Compose knobs that exist only on the volume side.
+///
+/// This shares its `type_name` with [`VOLUME`], the service-level
+/// `volume` *field*, on purpose: to a user they are one concept
+/// (`volume`) written in two positions, and an `UnknownField` on either
+/// should say "volume". See [`VOLUME`]'s doc for why the shared name
+/// can't cause a resolution collision.
+pub static VOLUME_DECL: TypeSchema = TypeSchema {
+    type_name: "volume",
+    kind: SchemaKind::Struct,
+    fields: &[
+        FieldSchema {
+            name: "external",
+            kind: FieldKind::BoolFlag,
+        },
+        FieldSchema {
+            name: "name",
+            kind: FieldKind::Scalar,
+        },
+        FieldSchema {
+            name: "driver",
+            kind: FieldKind::Scalar,
+        },
+        FieldSchema {
+            name: "driver_opts",
+            kind: FieldKind::Nested(&DRIVER_OPTS),
+        },
+    ],
+    primary_field: None,
+    map_separator: None,
+    uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: true,
     schema_free: false,
@@ -273,6 +369,7 @@ pub static WITH: TypeSchema = TypeSchema {
     primary_field: Some("templates"),
     map_separator: None,
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
@@ -355,6 +452,7 @@ pub static SERVICE: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: None,
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: true,
     schema_free: false,
@@ -371,6 +469,7 @@ pub static TEMPLATE: TypeSchema = TypeSchema {
     primary_field: None,
     map_separator: None,
     uniqueness: None,
+    key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: true,
     schema_free: false,
@@ -379,9 +478,19 @@ pub static TEMPLATE: TypeSchema = TypeSchema {
 /// Looks up a top-level declaration's type schema by name. `template` is
 /// handled separately by the parser as a lexical-token check (`template`
 /// is a reserved word, not an ordinary `IDENT`), not via this table.
+///
+/// `volume` appears both here (as [`VOLUME_DECL`], the top-level
+/// declaration) and in `SERVICE_FIELDS` (as [`VOLUME`], the map-kind
+/// mount field). That's not an ambiguity: this function is only ever
+/// called on the first token of a *top-level* declaration, while a field
+/// name is only ever resolved through [`resolve_field`] against the
+/// enclosing type's own field list. Neither table is consulted in the
+/// other's position, so the shared identifier resolves to exactly one
+/// schema everywhere it can appear.
 pub fn top_level_type(name: &str) -> Option<&'static TypeSchema> {
     match name {
         "network" => Some(&NETWORK),
+        "volume" => Some(&VOLUME_DECL),
         "service" => Some(&SERVICE),
         _ => None,
     }

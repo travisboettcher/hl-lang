@@ -22,6 +22,7 @@ const SYNCTHING_HLL: &str = include_str!("../../hl-parser/tests/fixtures/syncthi
 
 const IMPORTS_NETWORK_HLL: &str = include_str!("fixtures/imports/network.hll");
 const IMPORTS_TEMPLATES_HLL: &str = include_str!("fixtures/imports/templates.hll");
+const IMPORTS_STORAGE_HLL: &str = include_str!("fixtures/imports/storage.hll");
 const IMPORTS_SYNCTHING_HLL: &str = include_str!("fixtures/imports/syncthing.hll");
 
 /// A scratch directory under the target dir, unique per test process, so
@@ -144,15 +145,21 @@ fn build_directory_writes_one_file_per_hll_input() {
 
 /// `crates/hl-cli/tests/fixtures/imports/` splits the same service
 /// `SYNCTHING_HLL` declares into `network.hll` + `templates.hll` +
-/// `syncthing.hll`, connected by real `use` decls. Building the split
-/// version through a real on-disk `use` graph (not `hl-linker`'s own
-/// `InMemoryLoader`-backed unit tests) should produce byte-identical
-/// output to building the original one-file version.
+/// `storage.hll` + `syncthing.hll`, connected by real `use` decls.
+/// Building the split version through a real on-disk `use` graph (not
+/// `hl-linker`'s own `InMemoryLoader`-backed unit tests) should produce
+/// byte-identical output to building the original one-file version.
+///
+/// That covers both kinds of cross-file reference at once: the service
+/// reaches its network through an imported *template*'s own
+/// `net.traefik-net`, and its named volume directly through its own
+/// `storage.syncthing-config`.
 #[test]
 fn build_directory_of_hll_files_with_use_imports_between_them() {
     let dir = scratch_dir("imports");
     fs::write(dir.join("network.hll"), IMPORTS_NETWORK_HLL).unwrap();
     fs::write(dir.join("templates.hll"), IMPORTS_TEMPLATES_HLL).unwrap();
+    fs::write(dir.join("storage.hll"), IMPORTS_STORAGE_HLL).unwrap();
     let input = dir.join("syncthing.hll");
     fs::write(&input, IMPORTS_SYNCTHING_HLL).unwrap();
     let out = dir.join("docker-compose.yml");
@@ -184,7 +191,7 @@ fn build_directory_of_hll_files_with_use_imports_between_them() {
 
     assert_eq!(
         imported_yaml, baseline_yaml,
-        "splitting syncthing.hll across network.hll/templates.hll/syncthing.hll \
+        "splitting syncthing.hll across network.hll/templates.hll/storage.hll/syncthing.hll \
          should produce identical Compose output to the original one-file version"
     );
 
@@ -1118,6 +1125,160 @@ fn compose_error_across_imported_files_names_both_files() {
         dir.join("t1.hll").display(),
     );
     assert_eq!(stderr, expected);
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// #60, end to end through the real binary: an undeclared named-volume
+/// reference fails the build with a `path:line:col`-located message,
+/// rendered through the same `SourceMap` machinery as every other
+/// codegen diagnostic. The `.hll` here is the exact "before" of this
+/// change — it compiled silently until the top-level declaration became
+/// mandatory.
+#[test]
+fn build_reports_an_undeclared_named_volume_with_its_path_line_and_col() {
+    let dir = scratch_dir("unknown-volume");
+    let entry = dir.join("syncthing.hll");
+    fs::write(
+        &entry,
+        "volume syncthing-config {}\n\
+         service syncthing {\n  \
+           image \"lscr.io/linuxserver/syncthing\"\n  \
+           volume snycthing-config -> \"/config\"\n\
+         }\n",
+    )
+    .unwrap();
+
+    let output = hllc_output(&["--build", entry.to_str().unwrap()]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr,
+        format!(
+            "{}:4:10: service `syncthing` references undeclared volume `snycthing-config`\n",
+            entry.display()
+        )
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// A named volume imported through an alias resolves against the
+/// *aliased* file's declarations, and the imported declaration's own
+/// options ride along into the generated `volumes:` section — the same
+/// end-to-end path `networks [alias.name]` already took.
+#[test]
+fn build_resolves_an_imported_named_volume_through_its_alias() {
+    let dir = scratch_dir("imported-volume");
+    fs::write(
+        dir.join("storage.hll"),
+        "volume media {\n  external\n  name: \"media_store\"\n}\n",
+    )
+    .unwrap();
+    let entry = dir.join("jellyfin.hll");
+    fs::write(
+        &entry,
+        "use \"storage.hll\" as storage\n\
+         service jellyfin {\n  \
+           image \"jellyfin/jellyfin\"\n  \
+           volume storage.media -> \"/data\"\n\
+         }\n",
+    )
+    .unwrap();
+    let out = dir.join("docker-compose.yml");
+
+    let code = run(Cli {
+        file: entry,
+        parse: false,
+        build: true,
+        out: Some(out.clone()),
+        force: false,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let yaml = fs::read_to_string(&out).unwrap();
+    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert_eq!(
+        parsed["services"]["jellyfin"]["volumes"][0],
+        serde_yaml_ng::Value::String("media:/data".to_string()),
+        "\n--- actual ---\n{yaml}"
+    );
+    assert_eq!(
+        parsed["volumes"]["media"]["name"],
+        serde_yaml_ng::Value::String("media_store".to_string()),
+        "\n--- actual ---\n{yaml}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// And an alias that resolves to a real file with no such `volume` is a
+/// located error, not a silently-created volume.
+#[test]
+fn build_reports_an_unknown_qualified_volume() {
+    let dir = scratch_dir("unknown-qualified-volume");
+    fs::write(dir.join("storage.hll"), "volume media {}\n").unwrap();
+    let entry = dir.join("jellyfin.hll");
+    fs::write(
+        &entry,
+        "use \"storage.hll\" as storage\n\
+         service jellyfin {\n  \
+           image \"jellyfin/jellyfin\"\n  \
+           volume storage.medai -> \"/data\"\n\
+         }\n",
+    )
+    .unwrap();
+
+    let output = hllc_output(&["--build", entry.to_str().unwrap()]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr,
+        format!("{}:4:10: no volume `medai` in `storage`\n", entry.display())
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// The other half: with the declaration present, the same file builds
+/// and the named volume lands in the document's top-level `volumes:`
+/// section carrying its declaration's options.
+#[test]
+fn build_emits_a_declared_volumes_options_in_the_top_level_section() {
+    let dir = scratch_dir("declared-volume");
+    let entry = dir.join("syncthing.hll");
+    fs::write(
+        &entry,
+        "volume syncthing-config {\n  external\n  name: \"sync_store\"\n}\n\
+         service syncthing {\n  \
+           image \"lscr.io/linuxserver/syncthing\"\n  \
+           volume syncthing-config -> \"/config\"\n\
+         }\n",
+    )
+    .unwrap();
+    let out = dir.join("docker-compose.yml");
+
+    let code = run(Cli {
+        file: entry,
+        parse: false,
+        build: true,
+        out: Some(out.clone()),
+        force: false,
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let yaml = fs::read_to_string(&out).unwrap();
+    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert_eq!(
+        parsed["volumes"]["syncthing-config"]["name"],
+        serde_yaml_ng::Value::String("sync_store".to_string()),
+        "\n--- actual ---\n{yaml}"
+    );
+    assert_eq!(
+        parsed["volumes"]["syncthing-config"]["external"],
+        serde_yaml_ng::Value::Bool(true),
+        "\n--- actual ---\n{yaml}"
+    );
 
     fs::remove_dir_all(&dir).ok();
 }

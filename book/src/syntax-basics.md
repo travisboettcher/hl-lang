@@ -10,8 +10,8 @@ the rules behind them.
 A `.hll` file is a sequence of top-level declarations. There are three
 kinds:
 
-- A **named declaration**—a `service` or a `network`—gives a type and
-  a name, followed by a body: `service jellyfin { ... }`.
+- A **named declaration**—a `service`, a `network`, or a `volume`—gives
+  a type and a name, followed by a body: `service jellyfin { ... }`.
 - A **template declaration** starts with the word `template`, the *one*
   reserved word in the whole language (see [Reserved words](#reserved-words)
   below): `template internal_web(port: Number) { ... }`.
@@ -109,9 +109,19 @@ natural-looking separator instead of a colon:
 
 ```hll,fragment
 volume "/mnt/media" -> "/data"     # host path -> container path
+volume media -> "/media"           # named volume -> container path
 publish 8096 -> 8096               # host port -> container port
 env PUID = "1000"                  # key = value
 ```
+
+`volume` is the one map-style field whose key side can be either. A
+quoted host is a path. An unquoted one is an identifier referring to a
+named Docker volume, and needs a declaration to refer to.
+
+`volume` here is also the *field* that mounts something into a service.
+A `volume` at the top level of a file, outside any service body, is a
+different thing—the declaration of a named Docker volume, whose body is
+an ordinary struct body. See [`volume`](./built-in-fields.md#volume).
 
 Writing any of these more than once in the same body accumulates
 entries rather than overwriting—a service can have several `volume`
@@ -139,12 +149,14 @@ Two rules govern whitespace and punctuation, and both matter in practice:
   continuation.
 
 ```hll
+volume syncthing-config {}
+
 service syncthing {
   with internal_web { port: 8384 },
        authenticated,
        linuxserver_app { puid: 1000, pgid: 100 }
   image "lscr.io/linuxserver/syncthing:latest"
-  volume "syncthing-config" -> "/config"
+  volume syncthing-config -> "/config"
 }
 ```
 

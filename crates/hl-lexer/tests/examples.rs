@@ -52,8 +52,8 @@ fn syncthing_example_lexes_to_expected_token_sequence() {
         // with internal_web { port: 8384 }, authenticated, linuxserver_app { puid: 1000, pgid: 100 }
         Ident, Ident, LBrace, Ident, Colon, Number, RBrace, Comma, Ident, Comma, Ident, LBrace,
         Ident, Colon, Number, Comma, Ident, Colon, Number, RBrace, // image "..."
-        Ident, Str, // volume "syncthing-config" -> "/config"
-        Ident, Str, Arrow, Str, RBrace, Eof,
+        Ident, Str, // volume syncthing-config -> "/config"
+        Ident, Ident, Arrow, Str, RBrace, Eof,
     ];
     assert_eq!(kinds(SYNCTHING), expected);
 }

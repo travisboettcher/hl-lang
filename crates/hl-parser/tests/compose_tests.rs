@@ -5,7 +5,7 @@
 
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    ComposeError, ComposedProgram, Expose, Literal, RawValue, Service, compose, parse,
+    ComposeError, ComposedProgram, Expose, Literal, RawValue, Service, VolumeHost, compose, parse,
 };
 
 fn compose_ok(source: &str) -> ComposedProgram {
@@ -994,7 +994,12 @@ fn assert_no_params(service: &Service) {
         assert_not_param(p);
     }
     for v in &fields.volumes.entries {
-        assert_not_param(&v.host);
+        // Only a bind-mount host holds a literal; a named-volume host is
+        // a `Reference`, which can never be a `$param` in the first
+        // place (the grammar has no parameter in reference position).
+        if let VolumeHost::BindMount(host) = &v.host {
+            assert_not_param(host);
+        }
         assert_not_param(&v.container);
     }
     for e in &fields.env.entries {
@@ -1149,17 +1154,46 @@ fn duplicate_top_level_network_name_is_error() {
     ));
 }
 
-/// A name may still be reused *across* declaration kinds — the three
-/// symbol tables are separate, and nothing looks a service up by a
-/// network's name or vice versa.
+/// #60: a named volume is resolved by its bare name too, and its
+/// declaration is what decides whether the volume is `external` or
+/// carries a `name:` override — so two declarations under one name are
+/// exactly as ambiguous as two networks are.
+#[test]
+fn duplicate_top_level_volume_name_is_error() {
+    let err = compose_err("volume data {}\nvolume data {\n  external\n}\n");
+    assert!(matches!(
+        err,
+        ComposeError::DuplicateVolumeName { name, .. } if name == "data"
+    ));
+}
+
+/// Top-level `volume` declarations reach the composed program in source
+/// order, for codegen to resolve named-volume mounts against.
+#[test]
+fn top_level_volumes_are_carried_through_composition() {
+    let composed = compose_ok("volume a {}\nvolume b {\n  external\n}\n");
+    let names: Vec<&str> = composed
+        .volumes
+        .iter()
+        .map(|v| v.name.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["a", "b"]);
+    assert!(composed.volumes[1].external.is_some());
+}
+
+/// A name may still be reused *across* declaration kinds — the symbol
+/// tables are separate, and nothing looks a service up by a network's
+/// or a volume's name or vice versa.
 #[test]
 fn same_name_across_different_declaration_kinds_is_fine() {
     let composed = compose_ok(
         "network shared {\n  external\n}\n\
+         volume shared {}\n\
          template shared {\n  restart always\n}\n\
-         service shared {\n  image \"x\"\n  with shared\n  networks [shared]\n}\n",
+         service shared {\n  image \"x\"\n  with shared\n  networks [shared]\n  volume shared -> \"/data\"\n}\n",
     );
     assert_eq!(composed.networks.len(), 1);
+    assert_eq!(composed.volumes.len(), 1);
     assert_eq!(composed.services.len(), 1);
 }
 
@@ -1172,6 +1206,35 @@ fn qualified_network_reference_with_no_use_decls_is_unknown_alias() {
         err,
         ComposeError::UnknownAlias { alias, .. } if alias == "traefik"
     ));
+}
+
+/// A qualified named-volume host answers the same way, for the same
+/// reason: a lone `Program` has no imports, so no alias can be valid.
+#[test]
+fn qualified_volume_reference_with_no_use_decls_is_unknown_alias() {
+    let err = compose_err("service s {\n  image \"x\"\n  volume storage.media -> \"/data\"\n}\n");
+    assert!(matches!(
+        err,
+        ComposeError::UnknownAlias { alias, .. } if alias == "storage"
+    ));
+}
+
+/// A *bare* named-volume host is left completely untouched by
+/// composition — it carries no qualifier, so there is nothing to resolve
+/// until codegen looks it up against the program's declarations.
+#[test]
+fn bare_volume_reference_survives_composition_untouched() {
+    let composed = compose_ok(
+        "volume media {}\n\
+         template mounts {\n  volume media -> \"/data\"\n}\n\
+         service s {\n  image \"x\"\n  with mounts\n}\n",
+    );
+    let host = &composed.services[0].fields.volumes.entries[0].host;
+    let VolumeHost::Named(r) = host else {
+        panic!("expected a named-volume host, got {host:?}");
+    };
+    assert!(r.qualifier.is_none());
+    assert_eq!(r.name, "media");
 }
 
 #[test]

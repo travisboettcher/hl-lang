@@ -34,13 +34,14 @@ mod doc;
 mod interp;
 mod labels;
 mod raw;
-mod volume;
 mod warning;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use hl_parser::{ComposedProgram, Network, Reference, Service, SourceMap, Span};
+use hl_parser::{
+    ComposedProgram, Network, Reference, Service, SourceMap, Span, Volume, VolumeHost, VolumeMap,
+};
 use indexmap::IndexMap;
 
 pub use warning::CodegenWarning;
@@ -65,6 +66,11 @@ pub struct GeneratedProgram {
 /// program's top-level `networks:` section.
 type NetworkDocs = Vec<(String, doc::NetworkDoc)>;
 
+/// `(volume identifier, its Compose doc)` pairs to merge into the
+/// program's top-level `volumes:` section. `None` means the declaration
+/// set no options — see [`doc::ComposeDoc::volumes`].
+type VolumeDocs = Vec<(String, Option<doc::VolumeDoc>)>;
+
 /// An error raised while generating Compose YAML from a composed
 /// program. Mirrors [`hl_parser::ParseError`]/[`hl_parser::ComposeError`]'s
 /// existing span-carrying, no-recovery style.
@@ -77,6 +83,27 @@ pub enum CodegenError {
     UnknownNetwork {
         service: String,
         network: String,
+        span: Span,
+    },
+    /// A service's `volume name -> "/path"` entry names a *named*
+    /// volume — an unquoted identifier on the host side, per
+    /// [`hl_parser::VolumeHost`] — with no matching top-level `volume`
+    /// declaration in the same program.
+    ///
+    /// The exact analogue of [`Self::UnknownNetwork`], and for the same
+    /// reason (#60): a name there used to become a real Compose named
+    /// volume on sight, deduplicated only by exact string equality, so
+    /// `snycthing-config` for `syncthing-config` silently produced a
+    /// *second*, empty volume rather than sharing the first — and two
+    /// services that happened to write the same string were
+    /// indistinguishable from two services deliberately sharing one
+    /// volume. Requiring the declaration makes both cases say which one
+    /// they mean. Bind-mount paths are unaffected: a quoted host side
+    /// names a path on the host, not a Docker-managed volume, and Docker
+    /// itself requires no declaration for one.
+    UnknownVolume {
+        service: String,
+        volume: String,
         span: Span,
     },
     /// A service declares more than one `external` network, so which
@@ -142,6 +169,7 @@ impl CodegenError {
     pub fn span(&self) -> Span {
         match self {
             CodegenError::UnknownNetwork { span, .. }
+            | CodegenError::UnknownVolume { span, .. }
             | CodegenError::AmbiguousExternalNetwork { span, .. }
             | CodegenError::UnknownInterpolation { span, .. }
             | CodegenError::MissingImage { span, .. }
@@ -178,6 +206,12 @@ impl CodegenError {
             } => write!(
                 f,
                 "{at}: service `{service}` references undeclared network `{network}`"
+            ),
+            CodegenError::UnknownVolume {
+                service, volume, ..
+            } => write!(
+                f,
+                "{at}: service `{service}` references undeclared volume `{volume}`"
             ),
             CodegenError::AmbiguousExternalNetwork {
                 service,
@@ -270,17 +304,17 @@ impl std::error::Error for CodegenError {}
 pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenError> {
     let mut services = IndexMap::new();
     let mut networks: IndexMap<String, doc::NetworkDoc> = IndexMap::new();
-    let mut volumes: IndexMap<String, Option<()>> = IndexMap::new();
+    let mut volumes: IndexMap<String, Option<doc::VolumeDoc>> = IndexMap::new();
     let mut referenced_networks: HashSet<&str> = HashSet::new();
 
     for service in &program.services {
-        let (service_doc, network_docs, named_volumes) =
-            generate_service(service, &program.networks)?;
+        let (service_doc, network_docs, volume_docs) =
+            generate_service(service, &program.networks, &program.volumes)?;
         for (net_name, net_doc) in network_docs {
             networks.entry(net_name).or_insert(net_doc);
         }
-        for vol_name in named_volumes {
-            volumes.entry(vol_name).or_insert(None);
+        for (vol_name, vol_doc) in volume_docs {
+            volumes.entry(vol_name).or_insert(vol_doc);
         }
         for r in &service.fields.networks {
             referenced_networks.insert(r.name.as_str());
@@ -317,7 +351,8 @@ pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenErr
 fn generate_service(
     service: &Service,
     declared_networks: &[Network],
-) -> Result<(doc::ComposeServiceDoc, NetworkDocs, Vec<String>), CodegenError> {
+    declared_volumes: &[Volume],
+) -> Result<(doc::ComposeServiceDoc, NetworkDocs, VolumeDocs), CodegenError> {
     let name = &service.name.name;
     let fields = &service.fields;
     let bindings: HashMap<&str, &str> = HashMap::from([("name", name.as_str())]);
@@ -352,16 +387,8 @@ fn generate_service(
         environment.push(format!("{key}={value}"));
     }
 
-    let mut volume_entries = Vec::with_capacity(fields.volumes.entries.len());
-    let mut named_volumes = Vec::new();
-    for v in &fields.volumes.entries {
-        let host = interp::resolve(v.host.text(), &bindings, v.host.span())?;
-        let container = interp::resolve(v.container.text(), &bindings, v.container.span())?;
-        if let Some(vol_name) = volume::classify_named_volume(&host) {
-            named_volumes.push(vol_name.to_string());
-        }
-        volume_entries.push(format!("{host}:{container}"));
-    }
+    let (volume_entries, volume_docs) =
+        resolve_volumes(&fields.volumes, declared_volumes, name, &bindings)?;
 
     // Compose short syntax, `"host:container"` — quoted, since YAML
     // reads a bare `8096:8096` as a sexagesimal integer rather than as a
@@ -415,7 +442,73 @@ fn generate_service(
     // shadows a built-in field emits the key twice (#68).
     service_doc.apply_raw_overrides();
 
-    Ok((service_doc, network_docs, named_volumes))
+    Ok((service_doc, network_docs, volume_docs))
+}
+
+/// Resolves a service's `volume` entries into the Compose-level
+/// `host:container` mount strings, plus the `(name, doc)` pairs to merge
+/// into the program's top-level `volumes:` section.
+///
+/// The direct counterpart of [`resolve_networks`], differing only in
+/// that not every entry is a reference: which entries are is settled by
+/// then, in the parser, by which token the host side was written as (see
+/// [`hl_parser::VolumeHost`]). A [`VolumeHost::Named`] resolves against
+/// `declared` exactly as a `networks [x]` entry resolves against the
+/// program's `network` declarations; a [`VolumeHost::BindMount`] passes
+/// through untouched and contributes nothing to `volumes:`, since Docker
+/// itself requires no declaration for a host path.
+fn resolve_volumes(
+    volumes: &VolumeMap,
+    declared: &[Volume],
+    service_name: &str,
+    bindings: &HashMap<&str, &str>,
+) -> Result<(Vec<String>, VolumeDocs), CodegenError> {
+    let mut entries = Vec::with_capacity(volumes.entries.len());
+    let mut docs = Vec::new();
+
+    for v in &volumes.entries {
+        // Host before container, so an entry with a problem on both
+        // sides reports the left one — the order the user reads them in.
+        let host = match &v.host {
+            // A bind-mount path is an ordinary value and interpolates
+            // like every other one (`volume "/srv/{{name}}" -> "/data"`).
+            VolumeHost::BindMount(lit) => interp::resolve(lit.text(), bindings, lit.span())?,
+            VolumeHost::Named(r) => {
+                let decl = declared
+                    .iter()
+                    .find(|d| d.name.name == r.name)
+                    .ok_or_else(|| {
+                        CodegenError::UnknownVolume {
+                            service: service_name.to_string(),
+                            volume: r.name.clone(),
+                            // The offending reference itself, not the
+                            // enclosing service — same choice #70 made for
+                            // `UnknownNetwork`.
+                            span: r.span,
+                        }
+                    })?;
+                let vol_doc = doc::VolumeDoc {
+                    name: decl.real_name.as_ref().map(|l| l.text().to_string()),
+                    external: decl.external.is_some(),
+                    driver: decl.driver.as_ref().map(|l| l.text().to_string()),
+                    driver_opts: decl
+                        .driver_opts
+                        .iter()
+                        .map(|o| (o.key.text().to_string(), o.value.text().to_string()))
+                        .collect(),
+                };
+                docs.push((
+                    decl.name.name.clone(),
+                    (!vol_doc.is_empty()).then_some(vol_doc),
+                ));
+                decl.name.name.clone()
+            }
+        };
+        let container = interp::resolve(v.container.text(), bindings, v.container.span())?;
+        entries.push(format!("{host}:{container}"));
+    }
+
+    Ok((entries, docs))
 }
 
 /// Resolves a service's `networks [x, ...]` references against the
@@ -558,6 +651,45 @@ mod error_display_tests {
         assert_eq!(
             err.to_string(),
             "3:5: service `web` references undeclared network `proxy`"
+        );
+    }
+
+    /// #60: worded identically to `UnknownNetwork`, and resolved
+    /// through the same [`Span::locate`] path, so the two read as one
+    /// family of diagnostic rather than two.
+    #[test]
+    fn unknown_volume_display() {
+        let err = CodegenError::UnknownVolume {
+            service: "syncthing".to_string(),
+            volume: "snycthing-config".to_string(),
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: service `syncthing` references undeclared volume `snycthing-config`"
+        );
+    }
+
+    /// And, like every other codegen diagnostic, it names the file when
+    /// the caller has a [`SourceMap`] to resolve against (#75).
+    #[test]
+    fn unknown_volume_display_with_a_source_map_names_the_file() {
+        let mut files = SourceMap::default();
+        let entry = files.intern("services/syncthing.hll");
+        let err = CodegenError::UnknownVolume {
+            service: "syncthing".to_string(),
+            volume: "snycthing-config".to_string(),
+            span: Span {
+                start: 0,
+                end: 0,
+                line: 6,
+                col: 10,
+                file: entry,
+            },
+        };
+        assert_eq!(
+            err.display(&files).to_string(),
+            "services/syncthing.hll:6:10: service `syncthing` references undeclared volume `snycthing-config`"
         );
     }
 

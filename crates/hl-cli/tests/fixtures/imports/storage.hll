@@ -1,0 +1,6 @@
+# The named volumes a service file mounts, kept apart from the service
+# that mounts them exactly as network.hll keeps the networks apart.
+# Imported as `storage`, so a mount reads `volume storage.<name> ->
+# "/container/path"`.
+
+volume syncthing-config {}

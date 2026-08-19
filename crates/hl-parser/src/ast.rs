@@ -9,11 +9,12 @@ pub struct Program {
 }
 
 /// One top-level declaration. `Service`/`TemplateDecl` are boxed since
-/// they're much larger than `Network` (many optional/list fields) — keeps
-/// `TopDecl` itself small to pass around.
+/// they're much larger than `Network`/`Volume` (many optional/list
+/// fields) — keeps `TopDecl` itself small to pass around.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TopDecl {
     Network(Network),
+    Volume(Volume),
     Service(Box<Service>),
     Template(Box<TemplateDecl>),
     Use(UseDecl),
@@ -127,9 +128,9 @@ pub struct Param {
 }
 
 /// A bare-identifier reference, e.g. an entry in `middleware`/
-/// `depends_on`/`networks`, or a `network` name referenced from a
-/// `service` (not yet resolved/validated against declared networks this
-/// milestone).
+/// `depends_on`/`networks`, the host side of a named-volume mount (see
+/// [`VolumeHost::Named`]), or a `network` name referenced from a
+/// `service`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reference {
     /// The `alias` in `alias.name`, from a `use`-imported file; `None`
@@ -166,6 +167,48 @@ pub struct Network {
     /// mirroring how [`Image::reference`] staying `Option` defers
     /// "required" enforcement to a later stage.
     pub real_name: Option<Literal>,
+    pub span: Span,
+}
+
+/// A parsed top-level `volume` declaration — the named Docker volume a
+/// service's `volume name -> "/path"` entry refers to. Deliberately the
+/// same shape as [`Network`] (`external` flag plus an optional
+/// `real_name` override), since the two answer the same question about
+/// two different Compose top-level sections; `driver`/`driver_opts` are
+/// the extra Compose knobs that only exist on the volume side.
+///
+/// Note the *field* named `volume` inside a `service`/`template` body is
+/// a different, map-kind schema ([`VolumeMap`]) that happens to share
+/// the identifier — a top-level `volume x { ... }` declares the volume,
+/// a service-level `volume x -> "/path"` mounts it. Field lookup and
+/// top-level-type lookup are separate tables (`schema::resolve_field`
+/// vs. `schema::top_level_type`), so the two roles never collide.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Volume {
+    pub name: Ident,
+    /// `Some(span)` of the bare `external` flag if it was set; `None`
+    /// otherwise — bare-presence only, exactly like [`Network::external`].
+    pub external: Option<Span>,
+    /// The real underlying Docker volume name, set via the `name` field
+    /// (`volume media { name: "media_store" }`), when it differs from
+    /// `name.name` above. `None` means "use `name.name` verbatim" —
+    /// codegen applies that default, mirroring [`Network::real_name`].
+    pub real_name: Option<Literal>,
+    /// Compose's own `driver:` key for this volume (`local`, `nfs`, ...).
+    pub driver: Option<Literal>,
+    /// Compose's own `driver_opts:` map — a free-form `key: value` bag
+    /// whose meaning belongs entirely to the chosen driver, so it's
+    /// carried through verbatim rather than checked against any schema.
+    pub driver_opts: Vec<VolumeDriverOpt>,
+    pub span: Span,
+}
+
+/// One `key: value` entry inside a top-level `volume`'s `driver_opts`
+/// body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VolumeDriverOpt {
+    pub key: Literal,
+    pub value: Literal,
     pub span: Span,
 }
 
@@ -223,9 +266,57 @@ pub struct VolumeMap {
 /// One `host -> container` mount entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VolumeEntry {
-    pub host: Literal,
+    pub host: VolumeHost,
     pub container: Literal,
     pub span: Span,
+}
+
+/// The host side of a `volume` entry: either a path on the machine
+/// Compose runs on, or a reference to a named Docker volume declared by
+/// a top-level `volume` declaration.
+///
+/// Which one is a *syntactic* question, decided here by the parser from
+/// the token it read, not later by inspecting the string's shape: a
+/// quoted string is always a path (`volume "/mnt/media" -> "/data"`,
+/// `volume "./config" -> "/config"`), and a bare identifier is always a
+/// reference (`volume syncthing-config -> "/config"`), exactly as a
+/// `networks [traefik-net]` entry is. That's what lets a named volume
+/// carry an `alias.name` qualifier at all — a string has no structure a
+/// qualifier could attach to — and it makes the distinction one the
+/// parser enforces rather than one codegen guesses.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VolumeHost {
+    /// A quoted path (or any other non-identifier literal, including a
+    /// `$param` a template substitutes a path into) bind-mounted from
+    /// the host. Needs no declaration — Docker itself requires none for
+    /// a host path.
+    BindMount(Literal),
+    /// A bare `IDENT`, optionally `alias.`-qualified, naming a top-level
+    /// [`Volume`] declaration. Resolved exactly like a `networks [x]`
+    /// entry: a bare name against the entry file's own declarations, a
+    /// qualified one against the aliased module's.
+    Named(Reference),
+}
+
+impl VolumeHost {
+    /// The host's location in source.
+    pub fn span(&self) -> Span {
+        match self {
+            VolumeHost::BindMount(lit) => lit.span(),
+            VolumeHost::Named(r) => r.span,
+        }
+    }
+
+    /// The host's text as written: the literal's content for a bind
+    /// mount, the referenced declaration's name for a named volume
+    /// (without any `alias.` qualifier, which names the file the
+    /// declaration lives in rather than the volume).
+    pub fn text(&self) -> &str {
+        match self {
+            VolumeHost::BindMount(lit) => lit.text(),
+            VolumeHost::Named(r) => &r.name,
+        }
+    }
 }
 
 /// `publish`'s entries — host-port → container-port mappings, emitted as

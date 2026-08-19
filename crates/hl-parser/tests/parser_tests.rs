@@ -1,7 +1,8 @@
 use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    Expected, Expose, Literal, ParamType, ParseError, TemplateDecl, TopDecl, UseDecl, parse,
+    Expected, Expose, Literal, ParamType, ParseError, TemplateDecl, TopDecl, UseDecl, VolumeHost,
+    parse,
 };
 
 fn parse_ok(source: &str) -> hl_parser::Program {
@@ -19,6 +20,13 @@ fn as_network(decl: &TopDecl) -> &hl_parser::Network {
     match decl {
         TopDecl::Network(n) => n,
         other => panic!("expected a Network decl, got {other:?}"),
+    }
+}
+
+fn as_volume(decl: &TopDecl) -> &hl_parser::Volume {
+    match decl {
+        TopDecl::Volume(v) => v,
+        other => panic!("expected a Volume decl, got {other:?}"),
     }
 }
 
@@ -299,6 +307,200 @@ fn network_without_real_name_field_is_none() {
     let program = parse_ok("network internal {}\n");
     let network = as_network(&program.decls[0]);
     assert!(network.real_name.is_none());
+}
+
+// --- top-level `volume` declarations (#60) ---
+//
+// `volume` is the one identifier that names both a top-level
+// declaration type and a `service`/`template` field. These pin that the
+// two roles stay separate: the same word resolves through
+// `schema::top_level_type` in one position and `schema::resolve_field`
+// in the other, and neither leaks into the other's position.
+
+#[test]
+fn volume_decl_with_empty_body_parses() {
+    let program = parse_ok("volume syncthing-config {}\n");
+    let volume = as_volume(&program.decls[0]);
+    assert_eq!(volume.name.name, "syncthing-config");
+    assert!(volume.external.is_none());
+    assert!(volume.real_name.is_none());
+    assert!(volume.driver.is_none());
+    assert!(volume.driver_opts.is_empty());
+}
+
+/// `external`/`name` are read exactly as `network`'s are — same field
+/// names, same bare-flag/scalar kinds, same "unset means use the
+/// declaration's own identifier" deferral.
+#[test]
+fn volume_decl_external_and_real_name() {
+    let program = parse_ok("volume media {\n  external\n  name: \"media_store\"\n}\n");
+    let volume = as_volume(&program.decls[0]);
+    assert!(volume.external.is_some());
+    assert_eq!(volume.real_name.as_ref().unwrap().text(), "media_store");
+}
+
+#[test]
+fn volume_decl_driver_and_driver_opts() {
+    let program = parse_ok(
+        "volume backups {\n  \
+           driver \"local\"\n  \
+           driver_opts {\n    type: \"nfs\"\n    device: \":/exports/backups\"\n  }\n\
+         }\n",
+    );
+    let volume = as_volume(&program.decls[0]);
+    assert_eq!(volume.driver.as_ref().unwrap().text(), "local");
+    let opts: Vec<(&str, &str)> = volume
+        .driver_opts
+        .iter()
+        .map(|o| (o.key.text(), o.value.text()))
+        .collect();
+    assert_eq!(opts, vec![("type", "nfs"), ("device", ":/exports/backups")]);
+}
+
+#[test]
+fn volume_decl_needs_name() {
+    let err = parse("volume {\n  external\n}\n").unwrap_err();
+    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+}
+
+#[test]
+fn unknown_field_in_volume_decl_says_volume() {
+    let err = parse("volume v {\n  nope: \"x\"\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnknownField {
+            type_name: "volume",
+            ref field,
+            ..
+        } if field == "nope"
+    ));
+}
+
+/// The point of the whole two-roles arrangement: a top-level `volume`
+/// declaration and a service-level `volume` *mount* in the same file
+/// each parse as their own thing, in one parse.
+#[test]
+fn volume_decl_and_volume_field_coexist_in_one_file() {
+    let program = parse_ok(
+        "volume syncthing-config {}\n\
+         service syncthing {\n  \
+           image \"x\"\n  \
+           volume syncthing-config -> \"/config\"\n\
+         }\n",
+    );
+    assert_eq!(as_volume(&program.decls[0]).name.name, "syncthing-config");
+    let service = as_service(&program.decls[1]);
+    assert_eq!(service.fields.volumes.entries.len(), 1);
+    assert_eq!(
+        service.fields.volumes.entries[0].host.text(),
+        "syncthing-config"
+    );
+}
+
+/// The host side is split by *syntax*, not by the string's shape: an
+/// unquoted identifier is a reference to a declaration, a quoted string
+/// is a path. The two forms sit side by side in one body here so the
+/// split can't be mistaken for a property of the content — `"media"`
+/// would have been a named volume under the old leading-`/`-or-`.`
+/// heuristic, and is unambiguously a bind mount now that it's quoted.
+#[test]
+fn volume_host_is_a_reference_when_unquoted_and_a_path_when_quoted() {
+    let program = parse_ok(
+        "service s {\n  \
+           volume media -> \"/data\"\n  \
+           volume \"media\" -> \"/other\"\n  \
+           volume \"/mnt/x\" -> \"/x\"\n\
+         }\n",
+    );
+    let entries = &as_service(&program.decls[0]).fields.volumes.entries;
+    assert!(matches!(
+        &entries[0].host,
+        VolumeHost::Named(r) if r.name == "media" && r.qualifier.is_none()
+    ));
+    assert!(matches!(&entries[1].host, VolumeHost::BindMount(lit) if lit.text() == "media"));
+    assert!(matches!(&entries[2].host, VolumeHost::BindMount(lit) if lit.text() == "/mnt/x"));
+    // `VolumeHost`'s own accessors read through either arm, and each
+    // host's span covers just that host — the entry span (which reaches
+    // past the `->` to the container side) is a different, wider thing.
+    let texts: Vec<&str> = entries.iter().map(|e| e.host.text()).collect();
+    assert_eq!(texts, vec!["media", "media", "/mnt/x"]);
+    for entry in entries {
+        assert!(entry.host.span().end <= entry.span.end);
+        assert_eq!(entry.host.span().start, entry.span.start);
+    }
+    // And the entry span really does reach past its own host, to the end
+    // of the container side.
+    assert!(entries[0].span.end > entries[0].host.span().end);
+}
+
+/// And a named-volume host takes the same `alias.name` qualifier every
+/// other cross-file reference does — the parser records it; the linker
+/// resolves it.
+#[test]
+fn volume_host_can_be_alias_qualified() {
+    let program = parse_ok(
+        "use \"shared.hll\" as common\n\
+         service s {\n  volume common.media -> \"/data\"\n}\n",
+    );
+    let entries = &as_service(&program.decls[1]).fields.volumes.entries;
+    let VolumeHost::Named(r) = &entries[0].host else {
+        panic!("expected a named-volume host, got {:?}", entries[0].host);
+    };
+    assert_eq!(r.qualifier.as_ref().unwrap().name, "common");
+    assert_eq!(r.name, "media");
+}
+
+/// The canonical map-body form takes both host kinds too, since it goes
+/// through the same entry parser as the bare-entry sugar.
+#[test]
+fn volume_map_body_takes_both_host_kinds() {
+    let program =
+        parse_ok("service s {\n  volume {\n    media: \"/data\"\n    \"/mnt/x\": \"/x\"\n  }\n}\n");
+    let entries = &as_service(&program.decls[0]).fields.volumes.entries;
+    assert!(matches!(&entries[0].host, VolumeHost::Named(r) if r.name == "media"));
+    assert!(matches!(&entries[1].host, VolumeHost::BindMount(_)));
+}
+
+/// A `publish` entry's key side stays a plain literal — the
+/// reference-capable key is `volume`'s alone, so a bare identifier here
+/// is still just a value.
+#[test]
+fn publish_keys_are_still_plain_literals() {
+    let program = parse_ok("service s {\n  publish 8096 -> 8096\n}\n");
+    let entries = &as_service(&program.decls[0]).fields.publish.entries;
+    assert_eq!(entries[0].host.text(), "8096");
+}
+
+/// The service-level field keeps its map-kind bare-entry sugar — the
+/// top-level declaration's struct-kind schema must not have displaced
+/// it. A `volume` field written the way a declaration is written is
+/// still a map entry missing its `->`.
+#[test]
+fn volume_field_still_requires_its_map_separator() {
+    let err = parse("service s {\n  volume \"a\"\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::MapEntryMissingSeparator {
+            type_name: "volume",
+            separator: TokenKind::Arrow,
+            ..
+        }
+    ));
+}
+
+/// And the reverse: a top-level `volume` body is a *struct* body, so a
+/// map entry written there is a parse error rather than being silently
+/// accepted as some map-kind sugar.
+#[test]
+fn map_entry_in_a_top_level_volume_body_is_error() {
+    let err = parse("volume v {\n  \"a\" -> \"b\"\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnknownField {
+            type_name: "volume",
+            ..
+        }
+    ));
 }
 
 fn entrypoints(expose: &Expose) -> Vec<&str> {

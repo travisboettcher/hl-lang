@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use hl_parser::{
     ComposeError, Ident, Network, Service, SourceMap, Span, SymbolResolver, TemplateDecl, TopDecl,
-    parse_in_file,
+    Volume, parse_in_file,
 };
 
 use crate::error::LinkError;
@@ -31,6 +31,11 @@ pub(crate) struct ModuleId(usize);
 struct Module {
     templates: HashMap<String, TemplateDecl>,
     networks: HashMap<String, Network>,
+    /// Every module's own top-level `volume` decls, by name — the table
+    /// a *qualified* `volume alias.name -> "/path"` mount resolves
+    /// against, exactly as `networks` above serves `networks
+    /// [alias.name]`.
+    volumes: HashMap<String, Volume>,
     aliases: HashMap<String, ModuleId>,
     /// Only ever populated for the entry module — see [`Graph::take_entry`].
     services: Vec<Service>,
@@ -40,6 +45,12 @@ struct Module {
     /// not) since `compose_with_resolver` wants these as a plain,
     /// order-preserving `Vec`.
     entry_networks: Vec<Network>,
+    /// The entry module's own top-level `volume` decls, in source order
+    /// — distinct from `volumes` above for exactly the reason
+    /// `entry_networks` is distinct from `networks`: that one is a
+    /// by-name map for qualified lookups against any module, this one is
+    /// the plain, order-preserving `Vec` `compose_with_resolver` wants.
+    entry_volumes: Vec<Volume>,
 }
 
 pub(crate) struct Graph {
@@ -70,14 +81,15 @@ impl Graph {
         std::mem::take(&mut self.warnings)
     }
 
-    /// Takes ownership of the entry module's own networks/services,
-    /// leaving everything else (templates, by-name networks, aliases —
-    /// for every module, entry included) untouched for
-    /// [`SymbolResolver`] lookups during composition.
-    pub(crate) fn take_entry(&mut self) -> (Vec<Network>, Vec<Service>) {
+    /// Takes ownership of the entry module's own networks/volumes/
+    /// services, leaving everything else (templates, by-name networks
+    /// and volumes, aliases — for every module, entry included)
+    /// untouched for [`SymbolResolver`] lookups during composition.
+    pub(crate) fn take_entry(&mut self) -> (Vec<Network>, Vec<Volume>, Vec<Service>) {
         let entry = &mut self.modules[0];
         (
             std::mem::take(&mut entry.entry_networks),
+            std::mem::take(&mut entry.entry_volumes),
             std::mem::take(&mut entry.services),
         )
     }
@@ -95,8 +107,8 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
     // Both things an imported file can declare that this stage then
     // drops on the floor: its own `service`s, and a `defaults` template
     // (#80). Neither is an error — the file is still perfectly usable
-    // for the templates and networks it was imported for — so they
-    // accumulate here and ride out alongside the finished graph.
+    // for the templates, networks, and volumes it was imported for — so
+    // they accumulate here and ride out alongside the finished graph.
     let mut warnings: Vec<LinkWarning> = Vec::new();
 
     let entry_id = ModuleId(0);
@@ -148,6 +160,28 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
                     }
                     module.networks.insert(n.name.name.clone(), n);
                 }
+                TopDecl::Volume(v) => {
+                    // Checked before either collection is touched, for
+                    // the same reason as `network` above: `entry_volumes`
+                    // is first-wins while `volumes` is last-wins for
+                    // `alias.name` lookups, so a duplicate would leave
+                    // bare and qualified references disagreeing about
+                    // which declaration is the real one (#63).
+                    if let Some(prev) = module.volumes.get(&v.name.name) {
+                        return Err(LinkError::compose(
+                            ComposeError::DuplicateVolumeName {
+                                name: v.name.name.clone(),
+                                first: prev.name.span,
+                                second: v.name.span,
+                            },
+                            &files,
+                        ));
+                    }
+                    if is_entry {
+                        module.entry_volumes.push(v.clone());
+                    }
+                    module.volumes.insert(v.name.name.clone(), v);
+                }
                 TopDecl::Service(s) => {
                     if let Some(&first) = service_spans.get(&s.name.name) {
                         return Err(LinkError::compose(
@@ -166,10 +200,10 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
                         // A non-entry file's own `service` decls are
                         // parsed but otherwise inert — nothing can
                         // reference a service across files, only
-                        // templates/networks. Dropping them is right;
-                        // dropping them *quietly* is what left a user who
-                        // split a service into a library file with no
-                        // output and no diagnostic (#80).
+                        // templates/networks/volumes. Dropping them is
+                        // right; dropping them *quietly* is what left a
+                        // user who split a service into a library file
+                        // with no output and no diagnostic (#80).
                         warnings.push(LinkWarning::ImportedService {
                             service: s.name.name.clone(),
                             span: s.name.span,
@@ -247,12 +281,7 @@ impl SymbolResolver for Graph {
         span: Span,
     ) -> Result<(ModuleId, &TemplateDecl), ComposeError> {
         let target = match qualifier {
-            Some(q) => *self.modules[scope.0].aliases.get(&q.name).ok_or_else(|| {
-                ComposeError::UnknownAlias {
-                    alias: q.name.clone(),
-                    span: q.span,
-                }
-            })?,
+            Some(q) => self.alias_target(scope, q)?,
             None => scope,
         };
         self.modules[target.0]
@@ -279,13 +308,7 @@ impl SymbolResolver for Graph {
         name: &str,
         span: Span,
     ) -> Result<&Network, ComposeError> {
-        let target = *self.modules[scope.0]
-            .aliases
-            .get(&qualifier.name)
-            .ok_or_else(|| ComposeError::UnknownAlias {
-                alias: qualifier.name.clone(),
-                span: qualifier.span,
-            })?;
+        let target = self.alias_target(scope, qualifier)?;
         self.modules[target.0].networks.get(name).ok_or_else(|| {
             ComposeError::UnknownQualifiedNetwork {
                 alias: qualifier.name.clone(),
@@ -293,5 +316,38 @@ impl SymbolResolver for Graph {
                 span,
             }
         })
+    }
+
+    fn resolve_qualified_volume(
+        &self,
+        scope: ModuleId,
+        qualifier: &Ident,
+        name: &str,
+        span: Span,
+    ) -> Result<&Volume, ComposeError> {
+        let target = self.alias_target(scope, qualifier)?;
+        self.modules[target.0].volumes.get(name).ok_or_else(|| {
+            ComposeError::UnknownQualifiedVolume {
+                alias: qualifier.name.clone(),
+                name: name.to_string(),
+                span,
+            }
+        })
+    }
+}
+
+impl Graph {
+    /// The module an `alias.` qualifier names, from `scope`'s own alias
+    /// table — the first half of every qualified lookup, whatever kind
+    /// of declaration the second half goes looking for.
+    fn alias_target(&self, scope: ModuleId, qualifier: &Ident) -> Result<ModuleId, ComposeError> {
+        self.modules[scope.0]
+            .aliases
+            .get(&qualifier.name)
+            .copied()
+            .ok_or_else(|| ComposeError::UnknownAlias {
+                alias: qualifier.name.clone(),
+                span: qualifier.span,
+            })
     }
 }

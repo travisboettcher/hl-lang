@@ -632,6 +632,292 @@ fn duplicate_template_in_an_imported_file_names_that_file() {
     );
 }
 
+/// #60: a *bare* named-volume mount resolves against the entry file's
+/// own top-level declarations — the same rule a bare `networks [x]`
+/// entry already follows. The entry file's declarations reach the
+/// composed program in source order.
+#[test]
+fn entry_file_volume_declarations_reach_the_composed_program() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "templates.hll",
+        "template linuxserver_app {\n  env PUID = \"1000\"\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"templates.hll\" as common\n\
+         volume syncthing-config {\n  external\n}\n\
+         service syncthing {\n  \
+           with common.linuxserver_app\n  \
+           image \"lscr.io/linuxserver/syncthing\"\n  \
+           volume syncthing-config -> \"/config\"\n\
+         }\n",
+    );
+
+    let composed = link(Path::new("svc.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
+    assert_eq!(composed.volumes.len(), 1);
+    assert_eq!(composed.volumes[0].name.name, "syncthing-config");
+    assert!(composed.volumes[0].external.is_some());
+    assert_eq!(
+        composed.volumes[0]
+            .name
+            .span
+            .locate(Some(&composed.files))
+            .path(),
+        Some(Path::new("svc.hll"))
+    );
+}
+
+/// A redeclaration inside an imported file is a mistake worth reporting
+/// even when the entry file never reaches either declaration, exactly as
+/// a redeclared `service` in an imported file already is.
+#[test]
+fn duplicate_volume_in_an_imported_file_is_still_an_error() {
+    let mut loader = InMemoryLoader::default();
+    loader.add("lib.hll", "volume data {}\nvolume data {\n  external\n}\n");
+    loader.add(
+        "svc.hll",
+        "use \"lib.hll\" as lib\nservice web {\n  image \"nginx\"\n}\n",
+    );
+
+    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        err,
+        LinkError::Compose {
+            source: ComposeError::DuplicateVolumeName { ref name, .. },
+            ..
+        } if name == "data"
+    ));
+}
+
+/// A named-volume host is a reference, so it takes an `alias.name`
+/// qualifier exactly as a `networks [alias.name]` entry does: the
+/// imported declaration is pulled into the composed program, carrying
+/// its own options, and the mount is rewritten to its bare name.
+#[test]
+fn qualified_volume_reference_resolves_across_files() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "storage.hll",
+        "volume media {\n  external\n  name: \"media_store\"\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"storage.hll\" as storage\n\
+         service jellyfin {\n  \
+           image \"jellyfin/jellyfin\"\n  \
+           volume storage.media -> \"/data\"\n\
+         }\n",
+    );
+
+    let composed = link(Path::new("svc.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
+    assert_eq!(composed.volumes.len(), 1);
+    assert_eq!(composed.volumes[0].name.name, "media");
+    assert_eq!(
+        composed.volumes[0].real_name.as_ref().unwrap().text(),
+        "media_store"
+    );
+    // The declaration stays attributed to the file it was written in.
+    assert_eq!(
+        composed.volumes[0]
+            .name
+            .span
+            .locate(Some(&composed.files))
+            .path(),
+        Some(Path::new("storage.hll"))
+    );
+    let host = &composed.services[0].fields.volumes.entries[0].host;
+    assert_eq!(host.text(), "media");
+}
+
+/// A qualified volume host reached from inside an imported *template*
+/// resolves in the template's own declaring file, per the same lexical
+/// scoping rule every other qualified reference follows.
+#[test]
+fn qualified_volume_reference_inside_a_template_resolves_in_its_own_file() {
+    let mut loader = InMemoryLoader::default();
+    loader.add("storage.hll", "volume media {\n  external\n}\n");
+    loader.add(
+        "templates.hll",
+        "use \"storage.hll\" as storage\n\
+         template mounts_media {\n  volume storage.media -> \"/data\"\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"templates.hll\" as common\n\
+         service jellyfin {\n  image \"x\"\n  with common.mounts_media\n}\n",
+    );
+
+    let composed = link(Path::new("svc.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
+    assert_eq!(composed.volumes.len(), 1);
+    assert_eq!(composed.volumes[0].name.name, "media");
+    assert!(composed.volumes[0].external.is_some());
+}
+
+/// The volume-side counterpart to `unknown_qualified_network_is_error`:
+/// the alias resolves to a real imported module, but that module has no
+/// `volume` by that name.
+#[test]
+fn unknown_qualified_volume_is_error() {
+    let mut loader = InMemoryLoader::default();
+    loader.add("storage.hll", "volume media {}\n");
+    loader.add(
+        "svc.hll",
+        "use \"storage.hll\" as storage\n\
+         service s {\n  image \"x\"\n  volume storage.nonexistent -> \"/data\"\n}\n",
+    );
+
+    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        err,
+        LinkError::Compose { source: ComposeError::UnknownQualifiedVolume { alias, name, .. }, .. }
+            if alias == "storage" && name == "nonexistent"
+    ));
+}
+
+/// An alias that names nothing is `UnknownAlias`, not
+/// `UnknownQualifiedVolume` — the two halves of a qualified reference
+/// fail separately, exactly as they do for a network.
+#[test]
+fn qualified_volume_with_an_unknown_alias_is_an_alias_error() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "svc.hll",
+        "service s {\n  image \"x\"\n  volume nope.media -> \"/data\"\n}\n",
+    );
+
+    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        err,
+        LinkError::Compose { source: ComposeError::UnknownAlias { alias, .. }, .. }
+            if alias == "nope"
+    ));
+}
+
+/// #71's rule, volume side: an imported volume keeps its own bare name
+/// as its key in the generated `volumes:` section, so a file that both
+/// imports one and declares its own under that name is asking for two
+/// different volumes under one Compose key.
+#[test]
+fn imported_volume_colliding_with_a_local_one_is_error() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "storage.hll",
+        "volume media {\n  external\n  name: \"imported_real_name\"\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"storage.hll\" as storage\n\
+         volume media {\n  name: \"local_real_name\"\n}\n\
+         service web {\n  image \"nginx\"\n  volume storage.media -> \"/data\"\n}\n",
+    );
+
+    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        &err,
+        LinkError::Compose { source: ComposeError::CollidingImportedVolume { alias, name, .. }, .. }
+            if alias == "storage" && name == "media"
+    ));
+    // Points at the reference in the entry file, not at the imported
+    // declaration: the reference is the line the user would edit.
+    let LinkError::Compose {
+        source: compose_err,
+        ..
+    } = &err
+    else {
+        panic!("expected a compose error, got {err:?}");
+    };
+    let span = compose_err.span();
+    assert_eq!((span.line, span.col), (7, 10));
+}
+
+/// The same collision between two *imported* modules, neither of them
+/// the entry file's own.
+#[test]
+fn two_imported_volumes_sharing_a_bare_name_is_error() {
+    let mut loader = InMemoryLoader::default();
+    loader.add("a.hll", "volume media {\n  name: \"a_real\"\n}\n");
+    loader.add("b.hll", "volume media {\n  name: \"b_real\"\n}\n");
+    loader.add(
+        "svc.hll",
+        "use \"a.hll\" as a\n\
+         use \"b.hll\" as b\n\
+         service s {\n  \
+           image \"x\"\n  \
+           volume a.media -> \"/a\"\n  \
+           volume b.media -> \"/b\"\n\
+         }\n",
+    );
+
+    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        err,
+        LinkError::Compose { source: ComposeError::CollidingImportedVolume { alias, name, .. }, .. }
+            if alias == "b" && name == "media"
+    ));
+}
+
+/// One imported volume reached from several places is one volume, not a
+/// collision with itself.
+#[test]
+fn one_imported_volume_referenced_by_several_services_is_fine() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "storage.hll",
+        "volume media {\n  external\n  name: \"real\"\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"storage.hll\" as storage\n\
+         service jellyfin {\n  image \"x\"\n  volume storage.media -> \"/data\"\n}\n\
+         service sonarr {\n  image \"x\"\n  volume storage.media -> \"/media\"\n}\n",
+    );
+
+    let composed = link(Path::new("svc.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
+    assert_eq!(composed.volumes.len(), 1);
+    assert_eq!(
+        composed.volumes[0].real_name.as_ref().unwrap().text(),
+        "real"
+    );
+}
+
+/// A local volume sharing no name with anything imported is untouched by
+/// the check — both survive into the composed program, entry file's own
+/// declarations first.
+#[test]
+fn local_and_imported_volumes_with_distinct_names_both_survive() {
+    let mut loader = InMemoryLoader::default();
+    loader.add("storage.hll", "volume media {\n  external\n}\n");
+    loader.add(
+        "svc.hll",
+        "use \"storage.hll\" as storage\n\
+         volume config {}\n\
+         service s {\n  \
+           image \"x\"\n  \
+           volume config -> \"/config\"\n  \
+           volume storage.media -> \"/data\"\n\
+         }\n",
+    );
+
+    let composed = link(Path::new("svc.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
+    let names: Vec<&str> = composed
+        .volumes
+        .iter()
+        .map(|v| v.name.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["config", "media"]);
+}
+
 /// The composed program carries the graph's own path table, so codegen —
 /// which runs after `link` and never reads a file itself — can still
 /// name the file any span it reports came from.

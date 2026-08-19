@@ -22,8 +22,8 @@ use hl_parser::{SourceMap, Span};
 pub enum LinkWarning {
     /// An imported (non-entry) file declares a `service`. Only the entry
     /// file's services are compiled — a `use`d file is loaded for its
-    /// templates and networks, and nothing can reference a service
-    /// across files — so this declaration is parsed, checked for
+    /// templates, networks, and volumes, and nothing can reference a
+    /// service across files — so this declaration is parsed, checked for
     /// duplicates, and then discarded.
     ImportedService { service: String, span: Span },
     /// An imported (non-entry) file declares `template defaults`. The
