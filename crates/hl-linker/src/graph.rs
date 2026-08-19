@@ -107,8 +107,8 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
     // Both things an imported file can declare that this stage then
     // drops on the floor: its own `service`s, and a `defaults` template
     // (#80). Neither is an error — the file is still perfectly usable
-    // for the templates and networks it was imported for — so they
-    // accumulate here and ride out alongside the finished graph.
+    // for the templates, networks, and volumes it was imported for — so
+    // they accumulate here and ride out alongside the finished graph.
     let mut warnings: Vec<LinkWarning> = Vec::new();
 
     let entry_id = ModuleId(0);
@@ -200,10 +200,10 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
                         // A non-entry file's own `service` decls are
                         // parsed but otherwise inert — nothing can
                         // reference a service across files, only
-                        // templates/networks. Dropping them is right;
-                        // dropping them *quietly* is what left a user who
-                        // split a service into a library file with no
-                        // output and no diagnostic (#80).
+                        // templates/networks/volumes. Dropping them is
+                        // right; dropping them *quietly* is what left a
+                        // user who split a service into a library file
+                        // with no output and no diagnostic (#80).
                         warnings.push(LinkWarning::ImportedService {
                             service: s.name.name.clone(),
                             span: s.name.span,
