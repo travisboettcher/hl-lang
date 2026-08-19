@@ -23,9 +23,9 @@ use std::fmt;
 use hl_lexer::{SourceMap, Span};
 
 use crate::ast::{
-    EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, ParamType, Program, RawMap, RawValue,
-    Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Volume,
-    VolumeEntry, VolumeMap,
+    EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, ParamType, Program, PublishEntry,
+    PublishMap, RawMap, RawValue, Reference, Restart, Service, ServiceFields, TemplateDecl,
+    TemplateInvocation, TopDecl, Volume, VolumeEntry, VolumeMap,
 };
 use crate::schema::MapSide;
 
@@ -203,9 +203,10 @@ pub enum ComposeError {
         second: Span,
     },
     /// Same rule as [`Self::FieldCollision`], for a map field
-    /// (`env`/`volume`) — two explicit templates set the same key
-    /// (`env`) or container path (`volume`, matching that field's
-    /// existing [`MapSide::Value`] uniqueness convention). Boxed since
+    /// (`env`/`volume`/`publish`) — two explicit templates set the same
+    /// key (`env`), container path (`volume`), or container port
+    /// (`publish`) — each matching that field's own existing [`MapSide`]
+    /// uniqueness convention. Boxed since
     /// this is by far `ComposeError`'s largest variant (five owned
     /// fields) and every other variant is much smaller.
     MapKeyCollision(Box<MapKeyCollision>),
@@ -1385,6 +1386,10 @@ fn substitute_params(
         substitute_literal(&mut v.host, args, template_name)?;
         substitute_literal(&mut v.container, args, template_name)?;
     }
+    for p in &mut fields.publish.entries {
+        substitute_literal(&mut p.host, args, template_name)?;
+        substitute_literal(&mut p.container, args, template_name)?;
+    }
     for e in &mut fields.env.entries {
         substitute_literal(&mut e.key, args, template_name)?;
         substitute_literal(&mut e.value, args, template_name)?;
@@ -1551,6 +1556,11 @@ impl Spanned for EnvEntry {
         self.span
     }
 }
+impl Spanned for PublishEntry {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
 
 /// The accumulator a field-bag's tiers merge into, tracking which tier
 /// last set each value so [`merge_scalar`]/[`merge_map`] can tell
@@ -1588,6 +1598,7 @@ struct MergeAcc {
     lists: HashMap<&'static str, Vec<Reference>>,
     volumes: Vec<(VolumeEntry, Tier)>,
     env: Vec<(EnvEntry, Tier)>,
+    publish: Vec<(PublishEntry, Tier)>,
     raw: RawMap,
 }
 
@@ -1599,6 +1610,9 @@ impl MergeAcc {
             },
             env: EnvMap {
                 entries: self.env.into_iter().map(|(v, _)| v).collect(),
+            },
+            publish: PublishMap {
+                entries: self.publish.into_iter().map(|(v, _)| v).collect(),
             },
             raw: self.raw,
             ..Default::default()
@@ -1893,6 +1907,14 @@ fn merge_tier(
         tier,
         |e| e.key.text().to_string(),
     )?;
+    merge_map(
+        &mut acc.publish,
+        "publish",
+        MapSide::Value,
+        incoming.publish.entries,
+        tier,
+        |e| e.container.text().to_string(),
+    )?;
     acc.raw.entries.extend(incoming.raw.entries);
     Ok(())
 }
@@ -1937,7 +1959,8 @@ fn merge_scalar(
 }
 
 /// Merges one map-kind field's entries, keyed by `key_of` (the container
-/// path for `volume`, the key for `env` — matching each field's existing
+/// path for `volume`, the key for `env`, the container port for
+/// `publish` — matching each field's existing
 /// [`MapSide`] uniqueness convention). Same tier rules as
 /// [`merge_single`], applied per-key rather than to the field as a whole.
 fn merge_map<E: Spanned>(

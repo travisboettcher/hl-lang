@@ -182,6 +182,35 @@ pub static VOLUME: TypeSchema = TypeSchema {
     schema_free: false,
 };
 
+/// `publish 8096 -> 8096` / `publish { 8096: 8096 }` — a host-port →
+/// container-port mapping, emitted as Compose's `ports:` list. Spelled
+/// with the same `->` separator as [`VOLUME`] because it's the same
+/// shape: a host-side resource mapped onto a container-side one. Kept
+/// entirely separate from [`EXPOSE`], which keeps its own meaning
+/// (Compose's `expose:` — container-network visibility only, plus the
+/// Traefik router labels) unchanged.
+///
+/// Uniqueness on the value (container port) side, matching [`VOLUME`]'s
+/// own `host -> container` convention rather than the host side. Docker's
+/// real conflict is on the host side, but a protocol suffix rides on the
+/// container half of a Compose short-syntax mapping (`53:53/udp`), so a
+/// host-side check would reject the very configuration this field exists
+/// to make expressible — Pi-hole publishing both `53 -> "53/tcp"` and
+/// `53 -> "53/udp"`. Checking the container side still catches the
+/// copy-paste case (the same target port written twice) and leaves the
+/// legitimate one alone.
+pub static PUBLISH: TypeSchema = TypeSchema {
+    type_name: "publish",
+    kind: SchemaKind::Map,
+    fields: &[],
+    primary_field: None,
+    map_separator: Some(TokenKind::Arrow),
+    uniqueness: Some(MapSide::Value),
+    bare_keyword_alias: None,
+    needs_name: false,
+    schema_free: false,
+};
+
 /// `env KEY = "value"` / `env { KEY: "value" }`. Uniqueness on the key
 /// side.
 pub static ENV: TypeSchema = TypeSchema {
@@ -351,6 +380,10 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
         kind: FieldKind::Nested(&RESTART),
     },
     FieldSchema {
+        name: "publish",
+        kind: FieldKind::Nested(&PUBLISH),
+    },
+    FieldSchema {
         name: "volume",
         kind: FieldKind::Nested(&VOLUME),
     },
@@ -432,6 +465,21 @@ pub fn top_level_type(name: &str) -> Option<&'static TypeSchema> {
         "service" => Some(&SERVICE),
         _ => None,
     }
+}
+
+/// Whether `schema`'s body accepts a schema-free passthrough field (a
+/// `Nested` field whose own type is [`TypeSchema::schema_free`] — today
+/// exactly `raw`, on `service` and `template`).
+///
+/// Drives [`crate::ParseError::UnknownField`]'s `raw { ... }` hint, so
+/// the hint is offered only in bodies where writing it would actually
+/// compile. Derived from the schema rather than from a hardcoded list of
+/// type names, so it can't drift away from the field tables above.
+pub fn supports_raw(schema: &'static TypeSchema) -> bool {
+    schema
+        .fields
+        .iter()
+        .any(|f| matches!(f.kind, FieldKind::Nested(nested) if nested.schema_free))
 }
 
 pub enum FieldResolution {

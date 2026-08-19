@@ -546,15 +546,29 @@ fn write_output(out_path: &Path, yaml: &str, force: bool) -> Result<(), ExitCode
 /// That map is why the codegen error is rendered through
 /// `CodegenError::display`: `generate` consumes the composed program, so
 /// the map is cloned out of it first (cheap — a handful of paths).
+///
+/// Warnings (#80) are rendered the same way and printed to stderr as
+/// they come out of each stage, but change nothing else: a build that
+/// raises only warnings still writes its output and still exits 0, so
+/// `hllc --build` stays usable as a CI gate without every dropped
+/// declaration failing it. There is no flag to suppress them yet — that
+/// is deliberately a separate decision, since a suppression scheme is
+/// much harder to retrofit onto one that was designed without it.
 fn build_yaml(path: &Path) -> Result<String, ExitCode> {
-    let composed = hl_linker::link(path, &hl_linker::FsLoader).map_err(|err| {
+    let linked = hl_linker::link(path, &hl_linker::FsLoader).map_err(|err| {
         eprintln!("{err}");
         ExitCode::FAILURE
     })?;
-    let files = composed.files.clone();
-    let generated = hl_codegen::generate(composed).map_err(|err| {
+    let files = linked.program.files.clone();
+    for warning in &linked.warnings {
+        eprintln!("{}", warning.display(&files));
+    }
+    let generated = hl_codegen::generate(linked.program).map_err(|err| {
         eprintln!("{}", err.display(&files));
         ExitCode::FAILURE
     })?;
+    for warning in &generated.warnings {
+        eprintln!("{}", warning.display(&files));
+    }
     Ok(format!("{GENERATED_HEADER}{}", generated.yaml))
 }

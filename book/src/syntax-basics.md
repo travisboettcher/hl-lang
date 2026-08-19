@@ -103,12 +103,13 @@ expose 8096, host: "media.example.com", entrypoint: web-secure
 
 ## Map-style shorthand
 
-Two types—`volume` and `env`—are conceptually key/value maps rather
-than named struct fields, and each has its own natural-looking separator
-instead of a colon:
+Three types—`volume`, `publish`, and `env`—are conceptually key/value
+maps rather than named struct fields, and each has its own
+natural-looking separator instead of a colon:
 
 ```hll,fragment
 volume "/mnt/media" -> "/data"     # host path -> container path
+publish 8096 -> 8096               # host port -> container port
 env PUID = "1000"                  # key = value
 ```
 
@@ -117,12 +118,12 @@ env PUID = "1000"                  # key = value
 different thing—the declaration of a named Docker volume, whose body is
 an ordinary struct body. See [`volume`](./built-in-fields.md#volume).
 
-Writing either of these more than once in the same body accumulates
+Writing any of these more than once in the same body accumulates
 entries rather than overwriting—a service can have several `volume`
-lines and several `env` lines. The same is true of `middleware` and
-`depends_on`, which are list fields. `image` and `restart`, by contrast,
-are scalar—writing either twice in the same body is a compile error,
-not a silent overwrite.
+lines, several `publish` lines, and several `env` lines. The same is
+true of `middleware` and `depends_on`, which are list fields. `image`
+and `restart`, by contrast, are scalar—writing either twice in the same
+body is a compile error, not a silent overwrite.
 
 ## Layout rules
 

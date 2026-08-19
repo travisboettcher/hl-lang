@@ -233,3 +233,41 @@ raised it:
   path on each is what distinguishes them, and it points at the file the
   field was really written in, which may be an imported one you never
   opened.
+
+## Warnings
+
+Not everything `hllc` has to say is fatal. Some of what you can write is
+legal, deliberately dropped, and still worth hearing about, since a
+declaration that compiles to nothing at all looks exactly like one you
+forgot to write. Those are **warnings**. `hllc` prints each one to
+stderr in the same `path:line:col:` shape as an error, with a `warning:`
+marker after the location, and it changes neither the exit code nor the
+output. A build that raises only warnings still writes its files and
+still exits 0, so a warning can't break a CI gate:
+
+```text
+shared/common.hll:1:10: warning: template `defaults` is declared in an imported file and is not applied — `defaults` is only looked up in the entry file; give it an ordinary name and apply it with `with`
+shared/common.hll:6:9: warning: service `db` is declared in an imported file and is not compiled — only the entry file's services are built
+jellyfin.hll:2:9: warning: network `unused` is declared but no service references it, so it is not emitted — add it to a service's `networks [...]` list, or remove the declaration
+```
+
+There are three of them today, one per construct that a stage drops on
+purpose:
+
+- a `service` in an imported file, since `hllc` builds only the entry
+  file's services—see
+  [Imports](./imports.md#only-the-entry-file-contributes-services)
+- a `template defaults` in an imported file, since `hllc` looks
+  `defaults` up only in the entry file
+- a top-level `network` no service references, since `hllc` builds the
+  `networks:` section from services' references
+
+No flag silences them yet. When one is telling you about something you
+meant, the fix is to write it in a way that drops nothing, and the
+warning text names that fix in each case.
+
+A fourth construct once dropped this way—`middleware` or
+`expose.entrypoint` on a service with no `expose.host`—is a hard
+**error** instead, because a middleware with no router is never
+something you could have meant. See
+[`expose`](./built-in-fields.md#expose).

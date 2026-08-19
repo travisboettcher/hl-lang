@@ -36,3 +36,5 @@ enum
 coercively
 Traefik
 [Ll]exing
+Jellyfin
+Syncthing

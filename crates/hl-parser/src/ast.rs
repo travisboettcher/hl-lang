@@ -271,6 +271,27 @@ pub struct VolumeEntry {
     pub span: Span,
 }
 
+/// `publish`'s entries — host-port → container-port mappings, emitted as
+/// Compose's `ports:` list. Uniqueness is checked on `container` (the
+/// value side of `host -> container`), matching [`VolumeMap`]'s own
+/// convention; see [`crate::schema::PUBLISH`] for why that side rather
+/// than the host one.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PublishMap {
+    pub entries: Vec<PublishEntry>,
+}
+
+/// One `host -> container` published-port entry. Both sides are plain
+/// [`Literal`]s rather than parsed port numbers: a quoted container side
+/// is how a protocol suffix is written (`publish 53 -> "53/udp"`), and a
+/// bare number is the ordinary case.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PublishEntry {
+    pub host: Literal,
+    pub container: Literal,
+    pub span: Span,
+}
+
 /// `env`'s entries. Uniqueness is checked on `key`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EnvMap {
@@ -355,6 +376,11 @@ pub struct ServiceFields {
     pub image: Option<Image>,
     pub expose: Option<Expose>,
     pub restart: Option<Restart>,
+    /// `publish 8096 -> 8096` entries — Compose's `ports:` key. Distinct
+    /// from `expose` above, which is Compose's `expose:` (visible to
+    /// other containers on the same network, never published to the
+    /// host) plus the Traefik router labels.
+    pub publish: PublishMap,
     pub volumes: VolumeMap,
     pub env: EnvMap,
     pub raw: RawMap,

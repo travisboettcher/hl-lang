@@ -43,9 +43,9 @@ Punctuation: { } [ ] ( ) : = -> , . $
 
 - `template` is the *only* reserved word in the entire language. Everything
   else that looks like a keyword (`service`, `network`, `image`, `volume`,
-  `env`, `restart`, `expose`, `middleware`, `depends_on`, `networks`, `dns`,
-  `container_name`, `with`, `as`, `external`, `use`, `raw`, `defaults`, and
-  more) is an ordinary `IDENT`,
+  `publish`, `env`, `restart`, `expose`, `middleware`, `depends_on`,
+  `networks`, `dns`, `container_name`, `with`, `as`, `external`, `use`,
+  `raw`, `defaults`, and more) is an ordinary `IDENT`,
   resolved against a schema table at parse time—not a lexer-level
   keyword. `with`, `as`, `external`, and `use` are *contextual* keywords,
   meaningful only in the grammar position expected (the same technique as
@@ -155,16 +155,17 @@ both depend on source position/line, not just token identity:
   the comma itself is never optional when there *is* a next item. Bare
   adjacency with no comma at all no longer implies continuation.
 
-Map-kind bodies—`raw { }`, `volume { }`/`env { }`, and a `with`-invocation's
-own argument body (which reuses `raw`'s entry parsing)—are exempt from the
-newline rule in the *opposite* direction from the preceding comma-list
-rule: their entries are conceptually key-value pairs in a dictionary, not
-named struct fields, and either a comma *or* a newline, not just a comma,
-is enough to separate them, so the compact one-line style (`{ puid: 1000,
-pgid: 100 }`) used throughout this doc's own worked examples stays valid,
-comma-separated, on one line, alongside the equally valid multi-line form
-with no commas at all. What's never valid is bare adjacency on *one* line
-with neither: `{ "a": "/x" "b": "/y" }` is a parse error (`expected a comma
+Map-kind bodies—`raw { }`, `volume { }`/`publish { }`/`env { }`, and a
+`with`-invocation's own argument body (which reuses `raw`'s entry
+parsing)—are exempt from the newline rule in the *opposite* direction
+from the preceding comma-list rule: their entries are conceptually
+key-value pairs in a dictionary, not named struct fields, and either a
+comma *or* a newline, not just a comma, is enough to separate them, so
+the compact one-line style (`{ puid: 1000, pgid: 100 }`) used throughout
+this doc's own worked examples stays valid, comma-separated, on one line,
+alongside the equally valid multi-line form with no commas at all. What's
+never valid is bare adjacency on *one* line with neither:
+`{ "a": "/x" "b": "/y" }` is a parse error (`expected a comma
 or a newline before the next entry`), same as the comma-list rule's own
 "bare adjacency no longer implies continuation"—only here a newline is
 also an accepted substitute for the comma, not just its own separate case.
@@ -209,8 +210,8 @@ same two entries—see #81.
    a valid statement start and now correctly errors instead of silently
    reattaching elsewhere.
 4. **Repeatable-field accumulation**—semantic, not part of the
-   Context-Free Grammar (CFG)—writing `volume`, `env`, `middleware`, or
-   `depends_on` more than once in
+   Context-Free Grammar (CFG)—writing `volume`, `publish`, `env`,
+   `middleware`, or `depends_on` more than once in
    one body appends, since those fields are list/map-kinded—subject to
    the set-like lists' distinct-name rule under "Composition" below, which
    drops a repeat of a name already present. Writing
@@ -228,6 +229,7 @@ same two entries—see #81.
 | `expose` | struct | `port` |—|—| no |
 | `volume`—the `service`/`template` field | map |—| `->` | value—the container path | no |
 | `driver_opts`—inside a `volume` declaration | map |—| `:` | key | no |
+| `publish` | map |—| `->` | value—the container port | no |
 | `env` | map |—| `=` | key | no |
 | `restart` | struct | `policy` |—|—| no |
 | `with` | struct | `templates`—list of nested instantiations |—|—| no |
@@ -253,6 +255,21 @@ codegen emits the `raw` value and drops the built-in one, which keeps
 adding a row to this table from breaking files that were already
 reaching for `raw` in that row's absence (see the `raw` section of the
 book's Built-in Fields page).
+
+`publish` and `expose` are separate rows on purpose, not two spellings
+of one concept. `publish` is Compose's `ports:` key, which puts the port
+on the Docker host where the local network can reach it, and `expose` is
+Compose's `expose:` key, which reaches only other containers on the same
+network, plus the Traefik router labels. A homelab needs both: much of
+it sits behind Traefik and wants `expose`, while Pi-hole on 53, a
+Syncthing sync port, or a game server takes traffic directly and wants
+`publish`—see #84. `publish` borrows `volume`'s `->` separator and its
+value-side uniqueness because it has the same shape, a host-side
+resource mapped onto a container-side one. Uniqueness lands on the
+container port rather than the host one because a protocol suffix rides
+on the container half of a Compose short-syntax mapping (`53:53/udp`),
+so checking the host side would reject one host port serving both
+protocols—exactly the configuration the field exists to express.
 
 `expose`'s own `entrypoint` sub-field is a list of references too
 (`entrypoint web, web-secure`), for the same reason it isn't a scalar
@@ -307,15 +324,15 @@ List fields concatenate, so no collision is possible. The set-like ones
 (`middleware`, `depends_on`, `networks`, `expose.entrypoint`) concatenate
 by *distinct* name, keeping the first occurrence, while `dns` keeps
 duplicates since its order is observable resolver priority. Map fields
-merge key-by-key (or value-by-value for `volume`), and scalar fields
-(`image`, `restart`) error on collision among explicit templates only.
-`expose`, the one built-in struct field with more than one sub-field,
-merges per sub-field (`port`/`host`/`entrypoint` independently) rather
-than as one indivisible unit—the same key-by-key reasoning as a map
-field, applied to a struct's named fields instead of a map's keys. Each
-sub-field then merges by its own kind: `port`/`host` are scalars and
-collide, `entrypoint` is a list and concatenates, so two explicit
-templates each naming one entry point yield a router attached to both
+merge key-by-key (or value-by-value for `volume` and `publish`), and
+scalar fields (`image`, `restart`) error on collision among explicit
+templates only. `expose`, the one built-in struct field with more than
+one sub-field, merges per sub-field (`port`/`host`/`entrypoint`
+independently) rather than as one indivisible unit—the same key-by-key
+reasoning as a map field, applied to a struct's named fields instead of
+a map's keys. Each sub-field then merges by its own kind: `port`/`host`
+are scalars and collide, `entrypoint` is a list and concatenates, so two
+explicit templates each naming one entry point yield a router attached to both
 rather than a `FieldCollision`. Two naming the same entry point yield a
 router attached to it once, per the distinct-name rule. This means a
 service's own body can override just `expose.host` while still
@@ -381,6 +398,15 @@ use "docker.hll" as traefik
   them. Two files each declaring an unrelated `network proxy` stay
   legal. The error only fires when a qualified reference actually
   brings one across an import into the other's company.
+- **`use` shares declarations, not services.** The compiler builds only
+  the entry file's own `service` blocks. It parses one in an imported
+  file, so duplicate names and syntax still get checked, and then drops
+  it, since nothing resolves a service across files anyway. Likewise, it
+  looks up the implicit `defaults` template only in the entry module. It
+  has no invocation to carry an alias, so there is no
+  `with common.defaults` to write, and an imported `defaults` applies to
+  nothing. Both are warnings rather than errors—see the following
+  Diagnostics section.
 
 ## Worked examples
 
@@ -510,8 +536,9 @@ readability choice, not a different construct.
    list—the primary-field shorthand—or a `{ field: value, ... }` body,
    recursing into nested blocks. A schema table drives both parsing
    and validation. Covers every built-in type (`network`, `service`,
-   `image`, `expose`, `volume` in both its top-level declaration and its
-   `service`-field forms, `env`, `restart`, `raw`), full
+   `image`, `expose`, `publish`, `volume` in both its top-level
+   declaration and its `service`-field forms, `env`, `restart`, `raw`),
+   full
    `template`/`with` composition, and `use`/alias-qualified references,
    see the preceding Composition and Imports sections—purely syntactic,
    no name resolution.
@@ -581,6 +608,41 @@ readability choice, not a different construct.
    write silently destroys the hand-written files it happened to find.
    Rebuilding works fine: `hllc`'s own output already carries the
    header, so `hllc` overwrites it as before.
+
+## Diagnostics
+
+Most diagnostics are hard errors: a stage returns one, the pipeline
+stops, and `hllc` exits non-zero having printed it to stderr. Every one
+of them carries a span, and every span carries the identity of the file
+it came from, so a location renders as `path:line:col` even when the
+offending field came from a template in an imported file the user never
+opened.
+
+Alongside that, each stage accumulates **warnings**—non-fatal
+diagnostics for constructs the compiler deliberately drops. Each stage
+hands its warnings back with its success value
+(`hl_linker::Linked::warnings`, `hl_codegen::GeneratedProgram::warnings`)
+in the same shape errors render in, with a `warning:` marker after the
+location. `hllc` prints them to stderr and touches neither its exit code
+nor its output. Three constructs warn today: a `service` in a non-entry
+file, a `defaults` template in a non-entry file, and a top-level
+`network` no service references. That last one drops out of assembling
+the `networks:` section from services' references, which leaves a
+declaration nothing names with nowhere to go. A top-level `volume` no
+service mounts drops out of `volumes:` for the same reason, but raises
+no warning yet.
+
+The channel is deliberately minimal. Nothing promotes a warning to an
+error, and there's no `--quiet`, `-W`, or `-A` style suppression yet.
+Warnings are a named enum per stage precisely so a later suppression
+scheme has something to filter on.
+
+The fourth construct of this shape is *not* a warning: `middleware` or
+`expose.entrypoint` on a service with no `expose.host` is a hard error.
+Both fields only exist as labels on a Traefik router, and `expose.host`
+is what creates that router, so no reading of the pair means anything.
+Dropping them quietly, by contrast, shipped a service with its
+forward-auth missing and nothing to say so.
 
 ## Future work
 

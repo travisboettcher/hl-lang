@@ -120,9 +120,9 @@ fn parse_ok(src: &str) -> Result<(), String> {
 fn build_ok(src: &str) -> Result<(), String> {
     let mut loader = hl_linker::InMemoryLoader::default();
     loader.add("example.hll", src);
-    let composed =
+    let linked =
         hl_linker::link(Path::new("example.hll"), &loader).map_err(|err| err.to_string())?;
-    hl_codegen::generate(composed)
+    hl_codegen::generate(linked.program)
         .map(|_| ())
         .map_err(|err| err.to_string())
 }
@@ -186,8 +186,8 @@ fn book_examples_compile() {
             continue;
         };
         match hl_linker::link(Path::new(&entry_name), &loader) {
-            Ok(composed) => {
-                if let Err(err) = hl_codegen::generate(composed) {
+            Ok(linked) => {
+                if let Err(err) = hl_codegen::generate(linked.program) {
                     failures.push(format!("{entry_loc} (group `{group}`): build error: {err}"));
                 }
             }

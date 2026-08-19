@@ -22,6 +22,7 @@ use hl_parser::{
 use crate::error::LinkError;
 use crate::loader::FileLoader;
 use crate::path::{normalize, resolve_relative};
+use crate::warning::LinkWarning;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ModuleId(usize);
@@ -56,6 +57,10 @@ pub(crate) struct Graph {
     /// [`hl_parser::FileId`] stamped into that module's spans resolves
     /// back to a path a diagnostic can print (#75).
     files: SourceMap,
+    /// Non-fatal diagnostics collected while loading, in load order —
+    /// the entry module first, then each imported module in the order it
+    /// was reached. Loading never stops for one (#80).
+    warnings: Vec<LinkWarning>,
 }
 
 impl Graph {
@@ -66,6 +71,12 @@ impl Graph {
     /// The path table every span in this graph resolves against.
     pub(crate) fn files(&self) -> &SourceMap {
         &self.files
+    }
+
+    /// Takes the warnings collected while the graph was loaded, leaving
+    /// the graph itself usable as a [`SymbolResolver`] for composition.
+    pub(crate) fn take_warnings(&mut self) -> Vec<LinkWarning> {
+        std::mem::take(&mut self.warnings)
     }
 
     /// Takes ownership of the entry module's own networks/volumes/
@@ -91,6 +102,12 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
     let mut files = SourceMap::default();
     let mut path_to_id: HashMap<PathBuf, ModuleId> = HashMap::new();
     let mut queue: VecDeque<(ModuleId, PathBuf)> = VecDeque::new();
+    // Both things an imported file can declare that this stage then
+    // drops on the floor: its own `service`s, and a `defaults` template
+    // (#80). Neither is an error — the file is still perfectly usable
+    // for the templates and networks it was imported for — so they
+    // accumulate here and ride out alongside the finished graph.
+    let mut warnings: Vec<LinkWarning> = Vec::new();
 
     let entry_id = ModuleId(0);
     let entry_path = normalize(entry);
@@ -179,10 +196,19 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
                     service_spans.insert(s.name.name.clone(), s.name.span);
                     if is_entry {
                         module.services.push(*s);
+                    } else {
+                        // A non-entry file's own `service` decls are
+                        // parsed but otherwise inert — nothing can
+                        // reference a service across files, only
+                        // templates/networks. Dropping them is right;
+                        // dropping them *quietly* is what left a user who
+                        // split a service into a library file with no
+                        // output and no diagnostic (#80).
+                        warnings.push(LinkWarning::ImportedService {
+                            service: s.name.name.clone(),
+                            span: s.name.span,
+                        });
                     }
-                    // A non-entry file's own `service` decls are parsed
-                    // but otherwise inert — nothing can reference a
-                    // service across files, only templates/networks.
                 }
                 TopDecl::Template(t) => {
                     if let Some(prev) = module.templates.get(&t.name.name) {
@@ -194,6 +220,14 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
                             },
                             &files,
                         ));
+                    }
+                    // `defaults` is the one template with no invocation
+                    // to carry an alias, so `Graph::resolve_defaults`
+                    // only ever looks in the entry module — an imported
+                    // one is loaded, name-checked, and then never
+                    // applied to anything (#80).
+                    if !is_entry && t.name.name == "defaults" {
+                        warnings.push(LinkWarning::ImportedDefaults { span: t.name.span });
                     }
                     module.templates.insert(t.name.name.clone(), *t);
                 }
@@ -229,7 +263,11 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
         modules[id.0] = module;
     }
 
-    Ok(Graph { modules, files })
+    Ok(Graph {
+        modules,
+        files,
+        warnings,
+    })
 }
 
 impl SymbolResolver for Graph {
