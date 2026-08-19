@@ -836,7 +836,7 @@ impl<'src> Parser<'src> {
                     FieldValue::MountMap(v) => v,
                     _ => unreachable!("field kind is stable for a given field name"),
                 };
-                merge_map_entries(nested, bucket, entries)
+                merge_map_entries(nested, bucket, entries, VolumeHost::text)
             }
             SchemaKind::Map => {
                 let entries = if self.peek().kind == TokenKind::LBrace {
@@ -853,7 +853,7 @@ impl<'src> Parser<'src> {
                     FieldValue::LiteralMap(v) => v,
                     _ => unreachable!("field kind is stable for a given field name"),
                 };
-                merge_map_entries(nested, bucket, entries)
+                merge_map_entries(nested, bucket, entries, Literal::text)
             }
         }
     }
@@ -1280,43 +1280,33 @@ fn join_spans(start: Span, end: Span) -> Span {
     }
 }
 
-/// The key side of a map entry, for the uniqueness check below.
-/// Implemented for both a plain [`Literal`] (`env`/`publish`/
-/// `driver_opts`) and a [`VolumeHost`] (`volume`), so one merge routine
-/// serves every map-kind field rather than one per key representation.
-trait MapEntryKey {
-    fn key_text(&self) -> &str;
-}
-
-impl MapEntryKey for Literal {
-    fn key_text(&self) -> &str {
-        self.text()
-    }
-}
-
-impl MapEntryKey for VolumeHost {
-    fn key_text(&self) -> &str {
-        self.text()
-    }
-}
-
-fn merge_map_entries<K: MapEntryKey>(
+/// Accumulates one map-kind field's newly parsed entries into whatever
+/// earlier writes of the same field already contributed, rejecting a
+/// duplicate on whichever side [`TypeSchema::uniqueness`] names.
+///
+/// Generic over the key side's own type so one routine serves every
+/// map-kind field: `env`/`publish`/`driver_opts` key on a [`Literal`],
+/// `volume` on a [`VolumeHost`]. `key_text` reads that side's text —
+/// `Literal::text` or `VolumeHost::text`, passed by the caller, since
+/// there is no one trait both already implement.
+fn merge_map_entries<K>(
     nested: &'static TypeSchema,
     bucket: &mut Vec<(K, Literal, Span)>,
     new_entries: Vec<(K, Literal, Span)>,
+    key_text: fn(&K) -> &str,
 ) -> Result<(), ParseError> {
     let side = nested
         .uniqueness
         .expect("volume/env schemas must define a uniqueness side");
     for (key, value, span) in new_entries {
         let check = match side {
-            MapSide::Key => key.key_text(),
+            MapSide::Key => key_text(&key),
             MapSide::Value => value.text(),
         }
         .to_string();
         let dup = bucket.iter().find(|(k, v, _)| {
             let existing = match side {
-                MapSide::Key => k.key_text(),
+                MapSide::Key => key_text(k),
                 MapSide::Value => v.text(),
             };
             existing == check

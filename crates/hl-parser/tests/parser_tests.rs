@@ -419,6 +419,18 @@ fn volume_host_is_a_reference_when_unquoted_and_a_path_when_quoted() {
     ));
     assert!(matches!(&entries[1].host, VolumeHost::BindMount(lit) if lit.text() == "media"));
     assert!(matches!(&entries[2].host, VolumeHost::BindMount(lit) if lit.text() == "/mnt/x"));
+    // `VolumeHost`'s own accessors read through either arm, and each
+    // host's span covers just that host — the entry span (which reaches
+    // past the `->` to the container side) is a different, wider thing.
+    let texts: Vec<&str> = entries.iter().map(|e| e.host.text()).collect();
+    assert_eq!(texts, vec!["media", "media", "/mnt/x"]);
+    for entry in entries {
+        assert!(entry.host.span().end <= entry.span.end);
+        assert_eq!(entry.host.span().start, entry.span.start);
+    }
+    // And the entry span really does reach past its own host, to the end
+    // of the container side.
+    assert!(entries[0].span.end > entries[0].host.span().end);
 }
 
 /// And a named-volume host takes the same `alias.name` qualifier every
