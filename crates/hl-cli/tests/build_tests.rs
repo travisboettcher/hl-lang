@@ -1154,3 +1154,100 @@ fn codegen_error_inside_an_imported_template_names_that_file() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+/// #80: all three warning cases at once — an imported file's own
+/// `service`, an imported `defaults`, and a declared-but-unreferenced
+/// `network`. Every one of them is printed to stderr, naming the file it
+/// belongs to, and none of them stops the build: the YAML is written and
+/// `hllc` still exits 0, so a warning can't break a CI gate.
+#[test]
+fn build_prints_warnings_to_stderr_and_still_exits_zero() {
+    let dir = scratch_dir("warnings");
+    fs::write(
+        dir.join("lib.hll"),
+        "template defaults {\n  restart unless-stopped\n}\n\
+         service db {\n  image \"postgres\"\n}\n",
+    )
+    .unwrap();
+    let entry = dir.join("svc.hll");
+    fs::write(
+        &entry,
+        "use \"lib.hll\" as common\n\
+         network unused {\n  external\n}\n\
+         service web {\n  image \"nginx\"\n}\n",
+    )
+    .unwrap();
+    let out = dir.join("docker-compose.yml");
+
+    let output = hllc_output(&[
+        "--build",
+        entry.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "warnings must not change the exit code"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lib = dir.join("lib.hll");
+    assert_eq!(
+        stderr,
+        format!(
+            "{lib}:1:10: warning: template `defaults` is declared in an imported file and is \
+             not applied — `defaults` is only looked up in the entry file; give it an ordinary \
+             name and apply it with `with`\n\
+             {lib}:4:9: warning: service `db` is declared in an imported file and is not \
+             compiled — only the entry file's services are built\n\
+             {entry}:2:9: warning: network `unused` is declared but no service references it, \
+             so it is not emitted — add it to a service's `networks [...]` list, or remove the \
+             declaration\n",
+            lib = lib.display(),
+            entry = entry.display(),
+        )
+    );
+    // The build still produced its document.
+    let yaml = fs::read_to_string(&out).unwrap();
+    assert!(yaml.starts_with(GENERATED_HEADER));
+    assert!(yaml.contains("web:"));
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// #80's one hard error: `middleware` with no `expose.host` used to
+/// build a service with the middleware silently missing. It now fails
+/// the build, with a message naming the service and the fix.
+#[test]
+fn build_fails_on_middleware_without_a_host() {
+    let dir = scratch_dir("router-less-middleware");
+    let entry = dir.join("svc.hll");
+    fs::write(
+        &entry,
+        "service web {\n  image \"nginx\"\n  expose 80\n  middleware forwardAuth-authentik\n}\n",
+    )
+    .unwrap();
+    let out = dir.join("docker-compose.yml");
+
+    let output = hllc_output(&[
+        "--build",
+        entry.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr,
+        format!(
+            "{}:4:14: service `web` sets `middleware` but has no `expose.host`, so there is no \
+             Traefik router to attach it to — add a host (`expose <port> as \
+             \"web.example.com\"`) or drop the `middleware`\n",
+            entry.display()
+        )
+    );
+    assert!(!out.exists(), "a failed build must not write output");
+
+    fs::remove_dir_all(&dir).ok();
+}

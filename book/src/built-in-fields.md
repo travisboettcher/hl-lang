@@ -108,9 +108,27 @@ hostname to this service. If non-empty, `expose.entrypoint` restricts
 that router to the named Traefik entry points instead of all of them.
 
 `expose.host` is what switches Traefik routing on at all. With no `host`
-set there's no router, so neither `entrypoint` nor `middleware` produces
-a label—they're silently dropped rather than emitted against a router
-that doesn't exist.
+set there's no router, so neither `entrypoint` nor `middleware` has
+anything to attach to. Setting either one without a host is a **compile
+error**, not a service quietly built without them:
+
+```hll,ignore
+service web {
+  image "nginx"
+  expose 80                  # no `as "web.example.com"`, so no router
+  middleware forwardAuth-authentik
+}
+```
+
+```text
+web.hll:4:14: service `web` sets `middleware` but has no `expose.host`, so there is no Traefik router to attach it to — add a host (`expose <port> as "web.example.com"`) or drop the `middleware`
+```
+
+Earlier versions emitted no `labels:` key at all here and exited 0, so a
+service whose author forgot `as "..."` deployed with its authentication
+missing and nothing said so. Add the host, or drop the
+`middleware`/`entrypoint`. Each of those spellings means something on
+its own, but the pair without a host doesn't.
 
 Because `hllc` splices `host` directly into the router rule
 (``Host(`...`)``, which has no escape for its own backtick delimiter), it
@@ -256,9 +274,10 @@ dns ["192.168.50.182"]
   Traefik's file-provider reference convention, applied unconditionally,
   so write the bare middleware name and let `hllc` add it. Like
   `expose`'s `entrypoint`—which joins its own list the same way, just
-  without the `@file` suffix—`middleware` generates nothing at all unless
-  you set `expose.host`: with no host there's no router to attach
-  anything to.
+  without the `@file` suffix—`middleware` requires `expose.host`: with
+  no host there's no router to attach anything to, so naming a
+  middleware anyway is a compile error, as [`expose`](#expose)
+  describes.
 - `depends_on` names a same-file sibling `service` this one depends
   on—it's not cross-file, and doesn't accept a qualified `alias.name`.
 - `networks` references a top-level `network` declared in the same
@@ -266,7 +285,10 @@ dns ["192.168.50.182"]
   is `external`, its real name also drives the
   `traefik.docker.network=` label, but more than one `external` network
   on the same service is a compile error, since it's ambiguous which
-  network Traefik should target.
+  network Traefik should target. `hllc` builds the generated `networks:`
+  section from these references, so a `network` no service names never
+  reaches the output. That one is a warning on stderr rather than an
+  error—see [Warnings](./cli.md#warnings).
 - `dns` sets Compose's own per-service `dns:` key—a resolver override.
   Use it, for example, when a network has a local name server.
 

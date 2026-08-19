@@ -34,7 +34,8 @@ fn links_a_real_multi_file_tree_on_disk() {
     .unwrap();
 
     let composed = link(&dir.join("service.hll"), &FsLoader)
-        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
 
     assert_eq!(composed.services.len(), 1);
     assert_eq!(composed.networks.len(), 1);

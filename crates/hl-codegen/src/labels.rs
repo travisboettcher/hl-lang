@@ -60,6 +60,29 @@ fn reject_metacharacters(
     }
 }
 
+/// The first field a service sets that only means anything attached to a
+/// Traefik router, if it sets one at all — in the order [`compute`]
+/// would have emitted their labels, so the field reported is the first
+/// one that needed the missing `expose.host`.
+///
+/// Both are pointed at by their first entry's own span rather than the
+/// field's: a repeated `middleware` accumulates entries across a
+/// template and the service's own body, and the first one is the entry
+/// that the merged service leads with.
+fn router_field_needing_host(fields: &ServiceFields) -> Option<(&'static str, Span)> {
+    fields
+        .expose
+        .as_ref()
+        .and_then(|e| e.entrypoint.first())
+        .map(|r| ("expose.entrypoint", r.name_span))
+        .or_else(|| {
+            fields
+                .middleware
+                .first()
+                .map(|r| ("middleware", r.name_span))
+        })
+}
+
 /// Computes `service_name`'s Traefik label list, in this order:
 /// `traefik.docker.network=` (if `docker_network` is set — the real name
 /// of whichever of the service's declared networks is `external`),
@@ -74,6 +97,12 @@ fn reject_metacharacters(
 /// port is set, even when technically redundant with Traefik's
 /// single-port default, matching every real example's own "always
 /// explicit" convention.
+///
+/// Both router-attached fields — `expose.entrypoint` and `middleware` —
+/// require `expose.host`, since that's what creates the router they'd
+/// attach to. Setting either without a host is
+/// [`CodegenError::RouterFieldWithoutHost`], not a silently label-less
+/// service (#80).
 pub fn compute(
     service_name: &str,
     fields: &ServiceFields,
@@ -84,6 +113,23 @@ pub fn compute(
 
     if let Some(net) = docker_network {
         labels.push(format!("traefik.docker.network={net}"));
+    }
+
+    // Checked before either binding below, so "no `expose` block at all"
+    // and "an `expose` block with no `host`" take the same path — a
+    // `middleware` line is equally router-less either way.
+    if fields
+        .expose
+        .as_ref()
+        .and_then(|e| e.host.as_ref())
+        .is_none()
+        && let Some((field, span)) = router_field_needing_host(fields)
+    {
+        return Err(CodegenError::RouterFieldWithoutHost {
+            service: service_name.to_string(),
+            field,
+            span,
+        });
     }
 
     let Some(expose) = &fields.expose else {
@@ -190,6 +236,87 @@ mod tests {
         let fields = ServiceFields::default();
         let labels = compute("s", &fields, None, &bindings()).unwrap();
         assert!(labels.is_empty());
+    }
+
+    /// #80: a `middleware` with no router to attach to is refused rather
+    /// than dropped — and refused whether the service has a host-less
+    /// `expose` block or no `expose` block at all.
+    #[test]
+    fn middleware_without_a_host_is_rejected() {
+        let mut fields = ServiceFields {
+            middleware: refs(&["forwardAuth-authentik"]),
+            ..Default::default()
+        };
+        let err = compute("s", &fields, None, &bindings()).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::RouterFieldWithoutHost {
+                field: "middleware",
+                ..
+            }
+        ));
+
+        fields.expose = Some(Expose {
+            port: Some(Literal::Number {
+                text: "80".to_string(),
+                value: 80,
+                span: span(),
+            }),
+            host: None,
+            entrypoint: Vec::new(),
+            span: span(),
+        });
+        let err = compute("s", &fields, None, &bindings()).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::RouterFieldWithoutHost {
+                field: "middleware",
+                ..
+            }
+        ));
+    }
+
+    /// `expose.entrypoint` needs the same router, and is the field
+    /// reported when a service sets both — it's the one whose label would
+    /// have been emitted first.
+    #[test]
+    fn entrypoint_without_a_host_is_rejected_before_middleware() {
+        let fields = ServiceFields {
+            expose: Some(Expose {
+                port: None,
+                host: None,
+                entrypoint: refs(&["web-secure"]),
+                span: span(),
+            }),
+            middleware: refs(&["forwardAuth-authentik"]),
+            ..Default::default()
+        };
+        let err = compute("s", &fields, None, &bindings()).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::RouterFieldWithoutHost {
+                field: "expose.entrypoint",
+                ..
+            }
+        ));
+    }
+
+    /// The guard is specific to the router-attached fields: a host-less
+    /// service that sets neither still generates its non-router labels
+    /// and no diagnostic.
+    #[test]
+    fn a_hostless_service_without_router_fields_is_fine() {
+        let fields = ServiceFields {
+            expose: Some(Expose {
+                port: None,
+                host: None,
+                entrypoint: Vec::new(),
+                span: span(),
+            }),
+            ..Default::default()
+        };
+        let labels = compute("s", &fields, Some("docker_default"), &bindings()).unwrap();
+        assert_eq!(labels, vec!["traefik.docker.network=docker_default"]);
     }
 
     #[test]
