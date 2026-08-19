@@ -1,7 +1,7 @@
 # Imports
 
-Real templates and networks are meant to be shared across every service
-file in a homelab, not copy-pasted into each one. `use` imports another
+Real templates and networks should span every service file in a homelab
+instead of getting copy-pasted into each one. `use` imports another
 `.hll` file under a local alias, so its top-level templates and networks
 become available, qualified by that alias.
 
@@ -12,8 +12,8 @@ use "docker.hll" as traefik
 ```
 
 - `use`'s path is always a quoted string, resolved **relative to the
-  importing file's own location** — never the entry file's location or
-  the directory `hllc` was invoked from.
+  importing file's own location**—never the entry file's location or
+  the directory you invoked `hllc` from.
 - `alias.name` then qualifies any reference that would otherwise be a
   bare identifier: a `networks [...]` entry (`networks
   [traefik.traefik-net]`) or a `with` invocation's target (`with
@@ -21,11 +21,11 @@ use "docker.hll" as traefik
 - `middleware` and `depends_on` don't support a qualified form. Neither
   has a coherent cross-file meaning: `depends_on` names a same-file
   sibling service, and `middleware` isn't resolved against anything at
-  all — it's just a Traefik middleware name passed through verbatim.
+  all—it's just a Traefik middleware name passed through verbatim.
 
 ## Splitting a homelab across files
 
-The templates from the [previous chapter's example](./templates-and-composition.md#a-complete-example)
+The templates from the [previous page's example](./templates-and-composition.md#a-complete-example)
 split across three files, `use`-connected instead of copy-pasted into
 every service:
 
@@ -72,49 +72,49 @@ service syncthing {
 ```
 
 Compiling `syncthing.hll` with `hllc --build` produces byte-identical
-output to writing all three declarations in one file — `use` is purely
+output to writing all three declarations in one file—`use` is purely
 an organizational tool, not a different composition mechanism.
 
 Note where `volume syncthing-config {}` lives: in `syncthing.hll`, the
-entry file, not in the shared `templates.hll`. A `network` can be
-imported and referenced as `alias.name`, but a named-volume mount is
-written as a plain name on the host side of a `volume` entry, with no
-qualified form — so a named volume always resolves against the entry
+entry file, rather than in the shared `templates.hll`. You can import a
+`network` and reference it as `alias.name`, but a named-volume mount
+takes a plain name on the host side of a `volume` entry, with no
+qualified form—so a named volume always resolves against the entry
 file's own top-level declarations.
 
 ## Two rules that matter for multi-file layouts
 
 **Templates are lexically scoped, not dynamically scoped.** A template's
-own references always resolve against *the file it was written in*, not
-whichever file happens to call it. In the example above,
+own references always resolve against *the file that declared it*, not
+whichever file happens to call it. In the preceding example,
 `internal_web`'s `networks [net.traefik-net]` resolves against
-`templates.hll`'s own `use "network.hll" as net` — even though it's
+`templates.hll`'s own `use "network.hll" as net`—even though it's
 `syncthing.hll` that actually invokes `internal_web` via `with`.
 `syncthing.hll` never itself needs to `use "network.hll"` for this to
 work.
 
-**Imports are not transitive.** `use`-ing a file only makes *that file's
-own* top-level declarations available under your alias — not anything it
-in turn `use`s. In the example above, `syncthing.hll` uses
+**Imports aren't transitive.** `use`-ing a file only makes *that file's
+own* top-level declarations available under your alias—not anything it
+in turn `use`s. In the preceding example, `syncthing.hll` uses
 `templates.hll`, and `templates.hll` uses `network.hll`, but
-`syncthing.hll` cannot write `net.traefik-net` itself — only
+`syncthing.hll` can't write `net.traefik-net` itself—only
 `templates.hll`'s own template bodies can reach `network.hll`'s
-declarations, via the lexical-scoping rule above. If `syncthing.hll`
-needed to reference `traefik-net` directly (not through a template), it
-would need its own `use "network.hll" as net`.
+declarations, via the preceding lexical-scoping rule. If `syncthing.hll`
+needed to reference `traefik-net` directly instead of through a template,
+it would need its own `use "network.hll" as net`.
 
 Together, these two rules mean: a template file needs `use` declarations
 for whatever *it* references, and a service file needs `use` declarations
-only for what *it* references directly — importing a template doesn't
+only for what *it* references directly—importing a template doesn't
 also import that template's own imports.
 
 ## Two networks can't share one bare name
 
-An imported `network` keeps its own bare name in the generated Compose —
-`net.traefik-net` becomes the `traefik-net` key under `networks:`. So a
-file that pulls in an imported network while also declaring one of its
-own by the same name is asking for two different networks under one key,
-and `hllc` rejects it:
+An imported `network` keeps its own bare name in the generated
+Compose—`net.traefik-net` becomes the `traefik-net` key under
+`networks:`. So a file that pulls in an imported network while also
+declaring one of its own by the same name is asking for two different
+networks under one key, and `hllc` rejects it:
 
 ```hll,ignore
 use "network.hll" as net
@@ -131,7 +131,7 @@ service web {
 ```
 
 Rename one of the two and the ambiguity goes away. The same applies to
-two *imported* networks sharing a bare name — `use`-ing both `a.hll` and
+two *imported* networks sharing a bare name—`use`-ing both `a.hll` and
 `b.hll` is fine, and referencing `a.proxy` and `b.proxy` from the same
 file is what's rejected.
 
@@ -142,17 +142,18 @@ across the import to name the other one.
 
 ## `defaults` is the one template `use` can't share
 
-The implicit `defaults` template (see
-[Templates & Composition](./templates-and-composition.md)) is looked up
-only in the entry file — the one `hllc` was actually pointed at. A
+`hllc` looks up the implicit `defaults` template (see
+[Templates & Composition](./templates-and-composition.md)) only in the
+entry file—the one it was actually pointed at. A
 `template defaults { ... }` in an imported file is **silently ignored**:
 nothing errors, the services just don't get those fields. This falls out
-of `defaults` having no invocation to resolve — there's no `with
+of `defaults` having no invocation to resolve—there's no `with
 common.defaults` to write, and no alias for the lookup to go through.
 
 So if several service files should share a set of baseline fields, give
 the shared template an ordinary name and apply it explicitly:
 
+<!-- vale Google.EmDash = NO -->
 ```hll,file=common.hll,group=defaults-not-shared
 # common.hll — naming this template `defaults` instead would leave it
 # silently unapplied in every file that imports this one
@@ -160,6 +161,7 @@ template baseline {
   restart unless-stopped
 }
 ```
+<!-- vale Google.EmDash = YES -->
 
 ```hll,file=syncthing.hll,group=defaults-not-shared,entry
 # syncthing.hll

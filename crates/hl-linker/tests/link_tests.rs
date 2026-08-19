@@ -569,7 +569,7 @@ fn field_collision_across_two_files_names_each_file() {
     assert_eq!(
         err.to_string(),
         "t2.hll:2:11: field `restart.policy` set by both template `x` (at t1.hll:2:11) \
-         and template `y` — explicit templates must not conflict"
+         and template `y`—explicit templates must not conflict"
     );
 }
 

@@ -1,36 +1,36 @@
-# Built-in Fields
+# Built-in fields
 
 This is a reference for every field `hll` understands: what it accepts,
 its default, and what it produces in the generated Compose YAML. See
 [Syntax Basics](./syntax-basics.md) for the shorthand forms referenced
-below (primary-value, secondary-field, map-style).
+below—primary-value, secondary-field, map-style.
 
-## `service`, `network` and `volume`
+## `service`, `network`, and `volume`
 
-`service`, `network` and `volume` are the three top-level declaration
-types — each requires a name (`service jellyfin { ... }`, `network
-traefik-net { ... }`, `volume syncthing-config { ... }`) and a body. A
-`template` body accepts exactly the same set of fields as `service` —
-see [Templates & Composition](./templates-and-composition.md).
+`service`, `network`, and `volume` are the three top-level declaration
+types—each requires a name, such as `service jellyfin { ... }`, `network
+traefik-net { ... }`, or `volume syncthing-config { ... }`, and a body. A
+`template` body accepts exactly the same set of fields as `service`—see
+[Templates & Composition](./templates-and-composition.md).
 
-Note that `volume` names two different things depending on where it's
-written: at the top level it *declares* a named Docker volume (this
-section), while inside a `service`/`template` body it *mounts* one — the
+`volume` names two different things, depending on where you write it. At
+the top level it *declares* a named Docker volume, which this section
+covers. Inside a `service` or `template` body it *mounts* one, the
 map-kind [`volume` field](#volume) further down.
 
 ### `network` fields
 
 | Field | Accepts | Default |
 |---|---|---|
-| `external` | bare flag (no value) | unset (`false`) |
+| `external` | bare flag, no value | unset, `false` |
 | `name` | string | the network's own `hll` identifier |
 
-`external` marks a network as one Docker already manages (e.g. one
+`external` marks a network as one Docker already manages (for example, one
 `docker compose` created for another stack) rather than one this file's
 own Compose output should create. `name` is the real underlying Docker
 network name, when it differs from the identifier you declared the
-network under — needed because Compose's own auto-derived network names
-depend on the directory a `docker compose` was run from, which the
+network under—needed because Compose's own auto-derived network names
+depend on the directory you ran `docker compose` from, which the
 compiler can't know:
 
 ```hll
@@ -44,16 +44,17 @@ network traefik-net {
 
 | Field | Accepts | Default |
 |---|---|---|
-| `external` | bare flag (no value) | unset (`false`) |
+| `external` | bare flag, no value | unset, `false` |
 | `name` | string | the volume's own `hll` identifier |
-| `driver` | string | unset (Compose's own default, `local`) |
-| `driver_opts` | map body (`key: value`) | empty |
+| `driver` | string | unset, matching Compose's own default of `local` |
+| `driver_opts` | map body, `key: value` | empty |
 
-`external` and `name` mean exactly what they mean on a `network`: the
+`external` and `name` mean exactly what they mean on a `network`. The
 first marks a volume Docker already manages rather than one this file's
-Compose output should create, the second is the real underlying Docker
-volume name when it differs from the identifier you declared it under.
-`driver`/`driver_opts` are passed straight through to Compose:
+own Compose output should create. The second is the real underlying
+Docker volume name, when it differs from the identifier you declared the
+volume under. `hllc` passes `driver` and `driver_opts` straight through
+to Compose:
 
 ```hll
 volume syncthing-config {}
@@ -73,9 +74,9 @@ volume backups {
 }
 ```
 
-Every named volume a service mounts must have one of these — see the
-[`volume` field](#volume) below for what counts as a named volume and
-why the declaration is required.
+Every named volume a service mounts needs one of these declarations—see
+the [`volume` field](#volume) for what counts as a named volume and why
+`hllc` requires the declaration.
 
 ## `image`
 
@@ -83,14 +84,14 @@ Primary field: `ref`.
 
 | Field | Accepts | Default |
 |---|---|---|
-| `ref` | string | *(required — no default)* |
+| `ref` | string | *required—no default* |
 
 ```hll,fragment
 image "jellyfin/jellyfin:latest"
 ```
 
-Every service needs an `image` — either directly or inherited from a
-template — `hllc --build` fails if one is missing.
+Every service needs an `image`—either directly or inherited from a
+template—`hllc --build` fails if one is missing.
 
 ## `expose`
 
@@ -98,9 +99,9 @@ Primary field: `port`. Secondary-field shorthand: `as` aliases to `host`.
 
 | Field | Accepts | Default |
 |---|---|---|
-| `port` | number | *(no default — omitting `expose` entirely just means no Traefik routing)* |
-| `host` | string | unset (no router rule generated) |
-| `entrypoint` | reference list | empty (label omitted; Traefik attaches the router to every entry point) |
+| `port` | number | *No default—omitting `expose` entirely just means no Traefik routing* |
+| `host` | string | unset, no router rule generated |
+| `entrypoint` | reference list | empty—label omitted, so Traefik attaches the router to every entry point |
 
 ```hll,fragment
 expose 8096 as "media.example.com"
@@ -111,7 +112,7 @@ expose 8096 as "media.example.com"
 # }
 ```
 
-`as` is a one-shot fusion, not a list — it can't be followed by more
+`as` is a one-shot fusion, not a list—you can't follow it with more
 fields. To also set `entrypoint`, name `host` explicitly instead:
 
 ```hll,fragment
@@ -119,7 +120,7 @@ expose 8096, host: "media.example.com", entrypoint: web-secure
 ```
 
 `entrypoint` is a **reference list**, spelled exactly like `middleware`
-below — a bare name, several comma-separated names, or a bracketed list:
+below—a bare name, several comma-separated names, or a bracketed list:
 
 ```hll,fragment
 expose {
@@ -131,10 +132,10 @@ expose {
 
 However many entry points you name, they produce **one** label:
 `traefik.http.routers.<service>.entrypoints=` with the names
-comma-joined (`entrypoints=web,web-secure`) — `hllc` writes the commas,
-you write the names. Leave `entrypoint` off entirely and no
-`entrypoints=` label is generated at all, which is Traefik's own way of
-saying "attach this router to every entry point".
+comma-joined (`entrypoints=web,web-secure`)—`hllc` writes the commas,
+you write the names. Leave `entrypoint` off entirely and `hllc` emits
+no `entrypoints=` label at all, which is Traefik's own way of saying
+"attach this router to every entry point."
 
 One caveat if you write a bare list in the `expose 8096, ...` shorthand
 form: the list ends at the next `field:`, so
@@ -143,34 +144,35 @@ point and a host, not two entry points. Put `entrypoint` last, use
 brackets (`entrypoint: [web, web-secure]`), or use the `expose { ... }`
 body if you want a bare list in the middle.
 
-`expose.port` becomes Compose's `expose:` entry (the port is reachable
-from other containers on the same network — it isn't published to the
-host). `expose.host`, if set, generates a Traefik router-rule label
-(`Host(...)`,) routing that hostname to this service; `expose.entrypoint`,
-if non-empty, restricts that router to the named Traefik entry points
-instead of all of them.
+`expose.port` becomes Compose's `expose:` entry—the port is reachable
+from other containers on the same network, but it isn't published to
+the host. If set, `expose.host` generates a Traefik router-rule label
+(`Host(...)`,) routing that hostname to this service. If non-empty,
+`expose.entrypoint` restricts that router to the named Traefik entry
+points instead of all of them.
 
 `expose.host` is what switches Traefik routing on at all. With no `host`
 set there's no router, so neither `entrypoint` nor `middleware` produces
-a label — they're silently dropped rather than emitted against a router
+a label—they're silently dropped rather than emitted against a router
 that doesn't exist.
 
-Because `host` is spliced directly into the router rule
-(``Host(`...`)``, which has no escape for its own backtick delimiter),
-`hllc` rejects a `host` containing any rule metacharacter — a backtick
-above all, plus `` ( ) { } | & , " ' \ ``. Each `entrypoint` entry is
-checked against that same set, comma included: `hllc` owns the comma
-that joins entry points, so a comma inside one name would splice an
-extra entry into the label. (`entrypoint "web,web-secure"` is therefore
-an error — write `entrypoint web, web-secure`.) A comma is rejected in a
+Because `hllc` splices `host` directly into the router rule
+(``Host(`...`)``, which has no escape for its own backtick delimiter), it
+rejects a `host` containing any rule metacharacter, most notably a
+backtick, plus `` ( ) { } | & , " ' \ ``. `hllc` checks each `entrypoint`
+entry against that same set, comma included: it owns the comma that
+joins entry points, so a comma inside one name would splice an extra
+entry into the label. (`entrypoint "web,web-secure"` is therefore an
+error—write `entrypoint web, web-secure`.) `hllc` rejects a comma in a
 `middleware` name for the same reason.
 
 ## `volume`
 
-Map-kind. Bare-entry separator: `->` (host path/volume name → container
-path). Uniqueness is checked on the **container path** (the value side)
-— Docker itself refuses two mounts at the same container path, but
-allows the same host path mounted more than once.
+Map-kind. Bare-entry separator: `->`, which points from the host path
+or volume name to the container path. `hllc` checks uniqueness on the
+**container path**, the value side—Docker itself refuses two mounts at
+the same container path but allows the same host path mounted more
+than once.
 
 ```hll
 volume syncthing-config {}
@@ -182,26 +184,26 @@ service syncthing {
 }
 ```
 
-Repeating `volume` accumulates entries rather than overwriting.
+Repeating `volume` accumulates entries rather than overwriting. `hllc`
+treats a host side starting with neither `/` nor `.` as a **named Docker
+volume** and everything else as a bind mount—so `./jellyfin` and
+`../shared` are bind mounts just as `/mnt/media` is, not only absolute
+paths.
 
-A host side starting with neither `/` nor `.` is a **named Docker
-volume**; anything else is a bind mount, so `./jellyfin` and `../shared`
-are bind mounts just as `/mnt/media` is, not only absolute paths.
-
-A named volume must have a matching top-level `volume` declaration
-somewhere in the same file, exactly as a `networks [x]` entry must have
-a matching top-level `network` declaration. Referencing one that isn't
-declared is a compile error:
+Every named volume needs a matching top-level `volume` declaration
+somewhere in the same file, exactly as a `networks [x]` entry needs a
+matching top-level `network` declaration. Reference one you never
+declared and `hllc` reports a compile error:
 
 ```text
 syncthing.hll:6:10: service `syncthing` references undeclared volume `snycthing-config`
 ```
 
-That's what catches a typo or an accidental collision: before the
-declaration was required, `snycthing-config` simply became a second,
+That error catches a typo or an accidental collision. Before `hllc`
+asked for the declaration, `snycthing-config` quietly became a second,
 empty volume, and two services that happened to write the same string
-were indistinguishable from two services deliberately sharing one. Now
-sharing is stated explicitly — both services reference the one
+looked exactly like two services deliberately sharing one. Now each file
+states the sharing outright, with both services naming the one
 declaration:
 
 ```hll
@@ -218,20 +220,21 @@ service sonarr {
 }
 ```
 
-Bind mounts need no declaration at all — they name a host path, not
-something Docker manages, and Docker itself requires no pre-declaration
-for one.
+Bind mounts need no declaration at all. They name a host path rather
+than something Docker manages, and Docker itself asks for no
+pre-declaration either.
 
-Each *referenced* named volume becomes an entry in the Compose
-document's top-level `volumes:` section, carrying whatever `external`/
-`name`/`driver`/`driver_opts` its declaration set. A declared but never
-mounted volume isn't emitted, the same way an unreferenced `network`
-declaration isn't.
+`hllc` gives every *referenced* named volume an entry in the Compose
+document's top-level `volumes:` section, carrying whatever `external`,
+`name`, `driver`, and `driver_opts` its declaration set. A volume you
+declare but never mount produces no entry, exactly as a `network`
+declaration no service names produces none.
 
 ## `env`
 
-Map-kind. Bare-entry separator: `=` (key = value). Uniqueness is checked
-on the **key** — two `env` entries can't set the same variable.
+Map-kind. Bare-entry separator: `=`, key equals value. `hllc` checks
+uniqueness on the **key**—two `env` entries can't set the same
+variable.
 
 ```hll,fragment
 env PUID = "1000"
@@ -246,21 +249,21 @@ Primary field: `policy`.
 
 | Field | Accepts | Default |
 |---|---|---|
-| `policy` | bare word or string | unset (Compose's own default — no automatic restart) |
+| `policy` | bare word or string | unset, matching Compose's own default of no automatic restart |
 
 ```hll,fragment
 restart unless-stopped
 ```
 
 Writing `image` or `restart` more than once in the same body is a
-compile error (both are scalar fields, not repeatable) — unlike
+compile error, since both are scalar fields, not repeatable—unlike
 `volume`/`env`/`middleware`/`depends_on`.
 
 ## `middleware`, `depends_on`, `networks`, `dns`
 
-All four are plain reference-list fields directly on `service`/`template`
-— not nested struct types, so there's no primary-field shorthand to
-learn for them; write a bare identifier, a bracketed list, or repeat the
+All four are plain reference-list fields directly on `service`/`template`,
+not nested struct types, so there's no primary-field shorthand to learn
+for them. Write a bare identifier, a bracketed list, or repeat the
 field:
 
 ```hll,fragment
@@ -278,31 +281,32 @@ dns ["192.168.50.182"]
   router. However many you list, they produce **one** label, not one per
   item: `traefik.http.routers.<service>.middlewares=` with the names
   comma-joined. Every name also gets an `@file` suffix appended
-  (`middlewares=local-ipwhitelist@file,forwardAuth-authentik@file`) —
-  that's Traefik's file-provider reference convention, applied
-  unconditionally, so write the bare middleware name and let `hllc` add
-  it. Like `expose`'s `entrypoint` — which joins its own list the same
-  way, just without the `@file` suffix — `middleware` generates nothing at
-  all unless `expose.host` is set: with no host there's no router to
-  attach anything to.
-- `depends_on` names a same-file sibling `service` this one depends on —
-  it's not cross-file, and doesn't accept a qualified `alias.name`.
+  (`middlewares=local-ipwhitelist@file,forwardAuth-authentik@file`)—that's
+  Traefik's file-provider reference convention, applied unconditionally,
+  so write the bare middleware name and let `hllc` add it. Like
+  `expose`'s `entrypoint`—which joins its own list the same way, just
+  without the `@file` suffix—`middleware` generates nothing at all unless
+  you set `expose.host`: with no host there's no router to attach
+  anything to.
+- `depends_on` names a same-file sibling `service` this one depends
+  on—it's not cross-file, and doesn't accept a qualified `alias.name`.
 - `networks` references a top-level `network` declared in the same
-  program (see above). If exactly one referenced network is `external`,
-  its real name also drives the `traefik.docker.network=` label; more
-  than one `external` network on the same service is a compile error
-  (ambiguous which one Traefik should target).
-- `dns` sets Compose's own per-service `dns:` key — a resolver override,
-  e.g. for a network with a local DNS server.
+  program—see the preceding section. If exactly one referenced network
+  is `external`, its real name also drives the
+  `traefik.docker.network=` label, but more than one `external` network
+  on the same service is a compile error, since it's ambiguous which
+  network Traefik should target.
+- `dns` sets Compose's own per-service `dns:` key—a resolver override.
+  Use it, for example, when a network has a local name server.
 
 All four accumulate across repeated writes and across template
-composition (see [Templates & Composition](./templates-and-composition.md)) —
-there's no collision to check since list fields can only ever grow.
+composition (see [Templates & Composition](./templates-and-composition.md))—there's
+no collision to check since list fields can only ever grow.
 
 ## `container_name`
 
-A plain scalar field directly on `service`/`template` (not a nested
-struct type):
+A plain scalar field directly on `service`/`template`, not a nested
+struct type:
 
 ```hll,fragment
 container_name "uptime-kuma"
@@ -310,24 +314,24 @@ container_name "uptime-kuma"
 
 | Accepts | Default |
 |---|---|
-| string | not set — Compose's own per-project name applies |
+| string | not set—Compose's own per-project name applies |
 
 Only emitted when set explicitly. Compose's own default container
-naming is scoped per project and is what most people want; an explicit
+naming, scoped per project, is what most people want. An explicit
 `container_name` forces one specific name everywhere it's deployed, so
-it's an opt-in override (for a stable DNS name or an external
-reference), not something every service should get by default —
-defaulting it to the service's own name reliably collides across
+it's an opt-in override you use for a stable hostname or an external
+reference, not something every service should get by default.
+Defaulting it to the service's own name reliably collides across
 independent stacks that happen to share a service name (`db`, `broker`,
-...), and Compose refuses to start the second container with the same
-name.
+and so on), and Compose refuses to start the second container with the
+same name.
 
 ## `raw`
 
-Map-kind, schema-free: unknown keys are accepted as-is rather than
-checked against a fixed field list, and values pass straight through to
-the generated YAML. This is the escape hatch for any Compose key `hll`
-doesn't have a dedicated field for yet:
+Map-kind, schema-free: `hllc` accepts unknown keys as-is rather than
+checking them against a fixed field list, and their values pass
+straight through to the generated YAML. This is the escape hatch for
+any Compose key `hll` doesn't have a dedicated field for yet:
 
 ```hll,fragment
 raw {
@@ -338,22 +342,22 @@ raw {
 
 Each `raw` entry becomes a sibling top-level key on the generated
 Compose service block (`privileged: true`, `cap_add: [...]`), exactly as
-written — there's no validation, so a typo'd key or a value Compose
-doesn't understand won't be caught until `docker compose` itself rejects
-it.
+written—there's no validation, so `docker compose` itself is the first
+thing to reject a misspelled key or a value Compose doesn't
+understand.
 
-A `raw` value's lists and maps may nest up to 128 levels deep; past that
-`hllc` reports an error rather than following the nesting further. Real
-Compose structures nest a handful of levels, so this only ever comes up
-for generated or pathological input.
+A `raw` value's lists and maps may nest up to 128 levels deep. Past
+that, `hllc` reports an error rather than following the nesting
+further. Real Compose structures nest a handful of levels, so this only
+ever comes up for generated or pathological input.
 
 ### `raw` wins over a built-in field of the same name
 
-A `raw` key may name a field `hll` already has (`image`,
+A `raw` key may name a field `hll` already has: `image`,
 `container_name`, `restart`, `environment`, `volumes`, `networks`,
-`dns`, `expose`, `depends_on`, `labels`). When it does, the `raw` value
-is what's emitted and the built-in one is dropped — the key appears
-exactly once:
+`dns`, `expose`, `depends_on`, or `labels`. When it does, the `raw`
+value is what's emitted, and `hllc` drops the built-in one—the key
+appears exactly once:
 
 ```hll,fragment
 image "nginx"
@@ -364,11 +368,11 @@ raw {
 
 This is what makes `raw` a durable escape hatch. A file that writes
 `raw { ports: [...] }` today, because there's no dedicated `ports`
-field yet, keeps working unchanged the day one is added — so gaining a
+field yet, keeps working unchanged the day `hllc` adds one—so gaining a
 built-in field is never a breaking change for files that were working
 around its absence.
 
-Note that `raw`'s value **replaces** the built-in one; it never merges
+Note that `raw`'s value **replaces** the built-in one. It never merges
 with it. That's worth knowing for `labels` in particular, since `hll`
 computes the Traefik labels itself:
 
@@ -381,11 +385,11 @@ raw {
 
 Overriding a service's `volumes:` or `networks:` key doesn't retract
 the top-level `volumes:`/`networks:` declarations that `volume` and
-`networks` produced — those stay, so a `raw` replacement naming the
+`networks` produced—those stay, so a `raw` replacement naming the
 same named volume or network still resolves.
 
 ## `with`
 
 Not really a "field" you set directly so much as the mechanism for
-pulling a `template`'s fields onto a `service` — see [Templates &
+pulling a `template`'s fields onto a `service`—see [Templates &
 Composition](./templates-and-composition.md) for `with` in full.

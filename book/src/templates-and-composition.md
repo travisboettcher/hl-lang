@@ -1,6 +1,6 @@
-# Templates & Composition
+# Templates & composition
 
-A `template` is a named, reusable partial service — a block of fields
+A `template` is a named, reusable partial service—a block of fields
 that gets merged onto a real `service` via `with`, rather than a service
 in its own right. This is `hll`'s answer to the copy-paste every homelab
 accumulates: the shared Traefik network, the forward-auth middleware, the
@@ -22,14 +22,14 @@ template internal_web(port: Number) {
 ```
 
 - `(port: Number)` declares the template's parameter list. A parameter
-  can optionally be typed `Number` or `String`, checked strictly (a
-  `Number` parameter rejects a quoted string, even a numeric-looking
+  can optionally declare a `Number` or `String` type, checked strictly
+  (a `Number` parameter rejects a quoted string, even a numeric-looking
   one). An untyped parameter accepts any literal.
-- `$port` inside the body refers to that declared parameter — the `$`
-  sigil is reserved for exactly this, and is only legal inside a
+- `$port` inside the body refers to that declared parameter—the `$`
+  sigil serves exactly this purpose, and works only inside a
   template's own body.
 - `{{name}}` interpolates the *calling* service's own name at compile
-  time — see [Syntax Basics](./syntax-basics.md#comments-and-interpolation).
+  time—see [Syntax Basics](./syntax-basics.md#comments-and-interpolation).
 
 A template with no parameters just omits the parameter list:
 
@@ -55,14 +55,15 @@ service syncthing {
 
 Each item in a `with` list is a template name, followed by a `{ arg:
 value, ... }` argument body if the template takes parameters (a
-zero-parameter template like `authenticated` needs no body — bare
+zero-parameter template like `authenticated` needs no body—bare
 `authenticated` is enough). A template must always be fully applied at
-each call — there's no partial application or currying.
+each call—you can't partially apply it or curry it.
 
 A template's own body can itself `with` other templates, so templates
-compose — up to 64 levels of nesting, past which `hllc` reports an error
-instead of following the chain further. That's a bound on `with` *depth*,
-not on how many templates a single `with` list may name.
+can layer on each other—up to 64 levels of nesting, past which `hllc`
+reports an error instead of following the chain further. That's a bound
+on `with` *depth*, not on how many templates a single `with` list may
+name.
 
 A template may also forward its own parameters into the templates it
 applies:
@@ -81,9 +82,9 @@ template linuxserver_web(puid: Number, pgid: Number, port: Number) {
 
 ## The implicit `defaults` template
 
-A template named exactly `defaults` is special-cased: if one is declared
-in a file, it's applied to every service in that file automatically —
-no `with defaults` needed:
+A template named exactly `defaults` is special-cased: if a file declares
+one, `hllc` applies it to every service in that file automatically—no
+`with defaults` needed:
 
 ```hll,build
 template defaults {
@@ -97,38 +98,38 @@ service jellyfin {
 }
 ```
 
-`defaults` isn't a reserved word — it's an ordinary template name the
-compiler recognizes. It also never participates in collision-checking
-(below): it always loses silently to anything more specific, which is
-exactly what you want from a fallback.
+`defaults` isn't a reserved word—it's an ordinary template name the
+compiler recognizes. It also never participates in the collision-checking
+described in the next section: it always loses silently to anything more
+specific, which is exactly what you want from a fallback.
 
 ## Merge order and collisions
 
-When a service ends up with fields from more than one source — its own
+When a service ends up with fields from more than one source—its own
 body, one or more `with`-listed templates, and possibly an implicit
-`defaults` — they merge in a fixed priority order, lowest to highest:
+`defaults`—they merge in a fixed priority order, lowest to highest:
 
 1. the implicit `defaults` template, if declared
 2. explicit `with`-listed templates, left to right
-3. the service's own body — always wins over everything
+3. the service's own body—always wins over everything
 
 **A collision between two explicit `with`-listed templates on the same
-scalar or map field is a compile error** — if two templates you
+scalar or map field is a compile error**—if two templates you
 explicitly listed both try to set `image`, or both set the same `env`
 key, `hllc` won't guess which one you meant. Note that setting the field
 in the service's own body does *not* break the tie: the explicit tier
-merges to completion before the body is applied, so the collision is
-reported first and the body never gets a chance to win. The two real
+merges to completion before `hllc` applies the body, so it reports the
+collision first, and the body never gets a chance to win. The two real
 remedies are to drop one of the templates from the `with` list, or to
 refactor the contested field out of one of them. `defaults` is exempt
-from this check (it always silently loses), and the service's own body
-is exempt too (it always silently wins over whatever survives the
-explicit tier).
+from this check because it always silently loses, and the service's own
+body is exempt too because it always silently wins over whatever
+survives the explicit tier.
 
 Different field kinds merge differently:
 
 - **List fields** (`middleware`, `depends_on`, `networks`, `dns`, and
-  `expose`'s `entrypoint`) concatenate — no collision is possible, since
+  `expose`'s `entrypoint`) concatenate—no collision is possible, since
   there's nothing to overwrite. All but `dns` concatenate *by distinct
   name*: naming the same network in a template and again in the
   service's own body means what naming it once means, so the repeat is
@@ -139,20 +140,20 @@ Different field kinds merge differently:
   order is resolver priority and is therefore something you can observe.
 - **Map fields** (`volume`, `env`) merge key-by-key (or value-by-value
   for `volume`, since its uniqueness check is on the container-path
-  side) — a genuine collision on the same key is the compile error case
-  above.
+  side)—a genuine collision on the same key is the preceding compile
+  error case.
 - **Scalar fields** (`image`, `restart`) error on collision among
-  explicit templates only, per the rule above.
+  explicit templates only, per the preceding rule.
 - **`expose`** is the one built-in struct field with more than one
   sub-field, and merges per sub-field (`port`/`host`/`entrypoint`
-  independently) rather than as one indivisible unit — the same
+  independently) rather than as one indivisible unit—the same
   key-by-key reasoning as a map field, applied to a struct's named
   fields instead of a map's keys. Each sub-field then follows its own
   kind's rule: `port` and `host` are scalars and collide, while
   `entrypoint` is a list and concatenates, so two explicit templates
-  each naming one entry point produce a router attached to both — and
+  each naming one entry point produce a router attached to both—and
   two naming the *same* entry point produce a router attached to it
-  once, per the distinct-name rule above.
+  once, per the preceding distinct-name rule.
 
 That last point means a service's own body can override just
 `expose.host` while still inheriting `port`/`entrypoint` from a
@@ -162,7 +163,7 @@ That last point means a service's own body can override just
 service it-tools {
   with internal_web { port: 8080 }
   image "corentinth/it-tools:latest"
-  # overrides just expose.host — port and entrypoint still come from
+  # overrides just expose.host—port and entrypoint still come from
   # internal_web
   expose { host: "tools.internal.example.com" }
 }
@@ -170,7 +171,7 @@ service it-tools {
 
 ## A complete example
 
-Putting it together — a network, a named volume, three templates, and a
+Putting it together—a network, a named volume, three templates, and a
 service that composes all three:
 
 ```hll,build
@@ -204,12 +205,15 @@ service syncthing {
 }
 ```
 
-`syncthing` ends up with: a network reference and `restart` from
-`internal_web`; an `expose` block built from `internal_web`'s `port`
-parameter plus its own `{{name}}`-interpolated host; a middleware entry
-each from `internal_web` and `authenticated`; two `env` entries from
-`linuxserver_app`; and its own `image`/`volume`, which no template set.
+`syncthing` ends up with:
+
+- a network reference and `restart` from `internal_web`
+- an `expose` block built from `internal_web`'s `port` parameter plus
+  its own `{{name}}`-interpolated host
+- a middleware entry each from `internal_web` and `authenticated`
+- two `env` entries from `linuxserver_app`
+- its own `image` and `volume`, which no template sets
 
 Once these templates start getting reused across more than one `.hll`
-file, the next step is pulling them into a shared file and `use`-ing them
-— see [Imports](./imports.md).
+file, the next step is pulling them into a shared file and `use`-ing
+them—see [Imports](./imports.md).
