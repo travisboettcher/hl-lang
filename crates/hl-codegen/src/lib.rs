@@ -467,7 +467,8 @@ fn resolve_volumes(
     let mut docs = Vec::new();
 
     for v in &volumes.entries {
-        let container = interp::resolve(v.container.text(), bindings, v.container.span())?;
+        // Host before container, so an entry with a problem on both
+        // sides reports the left one — the order the user reads them in.
         let host = match &v.host {
             // A bind-mount path is an ordinary value and interpolates
             // like every other one (`volume "/srv/{{name}}" -> "/data"`).
@@ -503,6 +504,7 @@ fn resolve_volumes(
                 decl.name.name.clone()
             }
         };
+        let container = interp::resolve(v.container.text(), bindings, v.container.span())?;
         entries.push(format!("{host}:{container}"));
     }
 
