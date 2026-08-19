@@ -1,4 +1,4 @@
-# The `hllc` CLI
+# The `hllc` command-line tool
 
 `hllc` is the `hll` compiler's command-line binary. It has three modes,
 selected by flag, all taking a single positional path argument.
@@ -7,11 +7,10 @@ selected by flag, all taking a single positional path argument.
 hllc [--parse | --build] <file.hll or directory> [--out <path>] [--force]
 ```
 
-## Lexing (default, no flags)
+## Lexing—default, no flags
 
-With no flags, `hllc` just lexes the file and prints its token stream —
-useful for debugging the lexer itself, not something you'd reach for day
-to day:
+With no flags, `hllc` just lexes the file and prints its token stream—useful
+for debugging the lexer itself, not something you'd reach for day to day:
 
 ```sh
 hllc jellyfin.hll
@@ -19,7 +18,7 @@ hllc jellyfin.hll
 
 ## `--parse`
 
-Parses the file and pretty-prints its AST, without resolving `with`
+Parses the file and pretty-prints its Abstract Syntax Tree (AST), without resolving `with`
 composition or generating any output. Useful for checking that a file is
 syntactically valid, or for understanding how a particular shorthand
 desugars, without going all the way to Compose YAML:
@@ -30,8 +29,8 @@ hllc --parse jellyfin.hll
 
 ## `--build`
 
-Runs the full pipeline — parse, resolve `use` imports, resolve
-template/`with` composition, generate Compose YAML — and either prints
+Runs the full pipeline—parse, resolve `use` imports, resolve
+template/`with` composition, generate Compose YAML—and either prints
 the result or writes it to disk. This is the one you'll use in practice.
 
 ### Single file
@@ -42,22 +41,22 @@ hllc --build jellyfin.hll --out docker-compose.yml  # writes to a path
 hllc --build jellyfin.hll --out dist/               # writes dist/docker-compose.yml
 ```
 
-One input file always produces one output document (it may hold multiple
-`service` declarations — see [Getting Started](./getting-started.md#adding-a-second-service)).
+One input file always produces one output document, though it may hold
+multiple `service` declarations—see [Getting Started](./getting-started.md#adding-a-second-service).
 `--build` fully resolves any `use` graph the file participates in, so
 building `syncthing.hll` from the [Imports](./imports.md) example
 produces the same output whether its templates live in the same file or
 across three `use`-connected ones.
 
 If `--out` names an existing directory, `hllc` writes `docker-compose.yml`
-inside it — the same convention directory mode uses, so `dist/` (the
-natural first guess) works whether the input is a single file or a whole
+inside it—the same convention directory mode uses, so `dist/`—the
+natural first guess—works whether the input is a single file or a whole
 directory.
 
 ### Directory: flat mode
 
-Point `--build` at a directory instead of a file, and every `.hll` file
-**directly inside it** is treated as its own independent entry point,
+Point `--build` at a directory instead of a file, and `hllc` treats every
+`.hll` file **directly inside it** as its own independent entry point,
 each with its own `use` graph:
 
 ```
@@ -71,21 +70,21 @@ services/
 hllc --build services/ --out dist/
 ```
 
-`--out` is **required** in this mode — with potentially many files'
+`--out` is **required** in this mode—with potentially many files'
 worth of output, there's no single meaningful default location. Each
 file's stem becomes its own output directory:
 `dist/jellyfin/docker-compose.yml`, `dist/syncthing/docker-compose.yml`,
 and so on.
 
-A file that declares no `service` — one holding only `template`/`network`
-declarations meant to be `use`d by others — is skipped rather than built:
-it would produce a Compose document with nothing in it (codegen only
-ever emits what a service actually references).
+`hllc` skips, rather than builds, a file that declares no `service`—one
+holding only `template`/`network` declarations meant to be `use`d by
+others: building it would produce a Compose document with nothing in
+it, since codegen only ever emits what a service actually references.
 
 ### Directory: co-located mode
 
-This mode is chosen automatically when the target directory holds **no**
-`.hll` files directly — the layout a real homelab tends to use in
+`hllc` chooses this mode automatically when the target directory holds
+**no** `.hll` files directly—the layout a real homelab tends to use in
 practice, keeping each service's `.hll` source next to its other files
 (`.env`, bind-mounted config), often alongside a shared library of
 templates and networks `use`d by every service:
@@ -107,14 +106,15 @@ homelab/
 hllc --build homelab/
 ```
 
-`hllc` recurses through the tree looking for **service directories** — a
-directory holding exactly one `.hll` file that declares a `service` —
+`hllc` recurses through the tree looking for **service directories**—a
+directory holding exactly one `.hll` file that declares a `service`—
 however many levels down they sit. A directory that isn't one itself
-(like `homelab/` or `services/` above, which hold no `.hll` files of
-their own) is recursed into; a *library* directory (like `shared/`,
-which holds `.hll` files but none of them declare a service) is
-recognized as such and skipped, not treated as a malformed service
-directory. Only `service` declarations count for this — a file that
+(like `homelab/` or `services/` in the preceding listing, which hold no
+`.hll` files of their own) is recursed into. `hllc` recognizes a
+*library* directory (like `shared/`, which holds `.hll` files but none
+of them declare a service) as such and skips it, rather than treating it
+as a malformed service directory. Only `service` declarations count for
+this—a file that
 `use`s a shared library of templates is still a service directory in its
 own right.
 
@@ -126,18 +126,18 @@ service directory's path relative to the build root instead of flattening
 by name: `<out>/services/jellyfin/docker-compose.yml`.
 
 A directory containing more than one `.hll` file that declares a
-`service` is a hard error — it's ambiguous which one's output belongs
+`service` is a hard error—it's ambiguous which one's output belongs
 directly in that directory, so `hllc` won't guess. A directory can freely
-mix one service file with any number of library files, though; only the
+mix one service file with any number of library files, though—only the
 count of *service*-declaring files matters.
 
 ### Generated files, and what `hllc` won't overwrite
 
-Every document `--build` produces — printed or written — starts with a
+Every document `--build` produces—printed or written—starts with a
 header marking it as generated:
 
 ```yaml
-# Generated by hllc — do not edit.
+# Generated by hllc—do not edit.
 # Edit the .hll source and re-run `hllc --build` instead.
 services:
   jellyfin:
@@ -153,26 +153,26 @@ checks what's already there:
 
 - **Nothing there, or a file carrying the header** (`hllc`'s own earlier
   output) → written, as always. Rebuilding never needs a flag.
-- **A file without the header** — a hand-written `docker-compose.yml`,
-  or anything else — → refused, with an error, and the build exits
-  non-zero without touching it.
+- **A file without the header**—a hand-written `docker-compose.yml`, or
+  anything else—→ refused, with an error, and the build exits non-zero
+  without touching it.
 - **A symlink** → refused as well, whatever it points at. Replacing the
-  link is left to you, who can see its target.
+  link is up to you, since only you can see its target.
 
-This matters most in co-located mode, which finds its output paths by
-scanning rather than being told them: converting a repo one service at a
+This matters most in co-located mode, which scans for its output paths
+instead of taking them as input: converting a repo one service at a
 time means running `hllc --build .` over directories whose
 `docker-compose.yml` files are still hand-written, and those are exactly
-the files that must not be clobbered.
+the files `hllc` must not clobber.
 
-Pass `--force` when you do want an unmarked file replaced — typically
+Pass `--force` when you do want an unmarked file replaced—typically
 the one-time conversion of a service you've just rewritten in `.hll`:
 
 ```sh
 hllc --build services/jellyfin/jellyfin.hll --out services/jellyfin/docker-compose.yml --force
 ```
 
-`--force` skips only the header check; the symlink refusal stands
+`--force` skips only the header check. The symlink refusal stands
 regardless.
 
 ### Which directory mode applies
@@ -180,20 +180,20 @@ regardless.
 `hllc` inspects the target directory once and picks a mode:
 
 - **Any `.hll` files directly inside it** → flat mode, `--out` required.
-  Files that declare no service are skipped.
+  `hllc` skips files that declare no service.
 - **No `.hll` files directly inside it** → co-located mode, recursing
   into subdirectories to find service directories at any depth. A
   directory found along the way that declares no service (whether it
   holds no `.hll` files, or only library ones) is recursed into rather
   than treated as a service directory.
 - **No service directory found anywhere in the tree** → builds nothing,
-  successfully, but prints a line saying so — a directory build that
+  successfully, but prints a line saying so—a directory build that
   quietly does nothing is easy to mistake for one that worked.
 
 ## Flag combinations
 
-`--parse` and `--build` select different modes and can't be combined.
-`--out` and `--force` only mean anything alongside `--build` — both
+`--parse` and `--build` select different modes, so you can't combine
+them. `--out` and `--force` only mean anything alongside `--build`—both
 require it, rather than silently doing nothing when it's missing.
 `hllc` rejects an invalid combination immediately, before touching any
 file:
@@ -206,15 +206,15 @@ error: the following required arguments were not provided:
 
 ## Exit codes
 
-`hllc` exits non-zero on any lex/parse/link/compose/codegen error,
-printing a diagnostic to stderr — safe to use directly as a CI gate
+`hllc` exits non-zero on any lex/parse/link/Compose/codegen error,
+printing a diagnostic to stderr—safe to use directly as a CI gate
 before `docker compose up`.
 
 How much of a location the diagnostic carries depends on the stage that
 raised it:
 
 - **Lex errors** print `path:line:col: message`.
-- **Parse errors** print `path: line:col: message` — the path, then a
+- **Parse errors** print `path: line:col: message`—the path, then a
   space, then the position, so the path isn't part of the `line:col`
   sequence.
 - **Link errors** about a file as a whole (an import that won't load, a
@@ -226,24 +226,24 @@ raised it:
   two of them routinely straddles two files:
 
   ```text
-  t2.hll:2:11: field `restart.policy` set by both template `x` (at t1.hll:2:11) and template `y` — explicit templates must not conflict
+  t2.hll:2:11: field `restart.policy` set by both template `x` (at t1.hll:2:11) and template `y`—explicit templates must not conflict
   ```
 
-  Both positions here are line 2, column 11 — in different files. The
-  path on each is what tells them apart, and it points at the file the
+  Both positions here are line 2, column 11—in different files. The
+  path on each is what distinguishes them, and it points at the file the
   field was really written in, which may be an imported one you never
   opened.
 
 ## Warnings
 
-Not everything `hllc` has to say is fatal. Some things you can write are
-legal, deliberately dropped, and worth telling you about anyway — a
+Not everything `hllc` has to say is fatal. Some of what you can write is
+legal, deliberately dropped, and still worth hearing about, since a
 declaration that compiles to nothing at all looks exactly like one you
-forgot to write. Those are **warnings**: printed to stderr in the same
-`path:line:col:` shape as errors, with a `warning:` marker after the
-location, and with no effect on the exit code or the output. A build
-that raises only warnings still writes its files and still exits 0, so
-warnings can't break a CI gate:
+forgot to write. Those are **warnings**. `hllc` prints each one to
+stderr in the same `path:line:col:` shape as an error, with a `warning:`
+marker after the location, and it changes neither the exit code nor the
+output. A build that raises only warnings still writes its files and
+still exits 0, so a warning can't break a CI gate:
 
 ```text
 shared/common.hll:1:10: warning: template `defaults` is declared in an imported file and is not applied — `defaults` is only looked up in the entry file; give it an ordinary name and apply it with `with`
@@ -254,19 +254,20 @@ jellyfin.hll:2:9: warning: network `unused` is declared but no service reference
 There are three of them today, one per construct that a stage drops on
 purpose:
 
-- a `service` in an imported file (only the entry file's are built — see
-  [Imports](./imports.md#only-the-entry-files-services-are-built)),
-- a `template defaults` in an imported file (`defaults` is looked up only
-  in the entry file),
-- a top-level `network` no service references (the `networks:` section is
-  built from services' references).
+- a `service` in an imported file, since `hllc` builds only the entry
+  file's services—see
+  [Imports](./imports.md#only-the-entry-file-contributes-services)
+- a `template defaults` in an imported file, since `hllc` looks
+  `defaults` up only in the entry file
+- a top-level `network` no service references, since `hllc` builds the
+  `networks:` section from services' references
 
-There is no flag to silence them yet. When one is telling you about
-something you meant, the fix is to write it in a way that doesn't drop
-anything — the warning text names it in each case.
+No flag silences them yet. When one is telling you about something you
+meant, the fix is to write it in a way that drops nothing, and the
+warning text names that fix in each case.
 
-A fourth construct that used to be dropped this way — `middleware` or
-`expose.entrypoint` on a service with no `expose.host` — is a hard
+A fourth construct once dropped this way—`middleware` or
+`expose.entrypoint` on a service with no `expose.host`—is a hard
 **error** instead, because a middleware with no router is never
-something you can have meant. See
+something you could have meant. See
 [`expose`](./built-in-fields.md#expose).

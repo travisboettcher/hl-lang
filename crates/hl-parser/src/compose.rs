@@ -393,7 +393,7 @@ impl ComposeError {
                 ..
             } => write!(
                 f,
-                "{at}: field `{field}` set by both template `{first_template}` (at {}) and template `{second_template}` — explicit templates must not conflict",
+                "{at}: field `{field}` set by both template `{first_template}` (at {}) and template `{second_template}`—explicit templates must not conflict",
                 first.locate(files)
             ),
             ComposeError::MapKeyCollision(details) => {
@@ -403,7 +403,7 @@ impl ComposeError {
                 };
                 write!(
                     f,
-                    "{at}: `{}` {side_desc} {:?} set by both template `{}` (at {}) and template `{}` — explicit templates must not conflict",
+                    "{at}: `{}` {side_desc} {:?} set by both template `{}` (at {}) and template `{}`—explicit templates must not conflict",
                     details.field,
                     details.key,
                     details.first_template,
@@ -502,14 +502,14 @@ mod error_display_tests {
         assert_eq!(
             err.display(&files).to_string(),
             "t2.hll:2:11: field `restart.policy` set by both template `x` (at t1.hll:2:11) \
-             and template `y` — explicit templates must not conflict"
+             and template `y`—explicit templates must not conflict"
         );
         // Bare `Display` is what the single-file `compose` entry point
         // gets, and is unchanged.
         assert_eq!(
             err.to_string(),
-            "2:11: field `restart.policy` set by both template `x` (at 2:11) and template `y` \
-             — explicit templates must not conflict"
+            "2:11: field `restart.policy` set by both template `x` (at 2:11) and template `y`\
+             —explicit templates must not conflict"
         );
     }
 
@@ -681,7 +681,7 @@ mod error_display_tests {
         };
         assert_eq!(
             err.to_string(),
-            "2:1: field `image` set by both template `a` (at 1:1) and template `b` — explicit templates must not conflict"
+            "2:1: field `image` set by both template `a` (at 1:1) and template `b`—explicit templates must not conflict"
         );
     }
 
@@ -698,7 +698,7 @@ mod error_display_tests {
         }));
         assert_eq!(
             err.to_string(),
-            "2:1: `env` key \"FOO\" set by both template `a` (at 1:1) and template `b` — explicit templates must not conflict"
+            "2:1: `env` key \"FOO\" set by both template `a` (at 1:1) and template `b`—explicit templates must not conflict"
         );
     }
 
@@ -715,7 +715,7 @@ mod error_display_tests {
         }));
         assert_eq!(
             err.to_string(),
-            "2:1: `volume` value \"/data\" set by both template `a` (at 1:1) and template `b` — explicit templates must not conflict"
+            "2:1: `volume` value \"/data\" set by both template `a` (at 1:1) and template `b`—explicit templates must not conflict"
         );
     }
 

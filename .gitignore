@@ -1,2 +1,5 @@
 /target
 /book/book
+
+# Fetched by `vale sync`; not vendored. Run `vale sync` after cloning.
+/.vale/styles/Google

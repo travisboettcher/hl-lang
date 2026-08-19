@@ -1,12 +1,13 @@
 # hll design
 
-`hll` (pronounced "hell" — short for **H**ome**L**ab **L**anguage) is a
-small declarative DSL that transpiles to Docker Compose YAML plus Traefik
-labels. It is a transpiler, not an interpreter — no evaluation, no closures,
-no runtime. This document is the language's spec: grammar, semantics, and
-worked examples. It's the source of truth the lexer, parser, and codegen
-implementations are built against. Source files use the `.hll` extension;
-the CLI binary is `hllc`.
+`hll` (pronounced "hell"—short for **H**ome**L**ab **L**anguage) is a
+small declarative Domain-Specific Language (DSL) that transpiles to Docker
+Compose YAML plus Traefik labels. It's a transpiler, not an
+interpreter—no evaluation, no closures, no runtime. This document is the
+language's spec: grammar, semantics, and worked examples. It's the source
+of truth that the lexer, parser, and codegen implementations build
+against. Source files use the `.hll` extension, and `hllc` is the
+command-line tool.
 
 ## Motivation
 
@@ -19,13 +20,14 @@ and Traefik labels that would otherwise be hand-written.
 ## Design principle: generic core, specific templates
 
 The compiler's built-in schema stays small and generically
-Docker-Compose/Traefik-shaped — it has no knowledge of any particular
-homelab's conventions (specific auth providers, domain names, PUID/PGID
-values, etc.). Anything that's actually about *one* homelab belongs in
-`template` files that get imported, not in the compiler itself. The test to
-apply when considering a new built-in: "would this make sense to someone
-else's homelab with none of my infra?" If not, it's a template, not a
-grammar feature.
+Docker-Compose/Traefik-shaped—it has no knowledge of any particular
+homelab's conventions, such as specific auth providers, domain names, or
+Process User Identifier (PUID) and Process Group Identifier (PGID)
+values. Anything that's actually about *one* homelab belongs in
+`template` files that get imported, not in the
+compiler itself. The test to apply when considering a new built-in:
+"would this make sense on a homelab with completely different
+infrastructure?" If not, it's a template, not a grammar feature.
 
 ## Lexical grammar
 
@@ -42,32 +44,32 @@ Punctuation: { } [ ] ( ) : = -> , . $
 - `template` is the *only* reserved word in the entire language. Everything
   else that looks like a keyword (`service`, `network`, `image`, `volume`,
   `env`, `restart`, `expose`, `middleware`, `depends_on`, `networks`, `dns`,
-  `container_name`, `with`, `as`, `external`, `use`, `raw`, `defaults`,
-  ...) is an ordinary `IDENT`,
-  resolved against a schema table at parse time — not a lexer-level
+  `container_name`, `with`, `as`, `external`, `use`, `raw`, `defaults`, and
+  more) is an ordinary `IDENT`,
+  resolved against a schema table at parse time—not a lexer-level
   keyword. `with`, `as`, `external`, and `use` are *contextual* keywords,
   meaningful only in the grammar position expected (the same technique as
   C#'s `var`/`async`/`await`/`yield`), not globally off-limits as
   identifiers.
 - `.` separates an import alias from the name it qualifies (`alias.name`,
-  see Imports, below) and never appears anywhere else in the grammar —
+  see Imports, below) and never appears anywhere else in the grammar—
   `NUMBER` is integer-only, so there's no decimal-point ambiguity to
   resolve.
 - `$` prefixes a reference to a `template`'s own declared parameter
   (`$port`), see Composition, below. It's reserved for exactly that one
-  purpose — not a general sigil for anything else.
+  purpose—not a general sigil for anything else.
 - `NUMBER` is integer-only: `[0-9]+`, no sign, no decimal point, no exponent.
-- `STRING` is double-quoted with no escape sequences, and cannot contain a
-  literal `"` or a newline — an unterminated string is a lex error.
-- `->` is always a single token; a bare `-` is never valid on its own (it
+- `STRING` is double-quoted with no escape sequences, and can't contain a
+  literal `"` or a newline—an unterminated string is a lex error.
+- `->` is always a single token. A bare `-` is never valid on its own (it
   only ever appears inside an `IDENT`'s tail, or as the lead character of
   `->`).
 - `{{name}}` (string interpolation, an implicit binding to the enclosing
-  service's own name) is *not* part of the lexical grammar — it's ordinary
+  service's own name) is *not* part of the lexical grammar—it's ordinary
   content inside a `STRING` token, resolved later at codegen time.
-- `#` line comments are skipped like whitespace; no comment token is
-  emitted. A `#` inside a `STRING` is just ordinary string content, not a
-  comment — comments are only recognized between tokens.
+- The lexer skips `#` line comments like whitespace and emits no comment
+  token. A `#` inside a `STRING` is just ordinary string content, not a
+  comment—comments are only recognized between tokens.
 
 ## Syntactic grammar
 
@@ -106,108 +108,110 @@ list           ::= "[" ( value ( "," value )* )? "]"
 literal        ::= STRING | NUMBER | IDENT | "$" IDENT
 ```
 
-- A parameter's optional `: param_type` annotation is checked strictly,
-  not coercively: a declared `Number` rejects a quoted string argument
-  even if it's numeric-looking, and a declared `String` rejects a bare
-  number — no implicit coercion between kinds. An untyped parameter (no
-  `:` at all) accepts an argument of any literal kind, with no
-  compose-time check. `Number`/`String` are the only two types this
-  milestone supports — a bare-`IDENT`-typed or list-typed parameter isn't
+- The parser checks a parameter's optional `: param_type` annotation
+  strictly, not coercively: a declared `Number` rejects a quoted string
+  argument even if it's numeric-looking, and a declared `String` rejects
+  a bare number—no implicit coercion between kinds. An untyped parameter,
+  with no `:` at all, accepts an argument of any literal kind, with no
+  Compose-time check. `Number`/`String` are the only two types this
+  milestone supports—a bare-`IDENT`-typed or list-typed parameter isn't
   expressible yet.
-- The `"$" IDENT` form of `literal` (a parameter reference, e.g. `$port`)
-  is only legal inside a `template`'s own body — including a nested
-  `with`-invocation argument body written inside that template, where a
-  `$name` forwards the *enclosing* template's own parameter (see
+- The `"$" IDENT` form of `literal`, a parameter reference such as
+  `$port`, is only legal inside a `template`'s own body—including a
+  nested `with`-invocation argument body written inside that template,
+  where a `$name` forwards the *enclosing* template's own parameter (see
   Composition, below). Used anywhere else (a plain `service`/`network`
   body, or a `with`-invocation body written inside one of those), it's a
   compile error: only a template body has a declared parameter list to
-  resolve `$name` against. This is, like the newline/comma layout rules
-  above, a context-sensitive constraint the plain grammar can't express.
+  resolve `$name` against. This is, like the preceding newline/comma
+  layout rules, a context-sensitive constraint the plain grammar can't
+  express.
 
-`statement` is the whole language: a `named_decl` is one particular shape of
-it (mandatory second name, mandatory body); every field inside a `service`,
-every `template` invocation, every leaf like `image "foo"` is the same
-`statement` production, applied recursively.
+`statement` is the whole language: a `named_decl` is one particular shape
+of it with a mandatory second name and mandatory body. Every field
+inside a `service`, every `template` invocation, every leaf like `image
+"foo"` is the same `statement` production, applied recursively.
 
-The grammar above is deliberately silent on layout, but layout isn't actually
-free — two rules govern how statements are separated, neither expressible in
-a plain context-free grammar (both depend on source position/line, not just
-token identity):
+The preceding grammar is deliberately silent on layout, but layout isn't
+actually free—two rules govern how a newline or a comma separates
+statements, neither expressible in a plain context-free grammar, since
+both depend on source position/line, not just token identity:
 
-- **Different fields in a struct-kind body are separated by a newline, never
+- **A struct-kind body separates different fields with a newline, never
   a comma.** `service`/`template`/`network`'s own top-level body, and a
   nested struct-kind type's canonical `{ }` form (`image { ... }`, `expose {
   ... }`, `restart { ... }`), all require this: `image "x"` and `restart
   unless-stopped` must be on separate lines, and a comma between them (`image
   "x", restart unless-stopped`) is a compile error, not a tolerated
-  no-op — a comma is reserved exclusively for continuing a *single* field's
-  own comma-list (see below), never for marking the boundary between two
-  unrelated fields. A single-statement body needs nothing to separate
-  (`{ image "x" }` on one line is fine); the rule only applies from the
-  second statement on.
+  no-op—a comma exclusively continues a *single* field's own comma-list,
+  described in the next bullet below, and never marks the boundary
+  between two unrelated fields.
+  A single-statement body needs nothing to separate—`{ image "x" }` on
+  one line is fine. The rule only applies from the second statement on.
 - **A comma-list's trailing comma is mandatory, not optional, to continue
   it.** A bracket list (`[a, b, c]`), a bare `with`-list (`with a, b, c`),
-  and a primary-shorthand's own secondary fields (rule 3, below) all follow
-  "trailing comma continues, its absence ends the statement" — but the
-  comma itself is never optional when there *is* a next item; bare
+  and a primary-shorthand's own secondary fields, per rule 3 below, all
+  follow "trailing comma continues, its absence ends the statement"—but
+  the comma itself is never optional when there *is* a next item. Bare
   adjacency with no comma at all no longer implies continuation.
 
-Map-kind bodies — `raw { }`, `volume { }`/`env { }`, and a `with`-invocation's
-own argument body (which reuses `raw`'s entry parsing) — are exempt from the
-newline rule in the *opposite* direction from the comma-list rule above:
-their entries are conceptually key-value pairs in a dictionary, not named
-struct fields, and either a comma *or* a newline (not just a comma) is
-enough to separate them, so the compact one-line style (`{ puid: 1000, pgid:
-100 }`) used throughout this doc's own worked examples stays valid,
+Map-kind bodies—`raw { }`, `volume { }`/`env { }`, and a `with`-invocation's
+own argument body (which reuses `raw`'s entry parsing)—are exempt from the
+newline rule in the *opposite* direction from the preceding comma-list
+rule: their entries are conceptually key-value pairs in a dictionary, not
+named struct fields, and either a comma *or* a newline, not just a comma,
+is enough to separate them, so the compact one-line style (`{ puid: 1000,
+pgid: 100 }`) used throughout this doc's own worked examples stays valid,
 comma-separated, on one line, alongside the equally valid multi-line form
 with no commas at all. What's never valid is bare adjacency on *one* line
 with neither: `{ "a": "/x" "b": "/y" }` is a parse error (`expected a comma
 or a newline before the next entry`), same as the comma-list rule's own
-"bare adjacency no longer implies continuation" — only here a newline is
+"bare adjacency no longer implies continuation"—only here a newline is
 also an accepted substitute for the comma, not just its own separate case.
 Both `{ "a": "/x", "b": "/y" }` and `{ "a": "/x"\n  "b": "/y" }` parse to the
-same two entries (#81).
+same two entries—see #81.
 
 ### Desugaring rules
 
-1. **Primary-value/list shorthand** — a type's schema may designate one
+1. **Primary-value/list shorthand**—a type's schema may designate one
    field as primary. A bare value (or comma-list, if the primary field is
    list-typed) right after the type name, with no `{ }`, sets just that
    field. `image "foo"` desugars to `image { ref: "foo" }`.
-2. **Map bare-entry shorthand** — a bare `<key> <sep> <value>` line
+2. **Map bare-entry shorthand**—a bare `<key> <sep> <value>` line
    desugars to a one-entry map, where `<sep>` is a per-type schema choice
    (`env` uses `=`, `volume` uses `->`). Both desugar to the same canonical
    `:`-separated map form internally.
-3. **Secondary-field bare shorthand** — after a primary value, a type's
-   schema-configured `bare_keyword_alias` (if it has one — `as` is the one
+3. **Secondary-field bare shorthand**—after a primary value, a type's
+   schema-configured `bare_keyword_alias` (if it has one—`as` is the one
    built-in case, aliasing to `expose`'s `host` field) may fuse onto it
    directly with **no comma**: `expose port as "host"`. This is a one-shot
-   continuation, not a list — it cannot itself be followed by anything
-   else, comma or no comma; `expose port as "host", entrypoint: web` is a
-   compile error. Beyond that, additional explicit `key: value`/`key`
-   fields may follow, each preceded by a **mandatory comma** (the same
-   "trailing comma continues, its absence ends the statement" rule as any
-   other comma-list, including exempting the alias keyword itself — `as`
-   isn't a valid target of this comma-continuation, only of the immediate
-   no-comma fusion above): `expose port, host: "...", entrypoint: web`.
+   continuation, not a list—nothing else can follow it with or without
+   a comma. `expose port as "host", entrypoint: web` is a compile error.
+   Beyond that, additional explicit `key: value`/`key` fields may follow,
+   each preceded by a **mandatory comma** (the same "trailing comma
+   continues, its absence ends the statement" rule as any other
+   comma-list, including exempting the alias keyword itself—`as` isn't
+   a valid target of this comma-continuation, only of the preceding
+   no-comma fusion): `expose port, host: "...", entrypoint: web`.
    A field whose own value is an unbracketed comma-list (`entrypoint`'s
    reference list) ends at the next `key:` rather than swallowing it, by
    the same one-token lookahead: in `expose port, entrypoint: web, host:
    "..."`, the second comma starts a sibling field of `expose`, not a
    second entry point.
-   A boolean struct field can always be set bare with no value, implying
-   `true` (e.g. `external` on `network`). A bare zero-field template
-   invocation (`authenticated` with no `{ }`) is the same grammar
-   production as the comma-continuation case, disambiguated only by schema
-   lookup — one token of lookahead past the comma confirms the next key
-   genuinely names one of the nested type's own fields before consuming it
-   as part of this value; otherwise the comma (and whatever follows) is
-   left for the *enclosing* body, where a bare comma is never a valid
-   statement start and now correctly errors instead of silently
+   Writing a boolean struct field bare, with no value, always implies
+   `true` (for example, `external` on `network`). A bare zero-field
+   template invocation (`authenticated` with no `{ }`) is the same
+   grammar production as the comma-continuation case, disambiguated only
+   by schema lookup—one token of lookahead past the comma confirms the
+   next key genuinely names one of the nested type's own fields before
+   consuming it as part of this value. Otherwise the comma and whatever
+   follows it stay with the *enclosing* body, where a bare comma is never
+   a valid statement start and now correctly errors instead of silently
    reattaching elsewhere.
-4. **Repeatable-field accumulation** (semantic, not part of the CFG) —
-   writing `volume`, `env`, `middleware`, or `depends_on` more than once in
-   one body appends, since those fields are list/map-kinded — subject to
+4. **Repeatable-field accumulation**—semantic, not part of the
+   Context-Free Grammar (CFG)—writing `volume`, `env`, `middleware`, or
+   `depends_on` more than once in
+   one body appends, since those fields are list/map-kinded—subject to
    the set-like lists' distinct-name rule under "Composition" below, which
    drops a repeat of a name already present. Writing
    `image` or `restart` twice in the same body is a duplicate-scalar
@@ -217,22 +221,22 @@ same two entries (#81).
 
 | Type | Kind | Primary field | Separator | Uniqueness side | Needs name |
 |---|---|---|---|---|---|
-| `network` | struct | — | — | — | yes |
-| `service` | struct | — | — | — | yes |
-| `image` | struct | `ref` | — | — | no |
-| `expose` | struct | `port` | — | — | no |
-| `volume` | map | — | `->` | value (container path) | no |
-| `env` | map | — | `=` | key | no |
-| `restart` | struct | `policy` | — | — | no |
-| `with` | struct | `templates` (list of nested instantiations) | — | — | no |
-| `raw` | map | — | `:` | none (schema-free, passthrough) | no |
+| `network` | struct |—|—|—| yes |
+| `service` | struct |—|—|—| yes |
+| `image` | struct | `ref` |—|—| no |
+| `expose` | struct | `port` |—|—| no |
+| `volume` | map |—| `->` | value—the container path | no |
+| `env` | map |—| `=` | key | no |
+| `restart` | struct | `policy` |—|—| no |
+| `with` | struct | `templates`—list of nested instantiations |—|—| no |
+| `raw` | map |—| `:` | none—schema-free, passthrough | no |
 
-`raw`'s "no uniqueness checking" is a *parser*-level statement: its own
-entries are unchecked against each other and against any other field.
-Codegen does have one rule about them, because YAML forces the issue —
-two keys spelled the same in one mapping is invalid — and a `raw` key
-may well name a field that has a row above. Where it does, the `raw`
-value is what's emitted and the built-in one is dropped, which keeps
+`raw`'s "no uniqueness checking" is a *parser*-level statement: the
+parser never checks its own entries against each other or against any
+other field. Codegen does have one rule about them, because YAML forces
+the issue—two keys spelled the same in one mapping is invalid—and a
+`raw` key may well name a field that has a preceding row. Where it does,
+codegen emits the `raw` value and drops the built-in one, which keeps
 adding a row to this table from breaking files that were already
 reaching for `raw` in that row's absence (see the `raw` section of the
 book's Built-in Fields page).
@@ -241,69 +245,69 @@ book's Built-in Fields page).
 (`entrypoint web, web-secure`), for the same reason it isn't a scalar
 anywhere else in the pipeline: Traefik's `entrypoints=` label is
 comma-separated, and modelling that as a list keeps the separator
-codegen's to write rather than the user's — so no generated label value
+codegen's to write rather than the user's—so no generated label value
 ever has to tolerate a user-written comma, and the metacharacter guard
 can reject `,` uniformly everywhere.
 
-`middleware`, `depends_on`, `networks`, and `dns` are not rows in this
-table — they're plain list-of-reference fields directly on
-`service`/`template` (`dns ["192.168.50.182"]`: a per-service DNS
-resolver override, Compose's own `dns:` key — the field itself is
-generic, only a given entry's IP is homelab-specific, same reasoning as
-`volume`'s host path or an `env` entry's value already being
-homelab-specific without the field itself being one). `container_name`
-isn't a row either, for the opposite reason: it's a plain *scalar* field
-directly on `service`/`template` (`container_name "uptime-kuma"` /
-`container_name: "uptime-kuma"`) rather than a nested struct type — it
-has no secondary fields of its own to give it a primary-field/separator
-shape worth a table row. Unset, it's simply omitted from the generated
-service block rather than defaulting to anything (#90) — Compose's own
-per-project default naming is what most people want, and defaulting the
-built-in to the service's own name reliably collided across independent
-stacks sharing a common service name. `template` isn't a row either — it's the
-mechanism for adding new rows to this table at parse time. `defaults` is
-likewise not a row — it's an ordinary template, semantically special
-only in that it's implicitly applied (see
-Composition, below).
+`middleware`, `depends_on`, `networks`, and `dns` aren't rows in this
+table—they're plain list-of-reference fields directly on
+`service`/`template` (`dns ["192.168.50.182"]`: a per-service Domain
+Name System (DNS) resolver override, Compose's own `dns:` key—the field
+itself is generic, only a given entry's IP is homelab-specific, same
+reasoning as `volume`'s host path or an `env` entry's value already
+being homelab-specific without the field itself being one).
+`container_name` isn't a row either, for the opposite reason: it's a
+plain *scalar* field directly on `service`/`template`
+(`container_name "uptime-kuma"` / `container_name: "uptime-kuma"`)
+rather than a nested struct type—it has no secondary fields of its own
+to give it a primary-field/separator shape worth a table row. Unset,
+it's simply omitted from the generated service block rather than
+defaulting to anything—see #90. Compose's own per-project default
+naming is what most people want, and defaulting the built-in to the
+service's own name reliably collided across independent stacks sharing
+a common service name. `template` isn't a row either—it's the mechanism
+for adding new rows to this table at parse time. `defaults` is likewise
+not a row—it's an ordinary template, semantically special only in that
+it's implicitly applied—see Composition, below.
 
 ## Composition: templates and `with`
 
 A `template` is a named, optionally parameterized block that produces a
-*partial* record of fields, meant to be merged onto a real `service` via
-`with`. Templates must be fully applied at each call — no partial
-application, no currying. A template's body can itself `with` other
-templates (composition).
+*partial* record of fields for `with` to merge onto a real `service`.
+Templates must be fully applied at each call: never partially applied,
+and never curried. A template's body can itself `with` other
+templates—composition.
 
-`defaults` is not a reserved word — it's an ordinary template name the
+`defaults` isn't a reserved word—it's an ordinary template name the
 compiler treats specially: if declared, it's implicitly applied at the
-lowest-priority tier, below any explicit `with`-listed template, and never
-participates in conflict-checking (it always silently loses).
+lowest-priority tier, below any explicit `with`-listed template, and
+never participates in conflict-checking—it always silently loses.
 
 Merge priority, lowest to highest:
 
 1. the implicit `defaults` template, if declared
-2. explicit `with`-listed templates, left to right — a collision between
+2. explicit `with`-listed templates, left to right—a collision between
    two of these on the same scalar/map field is a **compile error**
-3. the service's own body — always wins over everything
+3. the service's own body—always wins over everything
 
-List fields concatenate (no collision possible) — the set-like ones
-(`middleware`, `depends_on`, `networks`, `expose.entrypoint`) by
-*distinct* name, keeping the first occurrence, while `dns` keeps
-duplicates since its order is observable resolver priority; map fields merge
-key-by-key (or value-by-value for `volume`); scalar fields (`image`,
-`restart`) error on collision among explicit templates only. `expose`,
-the one built-in struct field with more than one sub-field, merges
-per sub-field (`port`/`host`/`entrypoint` independently) rather than as
-one indivisible unit — the same key-by-key reasoning as a map field,
-applied to a struct's named fields instead of a map's keys. Each
+List fields concatenate, so no collision is possible. The set-like ones
+(`middleware`, `depends_on`, `networks`, `expose.entrypoint`) concatenate
+by *distinct* name, keeping the first occurrence, while `dns` keeps
+duplicates since its order is observable resolver priority. Map fields
+merge key-by-key (or value-by-value for `volume`), and scalar fields
+(`image`, `restart`) error on collision among explicit templates only.
+`expose`, the one built-in struct field with more than one sub-field,
+merges per sub-field (`port`/`host`/`entrypoint` independently) rather
+than as one indivisible unit—the same key-by-key reasoning as a map
+field, applied to a struct's named fields instead of a map's keys. Each
 sub-field then merges by its own kind: `port`/`host` are scalars and
 collide, `entrypoint` is a list and concatenates, so two explicit
 templates each naming one entry point yield a router attached to both
-rather than a `FieldCollision` (and two naming the same one yield a
-router attached to it once, per the distinct-name rule). This means a
+rather than a `FieldCollision`. Two naming the same entry point yield a
+router attached to it once, per the distinct-name rule. This means a
 service's own body can override just `expose.host` while still
 inheriting `port`/`entrypoint` from a `with`-listed template, without
-repeating them; two explicit templates only collide if they set the
+repeating them. Two explicit templates only collide if they set the
 *same* scalar `expose` sub-field, not merely the same `expose` field
 overall.
 
@@ -315,7 +319,7 @@ template internal_web(port: Number) {
 service it-tools {
   with internal_web { port: 8080 }
   image "corentinth/it-tools:latest"
-  # overrides just expose.host — port and entrypoint still come from
+  # overrides just expose.host—port and entrypoint still come from
   # internal_web above
   expose { host: "tools.internal.techdebtor.io" }
 }
@@ -323,55 +327,56 @@ service it-tools {
 
 ## Imports
 
-Real-world templates and network declarations are meant to be shared
-across many service files, not copy-pasted into each one. `use` imports
-another `.hll` file under a local alias; `alias.name` then references
+Real-world templates and network declarations are for sharing across
+many service files, not for copy-pasting into each one. `use` imports
+another `.hll` file under a local alias. `alias.name` then references
 anything that file declares at its top level.
 
 ```
 use "docker.hll" as traefik
 ```
 
-- `use`'s path is always a quoted `STRING` — `IDENT`'s grammar
+- `use`'s path is always a quoted `STRING`—`IDENT`'s grammar
   (`[A-Za-z_][A-Za-z0-9_-]*`) can't represent `.`/`/` at all, so a bare
   path isn't lexable. It's resolved relative to the *importing file's
-  own location*, never the entry file's location or the working
-  directory the compiler was invoked from.
+  own location*, never the entry file's location or the directory the
+  compiler ran from.
 - `alias.name` qualifies any reference that would otherwise be a bare
   `IDENT`: a `networks [...]` entry (`networks [traefik.traefik-net]`)
   or a `with` invocation's target (`with common.internal_web { ... }`).
-  `middleware`/`depends_on` don't support a qualified form — neither has
+  `middleware`/`depends_on` don't support a qualified form—neither has
   a coherent cross-file meaning (`depends_on` names a same-file sibling
-  service; `middleware` isn't resolved against anything at all).
+  service, and `middleware` isn't resolved against anything at all).
 - **Templates are lexically scoped, not dynamically scoped.** If a
   template declared in `templates.hll` writes
   `networks [traefik.traefik-net]`, that `traefik` resolves against
-  *`templates.hll`'s own* `use` declarations — never whichever file
+  *`templates.hll`'s own* `use` declarations—never whichever file
   happens to invoke the template with `with`. A template's references
   always resolve relative to where it was *written*, not where it was
   *called from*.
-- **Imports are not transitive.** `use`-ing a file only makes *that
-  file's* own top-level declarations available under your alias — not
+- **Imports aren't transitive.** `use`-ing a file only makes *that
+  file's* own top-level declarations available under your alias—not
   anything *it* in turn `use`s. If `service.hll` uses `templates.hll`,
-  and `templates.hll` uses `docker.hll`, `service.hll` cannot write
-  `docker.hll`'s alias itself; only `templates.hll`'s own template
-  bodies can (via the lexical-scoping rule above).
-- **An imported network keeps its own bare name**, and that bare name is
-  what a service's `networks [...]` entries are resolved by, so two
+  and `templates.hll` uses `docker.hll`, `service.hll` can't write
+  `docker.hll`'s alias itself. Only `templates.hll`'s own template
+  bodies can, via the preceding lexical-scoping rule.
+- **An imported network keeps its own bare name**, and a service's
+  `networks [...]` entries resolve against that bare name, so two
   networks can't share one. A file that pulls in `ext.proxy` while also
-  declaring its own `network proxy` — or that pulls in both `a.proxy`
-  and `b.proxy` — is a compile error rather than a silent pick between
+  declaring its own `network proxy`—or that pulls in both `a.proxy`
+  and `b.proxy`—is a compile error rather than a silent pick between
   them. Two files each declaring an unrelated `network proxy` stay
-  legal; the error only fires when a qualified reference actually brings
-  one across an import into the other's company.
-- **`use` shares declarations, not services.** Only the entry file's own
-  `service` blocks are compiled; one in an imported file is parsed (so
-  duplicate names and syntax are still checked) and then dropped, since
-  nothing resolves a service across files anyway. Likewise the implicit
-  `defaults` template is looked up only in the entry module — it has no
-  invocation to carry an alias, so there is no `with common.defaults` to
-  write and an imported `defaults` applies to nothing. Both are
-  warnings, not errors; see Diagnostics, below.
+  legal. The error only fires when a qualified reference actually
+  brings one across an import into the other's company.
+- **`use` shares declarations, not services.** The compiler builds only
+  the entry file's own `service` blocks. It parses one in an imported
+  file, so duplicate names and syntax still get checked, and then drops
+  it, since nothing resolves a service across files anyway. Likewise, it
+  looks up the implicit `defaults` template only in the entry module. It
+  has no invocation to carry an alias, so there is no
+  `with common.defaults` to write, and an imported `defaults` applies to
+  nothing. Both are warnings rather than errors—see the following
+  Diagnostics section.
 
 ## Worked examples
 
@@ -458,16 +463,16 @@ service syncthing {
 }
 ```
 
-`syncthing.hll` never itself `use`s `network.hll` — only `templates.hll`
-does — yet `internal_web`'s own `networks [net.traefik-net]` still
+`syncthing.hll` never itself `use`s `network.hll`—only `templates.hll`
+does—yet `internal_web`'s own `networks [net.traefik-net]` still
 resolves correctly no matter which service ends up invoking it, since it
 always resolves against `templates.hll`'s own alias table, never the
 caller's.
 
 A `with` list composing several templates reads as one long line once it
-grows past two or three — per the Syntactic grammar section above, "a
-trailing comma continues a comma-list," so the same `with` line can be
-wrapped across multiple lines instead, one template per line, as long as
+grows past two or three—per the preceding Syntactic grammar section, "a
+trailing comma continues a comma-list," so the same `with` line can
+instead wrap across multiple lines, one template per line, as long as
 every line but the last ends with a trailing comma:
 
 ```
@@ -480,130 +485,132 @@ service syncthing {
 }
 ```
 
-This parses identically to the single-line form above — it's purely a
+This parses identically to the preceding single-line form—it's purely a
 readability choice, not a different construct.
 
 ## Pipeline
 
-1. **Lexer** (`crates/hl-lexer`) — one reserved word (`template`),
+1. **Lexer** (`crates/hl-lexer`)—one reserved word (`template`),
    string/number literals, `{`/`}`/`[`/`]`/`.`/`$`, `->`, `:`, `=`,
    `(`/`)`, `,`, and `#` line comments. Everything else is just an
-   identifier to the lexer; meaning comes from the schema table during
+   identifier to the lexer. Meaning comes from the schema table during
    parsing.
-2. **Parser** (`crates/hl-parser`) — one generic block parser, not one
-   function per keyword: parse `<type> [<n>]`, then either a
-   bare-value/list (primary-field shorthand) or a `{ field: value, ... }`
-   body, recursing into nested blocks. A schema table drives both parsing
+2. **Parser** (`crates/hl-parser`)—one generic block parser, not one
+   function per keyword: parse `<type> [<n>]`, then a bare value or
+   list—the primary-field shorthand—or a `{ field: value, ... }` body,
+   recursing into nested blocks. A schema table drives both parsing
    and validation. Covers every built-in type (`network`, `service`,
    `image`, `expose`, `volume`, `env`, `restart`, `raw`), full
-   `template`/`with` composition, and `use`/alias-qualified references
-   (see Composition and Imports, above) — purely syntactic, no name
-   resolution.
-3. **Compose** (`crates/hl-parser`'s `compose` module) — resolves every
-   `with`-list into a fully-merged `Service` with no templates or
+   `template`/`with` composition, and `use`/alias-qualified references,
+   see the preceding Composition and Imports sections—purely syntactic,
+   no name resolution.
+3. **Compose** (`crates/hl-parser`'s `compose` module)—resolves every
+   `with`-list into a fully merged `Service` with no templates or
    unresolved parameters left, per the Composition section's 3-tier merge
    rules. Generalized over a `SymbolResolver` trait so the same merge
    engine resolves both a single file's own templates (`compose`, no
    imports) and a whole `use` graph (`compose_with_resolver`, driven by
    the linker below).
-4. **Linker** (`crates/hl-linker`) — loads a `use` graph off disk (or, for
+4. **Linker** (`crates/hl-linker`)—loads a `use` graph off disk (or, for
    tests, an in-memory map) into a module graph, and implements
    `SymbolResolver` over it so `compose_with_resolver` can resolve
-   cross-file `alias.name` references — see Imports, above.
-5. **Codegen** (`crates/hl-codegen`) — walks a composed program and emits
+   cross-file `alias.name` references—see the preceding Imports section.
+5. **Codegen** (`crates/hl-codegen`)—walks a composed program and emits
    one Compose YAML document per input file (which may hold multiple
    services), with Traefik labels on each service's own `labels:` list.
-6. **CLI** (`crates/hl-cli`, binary name `hllc`) — `hllc <file.hll>` lexes
-   and prints tokens; `hllc --parse <file.hll>` parses and pretty-prints
-   the AST; `hllc --build <file.hll> [--out <path>]` runs the full
-   pipeline (link → compose → codegen) and writes (or, with no `--out`,
-   prints) the resulting Compose YAML. `--build` also accepts a
-   directory, in either of two shapes:
+6. **Command-line tool** (`crates/hl-cli`, binary name `hllc`)—
+   `hllc <file.hll>` lexes and prints tokens. `hllc --parse <file.hll>`
+   parses and pretty-prints the Abstract Syntax Tree (AST). `hllc --build
+   <file.hll> [--out <path>]` runs the full pipeline—link → Compose →
+   codegen—and writes (or, with no `--out`, prints) the resulting Compose
+   YAML. `--build` also accepts a directory, in either of two shapes:
    - **Flat**: every `.hll` file directly inside the directory is its own
      independent entry point with its own `use` graph, each writing to
-     `<out>/<stem>/docker-compose.yml`. `--out` is required here — with
+     `<out>/<stem>/docker-compose.yml`. This shape requires `--out`—with
      potentially many files' output, there's no single meaningful default
      location.
    - **Co-located** (chosen automatically when the directory holds no
      `.hll` files of its own, but at least one immediate subdirectory
      that does): recurses exactly one level, and each such subdirectory's
      single `.hll` file builds in place, right back into that same
-     subdirectory by default (`<subdir>/docker-compose.yml`) — no `--out`
+     subdirectory by default (`<subdir>/docker-compose.yml`)—no `--out`
      needed. An explicit `--out <dir>` still remaps the whole tree, the
      same way it does for the flat case, keyed by each subdirectory's own
      name (`<out>/<subdir-name>/docker-compose.yml`) rather than a file
-     stem. This is the shape a real homelab tends to use in practice —
+     stem. This is the shape a real homelab tends to use in practice—
      `it_tools/it_tools.hll` alongside `it_tools/docker-compose.yml`,
      rather than every service's `.hll` file living in one flat
-     directory — so a service's `.hll` source stays next to its other
+     directory—so a service's `.hll` source stays next to its other
      files (`.env`, bind-mounted config) instead of splitting them across
      two locations. A subdirectory with more than one `.hll` file is a
      hard error (ambiguous which one's output belongs directly in that
      subdirectory), not a silent guess.
 
-   Every document `--build` emits, on any of those paths (stdout
-   included), is prefixed with a `# Generated by hllc` header. It's inert
+   `--build` prefixes every document it emits, on any of those paths,
+   including stdout, with a `# Generated by hllc` header. It's inert
    to Compose, it makes generated files self-identifying in a repo and in
    review, and it's what lets the compiler recognize its own previous
    output: before writing, `hllc` refuses any existing file that lacks
-   that header (and any symlink, whatever its target) unless `--force` is
-   passed. The point is the incremental migration — converting one
-   service to `.hll` while its neighbours stay hand-written Compose — in
-   which co-located mode writes to paths it found by scanning rather than
-   paths the user named, so an unguarded write silently destroys the
-   hand-written files it happened to find. Rebuilding is unaffected:
-   `hllc`'s own output carries the header and is overwritten as before.
+   that header, including a symlink whatever its target, unless the
+   caller passes `--force`. The point is the incremental
+   migration—converting one service to `.hll` while its neighbours stay
+   hand-written Compose—in which co-located mode writes to paths it
+   found by scanning rather than paths the user named, so an unguarded
+   write silently destroys the hand-written files it happened to find.
+   Rebuilding works fine: `hllc`'s own output already carries the
+   header, so `hllc` overwrites it as before.
 
 ## Diagnostics
 
 Most diagnostics are hard errors: a stage returns one, the pipeline
 stops, and `hllc` exits non-zero having printed it to stderr. Every one
 of them carries a span, and every span carries the identity of the file
-it was lexed from, so a location renders as `path:line:col` even when
-the offending field came from a template in an imported file the user
-never opened.
+it came from, so a location renders as `path:line:col` even when the
+offending field came from a template in an imported file the user never
+opened.
 
-Alongside that, each stage can accumulate **warnings** — non-fatal
-diagnostics for constructs the compiler deliberately drops. They are
-returned with the stage's success value (`hl_linker::Linked::warnings`,
-`hl_codegen::GeneratedProgram::warnings`), rendered exactly like errors
-with a `warning:` marker after the location, and printed to stderr by
-`hllc` without touching its exit code or its output. Three constructs
-warn today: a `service` in a non-entry file, a `defaults` template in a
-non-entry file, and a top-level `network` no service references (the
-`networks:` section is assembled from services' references, so an
-unreferenced declaration is emitted nowhere).
+Alongside that, each stage accumulates **warnings**—non-fatal
+diagnostics for constructs the compiler deliberately drops. Each stage
+hands its warnings back with its success value
+(`hl_linker::Linked::warnings`, `hl_codegen::GeneratedProgram::warnings`)
+in the same shape errors render in, with a `warning:` marker after the
+location. `hllc` prints them to stderr and touches neither its exit code
+nor its output. Three constructs warn today: a `service` in a non-entry
+file, a `defaults` template in a non-entry file, and a top-level
+`network` no service references. That last one drops out of assembling
+the `networks:` section from services' references, which leaves a
+declaration nothing names with nowhere to go.
 
-The channel is deliberately minimal. There is no way to promote a
-warning to an error and no `--quiet`/`-W`/`-A` style suppression yet;
-warnings are a named enum per stage precisely so a later suppression
+The channel is deliberately minimal. Nothing promotes a warning to an
+error, and there's no `--quiet`, `-W`, or `-A` style suppression yet.
+Warnings are a named enum per stage precisely so a later suppression
 scheme has something to filter on.
 
 The fourth construct of this shape is *not* a warning: `middleware` or
 `expose.entrypoint` on a service with no `expose.host` is a hard error.
 Both fields only exist as labels on a Traefik router, and `expose.host`
-is what creates that router, so there is no reading under which the pair
-means something — while quietly dropping them shipped a service with its
+is what creates that router, so no reading of the pair means anything.
+Dropping them quietly, by contrast, shipped a service with its
 forward-auth missing and nothing to say so.
 
 ## Future work
 
-- **`bootstrap` scaffold** — generate a brand-new homelab's starting
+- **`bootstrap` scaffold**—generate a brand-new homelab's starting
   `.hll` files from a template: a `docker.hll` declaring the shared
   network plus a `traefik` service (HTTPS termination, a
   certificate-resolver placeholder, the `web-secure`/`web` entrypoints),
   and a `templates.hll` with common reusable templates in the same shape
-  as this doc's own worked examples — so starting a new homelab doesn't
+  as this doc's own worked examples—so starting a new homelab doesn't
   mean hand-writing the reverse-proxy service from scratch. Not yet
   designed: exactly where the line falls between what's generic enough to
   belong in the scaffold (entrypoints, the shape of a certificate
   resolver) versus what's homelab-specific and should stay a
   fill-in-the-blanks placeholder (DNS provider/credentials, domain, IP
-  ranges) — see "Design principle: generic core, specific templates,"
-  above.
-- **`hllfmt`** — an auto-formatter that would wrap a long `with` list past
-  some line length (see the multiline `with` example above) with
+  ranges)—see the preceding section, "Design principle: generic core,
+  specific templates."
+- **`hllfmt`**—an auto-formatter that would wrap a long `with` list past
+  some line length (see the preceding multiline `with` example) with
   consistent indentation, instead of that being a manual per-file
   judgment call. Not yet designed: the line-length threshold, and whether
-  formatting is opinionated/non-configurable (à la `gofmt`/`rustfmt`) or
-  takes any settings at all.
+  formatting stays opinionated and non-configurable (à la
+  `gofmt`/`rustfmt`) or takes any settings at all.
