@@ -1,9 +1,9 @@
 # Introduction
 
-`hll` (pronounced "hell" — short for **H**ome**L**ab **L**anguage) is a
+`hll` (pronounced "hell"—short for **H**ome**L**ab **L**anguage) is a
 small declarative language for describing homelab services. You write a
-compact `.hll` file describing a service — its image, the port it
-exposes, its volumes, environment variables, restart policy — and `hllc`,
+compact `.hll` file describing a service—its image, the port it
+exposes, its volumes, environment variables, restart policy—and `hllc`,
 the `hll` compiler, transpiles it into a Docker Compose YAML file with
 Traefik reverse-proxy labels already attached.
 
@@ -15,7 +15,7 @@ service, and pull in the repeated parts (the Traefik network, the
 forward-auth middleware, the `PUID`/`PGID` pair every LinuxServer.io image
 wants) from a shared **template**.
 
-`hll` is a transpiler, not an interpreter — there's no evaluation, no
+`hll` is a transpiler, not an interpreter—there's no evaluation, no
 runtime, no state. Every `.hll` file compiles down to plain Compose YAML
 that you check in, deploy, and read like any other Compose file.
 
@@ -29,10 +29,10 @@ templates and imports work, and the `hllc` command line.
 If you're looking for the formal grammar, desugaring rules, or the
 internals of the lexer/parser/codegen pipeline, see
 [`docs/DESIGN.md`](https://github.com/travisboettcher/hl-lang/blob/main/docs/DESIGN.md)
-in the repository instead — that document is the implementer-facing spec
-the compiler is built against. This book is a friendlier presentation
-layer on top of it: the same rules, explained with prose and examples
-rather than BNF.
+in the repository instead—the compiler builds against that
+implementer-facing spec. This book is a friendlier presentation layer on
+top of it, covering the same rules with prose and examples instead of
+Backus-Naur Form (BNF).
 
 ## A quick taste
 
@@ -49,5 +49,5 @@ service jellyfin {
 `hllc --build` turns that into a ready-to-run `docker-compose.yml` with a
 `jellyfin` service, its image, a bind mount, an environment variable, a
 restart policy, and Traefik labels routing `media.example.com` to port
-8096 — all inferred from those five lines. The rest of this book walks
+8096—all inferred from those five lines. The rest of this book walks
 through how that works, starting with [Getting Started](./getting-started.md).

@@ -204,7 +204,7 @@ mod display_tests {
         assert_eq!(
             err.to_string(),
             "t2.hll:2:11: field `restart.policy` set by both template `x` (at t1.hll:2:11) \
-             and template `y` — explicit templates must not conflict"
+             and template `y`—explicit templates must not conflict"
         );
     }
 }

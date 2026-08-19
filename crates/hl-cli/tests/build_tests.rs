@@ -1113,7 +1113,7 @@ fn compose_error_across_imported_files_names_both_files() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let expected = format!(
         "{}:2:11: field `restart.policy` set by both template `x` (at {}:2:11) \
-         and template `y` — explicit templates must not conflict\n",
+         and template `y`—explicit templates must not conflict\n",
         dir.join("t2.hll").display(),
         dir.join("t1.hll").display(),
     );

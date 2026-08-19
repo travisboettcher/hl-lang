@@ -21,6 +21,12 @@ jobs:
     # without a cap a fuzz run that wedges would sit at GitHub's six-hour
     # default every night.
     timeout-minutes: 30
+    # rust-toolchain.toml pins a stable release for the rest of CI, but
+    # it takes precedence over `rustup default nightly` too (a toolchain
+    # file beats the default toolchain), which would otherwise silently
+    # hand cargo-fuzz's `-Z` flags to a stable rustc that rejects them.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     strategy:
       fail-fast: false
       matrix:
