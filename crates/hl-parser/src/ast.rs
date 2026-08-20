@@ -254,6 +254,56 @@ pub struct Restart {
     pub span: Span,
 }
 
+/// A parsed `healthcheck` field — Compose's own generic `healthcheck:`
+/// key (#153). Every sub-field is `Option` for the same reason as
+/// [`Image::reference`] (see that doc): the parser doesn't enforce
+/// required fields, so `healthcheck {}` must still parse.
+///
+/// `interval`/`timeout`/`start_period`/`start_interval` are duration
+/// strings and `retries` is a number, all carried through as literals
+/// exactly as written — see [`crate::schema::HEALTHCHECK`]'s doc for why
+/// `hllc` never parses or validates any of them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Healthcheck {
+    pub test: Option<HealthcheckTest>,
+    pub interval: Option<Literal>,
+    pub timeout: Option<Literal>,
+    pub retries: Option<Literal>,
+    pub start_period: Option<Literal>,
+    pub start_interval: Option<Literal>,
+    /// `Some(span)` of the bare `disable` flag if it was set; `None`
+    /// otherwise — bare-presence only, modeled directly on
+    /// [`Network::external`] (see that doc). There is no `disable:
+    /// false` form this milestone.
+    pub disable: Option<Span>,
+    pub span: Span,
+}
+
+/// `healthcheck`'s `test` sub-field: either a bare literal (Compose's
+/// shell form — a bare string is shorthand for `CMD-SHELL <string>`) or
+/// a bracketed list of literals (Compose's exec form, `["CMD",
+/// "pg_isready", "-U", "miniflux"]`). Carried through to codegen in
+/// whichever shape it was written rather than normalizing one into the
+/// other (#153) — the two aren't interchangeable: `CMD-SHELL` runs the
+/// string through the container's shell, `CMD` execs the list directly
+/// with no shell involved.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HealthcheckTest {
+    Shell(Literal),
+    /// The list's own span (covering the brackets), since a `Vec` has
+    /// nowhere else to carry one.
+    Exec(Vec<Literal>, Span),
+}
+
+impl HealthcheckTest {
+    pub fn span(&self) -> Span {
+        match self {
+            HealthcheckTest::Shell(lit) => lit.span(),
+            HealthcheckTest::Exec(_, span) => *span,
+        }
+    }
+}
+
 /// `volume`'s entries. Uniqueness is checked on `container` (the value
 /// side of `host -> container`), matching Docker's own constraint that
 /// two mounts can't target the same container path even though the same
@@ -424,6 +474,9 @@ pub struct ServiceFields {
     pub image: Option<Image>,
     pub expose: Option<Expose>,
     pub restart: Option<Restart>,
+    /// Compose's own `healthcheck:` key (#153). See [`Healthcheck`]'s
+    /// doc.
+    pub healthcheck: Option<Healthcheck>,
     /// `publish 8096 -> 8096` entries — Compose's `ports:` key. Distinct
     /// from `expose` above, which is Compose's `expose:` (visible to
     /// other containers on the same network, never published to the

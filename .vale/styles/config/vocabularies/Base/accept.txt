@@ -38,3 +38,4 @@ Traefik
 [Ll]exing
 Jellyfin
 Syncthing
+healthcheck

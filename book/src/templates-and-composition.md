@@ -146,20 +146,30 @@ Different field kinds merge differently:
   error case.
 - **Scalar fields** (`image`, `restart`) error on collision among
   explicit templates only, per the preceding rule.
-- **`expose`** is the one built-in struct field with more than one
-  sub-field, and merges per sub-field (`port`/`host`/`entrypoint`
-  independently) rather than as one indivisible unit—the same
-  key-by-key reasoning as a map field, applied to a struct's named
-  fields instead of a map's keys. Each sub-field then follows its own
-  kind's rule: `port` and `host` are scalars and collide, while
-  `entrypoint` is a list and concatenates, so two explicit templates
-  each naming one entry point produce a router attached to both—and
-  two naming the *same* entry point produce a router attached to it
-  once, per the preceding distinct-name rule.
+- **`expose` and `healthcheck`** are the built-in struct fields with
+  more than one sub-field, and both merge per sub-field independently
+  rather than as one indivisible unit—the same key-by-key reasoning as
+  a map field, applied to a struct's named fields instead of a map's
+  keys. Each sub-field then follows its own kind's rule: `expose.port`/
+  `.host` and every `healthcheck` sub-field but `entrypoint`/`test` are
+  scalars and collide (`healthcheck.test` collides too, even though its
+  value isn't a plain string or number—see below), while
+  `expose.entrypoint` is a list and concatenates, so two explicit
+  templates each naming one entry point produce a router attached to
+  both—and two naming the *same* entry point produce a router attached
+  to it once, per the preceding distinct-name rule.
 
-That last point means a service's own body can override just
-`expose.host` while still inheriting `port`/`entrypoint` from a
-`with`-listed template, without repeating them:
+  `healthcheck.test` and `healthcheck.disable` collide the same way a
+  scalar sub-field does, even though neither is a plain `Literal`:
+  `test` carries Compose's own shell-string-or-exec-list shape, and
+  `disable` is a bare-presence flag whose only "value" is the fact it
+  was set at all. Two explicit templates each setting `test` (or each
+  setting `disable`) still collide, exactly as two explicit templates
+  each setting `expose.port` do.
+
+That last point about per-sub-field merging means a service's own body
+can override just `expose.host` while still inheriting `port`/
+`entrypoint` from a `with`-listed template, without repeating them:
 
 ```hll
 service it-tools {

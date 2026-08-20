@@ -5,7 +5,8 @@
 
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    ComposeError, ComposedProgram, Expose, Literal, RawValue, Service, VolumeHost, compose, parse,
+    ComposeError, ComposedProgram, Expose, Healthcheck, HealthcheckTest, Literal, RawValue,
+    Service, VolumeHost, compose, parse,
 };
 
 fn compose_ok(source: &str) -> ComposedProgram {
@@ -458,6 +459,193 @@ fn defaults_expose_subfield_is_overridden_but_others_survive() {
     let expose = service.fields.expose.as_ref().expect("expose set");
     assert_eq!(expose.port.as_ref().unwrap().text(), "8080");
     assert_eq!(entrypoints(expose), vec!["web"]);
+}
+
+// --- healthcheck sub-field merge (#153) ---
+//
+// `healthcheck` follows the exact same per-sub-field merge `expose`
+// established above (see that section's tests) rather than merging as
+// one indivisible unit — chosen deliberately for consistency, per the
+// issue's own instruction to "follow how `expose` is merged... rather
+// than inventing a new mechanism." `test` and `disable` merge the same
+// way as `interval`/`timeout`/`retries`/`start_period`/
+// `start_interval` even though their values aren't `Literal`s — see
+// `MergeAcc::healthcheck_test`'s doc for how `merge_scalar_like`
+// generalizes the same Own/Defaults/two-explicit-collide rule to them.
+
+fn healthcheck_test_text(hc: &Healthcheck) -> &str {
+    match hc.test.as_ref().expect("test set") {
+        HealthcheckTest::Shell(lit) => lit.text(),
+        HealthcheckTest::Exec(..) => panic!("expected the shell form"),
+    }
+}
+
+/// A service's own body can override just one `healthcheck` sub-field
+/// while still inheriting the rest from a `with`-listed template,
+/// without repeating them — the same shape as
+/// `service_own_body_can_override_just_expose_host`.
+#[test]
+fn service_own_body_can_override_just_healthcheck_interval() {
+    let composed = compose_ok(
+        "template pg_healthcheck {\n  \
+           healthcheck {\n    test: \"pg_isready\"\n    interval: \"10s\"\n  }\n\
+         }\n\
+         service db {\n  \
+           with pg_healthcheck\n  \
+           image \"postgres\"\n  \
+           healthcheck { interval: \"30s\" }\n\
+         }\n",
+    );
+    let service = single_service(&composed);
+    let hc = service
+        .fields
+        .healthcheck
+        .as_ref()
+        .expect("healthcheck set");
+    assert_eq!(healthcheck_test_text(hc), "pg_isready");
+    assert_eq!(hc.interval.as_ref().unwrap().text(), "30s");
+}
+
+/// Two explicit templates each setting a *different* `healthcheck`
+/// sub-field don't collide.
+#[test]
+fn explicit_templates_setting_different_healthcheck_subfields_do_not_collide() {
+    let composed = compose_ok(
+        "template a {\n  healthcheck { test: \"pg_isready\" }\n}\n\
+         template b {\n  healthcheck { interval: \"10s\" }\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let hc = service
+        .fields
+        .healthcheck
+        .as_ref()
+        .expect("healthcheck set");
+    assert_eq!(healthcheck_test_text(hc), "pg_isready");
+    assert_eq!(hc.interval.as_ref().unwrap().text(), "10s");
+}
+
+/// Two explicit templates setting the *same* `healthcheck` sub-field
+/// still collide — the per-sub-field merge narrows the granularity of
+/// the collision rule, it doesn't remove it. Covers `test`
+/// specifically, since it's not a plain `Literal` and goes through
+/// `merge_scalar_like` rather than `SCALAR_FIELDS`.
+#[test]
+fn explicit_templates_setting_same_healthcheck_test_still_collide() {
+    let err = compose_err(
+        "template a {\n  healthcheck { test: \"a\" }\n}\n\
+         template b {\n  healthcheck { test: \"b\" }\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::FieldCollision {
+            field: "healthcheck.test",
+            first_template,
+            second_template,
+            ..
+        } => {
+            assert_eq!(first_template, "a");
+            assert_eq!(second_template, "b");
+        }
+        other => panic!("expected FieldCollision on healthcheck.test, got {other:?}"),
+    }
+}
+
+/// Same collision rule, for `disable` — a bare-presence flag whose
+/// "value" is just the span it was set at, still tracked and still
+/// collision-checked between two explicit templates.
+#[test]
+fn explicit_templates_setting_same_healthcheck_disable_still_collide() {
+    let err = compose_err(
+        "template a {\n  healthcheck { disable }\n}\n\
+         template b {\n  healthcheck { disable }\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    assert!(
+        matches!(
+            err,
+            ComposeError::FieldCollision {
+                field: "healthcheck.disable",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// Same collision rule, for a plain `Literal` sub-field (`interval`),
+/// confirming the `SCALAR_FIELDS`-routed sub-fields collide exactly
+/// like `expose.port`/`expose.host` do.
+#[test]
+fn explicit_templates_setting_same_healthcheck_interval_still_collide() {
+    let err = compose_err(
+        "template a {\n  healthcheck { interval: \"10s\" }\n}\n\
+         template b {\n  healthcheck { interval: \"20s\" }\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    assert!(
+        matches!(
+            err,
+            ComposeError::FieldCollision {
+                field: "healthcheck.interval",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// A `defaults` template setting one `healthcheck` sub-field is
+/// silently overridden only on that sub-field — the other sub-fields an
+/// explicit template sets still come through.
+#[test]
+fn defaults_healthcheck_subfield_is_overridden_but_others_survive() {
+    let composed = compose_ok(
+        "template defaults {\n  healthcheck {\n    test: \"placeholder\"\n    interval: \"1s\"\n  }\n}\n\
+         template real {\n  healthcheck { interval: \"10s\" }\n}\n\
+         service s {\n  with real\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let hc = service
+        .fields
+        .healthcheck
+        .as_ref()
+        .expect("healthcheck set");
+    assert_eq!(healthcheck_test_text(hc), "placeholder");
+    assert_eq!(hc.interval.as_ref().unwrap().text(), "10s");
+}
+
+/// `healthcheck` lives entirely inside one `Option<Healthcheck>` that
+/// the merge rebuilds from scratch — so an inherited sub-field with no
+/// others beside it still has to materialize the enclosing
+/// `Healthcheck`, not vanish. Mirrors
+/// `entrypoint_alone_still_materializes_expose`.
+#[test]
+fn healthcheck_disable_alone_still_materializes_healthcheck() {
+    let composed = compose_ok(
+        "template a {\n  healthcheck { disable }\n}\n\
+         service s {\n  with a\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let hc = service
+        .fields
+        .healthcheck
+        .as_ref()
+        .expect("healthcheck set");
+    assert!(hc.disable.is_some());
+    assert!(hc.test.is_none());
+}
+
+/// The mirror of the above: no tier setting any `healthcheck` sub-field
+/// at all must not conjure one into existence.
+#[test]
+fn no_healthcheck_anywhere_leaves_it_unset() {
+    let composed = compose_ok(
+        "template a {\n  middleware auth\n}\n\
+         service s {\n  with a\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert!(service.fields.healthcheck.is_none());
 }
 
 // --- non-colliding merges ---

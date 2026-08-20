@@ -1,8 +1,8 @@
 use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    Expected, Expose, Literal, ParamType, ParseError, TemplateDecl, TopDecl, UseDecl, VolumeHost,
-    parse,
+    Expected, Expose, HealthcheckTest, Literal, ParamType, ParseError, TemplateDecl, TopDecl,
+    UseDecl, VolumeHost, parse,
 };
 
 fn parse_ok(source: &str) -> hl_parser::Program {
@@ -270,6 +270,159 @@ fn alias_sugar_cannot_be_followed_by_further_secondary_fields() {
     assert!(
         err.to_string().contains("expose <port>, host:"),
         "expected the canonical form in the message, got: {err}"
+    );
+}
+
+// --- healthcheck (#153) ---
+
+/// Every field set at once, in the canonical struct form.
+#[test]
+fn healthcheck_full_field_set() {
+    let program = parse_ok(
+        "service s {\n  \
+           healthcheck {\n    \
+             test: \"curl -f http://localhost\"\n    \
+             interval: \"10s\"\n    \
+             timeout: \"5s\"\n    \
+             retries: 3\n    \
+             start_period: \"30s\"\n    \
+             start_interval: \"2s\"\n    \
+             disable\n  \
+           }\n\
+         }\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let hc = service.fields.healthcheck.as_ref().unwrap();
+    match hc.test.as_ref().unwrap() {
+        HealthcheckTest::Shell(lit) => assert_eq!(lit.text(), "curl -f http://localhost"),
+        other => panic!("expected HealthcheckTest::Shell, got {other:?}"),
+    }
+    assert_eq!(hc.interval.as_ref().unwrap().text(), "10s");
+    assert_eq!(hc.timeout.as_ref().unwrap().text(), "5s");
+    assert_eq!(hc.retries.as_ref().unwrap().text(), "3");
+    assert_eq!(hc.start_period.as_ref().unwrap().text(), "30s");
+    assert_eq!(hc.start_interval.as_ref().unwrap().text(), "2s");
+    assert!(hc.disable.is_some());
+}
+
+/// The minimal case — one field set, everything else left `None` (never
+/// enforced as required — see `ast::ServiceFields`'s doc).
+#[test]
+fn healthcheck_minimal_test_only() {
+    let program = parse_ok("service s {\n  healthcheck { test: \"exit 0\" }\n}\n");
+    let service = as_service(&program.decls[0]);
+    let hc = service.fields.healthcheck.as_ref().unwrap();
+    match hc.test.as_ref().unwrap() {
+        HealthcheckTest::Shell(lit) => assert_eq!(lit.text(), "exit 0"),
+        other => panic!("expected HealthcheckTest::Shell, got {other:?}"),
+    }
+    assert!(hc.interval.is_none());
+    assert!(hc.disable.is_none());
+}
+
+/// A syntactically empty body must still parse — no field on
+/// `Healthcheck` is enforced as required by the parser.
+#[test]
+fn healthcheck_empty_body_parses() {
+    let program = parse_ok("service s {\n  healthcheck {}\n}\n");
+    let service = as_service(&program.decls[0]);
+    let hc = service.fields.healthcheck.as_ref().unwrap();
+    assert!(hc.test.is_none());
+    assert!(hc.disable.is_none());
+}
+
+/// The exec form: `test` as a bracketed list rather than a bare string.
+#[test]
+fn healthcheck_test_list_form() {
+    let program = parse_ok(
+        "service s {\n  \
+           healthcheck {\n    \
+             test: [\"CMD\", \"pg_isready\", \"-U\", \"miniflux\"]\n  \
+           }\n\
+         }\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let hc = service.fields.healthcheck.as_ref().unwrap();
+    match hc.test.as_ref().unwrap() {
+        HealthcheckTest::Exec(items, _) => {
+            let texts: Vec<&str> = items.iter().map(Literal::text).collect();
+            assert_eq!(texts, vec!["CMD", "pg_isready", "-U", "miniflux"]);
+        }
+        other => panic!("expected HealthcheckTest::Exec, got {other:?}"),
+    }
+}
+
+/// A `test` list of exactly one item is still the list form, not the
+/// shell form — brackets are what select exec syntax, not item count.
+#[test]
+fn healthcheck_test_list_form_single_item() {
+    let program = parse_ok("service s {\n  healthcheck { test: [\"CMD-SHELL\"] }\n}\n");
+    let service = as_service(&program.decls[0]);
+    let hc = service.fields.healthcheck.as_ref().unwrap();
+    match hc.test.as_ref().unwrap() {
+        HealthcheckTest::Exec(items, _) => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].text(), "CMD-SHELL");
+        }
+        other => panic!("expected HealthcheckTest::Exec, got {other:?}"),
+    }
+}
+
+/// `retries` is a plain number literal.
+#[test]
+fn healthcheck_retries_is_a_number() {
+    let program = parse_ok("service s {\n  healthcheck { retries: 5 }\n}\n");
+    let service = as_service(&program.decls[0]);
+    let hc = service.fields.healthcheck.as_ref().unwrap();
+    match hc.retries.as_ref().unwrap() {
+        Literal::Number { value, .. } => assert_eq!(*value, 5),
+        other => panic!("expected Literal::Number, got {other:?}"),
+    }
+}
+
+/// `disable` is bare-presence only, exactly like `network`'s `external`
+/// — a `:` after it is rejected rather than treated as an attempted
+/// value.
+#[test]
+fn healthcheck_disable_rejects_a_colon_value() {
+    let err = parse("service s {\n  healthcheck { disable: true }\n}\n").unwrap_err();
+    assert!(
+        matches!(err, ParseError::UnexpectedToken { .. }),
+        "got {err:?}"
+    );
+}
+
+/// `healthcheck` has no `primary_field` (see `schema::HEALTHCHECK`'s
+/// doc) — unlike `expose`/`restart`/`image`, a bare value with no `{ }`
+/// is rejected rather than silently meaning nothing in particular.
+#[test]
+fn healthcheck_bare_value_without_braces_is_rejected() {
+    let err = parse("service s {\n  healthcheck \"exit 0\"\n}\n").unwrap_err();
+    match err {
+        ParseError::UnexpectedToken {
+            expected: Expected::Token(TokenKind::LBrace),
+            ..
+        } => {}
+        other => panic!("expected UnexpectedToken expecting `{{`, got {other:?}"),
+    }
+}
+
+/// Writing `test` twice is a duplicate-scalar compile error, same as
+/// any other single-occurrence field.
+#[test]
+fn healthcheck_duplicate_test_is_error() {
+    let err = parse("service s {\n  healthcheck {\n    test: \"a\"\n    test: \"b\"\n  }\n}\n")
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::DuplicateField {
+                type_name: "healthcheck",
+                field: "test",
+                ..
+            }
+        ),
+        "got {err:?}"
     );
 }
 

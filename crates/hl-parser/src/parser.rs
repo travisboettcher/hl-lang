@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
-    EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, Param, ParamType, Program,
-    PublishEntry, PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Service,
-    ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, UseDecl, Volume, VolumeDriverOpt,
-    VolumeEntry, VolumeHost, VolumeMap,
+    EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Param,
+    ParamType, Program, PublishEntry, PublishMap, RawEntry, RawMap, RawValue, Reference, Restart,
+    Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, UseDecl, Volume,
+    VolumeDriverOpt, VolumeEntry, VolumeHost, VolumeMap,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -89,18 +89,42 @@ enum FieldValue {
     RefList(Vec<Reference>),
     /// An accumulating template-invocation-list field (`with`'s `templates`).
     TemplateInvocations(Vec<TemplateInvocation>),
+    /// A single-occurrence field whose value is either a bare literal or
+    /// a bracketed list of literals (`healthcheck`'s `test`). See
+    /// [`schema::FieldKind::ScalarOrList`]'s doc.
+    ScalarOrList(ScalarOrList),
+}
+
+/// The parsed value of a [`schema::FieldKind::ScalarOrList`] field —
+/// see that variant's doc for the grammar and why there's no bare
+/// comma-list sugar here.
+enum ScalarOrList {
+    Scalar(Literal),
+    /// The list's own span, covering the brackets.
+    List(Vec<Literal>, Span),
+}
+
+impl ScalarOrList {
+    fn span(&self) -> Span {
+        match self {
+            ScalarOrList::Scalar(lit) => lit.span(),
+            ScalarOrList::List(_, span) => *span,
+        }
+    }
 }
 
 impl FieldValue {
     /// The span of a single-occurrence field's value, used to report the
     /// "first set here" location in a [`ParseError::DuplicateField`].
-    /// Only called for `Scalar`/`Flag`/`Struct`, the three kinds that are
-    /// ever duplicate-checked — map/list kinds accumulate instead.
+    /// Only called for `Scalar`/`Flag`/`Struct`/`ScalarOrList`, the four
+    /// kinds that are ever duplicate-checked — map/list kinds accumulate
+    /// instead.
     fn span(&self) -> Span {
         match self {
             FieldValue::Scalar(lit) => lit.span(),
             FieldValue::Flag(span) => *span,
             FieldValue::Struct(_, span) => *span,
+            FieldValue::ScalarOrList(v) => v.span(),
             FieldValue::LiteralMap(_)
             | FieldValue::MountMap(_)
             | FieldValue::Raw(_)
@@ -366,6 +390,55 @@ impl<'src> Parser<'src> {
             self.parse_bare_reference_list()
         } else {
             Err(self.unexpected(Expected::Description("a reference or a list of references")))
+        }
+    }
+
+    /// `"[" ( literal ( "," literal )* )? "]"` — the bracketed-list half
+    /// of a [`schema::FieldKind::ScalarOrList`] value (`healthcheck`'s
+    /// `test`'s exec form, `["CMD", "pg_isready", "-U", "miniflux"]`).
+    /// Items are ordinary literals, not [`Reference`]s — unlike
+    /// [`Self::parse_bracket_reference_list`], an entry here never
+    /// resolves against anything an `.hll` file declares, so it never
+    /// carries an `alias.` qualifier either.
+    fn parse_bracket_literal_list(&mut self) -> Result<(Vec<Literal>, Span), ParseError> {
+        let start = self.expect(TokenKind::LBracket)?.span;
+        let mut items = Vec::new();
+        if self.peek().kind != TokenKind::RBracket {
+            loop {
+                items.push(self.parse_literal()?);
+                if self.peek().kind == TokenKind::Comma {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+        }
+        let end = self.expect(TokenKind::RBracket)?.span;
+        let span = Span {
+            start: start.start,
+            end: end.end,
+            line: start.line,
+            col: start.col,
+            file: start.file,
+        };
+        Ok((items, span))
+    }
+
+    /// A [`schema::FieldKind::ScalarOrList`] value: an optional leading
+    /// `:`, then either a bracketed list of literals or one bare
+    /// literal. Deliberately no bare comma-list sugar — see that field
+    /// kind's own doc for why.
+    fn parse_scalar_or_list_value(&mut self) -> Result<ScalarOrList, ParseError> {
+        if self.peek().kind == TokenKind::Colon {
+            self.bump();
+        }
+        if self.peek().kind == TokenKind::LBracket {
+            let (items, span) = self.parse_bracket_literal_list()?;
+            Ok(ScalarOrList::List(items, span))
+        } else if self.at_value_start() {
+            Ok(ScalarOrList::Scalar(self.parse_literal()?))
+        } else {
+            Err(self.unexpected(Expected::Description("a value or a bracketed list")))
         }
     }
 
@@ -741,6 +814,10 @@ impl<'src> Parser<'src> {
                 }
                 Ok(())
             }
+            FieldKind::ScalarOrList => {
+                let value = self.parse_scalar_or_list_value()?;
+                self.insert_single(schema, fields, field.name, FieldValue::ScalarOrList(value))
+            }
         }
     }
 
@@ -789,10 +866,22 @@ impl<'src> Parser<'src> {
         }
         match nested.kind {
             SchemaKind::Struct => {
+                // The bare-value shorthand only exists for a type that
+                // declares a `primary_field` (docs/DESIGN.md's
+                // desugaring rule 1) — `healthcheck` deliberately
+                // doesn't (see `schema::HEALTHCHECK`'s doc), so a value
+                // token here can only mean the braced body was left off
+                // by mistake. Checking that before `at_value_start()`
+                // matters: `parse_struct_primary_shorthand` panics if
+                // called on a type with no primary field, so this is
+                // what keeps that call genuinely unreachable rather than
+                // merely untested.
                 let (nested_fields, span) = if self.peek().kind == TokenKind::LBrace {
                     self.parse_struct_body(nested)?
-                } else if self.at_value_start() {
+                } else if nested.primary_field.is_some() && self.at_value_start() {
                     self.parse_struct_primary_shorthand(nested)?
+                } else if nested.primary_field.is_none() {
+                    return Err(self.unexpected(Expected::Token(TokenKind::LBrace)));
                 } else {
                     return Err(self.unexpected(Expected::Description("a value or `{`")));
                 };
@@ -1392,6 +1481,10 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         Some(FieldValue::Struct(f, s)) => Some(lower_restart(f, s)),
         _ => None,
     };
+    let healthcheck = match fields.remove("healthcheck") {
+        Some(FieldValue::Struct(f, s)) => Some(lower_healthcheck(f, s)),
+        _ => None,
+    };
     let container_name = match fields.remove("container_name") {
         Some(FieldValue::Scalar(lit)) => Some(lit),
         _ => None,
@@ -1466,6 +1559,7 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         image,
         expose,
         restart,
+        healthcheck,
         publish,
         volumes,
         env,
@@ -1523,4 +1617,50 @@ fn lower_restart(mut fields: StructFields, span: Span) -> Restart {
         _ => None,
     };
     Restart { policy, span }
+}
+
+fn lower_healthcheck(mut fields: StructFields, span: Span) -> Healthcheck {
+    let test = match fields.remove("test") {
+        Some(FieldValue::ScalarOrList(ScalarOrList::Scalar(lit))) => {
+            Some(HealthcheckTest::Shell(lit))
+        }
+        Some(FieldValue::ScalarOrList(ScalarOrList::List(items, list_span))) => {
+            Some(HealthcheckTest::Exec(items, list_span))
+        }
+        _ => None,
+    };
+    let interval = match fields.remove("interval") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
+    let timeout = match fields.remove("timeout") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
+    let retries = match fields.remove("retries") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
+    let start_period = match fields.remove("start_period") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
+    let start_interval = match fields.remove("start_interval") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
+    let disable = match fields.remove("disable") {
+        Some(FieldValue::Flag(s)) => Some(s),
+        _ => None,
+    };
+    Healthcheck {
+        test,
+        interval,
+        timeout,
+        retries,
+        start_period,
+        start_interval,
+        disable,
+        span,
+    }
 }

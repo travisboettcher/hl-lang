@@ -23,9 +23,10 @@ use std::fmt;
 use hl_lexer::{SourceMap, Span};
 
 use crate::ast::{
-    EnvEntry, EnvMap, Expose, Ident, Image, Literal, Network, ParamType, Program, PublishEntry,
-    PublishMap, RawMap, RawValue, Reference, Restart, Service, ServiceFields, TemplateDecl,
-    TemplateInvocation, TopDecl, Volume, VolumeEntry, VolumeHost, VolumeMap,
+    EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network,
+    ParamType, Program, PublishEntry, PublishMap, RawMap, RawValue, Reference, Restart, Service,
+    ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Volume, VolumeEntry, VolumeHost,
+    VolumeMap,
 };
 use crate::schema::MapSide;
 
@@ -1756,6 +1757,17 @@ struct MergeAcc {
     env: Vec<(EnvEntry, Tier)>,
     publish: Vec<(PublishEntry, Tier)>,
     raw: RawMap,
+    /// `healthcheck.test`'s own collision point — not part of `scalars`
+    /// above because [`HealthcheckTest`] isn't a [`Literal`]. Merged by
+    /// `merge_scalar_like`, which is [`merge_scalar`] generalized over
+    /// the value type since only this field and `healthcheck_disable`
+    /// need it — not worth a second name-keyed table for two rows.
+    healthcheck_test: Option<(HealthcheckTest, Tier)>,
+    /// `healthcheck.disable`'s own collision point. A `FieldKind::BoolFlag`
+    /// carries no value beyond bare presence, so the "value" merged here
+    /// is just the span it was set at — mirroring how [`Literal::span`]
+    /// is all `merge_scalar` ever needs from a `Literal` too.
+    healthcheck_disable: Option<(Span, Tier)>,
 }
 
 impl MergeAcc {
@@ -1789,6 +1801,23 @@ impl MergeAcc {
             if let Some(values) = self.lists.remove(field.key) {
                 (field.set)(&mut fields, values);
             }
+        }
+        // Same "after the rest of `healthcheck`'s sub-fields" span
+        // preference as `expose.entrypoint` above, for the same reason:
+        // `get_or_insert` only stamps a freshly created `Healthcheck`'s
+        // span when nothing already materialized it.
+        if let Some((test, _)) = self.healthcheck_test {
+            let span = test.span();
+            fields
+                .healthcheck
+                .get_or_insert(empty_healthcheck(span))
+                .test = Some(test);
+        }
+        if let Some((disable_span, _)) = self.healthcheck_disable {
+            fields
+                .healthcheck
+                .get_or_insert(empty_healthcheck(disable_span))
+                .disable = Some(disable_span);
         }
         fields
     }
@@ -1884,7 +1913,77 @@ static SCALAR_FIELDS: &[ScalarField] = &[
         take: |f| f.container_name.take(),
         set: |f, v| f.container_name = Some(v),
     },
+    // `healthcheck`'s five plain-`Literal` sub-fields — `test` and
+    // `disable` aren't `Literal`-valued (see [`HealthcheckTest`]/
+    // [`Network::external`]'s shape), so they can't live in this table
+    // and are merged separately via `merge_scalar_like` and
+    // [`MergeAcc::healthcheck_test`]/[`MergeAcc::healthcheck_disable`]
+    // instead — see those fields' doc.
+    ScalarField {
+        key: "healthcheck.interval",
+        take: |f| f.healthcheck.as_mut().and_then(|h| h.interval.take()),
+        set: |f, v| {
+            let span = v.span();
+            f.healthcheck
+                .get_or_insert(empty_healthcheck(span))
+                .interval = Some(v);
+        },
+    },
+    ScalarField {
+        key: "healthcheck.timeout",
+        take: |f| f.healthcheck.as_mut().and_then(|h| h.timeout.take()),
+        set: |f, v| {
+            let span = v.span();
+            f.healthcheck.get_or_insert(empty_healthcheck(span)).timeout = Some(v);
+        },
+    },
+    ScalarField {
+        key: "healthcheck.retries",
+        take: |f| f.healthcheck.as_mut().and_then(|h| h.retries.take()),
+        set: |f, v| {
+            let span = v.span();
+            f.healthcheck.get_or_insert(empty_healthcheck(span)).retries = Some(v);
+        },
+    },
+    ScalarField {
+        key: "healthcheck.start_period",
+        take: |f| f.healthcheck.as_mut().and_then(|h| h.start_period.take()),
+        set: |f, v| {
+            let span = v.span();
+            f.healthcheck
+                .get_or_insert(empty_healthcheck(span))
+                .start_period = Some(v);
+        },
+    },
+    ScalarField {
+        key: "healthcheck.start_interval",
+        take: |f| f.healthcheck.as_mut().and_then(|h| h.start_interval.take()),
+        set: |f, v| {
+            let span = v.span();
+            f.healthcheck
+                .get_or_insert(empty_healthcheck(span))
+                .start_interval = Some(v);
+        },
+    },
 ];
+
+/// A freshly materialized [`Healthcheck`] with every sub-field unset,
+/// for the `get_or_insert` calls [`SCALAR_FIELDS`]'s `healthcheck.*`
+/// rows and `merge_scalar_like`'s two `healthcheck` call sites share —
+/// factored out once so a future `Healthcheck` sub-field doesn't have
+/// to be added to seven near-identical struct literals.
+fn empty_healthcheck(span: Span) -> Healthcheck {
+    Healthcheck {
+        test: None,
+        interval: None,
+        timeout: None,
+        retries: None,
+        start_period: None,
+        start_interval: None,
+        disable: None,
+        span,
+    }
+}
 
 /// [`ScalarField`]'s counterpart for reference-list fields — the same
 /// `key`/`take`/`set` triple, minus everything scalars need only
@@ -2011,6 +2110,30 @@ fn merge_tier(
             merge_scalar(&mut acc.scalars, field.key, value, tier)?;
         }
     }
+    // `healthcheck.test`/`healthcheck.disable` aren't `Literal`-valued,
+    // so they can't ride `SCALAR_FIELDS`'s table — see
+    // `MergeAcc::healthcheck_test`'s doc for why they get their own
+    // `Option` slots and `merge_scalar_like` calls instead.
+    if let Some(hc) = incoming.healthcheck.as_mut() {
+        if let Some(test) = hc.test.take() {
+            merge_scalar_like(
+                &mut acc.healthcheck_test,
+                "healthcheck.test",
+                test,
+                tier,
+                HealthcheckTest::span,
+            )?;
+        }
+        if let Some(disable_span) = hc.disable.take() {
+            merge_scalar_like(
+                &mut acc.healthcheck_disable,
+                "healthcheck.disable",
+                disable_span,
+                tier,
+                |span| *span,
+            )?;
+        }
+    }
     // Before the `merge_map` calls below only because those consume
     // `incoming`'s map entries by value, and `take` needs `incoming`
     // whole; the merge itself is order-independent.
@@ -2114,6 +2237,42 @@ fn merge_scalar(
                     second_template: second.clone(),
                     first: existing.span(),
                     second: value.span(),
+                });
+            }
+            _ => unreachable!("Own is always merged last; Defaults is always merged first"),
+        },
+    }
+    Ok(())
+}
+
+/// [`merge_scalar`] generalized over the value type via `span_of`, for
+/// the two `healthcheck` collision points whose slot isn't a [`Literal`]
+/// — `healthcheck.test` ([`HealthcheckTest`]) and `healthcheck.disable`
+/// (a bare-presence flag, whose "value" is just the span it was set
+/// at). Same Own-always-wins / Defaults-always-loses /
+/// two-`Explicit`-tiers-collide rule; `acc` is a single `Option` slot
+/// rather than a `HashMap` keyed by field name because there are only
+/// ever these two callers — see [`MergeAcc::healthcheck_test`]'s doc for
+/// why that didn't earn a second name-keyed table of its own.
+fn merge_scalar_like<T>(
+    acc: &mut Option<(T, Tier)>,
+    field: &'static str,
+    value: T,
+    tier: &Tier,
+    span_of: impl Fn(&T) -> Span,
+) -> Result<(), ComposeError> {
+    match acc.take() {
+        None => *acc = Some((value, tier.clone())),
+        Some((existing, existing_tier)) => match (&existing_tier, tier) {
+            (_, Tier::Own) => *acc = Some((value, Tier::Own)),
+            (Tier::Defaults, _) => *acc = Some((value, tier.clone())),
+            (Tier::Explicit(first), Tier::Explicit(second)) => {
+                return Err(ComposeError::FieldCollision {
+                    field,
+                    first_template: first.clone(),
+                    second_template: second.clone(),
+                    first: span_of(&existing),
+                    second: span_of(&value),
                 });
             }
             _ => unreachable!("Own is always merged last; Defaults is always merged first"),

@@ -348,6 +348,84 @@ Writing `image` or `restart` more than once in the same body is a
 compile error, since both are scalar fields, not repeatable—unlike
 `volume`/`publish`/`env`/`middleware`/`depends_on`.
 
+## `healthcheck`
+
+No primary field—unlike `image`'s `ref` or `expose`'s `port`, no one
+sub-field stands in for the whole healthcheck, so the braced body
+(`healthcheck { ... }`) is required; `healthcheck "..."` doesn't parse.
+
+| Field | Accepts | Default |
+|---|---|---|
+| `test` | string or bracketed list | unset—no healthcheck defined here (the image's own, if it has one, still applies) |
+| `interval` | string | unset, matching Compose's own default |
+| `timeout` | string | unset, matching Compose's own default |
+| `retries` | number | unset, matching Compose's own default |
+| `start_period` | string | unset, matching Compose's own default |
+| `start_interval` | string | unset, matching Compose's own default |
+| `disable` | bare flag, no value | unset, `false` |
+
+```hll,fragment
+healthcheck {
+  test: "pg_isready -U miniflux"
+  interval: "10s"
+  timeout: "5s"
+  retries: 3
+  start_period: "30s"
+  start_interval: "5s"
+}
+```
+
+`test` accepts either a bare string—Compose's shell form, run through the
+container's own shell (a bare string is shorthand for `CMD-SHELL
+<string>`)—or a bracketed list—Compose's exec form, run directly with no
+shell involved. `hllc` carries whichever form you write straight through
+to the generated `test:` key, rather than normalizing one into the
+other:
+
+```hll,build
+service miniflux-db {
+  image "postgres:15"
+  healthcheck {
+    test: ["CMD", "pg_isready", "-U", "miniflux"]
+    interval: "10s"
+    start_period: "30s"
+  }
+}
+```
+
+```yaml
+services:
+  miniflux-db:
+    image: postgres:15
+    healthcheck:
+      test:
+        - CMD
+        - pg_isready
+        - -U
+        - miniflux
+      interval: 10s
+      start_period: 30s
+```
+
+`interval`/`timeout`/`start_period`/`start_interval`/`retries` are
+carried through exactly as written—`hllc` doesn't parse or validate
+Compose's duration syntax (`"10s"`, `"1m30s"`) or check that `retries`
+is a sane, non-negative count. A mistake there is `docker compose
+config`'s to catch, not `hllc`'s.
+
+`disable` sets Compose's own `disable: true`, which turns the
+healthcheck off entirely—including one the image itself defines:
+
+```hll,fragment
+healthcheck {
+  disable
+}
+```
+
+Writing `healthcheck` more than once in the same body is a compile
+error, same as `image`/`restart`/`expose`—it's a struct-kind field, not
+repeatable.
+
 ## `middleware`, `depends_on`, `networks`, `dns`, `env_file`
 
 All five are plain reference-list fields directly on `service`/`template`,
@@ -489,10 +567,10 @@ ever comes up for generated or pathological input.
 ### `raw` wins over a built-in field of the same name
 
 A `raw` key may name a field `hll` already has: `image`,
-`container_name`, `restart`, `environment`, `env_file`, `volumes`,
-`networks`, `dns`, `ports`, `expose`, `depends_on`, or `labels`. When it
-does, the `raw` value is what's emitted, and `hllc` drops the built-in
-one—the key appears exactly once:
+`container_name`, `restart`, `healthcheck`, `environment`, `env_file`,
+`volumes`, `networks`, `dns`, `ports`, `expose`, `depends_on`, or
+`labels`. When it does, the `raw` value is what's emitted, and `hllc`
+drops the built-in one—the key appears exactly once:
 
 ```hll,fragment
 image "nginx"

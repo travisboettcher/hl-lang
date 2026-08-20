@@ -283,6 +283,151 @@ services:
     );
 }
 
+// --- healthcheck (#153) ---
+
+/// Every field set at once, shell form (`test` as a bare string).
+#[test]
+fn healthcheck_full_field_set_emits_every_key() {
+    let yaml = generate_from(
+        "service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           healthcheck {\n    \
+             test: \"node /app/services/healthcheck\"\n    \
+             interval: \"1m\"\n    \
+             timeout: \"10s\"\n    \
+             retries: 3\n    \
+             start_period: \"10s\"\n    \
+             start_interval: \"5s\"\n  \
+           }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  miniflux:
+    image: miniflux/miniflux:latest
+    healthcheck:
+      test: node /app/services/healthcheck
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+      start_interval: 5s
+"#,
+    );
+}
+
+/// The exec form: `test` as a bracketed list becomes a YAML sequence,
+/// not the plain string the shell form emits.
+#[test]
+fn healthcheck_test_list_form_emits_a_yaml_sequence() {
+    let yaml = generate_from(
+        "service db {\n  \
+           image \"postgres\"\n  \
+           healthcheck {\n    \
+             test: [\"CMD\", \"pg_isready\", \"-U\", \"miniflux\"]\n  \
+           }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  db:
+    image: postgres
+    healthcheck:
+      test:
+        - CMD
+        - pg_isready
+        - -U
+        - miniflux
+"#,
+    );
+}
+
+/// `disable` emits Compose's `disable: true`, with no other keys when
+/// nothing else was set.
+#[test]
+fn healthcheck_disable_emits_true() {
+    let yaml = generate_from("service web {\n  image \"nginx\"\n  healthcheck { disable }\n}\n");
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  web:
+    image: nginx
+    healthcheck:
+      disable: true
+"#,
+    );
+}
+
+/// A `healthcheck {}` with every sub-field left unset emits no
+/// `healthcheck:` key at all — matching how a fully-unset `expose {}`
+/// emits no `expose:` key.
+#[test]
+fn healthcheck_with_nothing_set_emits_no_key() {
+    let yaml = generate_from("service web {\n  image \"nginx\"\n  healthcheck {}\n}\n");
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  web:
+    image: nginx
+"#,
+    );
+}
+
+/// `healthcheck` sub-fields merge across a `with` template per
+/// sub-field, exactly like `expose` — the template's `test` survives
+/// while the service's own body overrides just `interval`.
+#[test]
+fn healthcheck_merges_through_a_with_template() {
+    let yaml = generate_from(
+        "template pg_healthcheck {\n  healthcheck { test: \"pg_isready -U miniflux\" }\n}\n\
+         service db {\n  \
+           image \"postgres\"\n  \
+           with pg_healthcheck\n  \
+           healthcheck { interval: \"10s\" }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  db:
+    image: postgres
+    healthcheck:
+      test: pg_isready -U miniflux
+      interval: 10s
+"#,
+    );
+}
+
+/// `raw { healthcheck: ... }` overrides the built-in `healthcheck`
+/// field, the same way it overrides every other built-in field.
+#[test]
+fn raw_healthcheck_overrides_the_built_in_healthcheck() {
+    let yaml = generate_from(
+        "service db {\n  \
+           image \"postgres\"\n  \
+           healthcheck { test: \"pg_isready\" }\n  \
+           raw {\n    healthcheck: { test: \"raw-test\" }\n  }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  db:
+    image: postgres
+    healthcheck:
+      test: raw-test
+"#,
+    );
+}
+
 #[test]
 fn unknown_network_reference_is_error() {
     let err = generate_err("service s {\n  image \"x\"\n  networks [nonexistent]\n}\n");
@@ -982,7 +1127,9 @@ fn every_built_in_field_is_overridable_by_raw() {
            image \"nginx\"\n  \
            container_name \"web-ctr\"\n  \
            restart unless-stopped\n  \
+           healthcheck { test: \"curl -f http://localhost\" }\n  \
            env PUID = \"1000\"\n  \
+           env_file \"web.env\"\n  \
            volume web-data -> \"/data\"\n  \
            networks [traefik-net]\n  \
            dns [\"192.168.50.182\"]\n  \
@@ -993,7 +1140,9 @@ fn every_built_in_field_is_overridable_by_raw() {
              image: \"raw-image\"\n    \
              container_name: \"raw-name\"\n    \
              restart: \"always\"\n    \
+             healthcheck: { test: \"raw-test\" }\n    \
              environment: [\"RAW=1\"]\n    \
+             env_file: [\"raw.env\"]\n    \
              volumes: [\"raw-vol:/raw\"]\n    \
              networks: [\"raw-net\"]\n    \
              dns: [\"1.1.1.1\"]\n    \
@@ -1012,8 +1161,12 @@ fn every_built_in_field_is_overridable_by_raw() {
 image: raw-image
 container_name: raw-name
 restart: always
+healthcheck:
+  test: raw-test
 environment:
   - RAW=1
+env_file:
+  - raw.env
 volumes:
   - raw-vol:/raw
 networks:
@@ -1098,7 +1251,9 @@ fn raw_leaves_built_in_fields_it_does_not_name_alone() {
            image \"nginx\"\n  \
            container_name \"web-ctr\"\n  \
            restart unless-stopped\n  \
+           healthcheck { test: \"curl -f http://localhost\" }\n  \
            env PUID = \"1000\"\n  \
+           env_file \"web.env\"\n  \
            volume web-data -> \"/data\"\n  \
            networks [traefik-net]\n  \
            dns [\"192.168.50.182\"]\n  \
@@ -1116,8 +1271,12 @@ fn raw_leaves_built_in_fields_it_does_not_name_alone() {
 image: nginx
 container_name: web-ctr
 restart: unless-stopped
+healthcheck:
+  test: curl -f http://localhost
 environment:
   - PUID=1000
+env_file:
+  - web.env
 volumes:
   - web-data:/data
 networks:

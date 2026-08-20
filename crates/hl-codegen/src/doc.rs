@@ -60,6 +60,54 @@ impl VolumeDoc {
     }
 }
 
+/// Compose's own `healthcheck:` key (#153) — mirrors [`NetworkDoc`]'s
+/// style, with `skip_serializing_if` on every field so an unset one is
+/// simply omitted rather than emitted as `null`.
+#[derive(Serialize, Default, PartialEq)]
+pub(crate) struct HealthcheckDoc {
+    /// Either a plain YAML string (Compose's shell form — a bare string
+    /// is shorthand for `CMD-SHELL <string>`) or a YAML sequence
+    /// (Compose's exec form, `["CMD", "pg_isready", "-U", "miniflux"]`),
+    /// carried through in whichever shape `.hll` wrote it rather than
+    /// normalizing one into the other — see
+    /// [`hl_parser::HealthcheckTest`]'s doc for why the two aren't
+    /// interchangeable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test: Option<serde_yaml_ng::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interval: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+    /// A YAML number when written as one (`retries: 3`), carried through
+    /// via [`crate::raw::scalar_value`] exactly like `expose.port` — see
+    /// that call site's own doc for why this field skips
+    /// `{{name}}`-interpolation the string fields above get.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retries: Option<serde_yaml_ng::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_period: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_interval: Option<String>,
+    /// Compose's `disable: true`. There's no `false` form to represent
+    /// — [`hl_parser::Healthcheck::disable`] is bare-presence-only, so
+    /// this is always emitted as `true` or omitted entirely, never
+    /// `false`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub disable: bool,
+}
+
+impl HealthcheckDoc {
+    /// Whether this `healthcheck` set nothing at all — in which case
+    /// [`ComposeServiceDoc::healthcheck`] stores `None` and the service
+    /// gets no `healthcheck:` key, rather than an empty `{}` mapping.
+    /// Mirrors [`VolumeDoc::is_empty`]; see that doc for why the empty
+    /// case is checked explicitly instead of just serializing whatever
+    /// came out.
+    pub(crate) fn is_empty(&self) -> bool {
+        *self == HealthcheckDoc::default()
+    }
+}
+
 #[derive(Serialize, Default)]
 pub(crate) struct ComposeServiceDoc {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,6 +124,12 @@ pub(crate) struct ComposeServiceDoc {
     pub container_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart: Option<String>,
+    /// Compose's own `healthcheck:` key (#153). `None` both when
+    /// `.hll` sets no `healthcheck` field at all and when it does but
+    /// leaves every sub-field unset (`healthcheck {}`) — see
+    /// [`HealthcheckDoc::is_empty`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub healthcheck: Option<HealthcheckDoc>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub environment: Vec<String>,
     /// `env_file` paths, carried through verbatim (#154). Always emitted
@@ -166,6 +220,7 @@ impl ComposeServiceDoc {
             image,
             container_name,
             restart,
+            healthcheck,
             environment,
             env_file,
             volumes,
@@ -188,6 +243,9 @@ impl ComposeServiceDoc {
         }
         if raw.contains_key("restart") {
             *restart = None;
+        }
+        if raw.contains_key("healthcheck") {
+            *healthcheck = None;
         }
         if raw.contains_key("environment") {
             environment.clear();

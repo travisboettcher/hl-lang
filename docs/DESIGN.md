@@ -43,14 +43,14 @@ Punctuation: { } [ ] ( ) : = -> , . $
 
 - `template` is the *only* reserved word in the entire language. Everything
   else that looks like a keyword (`service`, `network`, `image`, `volume`,
-  `publish`, `env`, `env_file`, `restart`, `expose`, `middleware`,
-  `depends_on`, `networks`, `dns`, `container_name`, `with`, `as`,
-  `external`, `use`, `raw`, `defaults`, and more) is an ordinary `IDENT`,
-  resolved against a schema table at parse time—not a lexer-level
-  keyword. `with`, `as`, `external`, and `use` are *contextual* keywords,
-  meaningful only in the grammar position expected (the same technique as
-  C#'s `var`/`async`/`await`/`yield`), not globally off-limits as
-  identifiers.
+  `publish`, `env`, `env_file`, `restart`, `expose`, `healthcheck`,
+  `middleware`, `depends_on`, `networks`, `dns`, `container_name`,
+  `with`, `as`, `external`, `use`, `raw`, `defaults`, and more) is an
+  ordinary `IDENT`, resolved against a schema table at parse time—not a
+  lexer-level keyword. `with`, `as`, `external`, and `use` are
+  *contextual* keywords, meaningful only in the grammar position expected
+  (the same technique as C#'s `var`/`async`/`await`/`yield`), not
+  globally off-limits as identifiers.
 - `.` separates an import alias from the name it qualifies (`alias.name`,
   see Imports, below) and never appears anywhere else in the grammar—
   `NUMBER` is integer-only, so there's no decimal-point ambiguity to
@@ -232,6 +232,7 @@ same two entries—see #81.
 | `publish` | map |—| `->` | value—the container port | no |
 | `env` | map |—| `=` | key | no |
 | `restart` | struct | `policy` |—|—| no |
+| `healthcheck` | struct |—|—|—| no |
 | `with` | struct | `templates`—list of nested instantiations |—|—| no |
 | `raw` | map |—| `:` | none—schema-free, passthrough | no |
 
@@ -288,6 +289,26 @@ codegen's to write rather than the user's—so no generated label value
 ever has to tolerate a user-written comma, and the metacharacter guard
 can reject `,` uniformly everywhere.
 
+`healthcheck` is the table's one struct-kind row (besides the three
+top-level types) with no primary field: unlike `image`'s `ref` or
+`expose`'s `port`, no single sub-field of `test`/`interval`/`timeout`/
+`retries`/`start_period`/`start_interval`/`disable` obviously stands in
+for the whole healthcheck, so `healthcheck { ... }` requires the braced
+body—`healthcheck "..."` is a parse error rather than sugar for
+anything. `test` needs a field kind none of the other struct fields do:
+`FieldKind::ScalarOrList` accepts either a bare literal (Compose's shell
+form, `CMD-SHELL <string>`) or a bracketed list of literals (Compose's
+exec form, `["CMD", "pg_isready", "-U", "miniflux"]`), single-occurrence
+like a plain scalar but with no bare comma-list sugar—`test: "a", "b"`
+would be ambiguous between the shell string plus garbage and a two-item
+exec list, so only a bare literal or an explicit `[...]` parses.
+`disable` is modeled directly on `NETWORK`'s `external`: a bare-presence
+`FieldKind::BoolFlag`, matching Compose's own `disable: true`, which
+turns the healthcheck off entirely, including one inherited from the
+image. Every field here is a plain, generic Compose key, not
+homelab-specific in any of its own fields—the same "generic core"
+reasoning that already justified `dns`/`env_file`/`container_name` (#153).
+
 `middleware`, `depends_on`, `networks`, `dns`, and `env_file` aren't
 rows in this table—they're plain list-of-reference fields directly on
 `service`/`template` (`dns ["192.168.50.182"]`: a per-service Domain
@@ -341,20 +362,31 @@ priority for `dns`, Compose's own last-file-wins precedence for
 `env_file` (#154). Map fields merge key-by-key (or value-by-value for
 `volume` and `publish`), and
 scalar fields (`image`, `restart`) error on collision among explicit
-templates only. `expose`, the one built-in struct field with more than
-one sub-field, merges per sub-field (`port`/`host`/`entrypoint`
-independently) rather than as one indivisible unit—the same key-by-key
-reasoning as a map field, applied to a struct's named fields instead of
-a map's keys. Each sub-field then merges by its own kind: `port`/`host`
-are scalars and collide, `entrypoint` is a list and concatenates, so two
-explicit templates each naming one entry point yield a router attached to both
+templates only. `expose` and `healthcheck`, the built-in struct fields
+with more than one sub-field, both merge per sub-field (`expose`'s
+`port`/`host`/`entrypoint`; `healthcheck`'s `test`/`interval`/`timeout`/
+`retries`/`start_period`/`start_interval`/`disable`) rather than as one
+indivisible unit—the same key-by-key reasoning as a map field, applied
+to a struct's named fields instead of a map's keys. Each sub-field then
+merges by its own kind: `expose.port`/`.host` and every `healthcheck`
+sub-field but `entrypoint` are scalars and collide (`healthcheck.test`
+and `.disable` collide the same way even though neither is a `Literal`
+—see below), `entrypoint` is a list and concatenates, so two explicit
+templates each naming one entry point yield a router attached to both
 rather than a `FieldCollision`. Two naming the same entry point yield a
 router attached to it once, per the distinct-name rule. This means a
-service's own body can override just `expose.host` while still
-inheriting `port`/`entrypoint` from a `with`-listed template, without
-repeating them. Two explicit templates only collide if they set the
-*same* scalar `expose` sub-field, not merely the same `expose` field
-overall.
+service's own body can override just `expose.host` (or just
+`healthcheck.interval`) while still inheriting the rest from a
+`with`-listed template, without repeating them. Two explicit templates
+only collide if they set the *same* scalar sub-field, not merely the
+same enclosing field overall.
+
+`healthcheck.test` (`HealthcheckTest`) and `healthcheck.disable` (a
+bare-presence flag) aren't `Literal`s, so they can't ride the same
+name-keyed `SCALAR_FIELDS` table `expose.port`/`.host`/`restart.policy`
+do—`merge_scalar_like` in `compose.rs` is `merge_scalar` generalized
+over the value type, applied to two dedicated `MergeAcc` slots instead
+of a third table row, since only these two fields need it (#153).
 
 ```
 template internal_web(port: Number) {

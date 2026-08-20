@@ -40,7 +40,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use hl_parser::{
-    ComposedProgram, Network, Reference, Service, SourceMap, Span, Volume, VolumeHost, VolumeMap,
+    ComposedProgram, Healthcheck, HealthcheckTest, Network, Reference, Service, SourceMap, Span,
+    Volume, VolumeHost, VolumeMap,
 };
 use indexmap::IndexMap;
 
@@ -418,6 +419,8 @@ fn generate_service(
         .map(|lit| interp::resolve(lit.text(), &bindings, lit.span()))
         .transpose()?;
 
+    let healthcheck = generate_healthcheck(fields.healthcheck.as_ref(), &bindings)?;
+
     let mut environment = Vec::with_capacity(fields.env.entries.len());
     for e in &fields.env.entries {
         let key = interp::resolve(e.key.text(), &bindings, e.key.span())?;
@@ -478,6 +481,7 @@ fn generate_service(
         image: Some(image),
         container_name,
         restart,
+        healthcheck,
         environment,
         env_file,
         volumes: volume_entries,
@@ -494,6 +498,81 @@ fn generate_service(
     service_doc.apply_raw_overrides();
 
     Ok((service_doc, network_docs, volume_docs))
+}
+
+/// Builds a service's `healthcheck:` doc from its parsed
+/// [`Healthcheck`], `{{name}}`-interpolating every string sub-field the
+/// same way `restart.policy`/`container_name` are above — a `test`
+/// command or a duration string is exactly as likely to want the
+/// service's own name spliced in as those are. `retries` is the one
+/// exception, handled via [`raw::scalar_value`] instead so a bare
+/// `retries: 3` reaches Compose as the YAML integer it was written as,
+/// matching `expose.port`'s own precedent just above in
+/// [`generate_service`] for the same reason: a number is a number, not
+/// text to interpolate into.
+///
+/// Returns `None` both when `hc` is `None` (no `healthcheck` field at
+/// all) and when every sub-field it holds is unset (`healthcheck {}`) —
+/// [`doc::HealthcheckDoc::is_empty`] is what tells those two cases
+/// apart from "something was actually set."
+fn generate_healthcheck(
+    hc: Option<&Healthcheck>,
+    bindings: &HashMap<&str, &str>,
+) -> Result<Option<doc::HealthcheckDoc>, CodegenError> {
+    let Some(hc) = hc else {
+        return Ok(None);
+    };
+
+    let test =
+        match &hc.test {
+            Some(HealthcheckTest::Shell(lit)) => Some(serde_yaml_ng::Value::String(
+                interp::resolve(lit.text(), bindings, lit.span())?,
+            )),
+            Some(HealthcheckTest::Exec(items, _)) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    out.push(serde_yaml_ng::Value::String(interp::resolve(
+                        item.text(),
+                        bindings,
+                        item.span(),
+                    )?));
+                }
+                Some(serde_yaml_ng::Value::Sequence(out))
+            }
+            None => None,
+        };
+    let interval = hc
+        .interval
+        .as_ref()
+        .map(|lit| interp::resolve(lit.text(), bindings, lit.span()))
+        .transpose()?;
+    let timeout = hc
+        .timeout
+        .as_ref()
+        .map(|lit| interp::resolve(lit.text(), bindings, lit.span()))
+        .transpose()?;
+    let retries = hc.retries.as_ref().map(raw::scalar_value);
+    let start_period = hc
+        .start_period
+        .as_ref()
+        .map(|lit| interp::resolve(lit.text(), bindings, lit.span()))
+        .transpose()?;
+    let start_interval = hc
+        .start_interval
+        .as_ref()
+        .map(|lit| interp::resolve(lit.text(), bindings, lit.span()))
+        .transpose()?;
+
+    let doc = doc::HealthcheckDoc {
+        test,
+        interval,
+        timeout,
+        retries,
+        start_period,
+        start_interval,
+        disable: hc.disable.is_some(),
+    };
+    Ok(if doc.is_empty() { None } else { Some(doc) })
 }
 
 /// Resolves a service's `volume` entries into the Compose-level
