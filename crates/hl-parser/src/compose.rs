@@ -23,10 +23,10 @@ use std::fmt;
 use hl_lexer::{SourceMap, Span};
 
 use crate::ast::{
-    EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network,
-    ParamType, Program, PublishEntry, PublishMap, RawMap, RawValue, Reference, Restart, Service,
-    ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Volume, VolumeEntry, VolumeHost,
-    VolumeMap,
+    DependsOnEntry, EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal,
+    Network, ParamType, Program, PublishEntry, PublishMap, RawMap, RawValue, Reference, Restart,
+    Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Volume, VolumeEntry,
+    VolumeHost, VolumeMap,
 };
 use crate::schema::MapSide;
 
@@ -1471,7 +1471,11 @@ fn resolve_qualified_references<R: SymbolResolver>(
         }
     }
     reject_qualified(&fields.middleware, "middleware")?;
-    reject_qualified(&fields.depends_on, "depends_on")?;
+    // `depends_on`'s entries carry a `Reference` rather than being one,
+    // since #155 gave each one an optional `condition` alongside it —
+    // see [`ast::DependsOnEntry`]'s doc — so this maps down to the
+    // `Reference`s inside rather than passing the list straight through.
+    reject_qualified(fields.depends_on.iter().map(|e| &e.reference), "depends_on")?;
     reject_qualified(&fields.dns, "dns")?;
     // An `env_file` path lives on disk next to the compose file, which
     // no `.hll` file declares, so there's nothing for an alias to
@@ -1490,7 +1494,10 @@ fn resolve_qualified_references<R: SymbolResolver>(
     Ok(())
 }
 
-fn reject_qualified(refs: &[Reference], field: &'static str) -> Result<(), ComposeError> {
+fn reject_qualified<'a>(
+    refs: impl IntoIterator<Item = &'a Reference>,
+    field: &'static str,
+) -> Result<(), ComposeError> {
     for r in refs {
         if let Some(q) = &r.qualifier {
             return Err(ComposeError::UnsupportedQualifiedReference {
@@ -1717,7 +1724,6 @@ impl Spanned for PublishEntry {
         self.span
     }
 }
-
 /// The accumulator a field-bag's tiers merge into, tracking which tier
 /// last set each value so [`merge_scalar`]/[`merge_map`] can tell
 /// "explicit-vs-explicit" (an error) apart from "defaults-vs-anything"
@@ -1742,13 +1748,31 @@ impl Spanned for PublishEntry {
 /// point a one-line addition rather than a new `MergeAcc` field plus new
 /// hand-written merge/rebuild logic.
 ///
-/// `lists` is the same idea for every reference-list field — the five
-/// bare ones on `ServiceFields` (`middleware`/`depends_on`/`networks`/
-/// `dns`/`env_file`) plus `expose.entrypoint`, which lives inside a
-/// nested struct and so can't be a plain `MergeAcc` field the way the
-/// others once were. They carry no `Tier`: list fields concatenate
+/// `lists` is the same idea for every plain reference-list field — the
+/// four bare ones on `ServiceFields` (`middleware`/`networks`/`dns`/
+/// `env_file`) plus `expose.entrypoint`, which lives inside a nested
+/// struct and so can't be a plain `MergeAcc` field the way the others
+/// once were. They carry no `Tier`: list fields concatenate
 /// unconditionally, so there is no collision to attribute to a tier.
 /// See [`LIST_FIELDS`].
+///
+/// `depends_on` isn't one of the four — it moved into its own
+/// `depends_on` field below, merged key-by-key on the referenced
+/// service's own name through [`merge_depends_on`] rather than through
+/// [`LIST_FIELDS`], once #155 gave each entry an optional `condition`
+/// that two entries naming the same service could actually disagree
+/// about. Own always wins over whatever a template said about the same
+/// dependency, and `defaults` always loses, exactly like every other
+/// keyed field — but unlike `env`/`volume`/`publish`'s own
+/// [`merge_map`], two `with`-listed templates naming the same service
+/// only collide when their *effective* conditions actually differ.
+/// Two templates both writing a plain `depends_on [db]` — by far the
+/// common case, and the only shape this field had before #155 — still
+/// silently collapse to one entry exactly as they always have: see
+/// [`merge_depends_on`]'s own doc for why treating that as a collision
+/// would be a gratuitous, unmotivated break of every `.hll` file
+/// already composing two templates that each depend on the same
+/// service.
 #[derive(Default)]
 struct MergeAcc {
     scalars: HashMap<&'static str, (Literal, Tier)>,
@@ -1756,6 +1780,10 @@ struct MergeAcc {
     volumes: Vec<(VolumeEntry, Tier)>,
     env: Vec<(EnvEntry, Tier)>,
     publish: Vec<(PublishEntry, Tier)>,
+    /// `depends_on`'s own merge point — see this struct's own doc for
+    /// why it's merged like a map field (keyed by the referenced
+    /// service's name) rather than riding [`Self::lists`].
+    depends_on: Vec<(DependsOnEntry, Tier)>,
     raw: RawMap,
     /// `healthcheck.test`'s own collision point — not part of `scalars`
     /// above because [`HealthcheckTest`] isn't a [`Literal`]. Merged by
@@ -1782,6 +1810,7 @@ impl MergeAcc {
             publish: PublishMap {
                 entries: self.publish.into_iter().map(|(v, _)| v).collect(),
             },
+            depends_on: self.depends_on.into_iter().map(|(v, _)| v).collect(),
             raw: self.raw,
             ..Default::default()
         };
@@ -2000,10 +2029,12 @@ fn empty_healthcheck(span: Span) -> Healthcheck {
 /// name each one — but `entrypoint` lives inside `expose`, which
 /// `into_service_fields` *rebuilds*, so it needs the same read-out/
 /// write-back indirection the scalars already had. Given one list field
-/// had to be described by function pointers, all six are: the whole
+/// had to be described by function pointers, all five are (`depends_on`
+/// no longer among them — see [`MergeAcc`]'s doc for why #155 moved it
+/// onto its own [`merge_depends_on`]-based merge point instead): the whole
 /// point of [`SCALAR_FIELDS`] (see hl-lang#28) is that both merge
 /// functions stay one generic loop apiece with no hand-enumerated
-/// knowledge of `ServiceFields`'s shape, and leaving five lists
+/// knowledge of `ServiceFields`'s shape, and leaving four lists
 /// hand-named beside a one-row table would have kept exactly the shape
 /// that design set out to remove.
 struct ListField {
@@ -2012,21 +2043,20 @@ struct ListField {
     set: fn(&mut ServiceFields, Vec<Reference>),
     /// Whether repeats of an already-accumulated name are dropped
     /// rather than appended (hl-lang#69). True for the set-like fields
-    /// — `networks`, `middleware`, `depends_on`, `expose.entrypoint` —
-    /// where naming the same thing twice means exactly what naming it
-    /// once means, so the repeat is pure noise: it duplicated
-    /// `networks:` entries and `middlewares=` label values in the
-    /// output, made a single external network look like an ambiguity
-    /// with itself, and (since list size then doubled per composition
-    /// level) turned a few hundred bytes of nested `with` into an
-    /// out-of-memory abort.
+    /// — `networks`, `middleware`, `expose.entrypoint` — where naming
+    /// the same thing twice means exactly what naming it once means, so
+    /// the repeat is pure noise: it duplicated `networks:` entries and
+    /// `middlewares=` label values in the output, made a single external
+    /// network look like an ambiguity with itself, and (since list size
+    /// then doubled per composition level) turned a few hundred bytes of
+    /// nested `with` into an out-of-memory abort.
     ///
     /// `dns` and `env_file` are the two exceptions, deliberately: order
     /// is observable for both — `dns` as resolver priority, `env_file`
     /// as Compose's own last-file-wins rule when the same variable is
     /// set in two of the listed files (#154) — so their append
     /// semantics are left exactly as they were even though a repeat is
-    /// just as meaningless. Every other reference list —
+    /// just as meaningless. Every other reference list here —
     /// `expose.entrypoint` included — is a set, and a router attached
     /// twice to the same entry point is attached to it once.
     dedupe: bool,
@@ -2064,12 +2094,6 @@ static LIST_FIELDS: &[ListField] = &[
         dedupe: true,
         take: |f| std::mem::take(&mut f.middleware),
         set: |f, v| f.middleware = v,
-    },
-    ListField {
-        key: "depends_on",
-        dedupe: true,
-        take: |f| std::mem::take(&mut f.depends_on),
-        set: |f, v| f.depends_on = v,
     },
     ListField {
         key: "networks",
@@ -2202,7 +2226,95 @@ fn merge_tier(
         tier,
         |e| e.container.text().to_string(),
     )?;
+    // Keyed by the referenced service's own name, like `env`'s key
+    // side — not concatenated through `LIST_FIELDS` above, even though
+    // its surface syntax is still a comma/bracket list. Not plain
+    // `merge_map` either, unlike `volumes`/`env`/`publish` just above:
+    // see `merge_depends_on`'s own doc for the narrower collision rule
+    // this field needs.
+    merge_depends_on(&mut acc.depends_on, incoming.depends_on, tier)?;
     acc.raw.entries.extend(incoming.raw.entries);
+    Ok(())
+}
+
+/// Merges `depends_on` entries into `acc`, keyed on the referenced
+/// service's own name — almost [`merge_map`], but with one narrower
+/// twist on the two-`Explicit`-tiers-collide case (#155).
+///
+/// `merge_map`'s own rule collides on key equality alone, which is
+/// right for `env`/`volume`/`publish`: two explicit templates setting
+/// the same key are colliding on that key even if they happen to write
+/// the same *value*, because nothing forces them to agree, and there's
+/// no principled reason to let today's accidental agreement paper over
+/// tomorrow's real one. `depends_on` is different: Compose's own
+/// implicit default already fixes what a *bare* entry means
+/// (`service_started`), so two explicit templates each writing
+/// `depends_on [db]` — the overwhelmingly common case — aren't
+/// proposing two different answers that happen to coincide, they're
+/// giving the *same* answer twice. Erroring there would be a gratuitous
+/// break of every `.hll` file that already composed two templates each
+/// depending on the same service, for a "conflict" that was never one —
+/// the same reasoning `resolve_networks`'s `AmbiguousExternalNetwork`
+/// check already applies to a network named `external` by two
+/// declarations that resolve to the same real name: "naming one
+/// external network more than once is not an ambiguity between it and
+/// itself, it's one answer given twice."
+///
+/// So two entries naming the same service are compared by
+/// [`DependsOnEntry::effective_condition`] — which folds a bare entry
+/// into Compose's own `service_started` default before comparing —
+/// before ever reaching the collision check: equal, and the earlier
+/// entry's own *written* form is kept, exactly like the set-like lists'
+/// own first-occurrence-wins dedupe; unequal, and it's a genuine
+/// [`ComposeError::MapKeyCollision`], the same diagnostic `env`/
+/// `volume`/`publish` raise for their own key collisions. Keeping the
+/// earlier entry's written form rather than normalizing it to whichever
+/// of the two conditions won matters for codegen: whether *any* entry
+/// in the field carries an explicit `condition` at all is what selects
+/// Compose's short-vs-long `depends_on:` shape (see
+/// `hl_codegen::generate_depends_on`), so silently promoting a bare
+/// entry into an explicit `service_started` here would flip an
+/// otherwise all-bare `depends_on` field into the long map form for no
+/// reason any `.hll` file actually wrote.
+fn merge_depends_on(
+    acc: &mut Vec<(DependsOnEntry, Tier)>,
+    incoming: Vec<DependsOnEntry>,
+    tier: &Tier,
+) -> Result<(), ComposeError> {
+    for entry in incoming {
+        let key = entry.reference.name.clone();
+        if let Some(pos) = acc.iter().position(|(e, _)| e.reference.name == key) {
+            let existing_tier = acc[pos].1.clone();
+            match (&existing_tier, tier) {
+                (_, Tier::Own) => {
+                    acc[pos] = (entry, Tier::Own);
+                }
+                (Tier::Defaults, _) => {
+                    acc[pos] = (entry, tier.clone());
+                }
+                (Tier::Explicit(first), Tier::Explicit(second)) => {
+                    if acc[pos].0.effective_condition() == entry.effective_condition() {
+                        // Same answer, given twice — not a collision;
+                        // keep the earlier entry's own written form (see
+                        // this function's own doc) and drop the repeat.
+                        continue;
+                    }
+                    return Err(ComposeError::MapKeyCollision(Box::new(MapKeyCollision {
+                        field: "depends_on",
+                        side: MapSide::Key,
+                        key,
+                        first_template: first.clone(),
+                        second_template: second.clone(),
+                        first: acc[pos].0.span,
+                        second: entry.span,
+                    })));
+                }
+                _ => unreachable!("Own is always merged last; Defaults is always merged first"),
+            }
+        } else {
+            acc.push((entry, tier.clone()));
+        }
+    }
     Ok(())
 }
 

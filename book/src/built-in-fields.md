@@ -428,16 +428,17 @@ repeatable.
 
 ## `middleware`, `depends_on`, `networks`, `dns`, `env_file`
 
-All five are plain reference-list fields directly on `service`/`template`,
-not nested struct types, so there's no primary-field shorthand to learn
-for them. Write a bare identifier or string, a bracketed list, or repeat
-the field:
+All five are plain list fields directly on `service`/`template`, not
+nested struct types, so there's no primary-field shorthand to learn for
+them. Write a bare identifier or string, a bracketed list, or repeat the
+field:
 
 ```hll,fragment
 middleware local-ipwhitelist
 middleware forwardAuth-authentik   # repeating accumulates
 
 depends_on database
+depends_on [database { condition: service_healthy }]
 
 networks [traefik-net]
 
@@ -461,6 +462,35 @@ env_file ["miniflux.env", "common.env"]
   describes.
 - `depends_on` names a same-file sibling `service` this one depends
   on—it's not cross-file, and doesn't accept a qualified `alias.name`.
+  Each entry may optionally add a `{ condition: ... }` body naming one
+  of Compose's own three readiness conditions—`service_started` (the
+  default: wait only for the target container to start, which is all a
+  bare `depends_on database` has ever meant), `service_healthy` (wait
+  for the target's `healthcheck` to report healthy), or
+  `service_completed_successfully` (wait for the target to exit
+  zero—typically a one-shot init/migration container). Anything else is
+  a compile error naming all three. A plain, bare entry and a
+  conditioned one can sit side by side in the same list:
+
+  ```hll,fragment
+  depends_on [cache, database { condition: service_healthy }]
+  ```
+
+  Compose has two mutually exclusive shapes for `depends_on:` and never
+  mixes them in one document: a plain list of names, or a mapping of
+  name to `{ condition: ... }`. `hllc` emits the plain list—unchanged
+  from before this syntax existed—as long as *no* entry in the field
+  carries a condition, and switches the whole field to the mapping form
+  as soon as *any* entry does; a sibling entry with no explicit
+  condition is then filled in with `service_started`, since the mapping
+  form requires every entry to name one.
+
+  `service_healthy` is only meaningful when the target service actually
+  has a healthcheck to become healthy against—but `hllc` doesn't warn
+  when the target's `.hll` body has no [`healthcheck`](#healthcheck)
+  field, because that's not evidence the condition is meaningless: a
+  Docker image can bake its own `HEALTHCHECK` into its Dockerfile,
+  invisible to anything an `.hll` file declares.
 - `networks` references a top-level `network` declared in the same
   program—see the preceding section. If exactly one referenced network
   is `external`, its real name also drives the
@@ -512,9 +542,20 @@ env_file ["miniflux.env", "common.env"]
   value belongs directly in the `.hll` file rather than in an external
   file.
 
-All five accumulate across repeated writes and across template
-composition (see [Templates & Composition](./templates-and-composition.md))—there's
-no collision to check since list fields can only ever grow.
+All five accumulate across repeated writes within one body. Across
+template composition (see [Templates &
+Composition](./templates-and-composition.md)), `middleware`/`networks`/
+`dns`/`env_file` also just accumulate—there's no collision to check
+since list fields can only ever grow. `depends_on` merges keyed on the
+service name instead, and the service's own body always wins over a
+template's entry for the same dependency—but two `with`-listed templates
+naming the same service is *not* automatically a compile error: it's
+only one when their `condition`s actually disagree (see above), exactly
+like two templates setting the same [`env`](#env) key to two
+different values would collide. Two templates that both say
+`depends_on [database]`—or that spell out the same condition on both—are
+giving the same answer twice, not two different ones, so they still
+compose to a single entry exactly as they always have.
 
 ## `container_name`
 

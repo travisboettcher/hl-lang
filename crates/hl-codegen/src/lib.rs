@@ -40,8 +40,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use hl_parser::{
-    ComposedProgram, Healthcheck, HealthcheckTest, Network, Reference, Service, SourceMap, Span,
-    Volume, VolumeHost, VolumeMap,
+    ComposedProgram, DependsOnEntry, Healthcheck, HealthcheckTest, Network, Reference, Service,
+    SourceMap, Span, Volume, VolumeHost, VolumeMap,
 };
 use indexmap::IndexMap;
 
@@ -461,7 +461,7 @@ fn generate_service(
 
     let labels = labels::compute(name, fields, docker_network.as_deref(), &bindings)?;
 
-    let depends_on = fields.depends_on.iter().map(|r| r.name.clone()).collect();
+    let depends_on = generate_depends_on(&fields.depends_on);
     let dns = fields.dns.iter().map(|r| r.name.clone()).collect();
     // Paths, carried through verbatim — never resolved against `bindings`
     // (matching `dns`/`middleware`/`depends_on`/`networks` just above:
@@ -498,6 +498,45 @@ fn generate_service(
     service_doc.apply_raw_overrides();
 
     Ok((service_doc, network_docs, volume_docs))
+}
+
+/// Builds a service's `depends_on:` doc from its parsed
+/// [`DependsOnEntry`] list (#155) — see [`doc::DependsOnDoc`]'s own doc
+/// for the short-vs-long shape switch this picks between. Deliberately
+/// never `{{name}}`-interpolated, matching every other reference-list
+/// field (`middleware`/`networks`/`dns`/`env_file`): a `depends_on`
+/// entry names a same-file sibling service, not free text, so there is
+/// nothing in it a binding could ever apply to.
+///
+/// Neither this function nor anything upstream of it warns when a
+/// `service_healthy` entry targets a service with no `hll`-level
+/// `healthcheck` field — deliberately. A Docker image can bake its own
+/// `HEALTHCHECK` into its Dockerfile, entirely outside anything an
+/// `.hll` file declares, so "no `healthcheck` field on the target
+/// service" is not evidence the condition is meaningless; `hllc` has no
+/// way to see an image's own healthcheck, and guessing wrong here would
+/// be worse than saying nothing.
+fn generate_depends_on(entries: &[DependsOnEntry]) -> doc::DependsOnDoc {
+    if entries.iter().all(|e| e.condition.is_none()) {
+        return doc::DependsOnDoc::Short(
+            entries.iter().map(|e| e.reference.name.clone()).collect(),
+        );
+    }
+    let mut long = IndexMap::new();
+    for entry in entries {
+        // An entry with no explicit condition still needs a mapping
+        // value once the document has committed to the long form —
+        // filled in with Compose's own implicit default via
+        // `effective_condition`, which is exactly what the short form
+        // always meant.
+        long.insert(
+            entry.reference.name.clone(),
+            doc::DependsOnConditionDoc {
+                condition: entry.effective_condition().compose_value().to_string(),
+            },
+        );
+    }
+    doc::DependsOnDoc::Long(long)
 }
 
 /// Builds a service's `healthcheck:` doc from its parsed

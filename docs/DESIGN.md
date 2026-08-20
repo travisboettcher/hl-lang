@@ -214,9 +214,11 @@ same two entries—see #81.
    `middleware`, or `depends_on` more than once in
    one body appends, since those fields are list/map-kinded—subject to
    the set-like lists' distinct-name rule under "Composition" below, which
-   drops a repeat of a name already present. Writing
-   `image` or `restart` twice in the same body is a duplicate-scalar
-   compile error.
+   drops a repeat of a name already present (`depends_on` instead keeps
+   only its own list's *last* entry for a repeated name, per the same
+   keyed-merge rule its own paragraph under "Composition" describes—#155).
+   Writing `image` or `restart` twice in the same body is a
+   duplicate-scalar compile error.
 
 ### Built-in schema table
 
@@ -320,6 +322,35 @@ being homelab-specific without the field itself being one). `env_file`
 follows the exact same reasoning as `dns`—Compose's own `env_file:` key,
 generic itself even though a real entry almost always names a
 gitignored, homelab-specific `.env` file—see #154.
+
+`depends_on` (`depends_on database` / `depends_on [database { condition:
+service_healthy }]`) shares this row's surface grammar—a bare reference,
+a bracketed list, the same accumulate-across-repeats rule—but each entry
+may also carry an optional `{ condition: ... }` body naming one of
+Compose's own three `depends_on` conditions (`service_started`, the
+default and the only thing a bare `depends_on database` has ever meant;
+`service_healthy`; `service_completed_successfully`)—see #155. A
+`condition` value outside that fixed set of three is a compile error,
+checked in the parser at the point it's written (mirroring
+`UnknownParamType`'s own precedent for validating a literal's *value*,
+not just its syntactic kind, as early as possible)—there's no later
+stage this needs deferring to, since `condition` can't hold a `$param`
+reference the way an ordinary literal slot can. `hllc` does *not* warn
+when a `service_healthy` entry's target has no `.hll`-level
+`healthcheck` field: a Docker image can bake its own `HEALTHCHECK` into
+its Dockerfile, invisible to anything an `.hll` file declares, so a
+missing `healthcheck` field is not evidence the condition is
+meaningless.
+
+Compose's `depends_on:` key has two shapes that can't mix in one
+document: a plain list of names (the short form, "wait for container
+start") or a mapping of name to `{ condition: ... }` (the long form).
+Codegen emits the short form—unchanged from before this syntax
+existed—as long as no entry in a service's `depends_on` carries a
+condition, and the long form as soon as any entry does, filling in
+`service_started` for any sibling entry left bare (the long form
+requires every entry to be a mapping).
+
 `container_name` isn't a row either, for the opposite reason: it's a
 plain *scalar* field directly on `service`/`template`
 (`container_name "uptime-kuma"` / `container_name: "uptime-kuma"`)
@@ -355,14 +386,38 @@ Merge priority, lowest to highest:
 3. the service's own body—always wins over everything
 
 List fields concatenate, so no collision is possible. The set-like ones
-(`middleware`, `depends_on`, `networks`, `expose.entrypoint`) concatenate
-by *distinct* name, keeping the first occurrence, while `dns` and
-`env_file` keep duplicates since their order is observable—resolver
-priority for `dns`, Compose's own last-file-wins precedence for
-`env_file` (#154). Map fields merge key-by-key (or value-by-value for
-`volume` and `publish`), and
-scalar fields (`image`, `restart`) error on collision among explicit
-templates only. `expose` and `healthcheck`, the built-in struct fields
+(`middleware`, `networks`, `expose.entrypoint`) concatenate by *distinct*
+name, keeping the first occurrence, while `dns` and `env_file` keep
+duplicates since their order is observable—resolver priority for `dns`,
+Compose's own last-file-wins precedence for `env_file` (#154). Map
+fields merge key-by-key (or value-by-value for `volume` and `publish`),
+and scalar fields (`image`, `restart`) error on collision among explicit
+templates only.
+
+`depends_on` merges key-by-key too, not by the set-like lists' rule,
+even though its surface grammar is still a reference list
+(`depends_on [db]`): once an entry could carry a `condition` (#155), two
+entries naming the same service could genuinely disagree, so `hllc`
+keys the merge on the referenced service's own name via a dedicated
+`merge_depends_on`, not `LIST_FIELDS`'s distinct-name concatenation. The
+service's own body still always wins over a template's entry for the
+same dependency—but unlike `env`/`volume`/`publish`'s own `merge_map`,
+two explicit templates naming the same service are compared by their
+*effective* condition (a bare entry means the same thing as an explicit
+`service_started`) before anything is called a collision: agreeing
+entries (including two plain `depends_on [db]`, by far the common case)
+still silently compose to one, exactly as they did before #155 existed,
+while only two explicit templates whose conditions genuinely differ
+raise the same `MapKeyCollision` two explicit templates setting the
+same `env` key to different values would. Erroring on mere agreement
+would have been a gratuitous breaking change to every `.hll` file
+already composing two templates that each depend on the same
+service—the same reasoning `hl-codegen`'s `AmbiguousExternalNetwork`
+check already applies to a network named `external` twice: naming one
+thing more than once isn't an ambiguity between it and itself, it's one
+answer given twice.
+
+`expose` and `healthcheck`, the built-in struct fields
 with more than one sub-field, both merge per sub-field (`expose`'s
 `port`/`host`/`entrypoint`; `healthcheck`'s `test`/`interval`/`timeout`/
 `retries`/`start_period`/`start_interval`/`disable`) rather than as one

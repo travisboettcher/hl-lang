@@ -34,10 +34,15 @@ pub enum FieldKind {
     /// entries across repeated writes (per docs/DESIGN.md's rule 4).
     Nested(&'static TypeSchema),
     /// A list of bare-identifier/string references (`middleware`,
-    /// `depends_on`, `networks`). Accumulates across repeats; settable
-    /// via a bracketed list, the bare comma-list sugar, or repeated
-    /// statements — never duplicate-checked, since list fields can't
-    /// collide.
+    /// `networks`, `dns`, `env_file`). Accumulates across repeats;
+    /// settable via a bracketed list, the bare comma-list sugar, or
+    /// repeated statements — never duplicate-checked, since list fields
+    /// can't collide.
+    ///
+    /// `depends_on` moved off this kind and onto its own
+    /// [`Self::DependsOnList`] when its entries gained an optional
+    /// `{ condition: ... }` body (#155) — a plain [`crate::ast::Reference`]
+    /// has nowhere to hang that.
     ReferenceList,
     /// A list of template invocations (`with`'s `templates` field): each
     /// item is an `IDENT` naming a template, optionally followed by a
@@ -58,6 +63,23 @@ pub enum FieldKind {
     /// the same — a bare literal or an explicit `[...]`, nothing in
     /// between.
     ScalarOrList,
+    /// `depends_on`'s own list kind (#155): like [`Self::ReferenceList`]
+    /// — accumulates across repeats, settable via a bracketed list, the
+    /// bare comma-list sugar, or repeated statements, never
+    /// duplicate-checked at parse time — except each entry may also
+    /// carry an optional `{ condition: ... }` body, matching
+    /// [`Self::TemplateInvocationList`]'s own "`IDENT` optionally
+    /// followed by a `{ }` body" shape. Not literally
+    /// `TemplateInvocationList`, though, because that body isn't
+    /// schema-free the way a template invocation's argument bag is:
+    /// `condition` is the one and only legal key, and its value must be
+    /// one of Compose's own three fixed keywords
+    /// (`service_started`/`service_healthy`/
+    /// `service_completed_successfully`), checked immediately by the
+    /// parser rather than deferred — see
+    /// [`crate::ast::DependsOnEntry`]'s doc and
+    /// [`crate::ParseError::InvalidDependsOnCondition`].
+    DependsOnList,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -515,7 +537,7 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
     },
     FieldSchema {
         name: "depends_on",
-        kind: FieldKind::ReferenceList,
+        kind: FieldKind::DependsOnList,
     },
     FieldSchema {
         name: "networks",

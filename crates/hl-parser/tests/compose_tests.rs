@@ -189,6 +189,145 @@ fn explicit_templates_publish_container_port_collision_is_error() {
     }
 }
 
+/// #155: `depends_on` merges keyed on the referenced service's own
+/// name, like `env`'s key side — but only *differing* conditions are a
+/// genuine collision. Here template `a`'s entry is effectively
+/// `service_healthy` and template `b`'s is effectively `service_started`
+/// (its bare `depends_on [db]`), so the two templates are proposing two
+/// different answers about the same dependency, not the same one
+/// twice — exactly as two explicit templates setting the same `env` key
+/// to two different values would collide.
+#[test]
+fn explicit_templates_depends_on_differing_conditions_is_error() {
+    let err = compose_err(
+        "template a {\n  depends_on [db { condition: service_healthy }]\n}\n\
+         template b {\n  depends_on [db]\n}\n\
+         service s {\n  with a, b\n}\n",
+    );
+    match err {
+        ComposeError::MapKeyCollision(details) => {
+            assert_eq!(details.field, "depends_on");
+            assert_eq!(details.side, MapSide::Key);
+            assert_eq!(details.key, "db");
+            assert_eq!(details.first_template, "a");
+            assert_eq!(details.second_template, "b");
+        }
+        other => panic!("expected MapKeyCollision, got {other:?}"),
+    }
+}
+
+/// The common case, and the one this rule exists to keep working: two
+/// explicit templates each writing a plain `depends_on [db]` are giving
+/// the *same* answer twice (both mean Compose's own implicit
+/// `service_started` default), not two different ones, so this composes
+/// successfully to a single entry rather than colliding — exactly as it
+/// did before #155 introduced the condition form at all.
+#[test]
+fn explicit_templates_depends_on_identical_bare_entries_compose_to_one_entry() {
+    let composed = compose_ok(
+        "template a {\n  depends_on [db]\n}\n\
+         template b {\n  depends_on [db]\n}\n\
+         service s {\n  with a, b\n}\n\
+         service db {\n  image \"x\"\n}\n",
+    );
+    let service = composed
+        .services
+        .iter()
+        .find(|s| s.name.name == "s")
+        .expect("service s");
+    assert_eq!(service.fields.depends_on.len(), 1);
+    assert_eq!(service.fields.depends_on[0].reference.name, "db");
+    assert!(service.fields.depends_on[0].condition.is_none());
+}
+
+/// Same idea, but both templates spell the condition out explicitly and
+/// agree: still composes to one entry, not a collision.
+#[test]
+fn explicit_templates_depends_on_identical_conditions_compose_to_one_entry() {
+    let composed = compose_ok(
+        "template a {\n  depends_on [db { condition: service_healthy }]\n}\n\
+         template b {\n  depends_on [db { condition: service_healthy }]\n}\n\
+         service s {\n  with a, b\n}\n\
+         service db {\n  image \"x\"\n}\n",
+    );
+    let service = composed
+        .services
+        .iter()
+        .find(|s| s.name.name == "s")
+        .expect("service s");
+    assert_eq!(service.fields.depends_on.len(), 1);
+    assert_eq!(
+        service.fields.depends_on[0].condition.map(|(c, _)| c),
+        Some(hl_parser::DependsOnCondition::ServiceHealthy)
+    );
+}
+
+/// A bare entry in one template and an explicit `condition:
+/// service_started` in another mean exactly the same thing to
+/// Compose — `service_started` is its own implicit default — so this
+/// composes successfully rather than colliding, even though the two
+/// entries aren't written identically.
+#[test]
+fn explicit_templates_depends_on_bare_and_explicit_default_agree() {
+    let composed = compose_ok(
+        "template a {\n  depends_on [db]\n}\n\
+         template b {\n  depends_on [db { condition: service_started }]\n}\n\
+         service s {\n  with a, b\n}\n\
+         service db {\n  image \"x\"\n}\n",
+    );
+    let service = composed
+        .services
+        .iter()
+        .find(|s| s.name.name == "s")
+        .expect("service s");
+    assert_eq!(service.fields.depends_on.len(), 1);
+    // `merge_depends_on` keeps the *earlier* entry's own written form
+    // (first-occurrence-wins, the same rule the set-like reference
+    // lists already use for a repeated name) rather than normalizing to
+    // whichever spelling won — template `a`'s bare entry ran first, so
+    // its bare form survives, and codegen's short-vs-long-form switch
+    // (#155) reads that as "no explicit condition anywhere in this
+    // field," which is exactly what both templates meant.
+    assert!(service.fields.depends_on[0].condition.is_none());
+}
+
+/// The service's own body always wins over a template's `depends_on`
+/// entry for the same service, condition included — the same
+/// Own-always-wins rule every other keyed field already follows.
+#[test]
+fn depends_on_own_body_overrides_a_templates_condition() {
+    let composed = compose_ok(
+        "template waits_for_db {\n  depends_on [db { condition: service_started }]\n}\n\
+         service s {\n  with waits_for_db\n  depends_on [db { condition: service_healthy }]\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(service.fields.depends_on.len(), 1);
+    let entry = &service.fields.depends_on[0];
+    assert_eq!(entry.reference.name, "db");
+    assert_eq!(
+        entry.condition.map(|(c, _)| c),
+        Some(hl_parser::DependsOnCondition::ServiceHealthy)
+    );
+}
+
+/// The implicit `defaults` template always silently loses, even on
+/// `depends_on` — an explicit `with`-listed template's own entry for the
+/// same service wins.
+#[test]
+fn depends_on_defaults_tier_loses_to_an_explicit_template() {
+    let composed = compose_ok(
+        "template defaults {\n  depends_on [db { condition: service_started }]\n}\n\
+         template waits_for_db {\n  depends_on [db { condition: service_healthy }]\n}\n\
+         service s {\n  with waits_for_db\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(service.fields.depends_on.len(), 1);
+    assert_eq!(
+        service.fields.depends_on[0].condition.map(|(c, _)| c),
+        Some(hl_parser::DependsOnCondition::ServiceHealthy)
+    );
+}
+
 /// Non-colliding entries accumulate across tiers, and a `$param` in
 /// either half of a mapping is substituted like any other literal slot.
 #[test]
@@ -717,17 +856,29 @@ fn list_fields_concatenate_in_priority_order() {
 }
 
 /// #69: the set-like lists concatenate *by distinct name*. Restating a
-/// network (or middleware, or dependency) a template already supplies is
-/// a natural thing to write, and means exactly what stating it once
-/// means — so the repeat is dropped rather than duplicated into the
-/// output.
+/// network (or middleware) a template already supplies is a natural
+/// thing to write, and means exactly what stating it once means — so the
+/// repeat is dropped rather than duplicated into the output.
+///
+/// `depends_on` used to be one of these set-like lists too, and this
+/// test used to cover it alongside `networks`/`middleware` — but #155
+/// moved its merge onto its own keyed-by-service-name engine (see the
+/// `depends_on_*` tests below), since an entry can now carry a
+/// `condition` two templates could genuinely disagree about. Two
+/// explicit templates both writing a plain `depends_on [db]` still
+/// compose to one entry exactly as before — they're proposing the same
+/// answer twice, not two different ones — so nothing here actually
+/// changed about *that* case; only two explicit templates whose
+/// conditions genuinely differ get a new `MapKeyCollision` that simply
+/// didn't exist before #155 gave `depends_on` anything to disagree
+/// about.
 #[test]
 fn set_like_list_fields_dedupe_across_tiers() {
     let composed = compose_ok(
         "network proxy {\n  name: \"real\"\n}\n\
-         template a {\n  networks [proxy]\n  middleware auth\n  depends_on [db]\n}\n\
-         template b {\n  networks [proxy]\n  middleware auth\n  depends_on [db]\n}\n\
-         service s {\n  image \"x\"\n  with a, b\n  networks [proxy]\n  middleware auth\n  depends_on [db]\n}\n",
+         template a {\n  networks [proxy]\n  middleware auth\n}\n\
+         template b {\n  networks [proxy]\n  middleware auth\n}\n\
+         service s {\n  image \"x\"\n  with a, b\n  networks [proxy]\n  middleware auth\n}\n",
     );
     let service = single_service(&composed);
     let names = |refs: &[hl_parser::Reference]| -> Vec<String> {
@@ -735,7 +886,6 @@ fn set_like_list_fields_dedupe_across_tiers() {
     };
     assert_eq!(names(&service.fields.networks), vec!["proxy"]);
     assert_eq!(names(&service.fields.middleware), vec!["auth"]);
-    assert_eq!(names(&service.fields.depends_on), vec!["db"]);
 }
 
 /// Deduping keeps the *first* occurrence, so the surviving order is
@@ -801,8 +951,10 @@ fn nested_with_chain_does_not_expand_exponentially() {
     assert_eq!(service.fields.middleware[0].name, "m");
 }
 
-/// `dns` is list-typed just like `middleware`/`depends_on`/`networks` —
-/// it concatenates across tiers rather than colliding.
+/// `dns` is list-typed just like `middleware`/`networks` — it
+/// concatenates across tiers rather than colliding. (`depends_on` no
+/// longer belongs in this list — #155 moved it onto a keyed merge; see
+/// the `depends_on_*` tests further down.)
 #[test]
 fn dns_concatenates_across_tiers() {
     let composed = compose_ok(

@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
-    EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Param,
-    ParamType, Program, PublishEntry, PublishMap, RawEntry, RawMap, RawValue, Reference, Restart,
-    Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, UseDecl, Volume,
-    VolumeDriverOpt, VolumeEntry, VolumeHost, VolumeMap,
+    DependsOnCondition, DependsOnEntry, EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest,
+    Ident, Image, Literal, Network, Param, ParamType, Program, PublishEntry, PublishMap, RawEntry,
+    RawMap, RawValue, Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation,
+    TopDecl, UseDecl, Volume, VolumeDriverOpt, VolumeEntry, VolumeHost, VolumeMap,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -85,7 +85,7 @@ enum FieldValue {
     /// An accumulating nested schema-free map-kind field (raw).
     Raw(RawMap),
     /// An accumulating reference-list field
-    /// (middleware/depends_on/networks/dns/env_file).
+    /// (middleware/networks/dns/env_file).
     RefList(Vec<Reference>),
     /// An accumulating template-invocation-list field (`with`'s `templates`).
     TemplateInvocations(Vec<TemplateInvocation>),
@@ -93,6 +93,9 @@ enum FieldValue {
     /// a bracketed list of literals (`healthcheck`'s `test`). See
     /// [`schema::FieldKind::ScalarOrList`]'s doc.
     ScalarOrList(ScalarOrList),
+    /// An accumulating `depends_on`-list field. See
+    /// [`schema::FieldKind::DependsOnList`]'s doc.
+    DependsOnEntries(Vec<DependsOnEntry>),
 }
 
 /// The parsed value of a [`schema::FieldKind::ScalarOrList`] field —
@@ -129,7 +132,8 @@ impl FieldValue {
             | FieldValue::MountMap(_)
             | FieldValue::Raw(_)
             | FieldValue::RefList(_)
-            | FieldValue::TemplateInvocations(_) => {
+            | FieldValue::TemplateInvocations(_)
+            | FieldValue::DependsOnEntries(_) => {
                 unreachable!("map/list-kind fields accumulate and are never duplicate-checked")
             }
         }
@@ -439,6 +443,125 @@ impl<'src> Parser<'src> {
             Ok(ScalarOrList::Scalar(self.parse_literal()?))
         } else {
             Err(self.unexpected(Expected::Description("a value or a bracketed list")))
+        }
+    }
+
+    // ---- depends_on (#155) ----
+
+    /// `IDENT | STRING` naming one of Compose's own three `depends_on`
+    /// conditions: `service_started`, `service_healthy`,
+    /// `service_completed_successfully`. Deliberately narrower than
+    /// [`Self::parse_literal`] — this position never accepts a `NUMBER`
+    /// or a `$param`. The three spellings are fixed Compose keywords,
+    /// not a value any homelab would template-parameterize (unlike, say,
+    /// `restart.policy`, which is carried through unchecked precisely
+    /// because Compose's own legal values there aren't a short, closed
+    /// set worth hard-coding) — so there is no later "resolve, then
+    /// check" stage this needs to defer to, and checking it here, right
+    /// where it's written, gives the best possible span.
+    fn parse_depends_on_condition(&mut self) -> Result<(DependsOnCondition, Span), ParseError> {
+        let tok = *self.peek();
+        if !matches!(tok.kind, TokenKind::Ident | TokenKind::Str) {
+            return Err(self.unexpected(Expected::Description(
+                "one of `service_started`, `service_healthy`, `service_completed_successfully`",
+            )));
+        }
+        self.bump();
+        match DependsOnCondition::parse(tok.lexeme) {
+            Some(condition) => Ok((condition, tok.span)),
+            None => Err(ParseError::InvalidDependsOnCondition {
+                found: tok.lexeme.to_string(),
+                span: tok.span,
+            }),
+        }
+    }
+
+    /// `reference ( "{" "condition" ":" condition_value "}" )?` — one
+    /// `depends_on`-list item: a plain same-file service reference
+    /// (`db`), or a reference plus an explicit condition (`db {
+    /// condition: service_healthy }`). Shaped like
+    /// [`Self::parse_template_invocation`] — `IDENT` optionally followed
+    /// by a `{ }` body — but the body is checked against a real
+    /// one-field schema (`condition` is the only legal key) rather than
+    /// parsed as a schema-free [`RawMap`], since there's no later stage
+    /// that resolves an arbitrary key the way template-argument binding
+    /// does.
+    fn parse_depends_on_entry(&mut self) -> Result<DependsOnEntry, ParseError> {
+        let reference = self.parse_reference()?;
+        let mut end = reference.span.end;
+        let condition = if self.peek().kind == TokenKind::LBrace {
+            self.bump();
+            let key_tok = self.expect(TokenKind::Ident)?;
+            if key_tok.lexeme != "condition" {
+                return Err(ParseError::UnknownField {
+                    type_name: "depends_on",
+                    field: key_tok.lexeme.to_string(),
+                    raw_escape_hatch: false,
+                    span: key_tok.span,
+                });
+            }
+            self.expect(TokenKind::Colon)?;
+            let value = self.parse_depends_on_condition()?;
+            let close = self.expect(TokenKind::RBrace)?;
+            end = close.span.end;
+            Some(value)
+        } else {
+            None
+        };
+        let span = Span {
+            start: reference.span.start,
+            end,
+            line: reference.span.line,
+            col: reference.span.col,
+            file: reference.span.file,
+        };
+        Ok(DependsOnEntry {
+            reference,
+            condition,
+            span,
+        })
+    }
+
+    fn parse_bare_depends_on_list(&mut self) -> Result<Vec<DependsOnEntry>, ParseError> {
+        let mut entries = vec![self.parse_depends_on_entry()?];
+        while self.peek().kind == TokenKind::Comma && !self.comma_starts_a_new_field() {
+            self.bump();
+            entries.push(self.parse_depends_on_entry()?);
+        }
+        Ok(entries)
+    }
+
+    fn parse_bracket_depends_on_list(&mut self) -> Result<Vec<DependsOnEntry>, ParseError> {
+        self.expect(TokenKind::LBracket)?;
+        let mut entries = Vec::new();
+        if self.peek().kind != TokenKind::RBracket {
+            loop {
+                entries.push(self.parse_depends_on_entry()?);
+                if self.peek().kind == TokenKind::Comma {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RBracket)?;
+        Ok(entries)
+    }
+
+    /// Mirrors [`Self::parse_reference_list_value`]: an optional leading
+    /// `:`, then either a bracketed list or the bare comma-list sugar.
+    fn parse_depends_on_list_value(&mut self) -> Result<Vec<DependsOnEntry>, ParseError> {
+        if self.peek().kind == TokenKind::Colon {
+            self.bump();
+        }
+        if self.peek().kind == TokenKind::LBracket {
+            self.parse_bracket_depends_on_list()
+        } else if self.at_value_start() {
+            self.parse_bare_depends_on_list()
+        } else {
+            Err(self.unexpected(Expected::Description(
+                "a service reference or a list of service references",
+            )))
         }
     }
 
@@ -817,6 +940,17 @@ impl<'src> Parser<'src> {
             FieldKind::ScalarOrList => {
                 let value = self.parse_scalar_or_list_value()?;
                 self.insert_single(schema, fields, field.name, FieldValue::ScalarOrList(value))
+            }
+            FieldKind::DependsOnList => {
+                let entries = self.parse_depends_on_list_value()?;
+                match fields
+                    .entry(field.name)
+                    .or_insert_with(|| FieldValue::DependsOnEntries(Vec::new()))
+                {
+                    FieldValue::DependsOnEntries(v) => v.extend(entries),
+                    _ => unreachable!("field kind is stable for a given field name"),
+                }
+                Ok(())
             }
         }
     }
@@ -1533,7 +1667,7 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         _ => Vec::new(),
     };
     let depends_on = match fields.remove("depends_on") {
-        Some(FieldValue::RefList(v)) => v,
+        Some(FieldValue::DependsOnEntries(v)) => v,
         _ => Vec::new(),
     };
     let networks = match fields.remove("networks") {

@@ -108,6 +108,62 @@ impl HealthcheckDoc {
     }
 }
 
+/// Compose's `depends_on:` key, in whichever of its two mutually
+/// exclusive shapes this service's own entries need (#155). Compose
+/// allows either a plain sequence of service names (the *short* form —
+/// what `hll` has always emitted, "wait for the target container to
+/// start") or a mapping of name to `{ condition: ... }` (the *long*
+/// form — "wait for a named readiness condition"), but never a mix of
+/// the two in one document.
+///
+/// `hllc` picks `Short` when none of a service's `depends_on` entries
+/// carries an explicit `condition`, so every `depends_on [db]`/
+/// `depends_on database` file — which is to say, every file written
+/// before #155 — keeps emitting the exact YAML it always has, byte for
+/// byte. It picks `Long` as soon as *any* entry does, since Compose's
+/// long form is all-or-nothing per document: once one entry needs a
+/// mapping value, every entry does, so [`crate::generate_depends_on`]
+/// fills in Compose's own implicit default (`service_started`) for any
+/// sibling entry that named no condition — the same "wait for container
+/// start" behavior the short form always meant, just spelled the long
+/// way.
+#[derive(Serialize, PartialEq)]
+#[serde(untagged)]
+pub(crate) enum DependsOnDoc {
+    Short(Vec<String>),
+    Long(IndexMap<String, DependsOnConditionDoc>),
+}
+
+impl Default for DependsOnDoc {
+    /// The short, empty form — matching `Vec::default()`'s own
+    /// "nothing set" meaning for every other list field on
+    /// [`ComposeServiceDoc`], and what `skip_serializing_if` compares
+    /// against via [`Self::is_empty`].
+    fn default() -> Self {
+        DependsOnDoc::Short(Vec::new())
+    }
+}
+
+impl DependsOnDoc {
+    /// Whether this `depends_on` set nothing at all — in which case the
+    /// service gets no `depends_on:` key. Mirrors
+    /// [`HealthcheckDoc::is_empty`]/[`VolumeDoc::is_empty`]; `Long` is
+    /// never actually constructed empty (see
+    /// [`crate::generate_depends_on`]), but the check costs nothing and
+    /// keeps this type self-consistent regardless of who builds one.
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            DependsOnDoc::Short(v) => v.is_empty(),
+            DependsOnDoc::Long(m) => m.is_empty(),
+        }
+    }
+}
+
+#[derive(Serialize, PartialEq)]
+pub(crate) struct DependsOnConditionDoc {
+    pub condition: String,
+}
+
 #[derive(Serialize, Default)]
 pub(crate) struct ComposeServiceDoc {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,8 +221,10 @@ pub(crate) struct ComposeServiceDoc {
     pub ports: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub expose: Vec<serde_yaml_ng::Value>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub depends_on: Vec<String>,
+    /// See [`DependsOnDoc`]'s own doc for the short-vs-long shape switch
+    /// (#155).
+    #[serde(skip_serializing_if = "DependsOnDoc::is_empty")]
+    pub depends_on: DependsOnDoc,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
     /// `raw {}` entries — flattened so they land as sibling top-level
@@ -269,7 +327,7 @@ impl ComposeServiceDoc {
             expose.clear();
         }
         if raw.contains_key("depends_on") {
-            depends_on.clear();
+            *depends_on = DependsOnDoc::default();
         }
         if raw.contains_key("labels") {
             labels.clear();

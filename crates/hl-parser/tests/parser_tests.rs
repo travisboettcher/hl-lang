@@ -1,8 +1,8 @@
 use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    Expected, Expose, HealthcheckTest, Literal, ParamType, ParseError, TemplateDecl, TopDecl,
-    UseDecl, VolumeHost, parse,
+    DependsOnCondition, Expected, Expose, HealthcheckTest, Literal, ParamType, ParseError,
+    TemplateDecl, TopDecl, UseDecl, VolumeHost, parse,
 };
 
 fn parse_ok(source: &str) -> hl_parser::Program {
@@ -1290,9 +1290,107 @@ fn depends_on_bracket_list_form() {
         .fields
         .depends_on
         .iter()
-        .map(|r| r.name.as_str())
+        .map(|e| e.reference.name.as_str())
         .collect();
     assert_eq!(names, vec!["a", "b"]);
+    assert!(
+        service
+            .fields
+            .depends_on
+            .iter()
+            .all(|e| e.condition.is_none())
+    );
+}
+
+/// `db { condition: service_healthy }` (#155): the bracketed extended
+/// form carries its condition alongside the plain reference.
+#[test]
+fn depends_on_extended_form_parses_the_condition() {
+    let program = parse_ok("service s {\n  depends_on [db { condition: service_healthy }]\n}\n");
+    let service = as_service(&program.decls[0]);
+    let entry = &service.fields.depends_on[0];
+    assert_eq!(entry.reference.name, "db");
+    assert_eq!(
+        entry.condition.map(|(c, _)| c),
+        Some(DependsOnCondition::ServiceHealthy)
+    );
+}
+
+/// The extended form also works unbracketed, as the bare single-item
+/// sugar every `depends_on` entry gets.
+#[test]
+fn depends_on_extended_form_works_without_brackets() {
+    let program = parse_ok("service s {\n  depends_on db { condition: service_healthy }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.depends_on.len(), 1);
+    assert_eq!(
+        service.fields.depends_on[0].condition.map(|(c, _)| c),
+        Some(DependsOnCondition::ServiceHealthy)
+    );
+}
+
+/// A mixed list — a plain reference alongside a conditioned one, in
+/// either order — parses each entry independently.
+#[test]
+fn depends_on_mixed_bare_and_conditioned_entries_parse() {
+    let program =
+        parse_ok("service s {\n  depends_on [cache, db { condition: service_healthy }]\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.depends_on.len(), 2);
+    assert_eq!(service.fields.depends_on[0].reference.name, "cache");
+    assert!(service.fields.depends_on[0].condition.is_none());
+    assert_eq!(service.fields.depends_on[1].reference.name, "db");
+    assert_eq!(
+        service.fields.depends_on[1].condition.map(|(c, _)| c),
+        Some(DependsOnCondition::ServiceHealthy)
+    );
+}
+
+/// All three of Compose's own condition values are accepted.
+#[test]
+fn depends_on_all_three_condition_values_parse() {
+    for (text, expected) in [
+        ("service_started", DependsOnCondition::ServiceStarted),
+        ("service_healthy", DependsOnCondition::ServiceHealthy),
+        (
+            "service_completed_successfully",
+            DependsOnCondition::ServiceCompletedSuccessfully,
+        ),
+    ] {
+        let source = format!("service s {{\n  depends_on [db {{ condition: {text} }}]\n}}\n");
+        let program = parse_ok(&source);
+        let service = as_service(&program.decls[0]);
+        assert_eq!(
+            service.fields.depends_on[0].condition.map(|(c, _)| c),
+            Some(expected),
+            "condition {text:?} did not round-trip"
+        );
+    }
+}
+
+/// A condition outside Compose's own three fixed values is a compile
+/// error naming all three legal ones.
+#[test]
+fn depends_on_invalid_condition_is_error() {
+    let err = parse("service s {\n  depends_on [db { condition: service_ok }]\n}\n")
+        .expect_err("expected a parse error");
+    assert!(matches!(
+        err,
+        ParseError::InvalidDependsOnCondition { found, .. } if found == "service_ok"
+    ));
+}
+
+/// `condition` is the only legal key inside a `depends_on` entry's body
+/// — anything else is `UnknownField`, same as any other struct-shaped
+/// body.
+#[test]
+fn depends_on_entry_unknown_key_is_error() {
+    let err = parse("service s {\n  depends_on [db { bogus: 1 }]\n}\n")
+        .expect_err("expected a parse error");
+    assert!(matches!(
+        err,
+        ParseError::UnknownField { type_name: "depends_on", field, .. } if field == "bogus"
+    ));
 }
 
 #[test]

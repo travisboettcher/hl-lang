@@ -428,6 +428,297 @@ services:
     );
 }
 
+// --- depends_on (#155) ---
+//
+// Every fixture below declares at least two services, since a
+// `depends_on` entry has to name a real sibling — which means #152's
+// multi-service auto-attach also reaches every one of them, and each
+// expects its own `networks: [default]` alongside whatever `depends_on`
+// itself produces.
+
+/// The plain, unconditioned form still emits Compose's short-syntax
+/// `depends_on:` — a bare list of names — exactly as it did before
+/// #155, so every file written before the extended condition form
+/// existed keeps compiling to the same YAML.
+#[test]
+fn depends_on_plain_form_emits_the_short_list_form() {
+    let yaml = generate_from(
+        "service database {\n  image \"postgres\"\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           depends_on [database]\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  database:
+    image: postgres
+    networks:
+      - default
+  miniflux:
+    image: miniflux/miniflux:latest
+    networks:
+      - default
+    depends_on:
+      - database
+"#,
+    );
+}
+
+/// An entry carrying an explicit `condition` switches the whole field to
+/// Compose's long, mapping form — the two shapes can't mix in one
+/// document, so a single conditioned entry is enough to commit to it.
+#[test]
+fn depends_on_extended_condition_emits_the_long_map_form() {
+    let yaml = generate_from(
+        "service database {\n  image \"postgres\"\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           depends_on [database { condition: service_healthy }]\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  database:
+    image: postgres
+    networks:
+      - default
+  miniflux:
+    image: miniflux/miniflux:latest
+    networks:
+      - default
+    depends_on:
+      database:
+        condition: service_healthy
+"#,
+    );
+}
+
+/// A mixed list — one entry with an explicit condition, one without —
+/// still emits the long form for the whole field (Compose has no way to
+/// mix shapes), and the bare entry is filled in with Compose's own
+/// implicit default, `service_started`, since the long form requires
+/// every entry to be a mapping.
+#[test]
+fn depends_on_mixed_list_fills_in_the_default_condition() {
+    let yaml = generate_from(
+        "service cache {\n  image \"redis\"\n}\n\
+         service database {\n  image \"postgres\"\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           depends_on [cache, database { condition: service_healthy }]\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  cache:
+    image: redis
+    networks:
+      - default
+  database:
+    image: postgres
+    networks:
+      - default
+  miniflux:
+    image: miniflux/miniflux:latest
+    networks:
+      - default
+    depends_on:
+      cache:
+        condition: service_started
+      database:
+        condition: service_healthy
+"#,
+    );
+}
+
+/// All three of Compose's own condition values round-trip verbatim.
+#[test]
+fn depends_on_all_three_condition_values_round_trip() {
+    let yaml = generate_from(
+        "service a {\n  image \"x\"\n}\n\
+         service b {\n  image \"x\"\n}\n\
+         service c {\n  image \"x\"\n}\n\
+         service s {\n  \
+           image \"x\"\n  \
+           depends_on [\n    \
+             a { condition: service_started },\n    \
+             b { condition: service_healthy },\n    \
+             c { condition: service_completed_successfully }\n  \
+           ]\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  a:
+    image: x
+    networks:
+      - default
+  b:
+    image: x
+    networks:
+      - default
+  c:
+    image: x
+    networks:
+      - default
+  s:
+    image: x
+    networks:
+      - default
+    depends_on:
+      a:
+        condition: service_started
+      b:
+        condition: service_healthy
+      c:
+        condition: service_completed_successfully
+"#,
+    );
+}
+
+/// `depends_on` merges through a `with` template just like every other
+/// field — the template's own conditioned entry survives into the
+/// composed service untouched.
+#[test]
+fn depends_on_condition_merges_through_a_with_template() {
+    let yaml = generate_from(
+        "service database {\n  image \"postgres\"\n}\n\
+         template waits_for_db {\n  depends_on [database { condition: service_healthy }]\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           with waits_for_db\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  database:
+    image: postgres
+    networks:
+      - default
+  miniflux:
+    image: miniflux/miniflux:latest
+    networks:
+      - default
+    depends_on:
+      database:
+        condition: service_healthy
+"#,
+    );
+}
+
+/// Two explicit `with`-listed templates that each write the same plain
+/// `depends_on [database]` — no condition on either — are giving the
+/// same answer twice, not two different ones, so they compose to a
+/// single entry rather than colliding (see `compose.rs`'s
+/// `merge_depends_on`), and the field still emits Compose's short list
+/// form: nothing about composing two templates that happen to agree
+/// should ever be able to flip a plain `depends_on` into the long map
+/// form on its own.
+#[test]
+fn depends_on_identical_bare_entries_across_templates_stay_short_form() {
+    let yaml = generate_from(
+        "service database {\n  image \"postgres\"\n}\n\
+         template a {\n  depends_on [database]\n}\n\
+         template b {\n  depends_on [database]\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           with a, b\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  database:
+    image: postgres
+    networks:
+      - default
+  miniflux:
+    image: miniflux/miniflux:latest
+    networks:
+      - default
+    depends_on:
+      - database
+"#,
+    );
+}
+
+/// The same agreement holds when both templates spell the condition
+/// out explicitly and it matches: still one entry, still no collision —
+/// just the long form this time, since a `condition` was actually
+/// written.
+#[test]
+fn depends_on_identical_explicit_conditions_across_templates_merge_to_one_entry() {
+    let yaml = generate_from(
+        "service database {\n  image \"postgres\"\n}\n\
+         template a {\n  depends_on [database { condition: service_healthy }]\n}\n\
+         template b {\n  depends_on [database { condition: service_healthy }]\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           with a, b\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  database:
+    image: postgres
+    networks:
+      - default
+  miniflux:
+    image: miniflux/miniflux:latest
+    networks:
+      - default
+    depends_on:
+      database:
+        condition: service_healthy
+"#,
+    );
+}
+
+/// `raw { depends_on: ... }` overrides the built-in `depends_on` field,
+/// the same way it overrides every other built-in field — including
+/// when the built-in would otherwise have emitted the long map form.
+#[test]
+fn raw_depends_on_overrides_the_built_in_depends_on() {
+    let yaml = generate_from(
+        "service database {\n  image \"postgres\"\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           depends_on [database { condition: service_healthy }]\n  \
+           raw {\n    depends_on: [\"raw-dep\"]\n  }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  database:
+    image: postgres
+    networks:
+      - default
+  miniflux:
+    image: miniflux/miniflux:latest
+    networks:
+      - default
+    depends_on:
+      - raw-dep
+"#,
+    );
+}
+
 #[test]
 fn unknown_network_reference_is_error() {
     let err = generate_err("service s {\n  image \"x\"\n  networks [nonexistent]\n}\n");

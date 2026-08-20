@@ -154,6 +154,16 @@ pub enum ParseError {
         separator: TokenKind,
         span: Span,
     },
+    /// A `depends_on` entry's `condition: ...` value wasn't one of
+    /// Compose's own three (#155). Checked immediately at the point the
+    /// value is written, mirroring [`Self::UnknownParamType`]'s own
+    /// precedent for validating a literal's *value* (not just its
+    /// syntactic kind) in the parser — the earliest point with the best
+    /// span, and, like a parameter's type annotation, a position that
+    /// can never legally hold a `$param` reference either, so there is
+    /// no later "resolve it, then check" stage this could be deferred
+    /// to even if it wanted to be.
+    InvalidDependsOnCondition { found: String, span: Span },
 }
 
 impl ParseError {
@@ -179,7 +189,8 @@ impl ParseError {
             | ParseError::UnknownTemplateParam { span, .. }
             | ParseError::RawValueTooDeep { span, .. }
             | ParseError::AliasSugarCannotContinue { span, .. }
-            | ParseError::MapEntryMissingSeparator { span, .. } => *span,
+            | ParseError::MapEntryMissingSeparator { span, .. }
+            | ParseError::InvalidDependsOnCondition { span, .. } => *span,
         }
     }
 }
@@ -332,6 +343,12 @@ impl fmt::Display for ParseError {
             } => write!(
                 f,
                 "{}:{}: `{type_name}` entry has no `:` or {separator} after its first value",
+                span.line, span.col
+            ),
+            ParseError::InvalidDependsOnCondition { found, .. } => write!(
+                f,
+                "{}:{}: unknown `depends_on` condition {found:?} (expected one of \
+                 `service_started`, `service_healthy`, `service_completed_successfully`)",
                 span.line, span.col
             ),
         }
@@ -577,6 +594,22 @@ mod display_tests {
         assert_eq!(
             err.to_string(),
             "4:12: `raw` value nested more than 128 levels deep"
+        );
+    }
+
+    /// Names all three legal spellings, mirroring
+    /// `unknown_param_type_display`'s own precedent for a fixed-set
+    /// value error (#155).
+    #[test]
+    fn invalid_depends_on_condition_display() {
+        let err = ParseError::InvalidDependsOnCondition {
+            found: "service_ok".to_string(),
+            span: span(6, 20),
+        };
+        assert_eq!(
+            err.to_string(),
+            "6:20: unknown `depends_on` condition \"service_ok\" (expected one of \
+             `service_started`, `service_healthy`, `service_completed_successfully`)"
         );
     }
 }
