@@ -371,6 +371,151 @@ fn two_declarations_sharing_one_real_name_are_not_ambiguous() {
     );
 }
 
+// --- implicit `default` network (#152) ---
+
+/// `default` needs no `network default {}` declaration at all: an
+/// undeclared `networks [default]` resolves to Compose's own implicit
+/// default network rather than raising `UnknownNetwork` — the first half
+/// of #152, and true regardless of how many services the program has.
+/// No top-level `networks:` entry is emitted for it either, since
+/// Compose defines `default` itself.
+#[test]
+fn undeclared_default_network_reference_compiles() {
+    let yaml = generate_from("service s {\n  image \"x\"\n  networks [default]\n}\n");
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert_eq!(
+        value["services"]["s"]["networks"],
+        serde_yaml_ng::Value::from(vec!["default"])
+    );
+    assert!(
+        value.get("networks").is_none(),
+        "an undeclared `default` must not emit a top-level `networks:` entry: {yaml}"
+    );
+}
+
+/// The auto-attach half of #152: two or more services in one program are
+/// one Compose stack by construction, so every one of them lands on
+/// `default` even though neither named it — with no top-level
+/// `networks:` entry, exactly as the single-service case above.
+#[test]
+fn two_service_program_auto_attaches_default() {
+    let yaml = generate_from(
+        "service app {\n  image \"app\"\n}\nservice db {\n  image \"postgres:15\"\n}\n",
+    );
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    for service in ["app", "db"] {
+        assert_eq!(
+            value["services"][service]["networks"],
+            serde_yaml_ng::Value::from(vec!["default"]),
+            "expected `{service}` on `default`, got: {yaml}"
+        );
+    }
+    assert!(value.get("networks").is_none());
+}
+
+/// A lone service gets no auto-attach: Compose's own implicit default
+/// network already covers a single-service project for free, so
+/// emitting nothing here — no `networks:` key on the service at all —
+/// is correct and matches pre-#152 output exactly.
+#[test]
+fn single_service_program_does_not_auto_attach() {
+    let yaml = generate_from("service s {\n  image \"x\"\n}\n");
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert!(
+        value["services"]["s"].get("networks").is_none(),
+        "a single-service program must get no `networks:` key: {yaml}"
+    );
+}
+
+/// Idempotence (#152): a service that already writes `networks
+/// [default]` itself still ends up with exactly one `default` entry once
+/// auto-attach runs, not two.
+#[test]
+fn explicit_default_reference_plus_auto_attach_is_not_duplicated() {
+    let yaml = generate_from(
+        "service app {\n  image \"app\"\n  networks [default]\n}\n\
+         service db {\n  image \"postgres:15\"\n}\n",
+    );
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert_eq!(
+        value["services"]["app"]["networks"],
+        serde_yaml_ng::Value::from(vec!["default"])
+    );
+}
+
+/// An explicit `network default { ... }` declaration still wins over the
+/// implicit fallback: its `external`/`name` settings are honored exactly
+/// as any other declared network's, and it still emits its own top-level
+/// `networks:` entry — the implicit, doc-free `default` is only a
+/// fallback for when no declaration exists at all.
+#[test]
+fn explicit_default_declaration_is_honored_and_emitted() {
+    let yaml = generate_from(
+        "network default {\n  external\n  name: \"shared_net\"\n}\n\
+         service app {\n  image \"app\"\n}\nservice db {\n  image \"postgres:15\"\n}\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  app:
+    image: app
+    networks: [default]
+    labels:
+      - "traefik.docker.network=shared_net"
+  db:
+    image: postgres:15
+    networks: [default]
+    labels:
+      - "traefik.docker.network=shared_net"
+
+networks:
+  default:
+    name: shared_net
+    external: true
+"#,
+    );
+}
+
+/// #152's note on `UnusedNetwork`: auto-attach feeds `default` into the
+/// same referenced-networks set the warning is checked against, so a
+/// `network default {}` declared explicitly in a multi-service program
+/// — now reached by every service via auto-attach — must not warn as
+/// unused, even though no service names it in an explicit `networks
+/// [...]` list.
+#[test]
+fn declared_default_in_multi_service_program_is_not_unused() {
+    let program = parse(
+        "network default {}\n\
+         service app {\n  image \"app\"\n}\nservice db {\n  image \"postgres:15\"\n}\n",
+    )
+    .unwrap();
+    let composed = compose(program).unwrap();
+    let generated = generate(composed).unwrap();
+    assert!(
+        generated.warnings.is_empty(),
+        "an explicitly declared `default` reached by auto-attach must not warn: {:?}",
+        generated.warnings
+    );
+}
+
+/// A genuinely undeclared network that isn't named `default` gets no
+/// fallback and still errors — the implicit-network carve-out is
+/// specific to that one name, not a general "any undeclared network is
+/// fine" relaxation.
+#[test]
+fn undeclared_non_default_network_still_errors() {
+    let err = generate_err(
+        "service app {\n  image \"app\"\n  networks [proxy]\n}\n\
+         service db {\n  image \"postgres:15\"\n}\n",
+    );
+    assert!(matches!(
+        err,
+        CodegenError::UnknownNetwork { service, network, .. }
+            if service == "app" && network == "proxy"
+    ));
+}
+
 // --- named volumes (#60) ---
 
 /// A named volume's own declaration is what fills its entry in the
@@ -462,6 +607,10 @@ fn unknown_volume_error_points_at_the_offending_reference() {
 /// `volumes:` and both services mount it. Before #60 this was
 /// indistinguishable from two services that happened to write the same
 /// string; now it's stated by referencing one declaration.
+///
+/// Two services also means both land on the implicit `default` network
+/// (#152) — neither names one, but they're one Compose stack by
+/// construction.
 #[test]
 fn one_volume_shared_by_two_services_is_declared_once() {
     let yaml = generate_from(
@@ -477,10 +626,12 @@ services:
     image: jellyfin/jellyfin
     volumes:
       - shared-media:/data
+    networks: [default]
   sonarr:
     image: lscr.io/linuxserver/sonarr
     volumes:
       - shared-media:/media
+    networks: [default]
 
 volumes:
   shared-media:
@@ -933,6 +1084,10 @@ volumes:
 /// alone. Same service, same `raw` arity — only the keys differ — so
 /// the two together pin the override to key equality rather than to
 /// "there is a `raw` block".
+///
+/// `web`'s `networks:` list ends with `default` alongside its explicit
+/// `traefik-net` — this fixture declares two services, so #152's
+/// auto-attach reaches it too.
 #[test]
 fn raw_leaves_built_in_fields_it_does_not_name_alone() {
     let yaml = generate_from(
@@ -967,6 +1122,7 @@ volumes:
   - web-data:/data
 networks:
   - traefik-net
+  - default
 dns:
   - 192.168.50.182
 ports:

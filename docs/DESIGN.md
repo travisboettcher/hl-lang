@@ -585,6 +585,23 @@ readability choice, not a different construct.
    `volumes:` section, and neither section carries a declaration nothing
    references. Bind-mount paths pass straight through and need no
    declaration, exactly as Docker asks for none.
+
+   `default` is the one exception to `UnknownNetwork`, and the one
+   network name that gets special codegen treatment at all—every program
+   has it whether or not it declares one. `networks [default]` with no
+   matching `network default { ... }` resolves to Compose's own implicit
+   default network rather than reporting `UnknownNetwork`, and
+   contributes nothing to `networks:`, since Compose defines that network
+   itself. On top of that, a program with two or more `service`
+   declarations—already one Compose stack, one output document—
+   implicitly attaches every service to `default` in addition to
+   whatever it names explicitly, exactly the behavior Compose itself
+   gives a project with no `networks:` key on any service. A
+   single-service program gets no such attachment, since Compose's own
+   default there is already implicit for free. An explicit `network
+   default { ... }` declaration still wins over both of those: its
+   `external`/`name` settings apply as they would to any other network,
+   and it still emits its own `networks:` entry.
 6. **Command-line tool** (`crates/hl-cli`, binary name `hllc`)—
    `hllc <file.hll>` lexes and prints tokens. `hllc --parse <file.hll>`
    parses and pretty-prints the Abstract Syntax Tree (AST). `hllc --build
@@ -646,9 +663,12 @@ nor its output. Three constructs warn today: a `service` in a non-entry
 file, a `defaults` template in a non-entry file, and a top-level
 `network` no service references. That last one drops out of assembling
 the `networks:` section from services' references, which leaves a
-declaration nothing names with nowhere to go. A top-level `volume` no
-service mounts drops out of `volumes:` for the same reason, but raises
-no warning yet.
+declaration nothing names with nowhere to go. An explicit `network
+default { ... }` in a multi-service program doesn't trigger it, even
+though no service writes `networks [default]` by hand: #152's
+auto-attach counts as a reference for exactly this check. A top-level
+`volume` no service mounts drops out of `volumes:` for the same reason,
+but raises no warning yet.
 
 The channel is deliberately minimal. Nothing promotes a warning to an
 error, and there's no `--quiet`, `-W`, or `-A` style suppression yet.

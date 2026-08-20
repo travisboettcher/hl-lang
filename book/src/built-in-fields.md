@@ -392,6 +392,32 @@ env_file ["miniflux.env", "common.env"]
   section from these references, so a `network` no service names never
   reaches the output. That one is a warning on stderr rather than an
   error—see [Warnings](./cli.md#warnings).
+
+  `default` is the one network name every program gets for free, with or
+  without a matching declaration: `networks [default]` compiles even
+  when nothing in the file declares `network default { ... }`, resolving
+  to the same implicit default network `docker compose` itself creates
+  for a project. `hllc` adds nothing to the top-level `networks:`
+  section for it in that case—Compose already knows about `default`, so
+  there's nothing for `hllc` to declare.
+
+  Two or more `service` declarations in one file are, by construction,
+  one Compose stack meant to talk to each other, so every service in
+  such a file is implicitly attached to `default` in addition to
+  whatever it names explicitly—no `networks [default]` required. A
+  single-service file gets no such auto-attachment. Compose's own
+  implicit default network already covers a lone service for free, so
+  there's nothing for `hllc` to add. Auto-attachment is idempotent—a
+  service that writes `networks [default]` itself still ends up with one
+  `default` entry, not two—and, when explicit, always sorts last in that
+  service's `networks:` list.
+
+  An explicit `network default { ... }` declaration still wins: its
+  `external`/`name` settings apply exactly as they would to any other
+  named network, including feeding the `traefik.docker.network=` label
+  when it's `external`, and it still emits its own top-level `networks:`
+  entry. The implicit, undeclared `default` is only a fallback for when
+  no such declaration exists.
 - `dns` sets Compose's own per-service `dns:` key—a resolver override.
   Use it, for example, when a network has a local name server.
 - `env_file` sets Compose's own `env_file:` key—one or more paths to
