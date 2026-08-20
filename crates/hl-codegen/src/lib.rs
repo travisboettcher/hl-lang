@@ -417,6 +417,13 @@ fn generate_service(
 
     let depends_on = fields.depends_on.iter().map(|r| r.name.clone()).collect();
     let dns = fields.dns.iter().map(|r| r.name.clone()).collect();
+    // Paths, carried through verbatim — never resolved against `bindings`
+    // (matching `dns`/`middleware`/`depends_on`/`networks` just above:
+    // none of `hll`'s reference-list fields interpolate `{{name}}`) and
+    // never inspected for existence, since Compose itself resolves each
+    // one relative to the compose file at deploy time, not `hllc` at
+    // compile time (#154).
+    let env_file = fields.env_file.iter().map(|r| r.name.clone()).collect();
 
     let mut raw_map = IndexMap::new();
     for entry in &fields.raw.entries {
@@ -429,6 +436,7 @@ fn generate_service(
         container_name,
         restart,
         environment,
+        env_file,
         volumes: volume_entries,
         networks: compose_networks,
         dns,

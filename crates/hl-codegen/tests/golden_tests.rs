@@ -187,6 +187,102 @@ services:
     );
 }
 
+/// `env_file` (#154): a single `env_file "path"` still emits Compose's
+/// `env_file:` as a one-element list, the uniform shape codegen always
+/// produces regardless of how many paths were written.
+#[test]
+fn env_file_single_path_emits_a_one_element_list() {
+    let yaml = generate_from(
+        "service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           env_file \"miniflux.env\"\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  miniflux:
+    image: miniflux/miniflux:latest
+    env_file:
+      - miniflux.env
+"#,
+    );
+}
+
+/// The list form (`env_file ["a", "b"]`) round-trips as-written, in
+/// order — order matters here because Compose applies later files' env
+/// vars over earlier ones when a key repeats.
+#[test]
+fn env_file_list_form_emits_every_path_in_order() {
+    let yaml = generate_from(
+        "service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           env_file [\"common.env\", \"miniflux.env\"]\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  miniflux:
+    image: miniflux/miniflux:latest
+    env_file:
+      - common.env
+      - miniflux.env
+"#,
+    );
+}
+
+/// `env_file` entries merge across a `with` template just like `dns`:
+/// the template's own path, then the service body's, concatenated in
+/// tier order.
+#[test]
+fn env_file_entries_merge_through_a_with_template() {
+    let yaml = generate_from(
+        "template with_common_env {\n  env_file \"common.env\"\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           with with_common_env\n  \
+           env_file \"miniflux.env\"\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  miniflux:
+    image: miniflux/miniflux:latest
+    env_file:
+      - common.env
+      - miniflux.env
+"#,
+    );
+}
+
+/// `raw { env_file: ... }` overrides the built-in `env_file` field, the
+/// same way it overrides every other built-in field (#154).
+#[test]
+fn raw_env_file_overrides_the_built_in_env_file() {
+    let yaml = generate_from(
+        "service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           env_file \"miniflux.env\"\n  \
+           raw {\n    env_file: [\"raw.env\"]\n  }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  miniflux:
+    image: miniflux/miniflux:latest
+    env_file:
+      - raw.env
+"#,
+    );
+}
+
 #[test]
 fn unknown_network_reference_is_error() {
     let err = generate_err("service s {\n  image \"x\"\n  networks [nonexistent]\n}\n");

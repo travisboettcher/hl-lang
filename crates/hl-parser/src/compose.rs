@@ -220,13 +220,14 @@ pub enum ComposeError {
     UnknownAlias { alias: String, span: Span },
     /// A qualified reference (`alias.name`) was used on a reference-list
     /// field that has no cross-file meaning — `middleware`,
-    /// `depends_on`, `dns`, or `expose.entrypoint`. (`depends_on` names
-    /// a same-file sibling service; the others aren't resolved against
-    /// anything an `.hll` file declares at all — an entry point lives
-    /// in the deployment's own `traefik.yml`.) Rejected rather than
-    /// silently accepted or silently dropped. Only `networks` resolves
-    /// a qualifier, because a `network` really is a declaration another
-    /// file can export.
+    /// `depends_on`, `dns`, `env_file`, or `expose.entrypoint`.
+    /// (`depends_on` names a same-file sibling service; the others
+    /// aren't resolved against anything an `.hll` file declares at
+    /// all — an entry point lives in the deployment's own
+    /// `traefik.yml`, and an `env_file` path lives on disk next to the
+    /// compose file.) Rejected rather than silently accepted or
+    /// silently dropped. Only `networks` resolves a qualifier, because
+    /// a `network` really is a declaration another file can export.
     UnsupportedQualifiedReference {
         field: &'static str,
         alias: String,
@@ -1428,7 +1429,7 @@ fn resolve_invocation<R: SymbolResolver>(
 /// mount's host side are the two the language has — rewriting each to an
 /// unqualified, resolved bare reference so [`merge_tier`] never needs to
 /// know imports exist, and recording the declaration it reached in
-/// `imports`. Qualified `middleware`/`depends_on`/`dns`/
+/// `imports`. Qualified `middleware`/`depends_on`/`dns`/`env_file`/
 /// `expose.entrypoint` entries are rejected outright — see
 /// [`ComposeError::UnsupportedQualifiedReference`]'s doc for why those
 /// have no cross-file meaning yet. Runs exactly once per scope, at
@@ -1471,6 +1472,11 @@ fn resolve_qualified_references<R: SymbolResolver>(
     reject_qualified(&fields.middleware, "middleware")?;
     reject_qualified(&fields.depends_on, "depends_on")?;
     reject_qualified(&fields.dns, "dns")?;
+    // An `env_file` path lives on disk next to the compose file, which
+    // no `.hll` file declares, so there's nothing for an alias to
+    // resolve against — same reasoning as `expose.entrypoint` just
+    // below.
+    reject_qualified(&fields.env_file, "env_file")?;
     // `expose.entrypoint` joined this list when it became a reference
     // list. An entry point names something in the deployment's own
     // `traefik.yml`, which no `.hll` file declares, so there is nothing
@@ -1735,12 +1741,13 @@ impl Spanned for PublishEntry {
 /// point a one-line addition rather than a new `MergeAcc` field plus new
 /// hand-written merge/rebuild logic.
 ///
-/// `lists` is the same idea for every reference-list field — the four
+/// `lists` is the same idea for every reference-list field — the five
 /// bare ones on `ServiceFields` (`middleware`/`depends_on`/`networks`/
-/// `dns`) plus `expose.entrypoint`, which lives inside a nested struct
-/// and so can't be a plain `MergeAcc` field the way the others once
-/// were. They carry no `Tier`: list fields concatenate unconditionally,
-/// so there is no collision to attribute to a tier. See [`LIST_FIELDS`].
+/// `dns`/`env_file`) plus `expose.entrypoint`, which lives inside a
+/// nested struct and so can't be a plain `MergeAcc` field the way the
+/// others once were. They carry no `Tier`: list fields concatenate
+/// unconditionally, so there is no collision to attribute to a tier.
+/// See [`LIST_FIELDS`].
 #[derive(Default)]
 struct MergeAcc {
     scalars: HashMap<&'static str, (Literal, Tier)>,
@@ -1894,10 +1901,10 @@ static SCALAR_FIELDS: &[ScalarField] = &[
 /// name each one — but `entrypoint` lives inside `expose`, which
 /// `into_service_fields` *rebuilds*, so it needs the same read-out/
 /// write-back indirection the scalars already had. Given one list field
-/// had to be described by function pointers, all five are: the whole
+/// had to be described by function pointers, all six are: the whole
 /// point of [`SCALAR_FIELDS`] (see hl-lang#28) is that both merge
 /// functions stay one generic loop apiece with no hand-enumerated
-/// knowledge of `ServiceFields`'s shape, and leaving four lists
+/// knowledge of `ServiceFields`'s shape, and leaving five lists
 /// hand-named beside a one-row table would have kept exactly the shape
 /// that design set out to remove.
 struct ListField {
@@ -1915,12 +1922,14 @@ struct ListField {
     /// level) turned a few hundred bytes of nested `with` into an
     /// out-of-memory abort.
     ///
-    /// `dns` is the one exception, deliberately: order is observable
-    /// there (resolver priority), so its append semantics are left
-    /// exactly as they were even though a repeat is just as
-    /// meaningless. Every other reference list — `expose.entrypoint`
-    /// included — is a set, and a router attached twice to the same
-    /// entry point is attached to it once.
+    /// `dns` and `env_file` are the two exceptions, deliberately: order
+    /// is observable for both — `dns` as resolver priority, `env_file`
+    /// as Compose's own last-file-wins rule when the same variable is
+    /// set in two of the listed files (#154) — so their append
+    /// semantics are left exactly as they were even though a repeat is
+    /// just as meaningless. Every other reference list —
+    /// `expose.entrypoint` included — is a set, and a router attached
+    /// twice to the same entry point is attached to it once.
     dedupe: bool,
 }
 
@@ -1975,6 +1984,12 @@ static LIST_FIELDS: &[ListField] = &[
         take: |f| std::mem::take(&mut f.dns),
         set: |f, v| f.dns = v,
     },
+    ListField {
+        key: "env_file",
+        dedupe: false,
+        take: |f| std::mem::take(&mut f.env_file),
+        set: |f, v| f.env_file = v,
+    },
 ];
 
 /// Merges one tier's [`ServiceFields`] into `acc`. List fields (`raw`,
@@ -1985,7 +2000,7 @@ static LIST_FIELDS: &[ListField] = &[
 /// concatenate *by distinct name*, dropping a repeat of a name an
 /// earlier tier (or an earlier entry of the same list) already
 /// contributed; see [`ListField::dedupe`] for which fields those are
-/// and why `dns` isn't one of them.
+/// and why `dns`/`env_file` aren't among them.
 fn merge_tier(
     acc: &mut MergeAcc,
     mut incoming: ServiceFields,

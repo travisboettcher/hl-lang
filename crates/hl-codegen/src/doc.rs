@@ -78,6 +78,15 @@ pub(crate) struct ComposeServiceDoc {
     pub restart: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub environment: Vec<String>,
+    /// `env_file` paths, carried through verbatim (#154). Always emitted
+    /// as a list — even a single `env_file "one.env"` becomes a
+    /// one-element `env_file:` list — rather than Compose's alternative
+    /// bare-string shorthand, so the emitted shape doesn't depend on how
+    /// many paths were written. Compose resolves each path relative to
+    /// the compose file itself; that's the user's concern; `hllc` never
+    /// inspects or rewrites a path.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub env_file: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -158,6 +167,7 @@ impl ComposeServiceDoc {
             container_name,
             restart,
             environment,
+            env_file,
             volumes,
             networks,
             dns,
@@ -181,6 +191,9 @@ impl ComposeServiceDoc {
         }
         if raw.contains_key("environment") {
             environment.clear();
+        }
+        if raw.contains_key("env_file") {
+            env_file.clear();
         }
         if raw.contains_key("volumes") {
             volumes.clear();

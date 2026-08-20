@@ -1171,6 +1171,48 @@ fn dns_repeats_accumulate() {
     assert_eq!(entries, vec!["192.168.50.182", "192.168.50.183"]);
 }
 
+/// `env_file "one.env"` — the bare single-item sugar every reference-list
+/// field gets for free (#154).
+#[test]
+fn env_file_bare_single_form() {
+    let program = parse_ok("service s {\n  env_file \"miniflux.env\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    let entries: Vec<&str> = service
+        .fields
+        .env_file
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(entries, vec!["miniflux.env"]);
+}
+
+#[test]
+fn env_file_bracket_list_form() {
+    let program = parse_ok("service s {\n  env_file [\"miniflux.env\", \"common.env\"]\n}\n");
+    let service = as_service(&program.decls[0]);
+    let entries: Vec<&str> = service
+        .fields
+        .env_file
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(entries, vec!["miniflux.env", "common.env"]);
+}
+
+#[test]
+fn env_file_repeats_accumulate() {
+    let program =
+        parse_ok("service s {\n  env_file \"miniflux.env\"\n  env_file \"common.env\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    let entries: Vec<&str> = service
+        .fields
+        .env_file
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(entries, vec!["miniflux.env", "common.env"]);
+}
+
 // --- template declarations ---
 
 #[test]

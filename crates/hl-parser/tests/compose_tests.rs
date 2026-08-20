@@ -641,6 +641,44 @@ fn dns_keeps_duplicates() {
     assert_eq!(entries, vec!["192.168.50.182", "192.168.50.182"]);
 }
 
+/// `env_file` is list-typed just like `dns` — it concatenates across
+/// tiers rather than colliding (#154).
+#[test]
+fn env_file_concatenates_across_tiers() {
+    let composed = compose_ok(
+        "template a {\n  env_file \"common.env\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n  env_file \"miniflux.env\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries: Vec<&str> = service
+        .fields
+        .env_file
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(entries, vec!["common.env", "miniflux.env"]);
+}
+
+/// ...and, like `dns`, `env_file` is *not* deduped: Compose's own
+/// last-file-wins precedence for a variable set in two listed files
+/// makes the order of a repeat observable, even a repeat naming the
+/// exact same file twice.
+#[test]
+fn env_file_keeps_duplicates() {
+    let composed = compose_ok(
+        "template a {\n  env_file \"common.env\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n  env_file \"common.env\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries: Vec<&str> = service
+        .fields
+        .env_file
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(entries, vec!["common.env", "common.env"]);
+}
+
 // --- cycles ---
 
 #[test]
@@ -1282,4 +1320,23 @@ fn unqualified_middleware_depends_on_dns_are_accepted() {
     assert_eq!(service.fields.middleware.len(), 1);
     assert_eq!(service.fields.depends_on.len(), 1);
     assert_eq!(service.fields.dns.len(), 1);
+}
+
+/// A qualified `env_file` entry has no cross-file meaning — an `.env`
+/// file lives on disk next to the compose file, not as a declaration any
+/// `.hll` file could export — so it's rejected the same as `dns` (#154).
+#[test]
+fn qualified_env_file_reference_is_rejected() {
+    let err = compose_err("service s {\n  image \"x\"\n  env_file [other.env]\n}\n");
+    assert!(matches!(
+        err,
+        ComposeError::UnsupportedQualifiedReference { field: "env_file", alias, .. } if alias == "other"
+    ));
+}
+
+#[test]
+fn unqualified_env_file_is_accepted() {
+    let composed = compose_ok("service s {\n  image \"x\"\n  env_file [\"miniflux.env\"]\n}\n");
+    let service = single_service(&composed);
+    assert_eq!(service.fields.env_file.len(), 1);
 }

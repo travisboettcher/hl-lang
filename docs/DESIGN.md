@@ -43,9 +43,9 @@ Punctuation: { } [ ] ( ) : = -> , . $
 
 - `template` is the *only* reserved word in the entire language. Everything
   else that looks like a keyword (`service`, `network`, `image`, `volume`,
-  `publish`, `env`, `restart`, `expose`, `middleware`, `depends_on`,
-  `networks`, `dns`, `container_name`, `with`, `as`, `external`, `use`,
-  `raw`, `defaults`, and more) is an ordinary `IDENT`,
+  `publish`, `env`, `env_file`, `restart`, `expose`, `middleware`,
+  `depends_on`, `networks`, `dns`, `container_name`, `with`, `as`,
+  `external`, `use`, `raw`, `defaults`, and more) is an ordinary `IDENT`,
   resolved against a schema table at parse time—not a lexer-level
   keyword. `with`, `as`, `external`, and `use` are *contextual* keywords,
   meaningful only in the grammar position expected (the same technique as
@@ -288,13 +288,17 @@ codegen's to write rather than the user's—so no generated label value
 ever has to tolerate a user-written comma, and the metacharacter guard
 can reject `,` uniformly everywhere.
 
-`middleware`, `depends_on`, `networks`, and `dns` aren't rows in this
-table—they're plain list-of-reference fields directly on
+`middleware`, `depends_on`, `networks`, `dns`, and `env_file` aren't
+rows in this table—they're plain list-of-reference fields directly on
 `service`/`template` (`dns ["192.168.50.182"]`: a per-service Domain
 Name System (DNS) resolver override, Compose's own `dns:` key—the field
 itself is generic, only a given entry's IP is homelab-specific, same
 reasoning as `volume`'s host path or an `env` entry's value already
-being homelab-specific without the field itself being one).
+being homelab-specific without the field itself being one). `env_file`
+(`env_file "miniflux.env"` / `env_file ["miniflux.env", "common.env"]`)
+follows the exact same reasoning as `dns`—Compose's own `env_file:` key,
+generic itself even though a real entry almost always names a
+gitignored, homelab-specific `.env` file—see #154.
 `container_name` isn't a row either, for the opposite reason: it's a
 plain *scalar* field directly on `service`/`template`
 (`container_name "uptime-kuma"` / `container_name: "uptime-kuma"`)
@@ -331,9 +335,11 @@ Merge priority, lowest to highest:
 
 List fields concatenate, so no collision is possible. The set-like ones
 (`middleware`, `depends_on`, `networks`, `expose.entrypoint`) concatenate
-by *distinct* name, keeping the first occurrence, while `dns` keeps
-duplicates since its order is observable resolver priority. Map fields
-merge key-by-key (or value-by-value for `volume` and `publish`), and
+by *distinct* name, keeping the first occurrence, while `dns` and
+`env_file` keep duplicates since their order is observable—resolver
+priority for `dns`, Compose's own last-file-wins precedence for
+`env_file` (#154). Map fields merge key-by-key (or value-by-value for
+`volume` and `publish`), and
 scalar fields (`image`, `restart`) error on collision among explicit
 templates only. `expose`, the one built-in struct field with more than
 one sub-field, merges per sub-field (`port`/`host`/`entrypoint`

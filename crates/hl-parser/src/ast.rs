@@ -447,6 +447,22 @@ pub struct ServiceFields {
     /// `IDENT`'s grammar can't contain a `.`) can never carry a
     /// qualifier anyway.
     pub dns: Vec<Reference>,
+    /// `env_file "one.env"` / `env_file ["one.env", "two.env"]` — paths
+    /// to load environment variables from, Compose's own `env_file:`
+    /// key (#154). Same reasoning as [`Self::dns`] just above: a plain
+    /// generic Compose key, not homelab-specific itself even though most
+    /// real entries point at a gitignored, homelab-specific `.env` file,
+    /// list-typed and reference-list shaped like
+    /// `middleware`/`depends_on`/`networks`/`dns` (accumulates across
+    /// repeats, never duplicate-checked, and a bare `env_file "one.env"`
+    /// is sugar for a one-element list), even though its entries are
+    /// ordinary path strings rather than references to another
+    /// declaration. Reusing [`Reference`] costs nothing here for the
+    /// same reason it costs nothing for `dns`: Compose's paths are
+    /// resolved relative to the compose file, which is the user's
+    /// concern, not `hllc`'s, so a path is carried through verbatim
+    /// either way and never needs a qualifier to mean anything.
+    pub env_file: Vec<Reference>,
     /// Docker's own `container_name:` key. `None` means "default to the
     /// service's own name" (via the same `{{name}}` interpolation
     /// binding `expose`'s `as`-sugar already uses) — codegen, not the

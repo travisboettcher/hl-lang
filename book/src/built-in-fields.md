@@ -348,12 +348,12 @@ Writing `image` or `restart` more than once in the same body is a
 compile error, since both are scalar fields, not repeatable—unlike
 `volume`/`publish`/`env`/`middleware`/`depends_on`.
 
-## `middleware`, `depends_on`, `networks`, `dns`
+## `middleware`, `depends_on`, `networks`, `dns`, `env_file`
 
-All four are plain reference-list fields directly on `service`/`template`,
+All five are plain reference-list fields directly on `service`/`template`,
 not nested struct types, so there's no primary-field shorthand to learn
-for them. Write a bare identifier, a bracketed list, or repeat the
-field:
+for them. Write a bare identifier or string, a bracketed list, or repeat
+the field:
 
 ```hll,fragment
 middleware local-ipwhitelist
@@ -364,6 +364,9 @@ depends_on database
 networks [traefik-net]
 
 dns ["192.168.50.182"]
+
+env_file "miniflux.env"
+env_file ["miniflux.env", "common.env"]
 ```
 
 - `middleware` names a Traefik middleware to attach to this service's
@@ -391,8 +394,21 @@ dns ["192.168.50.182"]
   error—see [Warnings](./cli.md#warnings).
 - `dns` sets Compose's own per-service `dns:` key—a resolver override.
   Use it, for example, when a network has a local name server.
+- `env_file` sets Compose's own `env_file:` key—one or more paths to
+  load environment variables from. It's a plain generic Compose key like
+  `dns`, not homelab-specific itself, even though most real entries
+  point at a gitignored, per-homelab `.env` file. Compose always sees a
+  list: a single `env_file "one.env"` still emits a one-element
+  `env_file:` list, so the generated shape doesn't depend on how many
+  paths you wrote. Each path is resolved relative to the compose file by
+  Compose itself, not by `hllc`—write it exactly as `docker compose`
+  would expect it. When two files set the same variable, Compose lets
+  the later file win, so order matters here the same way it matters for
+  `dns`'s resolver priority. Reach for [`env`](#env) instead when a
+  value belongs directly in the `.hll` file rather than in an external
+  file.
 
-All four accumulate across repeated writes and across template
+All five accumulate across repeated writes and across template
 composition (see [Templates & Composition](./templates-and-composition.md))—there's
 no collision to check since list fields can only ever grow.
 
@@ -447,10 +463,10 @@ ever comes up for generated or pathological input.
 ### `raw` wins over a built-in field of the same name
 
 A `raw` key may name a field `hll` already has: `image`,
-`container_name`, `restart`, `environment`, `volumes`, `networks`,
-`dns`, `ports`, `expose`, `depends_on`, or `labels`. When it does, the
-`raw` value is what's emitted, and `hllc` drops the built-in one—the key
-appears exactly once:
+`container_name`, `restart`, `environment`, `env_file`, `volumes`,
+`networks`, `dns`, `ports`, `expose`, `depends_on`, or `labels`. When it
+does, the `raw` value is what's emitted, and `hllc` drops the built-in
+one—the key appears exactly once:
 
 ```hll,fragment
 image "nginx"

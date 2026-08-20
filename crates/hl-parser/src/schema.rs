@@ -439,6 +439,10 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
         kind: FieldKind::ReferenceList,
     },
     FieldSchema {
+        name: "env_file",
+        kind: FieldKind::ReferenceList,
+    },
+    FieldSchema {
         name: "with",
         kind: FieldKind::Nested(&WITH),
     },
