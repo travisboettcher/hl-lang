@@ -6,8 +6,8 @@ use crate::ast::{
     Command, DependsOnCondition, DependsOnEntry, EnvEntry, EnvMap, Expose, Healthcheck,
     HealthcheckTest, Ident, Image, Literal, Network, Param, ParamType, Program, PublishEntry,
     PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Service, ServiceFields,
-    TemplateDecl, TemplateInvocation, TopDecl, UseDecl, Volume, VolumeDriverOpt, VolumeEntry,
-    VolumeHost, VolumeMap,
+    TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume, VolumeDriverOpt,
+    VolumeEntry, VolumeHost, VolumeMap,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -1690,6 +1690,10 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         Some(FieldValue::Struct(f, s)) => Some(lower_expose(f, s)),
         _ => None,
     };
+    let traefik = match fields.remove("traefik") {
+        Some(FieldValue::Struct(f, s)) => Some(lower_traefik(f, s)),
+        _ => None,
+    };
     let restart = match fields.remove("restart") {
         Some(FieldValue::Struct(f, s)) => Some(lower_restart(f, s)),
         _ => None,
@@ -1787,6 +1791,7 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
     ServiceFields {
         image,
         expose,
+        traefik,
         restart,
         healthcheck,
         publish,
@@ -1849,6 +1854,16 @@ fn lower_restart(mut fields: StructFields, span: Span) -> Restart {
         _ => None,
     };
     Restart { policy, span }
+}
+
+/// Lowers a `traefik { ... }` body (#159). Mirrors `healthcheck`'s
+/// `disable` extraction exactly — see [`Traefik::disabled`]'s doc.
+fn lower_traefik(mut fields: StructFields, span: Span) -> Traefik {
+    let disabled = match fields.remove("disabled") {
+        Some(FieldValue::Flag(s)) => Some(s),
+        _ => None,
+    };
+    Traefik { disabled, span }
 }
 
 fn lower_healthcheck(mut fields: StructFields, span: Span) -> Healthcheck {
