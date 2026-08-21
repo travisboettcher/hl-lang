@@ -183,6 +183,15 @@ Different field kinds merge differently:
   present at all. Two explicit templates each setting `test` (or each
   setting `disable`) still collide, exactly as two explicit templates
   each setting `expose.port` do.
+- **`command`**, added in #156, merges the same way `healthcheck.test` does, not
+  the way `container_name` does: its shell-string-or-exec-list shape
+  isn't a plain `Literal` either, so it collides between two explicit
+  templates by the same rule rather than riding the plain-scalar
+  machinery `image`/`restart`/`container_name` use. Unlike
+  `healthcheck.test`, `command` sits directly on the service body rather
+  than inside a struct field of its own, so there's no sub-field
+  independence to it—setting `command` at all is the whole collision,
+  the same as setting `container_name` is.
 
 That last point about per-sub-field merging means a service's own body
 can override just `expose.host` while still inheriting `port`/

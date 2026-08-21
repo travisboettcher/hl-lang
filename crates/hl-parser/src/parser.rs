@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
-    DependsOnCondition, DependsOnEntry, EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest,
-    Ident, Image, Literal, Network, Param, ParamType, Program, PublishEntry, PublishMap, RawEntry,
-    RawMap, RawValue, Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation,
-    TopDecl, UseDecl, Volume, VolumeDriverOpt, VolumeEntry, VolumeHost, VolumeMap,
+    Command, DependsOnCondition, DependsOnEntry, EnvEntry, EnvMap, Expose, Healthcheck,
+    HealthcheckTest, Ident, Image, Literal, Network, Param, ParamType, Program, PublishEntry,
+    PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Service, ServiceFields,
+    TemplateDecl, TemplateInvocation, TopDecl, UseDecl, Volume, VolumeDriverOpt, VolumeEntry,
+    VolumeHost, VolumeMap,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -80,8 +81,14 @@ enum FieldValue {
     /// An accumulating `volume` field: same shape as [`Self::LiteralMap`]
     /// except the key side is a [`VolumeHost`], which the parser has
     /// already split into a bind-mount literal or a named-volume
-    /// reference (see [`schema::TypeSchema::key_may_be_reference`]).
-    MountMap(Vec<(VolumeHost, Literal, Span)>),
+    /// reference (see [`schema::TypeSchema::key_may_be_reference`]), and
+    /// a third `bool` carrying whether the entry's optional `{ read_only
+    /// }` body (#158) was present. Not folded into [`Self::LiteralMap`]'s
+    /// own `(Literal, Literal, Span)` shape even though `volume` is the
+    /// only field that ever populates this variant, since `env`/
+    /// `publish`/`driver_opts` share that shape too and gain nothing from
+    /// carrying a flag none of them has.
+    MountMap(Vec<(VolumeHost, Literal, bool, Span)>),
     /// An accumulating nested schema-free map-kind field (raw).
     Raw(RawMap),
     /// An accumulating reference-list field
@@ -90,8 +97,8 @@ enum FieldValue {
     /// An accumulating template-invocation-list field (`with`'s `templates`).
     TemplateInvocations(Vec<TemplateInvocation>),
     /// A single-occurrence field whose value is either a bare literal or
-    /// a bracketed list of literals (`healthcheck`'s `test`). See
-    /// [`schema::FieldKind::ScalarOrList`]'s doc.
+    /// a bracketed list of literals (`healthcheck`'s `test` and
+    /// `command`, #156). See [`schema::FieldKind::ScalarOrList`]'s doc.
     ScalarOrList(ScalarOrList),
     /// An accumulating `depends_on`-list field. See
     /// [`schema::FieldKind::DependsOnList`]'s doc.
@@ -399,8 +406,9 @@ impl<'src> Parser<'src> {
 
     /// `"[" ( literal ( "," literal )* )? "]"` — the bracketed-list half
     /// of a [`schema::FieldKind::ScalarOrList`] value (`healthcheck`'s
-    /// `test`'s exec form, `["CMD", "pg_isready", "-U", "miniflux"]`).
-    /// Items are ordinary literals, not [`Reference`]s — unlike
+    /// `test`'s exec form, `["CMD", "pg_isready", "-U", "miniflux"]`, or
+    /// `command`'s own exec form, `["npm", "start"]`, #156). Items are
+    /// ordinary literals, not [`Reference`]s — unlike
     /// [`Self::parse_bracket_reference_list`], an entry here never
     /// resolves against anything an `.hll` file declares, so it never
     /// carries an `alias.` qualifier either.
@@ -1060,7 +1068,7 @@ impl<'src> Parser<'src> {
                     FieldValue::MountMap(v) => v,
                     _ => unreachable!("field kind is stable for a given field name"),
                 };
-                merge_map_entries(nested, bucket, entries, VolumeHost::text)
+                merge_mount_map_entries(nested, bucket, entries)
             }
             SchemaKind::Map => {
                 let entries = if self.peek().kind == TokenKind::LBrace {
@@ -1144,10 +1152,18 @@ impl<'src> Parser<'src> {
     /// `volume` declaration, optionally `alias.`-qualified. See
     /// [`VolumeHost`]'s own doc for why that distinction is drawn here,
     /// at parse time, rather than from the string's shape later on.
+    ///
+    /// The container literal may be followed by an optional `{ read_only
+    /// }` body (#158), shaped like [`Self::parse_depends_on_entry`]'s own
+    /// trailing `{ condition: ... }`: an `IDENT` (bare presence only, no
+    /// `:`/value, matching [`schema::FieldKind::BoolFlag`]'s own
+    /// convention for `external`/`disable`) that must read literally
+    /// `read_only`, then `}`. See [`VolumeEntry`]'s own doc for why this
+    /// shape was chosen over the issue's other candidates.
     fn parse_mount_map_entry(
         &mut self,
         schema: &'static TypeSchema,
-    ) -> Result<(VolumeHost, Literal, Span), ParseError> {
+    ) -> Result<(VolumeHost, Literal, bool, Span), ParseError> {
         let host = if self.peek().kind == TokenKind::Ident {
             VolumeHost::Named(self.parse_reference()?)
         } else {
@@ -1156,8 +1172,25 @@ impl<'src> Parser<'src> {
         let span = host.span();
         self.expect_map_separator(schema, span)?;
         let container = self.parse_literal()?;
-        let entry_span = join_spans(span, container.span());
-        Ok((host, container, entry_span))
+        let mut entry_span = join_spans(span, container.span());
+        let read_only = if self.peek().kind == TokenKind::LBrace {
+            self.bump();
+            let key_tok = self.expect(TokenKind::Ident)?;
+            if key_tok.lexeme != "read_only" {
+                return Err(ParseError::UnknownField {
+                    type_name: schema.type_name,
+                    field: key_tok.lexeme.to_string(),
+                    raw_escape_hatch: false,
+                    span: key_tok.span,
+                });
+            }
+            let close = self.expect(TokenKind::RBrace)?;
+            entry_span = join_spans(span, close.span);
+            true
+        } else {
+            false
+        };
+        Ok((host, container, read_only, entry_span))
     }
 
     /// Consumes the separator between a map entry's two sides — either
@@ -1549,6 +1582,52 @@ fn merge_map_entries<K>(
     Ok(())
 }
 
+/// [`merge_map_entries`]'s own twin for `volume`, the one map-kind field
+/// whose entries carry a fourth element (the `{ read_only }` flag, #158)
+/// alongside `(host, container, span)`. Not folded into
+/// `merge_map_entries` itself by making that function generic over a
+/// fourth type parameter: every other map-kind field (`env`/`publish`/
+/// `driver_opts`) would then have to thread a `()` payload through calls
+/// that have nothing to carry, for a genericity only one field ever uses.
+/// The duplicate-checking logic is intentionally identical to
+/// `merge_map_entries`'s own — same uniqueness side, same error — since
+/// the flag is never part of what makes two entries collide, only extra
+/// data riding along with whichever entry wins.
+fn merge_mount_map_entries(
+    nested: &'static TypeSchema,
+    bucket: &mut Vec<(VolumeHost, Literal, bool, Span)>,
+    new_entries: Vec<(VolumeHost, Literal, bool, Span)>,
+) -> Result<(), ParseError> {
+    let side = nested
+        .uniqueness
+        .expect("volume schema must define a uniqueness side");
+    for (host, container, read_only, span) in new_entries {
+        let check = match side {
+            MapSide::Key => VolumeHost::text(&host),
+            MapSide::Value => container.text(),
+        }
+        .to_string();
+        let dup = bucket.iter().find(|(h, c, _, _)| {
+            let existing = match side {
+                MapSide::Key => VolumeHost::text(h),
+                MapSide::Value => c.text(),
+            };
+            existing == check
+        });
+        if let Some((_, _, _, first_span)) = dup {
+            return Err(ParseError::DuplicateMapKey {
+                type_name: nested.type_name,
+                side,
+                value: check,
+                first: *first_span,
+                second: span,
+            });
+        }
+        bucket.push((host, container, read_only, span));
+    }
+    Ok(())
+}
+
 fn lower_network(name: Ident, mut fields: StructFields, span: Span) -> Network {
     let external = match fields.remove("external") {
         Some(FieldValue::Flag(s)) => Some(s),
@@ -1623,6 +1702,13 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         Some(FieldValue::Scalar(lit)) => Some(lit),
         _ => None,
     };
+    let command = match fields.remove("command") {
+        Some(FieldValue::ScalarOrList(ScalarOrList::Scalar(lit))) => Some(Command::Shell(lit)),
+        Some(FieldValue::ScalarOrList(ScalarOrList::List(items, list_span))) => {
+            Some(Command::Exec(items, list_span))
+        }
+        _ => None,
+    };
     let publish = match fields.remove("publish") {
         Some(FieldValue::LiteralMap(entries)) => PublishMap {
             entries: entries
@@ -1640,9 +1726,10 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         Some(FieldValue::MountMap(entries)) => VolumeMap {
             entries: entries
                 .into_iter()
-                .map(|(host, container, span)| VolumeEntry {
+                .map(|(host, container, read_only, span)| VolumeEntry {
                     host,
                     container,
+                    read_only,
                     span,
                 })
                 .collect(),
@@ -1714,6 +1801,7 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         privileged,
         devices,
         container_name,
+        command,
         with,
     }
 }

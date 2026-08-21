@@ -1,10 +1,18 @@
 # A service using the dedicated `privileged`/`devices` fields (#157)
-# plus `raw` for `security_opt`, the genuine long-tail Compose key that
-# has no dedicated field of its own — per docs/DESIGN.md's `raw`
-# passthrough example.
+# plus the real `cadvisor` service's five read-only bind mounts (#158),
+# each written through the dedicated `volume` field's own
+# `{ read_only }` flag instead of `raw`. What's left in `raw` is
+# `security_opt`, the genuine long-tail Compose key that has no
+# dedicated field of its own — per docs/DESIGN.md's `raw` passthrough
+# example.
 
 service cadvisor {
   image "gcr.io/cadvisor/cadvisor:latest"
+  volume "/" -> "/rootfs" { read_only }
+  volume "/var/run" -> "/var/run" { read_only }
+  volume "/sys" -> "/sys" { read_only }
+  volume "/var/lib/docker" -> "/var/lib/docker" { read_only }
+  volume "/dev/disk/" -> "/dev/disk" { read_only }
   privileged
   devices ["/dev/kmsg:/dev/kmsg"]
   raw {

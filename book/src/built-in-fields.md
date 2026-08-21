@@ -319,6 +319,41 @@ declare but never mount produces no entry, exactly as a `network`
 declaration no service names produces none—though only the `network`
 case raises a [warning](./cli.md#warnings) today.
 
+Either kind of entry may add a trailing `{ read_only }` body, appending
+Compose short syntax's `:ro` mode suffix—see #158:
+
+```hll,fragment
+volume "/" -> "/rootfs" { read_only }
+volume media -> "/data" { read_only }
+```
+
+produces:
+
+```yaml,fragment
+volumes:
+  - /:/rootfs:ro
+  - media:/data:ro
+```
+
+`read_only` is bare presence only, matching `network`'s own `external`
+flag—there's no `read_only: true`/`read_only: false` form, and no way to
+write `:rw` explicitly, since that's already Compose's own default for
+an entry with no mode suffix at all. It works the same way whether the
+host side is a bind-mount path or a named-volume reference, and inside
+`volume`'s canonical multi-entry body a flagged entry and an unflagged
+one can sit side by side:
+
+```hll,fragment
+volume {
+  "/" -> "/rootfs" { read_only }
+  "/data" -> "/data"
+}
+```
+
+`hll` covers only `:ro` today, not Compose's other short-syntax mount
+options (`:z`, `:Z`, tmpfs sizing)—see the design doc's `volume` section
+for why this design picked a bare flag over a general `mode` string.
+
 ## `env`
 
 Map-kind. Bare-entry separator: `=`, key equals value. `hllc` checks
@@ -617,6 +652,60 @@ independent stacks that happen to share a service name (`db`, `broker`,
 and so on), and Compose refuses to start the second container with the
 same name.
 
+## `command`
+
+A plain scalar-or-list field directly on `service`/`template`, not a
+nested struct type, sharing its grammar with [`healthcheck`](#healthcheck)'s
+`test` sub-field—a bare string, Compose's shell form, or a bracketed
+list, Compose's exec form:
+
+```hll,fragment
+command "npm start"
+```
+
+```hll,fragment
+command ["--housekeeping_interval=30s", "--docker_only=true"]
+```
+
+| Accepts | Default |
+|---|---|
+| string or bracketed list | unset—the image's own `CMD`/entrypoint applies |
+
+`command` overrides the arguments Compose passes to the image's
+entrypoint, exactly like Compose's own `command:` key. `hllc` carries
+whichever form you write straight through to the generated `command:`
+key, rather than normalizing one into the other—the same rule
+[`healthcheck`](#healthcheck)'s `test` follows, and for the same
+reason: the shell form runs through the container's own shell, while the
+exec form runs directly with no shell involved, so the two aren't
+interchangeable. A comma inside one quoted list item is data, not a list
+separator:
+
+```hll,build
+service cadvisor {
+  image "gcr.io/cadvisor/cadvisor:latest"
+  command [
+    "--housekeeping_interval=30s",
+    "--docker_only=true",
+    "--enable_metrics=cpu,memory,network"
+  ]
+}
+```
+
+```yaml
+services:
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    command:
+      - --housekeeping_interval=30s
+      - --docker_only=true
+      - --enable_metrics=cpu,memory,network
+```
+
+Writing `command` more than once in the same body is a compile error,
+same as `image`/`restart`/`container_name`—it's single-occurrence, not
+repeatable.
+
 ## `raw`
 
 Map-kind, schema-free: `hllc` accepts unknown keys as-is rather than
@@ -647,10 +736,11 @@ ever comes up for generated or pathological input.
 ### `raw` wins over a built-in field of the same name
 
 A `raw` key may name a field `hll` already has: `image`,
-`container_name`, `privileged`, `restart`, `healthcheck`, `environment`,
-`env_file`, `volumes`, `networks`, `dns`, `devices`, `ports`, `expose`,
-`depends_on`, or `labels`. When it does, the `raw` value is what's
-emitted, and `hllc` drops the built-in one—the key appears exactly once:
+`container_name`, `command`, `privileged`, `restart`, `healthcheck`,
+`environment`, `env_file`, `volumes`, `networks`, `dns`, `devices`,
+`ports`, `expose`, `depends_on`, or `labels`. When it does, the `raw`
+value is what's emitted, and `hllc` drops the built-in one—the key
+appears exactly once:
 
 ```hll,fragment
 image "nginx"

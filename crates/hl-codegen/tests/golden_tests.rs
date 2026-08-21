@@ -80,14 +80,19 @@ volumes:
     );
 }
 
-/// `cadvisor`'s three host-access knobs, matching the real
-/// `cadvisor/docker-compose.yml`'s `privileged`/`devices`/`security_opt`
-/// shape exactly (not asserting label parity — the real file's label has
-/// a typo, `traefiki.docker.network`, that's a bug in the source data,
-/// not a codegen target): the first two are dedicated fields (#157), and
+/// `cadvisor`'s host-access knobs, matching the real
+/// `cadvisor/docker-compose.yml`'s `volumes`/`privileged`/`devices`/
+/// `security_opt` shape exactly (not asserting label parity — the real
+/// file's label has a typo, `traefiki.docker.network`, that's a bug in
+/// the source data, not a codegen target). The five read-only bind
+/// mounts, each written as a plain `volume "<host>" -> "<container>" {
+/// read_only }` entry, come out as Compose short syntax with the `:ro`
+/// suffix appended — `/:/rootfs:ro`, matching #158's own worked example
+/// exactly. `privileged`/`devices` are dedicated fields (#157), and
 /// `security_opt` still goes through `raw`, landing as a sibling
 /// top-level service key — the genuine long tail `raw`'s job narrowed to
-/// once `privileged`/`devices` graduated out of it.
+/// once `privileged`/`devices` graduated out of it. None of the five
+/// needs `raw` any more.
 #[test]
 fn cadvisor_raw_passthrough_matches_real_service() {
     let yaml = generate_from(RAW_SERVICE);
@@ -97,6 +102,12 @@ fn cadvisor_raw_passthrough_matches_real_service() {
 services:
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:latest
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
     privileged: true
     devices:
       - /dev/kmsg:/dev/kmsg
@@ -531,6 +542,123 @@ services:
     image: postgres
     healthcheck:
       test: raw-test
+"#,
+    );
+}
+
+// --- command (#156) ---
+//
+// The issue's own motivating case: `cadvisor.hll` needs to override the
+// image's entrypoint arguments, previously only reachable through
+// `raw { command: [...] }`.
+
+/// The shell form: a bare string emits Compose's own shell-form
+/// `command:` — a plain scalar, not a sequence.
+#[test]
+fn command_shell_form_emits_a_plain_string() {
+    let yaml = generate_from("service web {\n  image \"nginx\"\n  command \"npm start\"\n}\n");
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  web:
+    image: nginx
+    command: npm start
+"#,
+    );
+}
+
+/// The exec form: a bracketed list emits a YAML sequence, exactly
+/// matching the issue's own `cadvisor.hll` example — including the one
+/// item with a comma embedded inside its own value
+/// (`--enable_metrics=cpu,memory,network`), which has to survive as one
+/// list entry rather than being split on the embedded comma.
+#[test]
+fn command_exec_form_emits_a_yaml_sequence() {
+    let yaml = generate_from(
+        "service cadvisor {\n  \
+           image \"gcr.io/cadvisor/cadvisor:latest\"\n  \
+           command [\n    \
+             \"--housekeeping_interval=30s\",\n    \
+             \"--docker_only=true\",\n    \
+             \"--enable_metrics=cpu,memory,network\"\n  \
+           ]\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    command:
+      - --housekeeping_interval=30s
+      - --docker_only=true
+      - --enable_metrics=cpu,memory,network
+"#,
+    );
+}
+
+/// No `command` field at all emits no `command:` key — never inferred
+/// or defaulted from the image.
+#[test]
+fn command_unset_emits_no_key() {
+    let yaml = generate_from("service web {\n  image \"nginx\"\n}\n");
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  web:
+    image: nginx
+"#,
+    );
+}
+
+/// `command` merges like `container_name` — the service's own body
+/// wins unconditionally over an inherited template value, with no
+/// per-sub-field merge to consider since `command` has no sub-fields.
+#[test]
+fn command_merges_through_a_with_template() {
+    let yaml = generate_from(
+        "template base_command {\n  command \"from-template\"\n}\n\
+         service web {\n  \
+           image \"nginx\"\n  \
+           with base_command\n  \
+           command \"own-command\"\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  web:
+    image: nginx
+    command: own-command
+"#,
+    );
+}
+
+/// `raw { command: ... }` overrides the built-in `command` field, the
+/// same way it overrides every other built-in field (#156) — this is
+/// the escape hatch the issue's own `cadvisor.hll` example used before
+/// `command` became a dedicated field.
+#[test]
+fn raw_command_overrides_the_built_in_command() {
+    let yaml = generate_from(
+        "service cadvisor {\n  \
+           image \"gcr.io/cadvisor/cadvisor:latest\"\n  \
+           command [\"--docker_only=true\"]\n  \
+           raw {\n    command: [\"--raw-override=true\"]\n  }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    command:
+      - --raw-override=true
 "#,
     );
 }
@@ -1524,6 +1652,7 @@ fn every_built_in_field_is_overridable_by_raw() {
          service web {\n  \
            image \"nginx\"\n  \
            container_name \"web-ctr\"\n  \
+           command \"npm start\"\n  \
            privileged\n  \
            restart unless-stopped\n  \
            healthcheck { test: \"curl -f http://localhost\" }\n  \
@@ -1539,6 +1668,7 @@ fn every_built_in_field_is_overridable_by_raw() {
            raw {\n    \
              image: \"raw-image\"\n    \
              container_name: \"raw-name\"\n    \
+             command: [\"raw-command\"]\n    \
              privileged: false\n    \
              restart: \"always\"\n    \
              healthcheck: { test: \"raw-test\" }\n    \
@@ -1562,6 +1692,8 @@ fn every_built_in_field_is_overridable_by_raw() {
         r#"
 image: raw-image
 container_name: raw-name
+command:
+  - raw-command
 privileged: false
 restart: always
 healthcheck:
@@ -1655,6 +1787,7 @@ fn raw_leaves_built_in_fields_it_does_not_name_alone() {
          service web {\n  \
            image \"nginx\"\n  \
            container_name \"web-ctr\"\n  \
+           command \"npm start\"\n  \
            restart unless-stopped\n  \
            healthcheck { test: \"curl -f http://localhost\" }\n  \
            env PUID = \"1000\"\n  \
@@ -1675,6 +1808,7 @@ fn raw_leaves_built_in_fields_it_does_not_name_alone() {
         r#"
 image: nginx
 container_name: web-ctr
+command: npm start
 restart: unless-stopped
 healthcheck:
   test: curl -f http://localhost
@@ -1918,5 +2052,41 @@ fn a_referenced_network_produces_no_warning() {
         generated.warnings.is_empty(),
         "unexpected warnings: {:?}",
         generated.warnings
+    );
+}
+
+/// #158's `{ read_only }` flag on a *named* Docker volume, not just a
+/// bind mount — the cadvisor fixture above only exercises the
+/// bind-mount side, and the two go through different `VolumeHost` arms
+/// in `resolve_volumes`, so this is the named-volume half of "must work
+/// for both." Mixes a flagged entry with an unflagged one in the same
+/// service, which is what actually exercises both of `resolve_volumes`'s
+/// `:ro`-or-not branches in one generated document (and is the surface a
+/// missed mutant on the `if v.read_only` check would show up on: flip it
+/// and either this entry loses its suffix or the other one gains one it
+/// shouldn't have).
+#[test]
+fn named_volume_read_only_flag_emits_ro_suffix_alongside_an_unflagged_entry() {
+    let yaml = generate_from(
+        "volume media {}\n\
+         service jellyfin {\n  \
+           image \"jellyfin/jellyfin:latest\"\n  \
+           volume media -> \"/data\" { read_only }\n  \
+           volume \"/mnt/config\" -> \"/config\"\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    volumes:
+      - media:/data:ro
+      - /mnt/config:/config
+
+volumes:
+  media:
+"#,
     );
 }

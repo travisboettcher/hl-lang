@@ -42,3 +42,6 @@ healthcheck
 Dockerfile
 gitignored
 dedupes?
+tmpfs
+unflagged
+SELinux
