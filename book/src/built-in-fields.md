@@ -184,6 +184,111 @@ entry into the label. (`entrypoint "web,web-secure"` is therefore an
 error—write `entrypoint web, web-secure`.) `hllc` rejects a comma in a
 `middleware` name for the same reason.
 
+## `traefik`
+
+No primary field—like `healthcheck`, no one sub-field stands in for the
+whole struct, so `traefik { ... }` requires the braced body.
+
+`hllc` computes a Traefik label list for every service by default:
+`traefik.docker.network=`, the router rule and its
+`entrypoints=`/`middlewares=` labels from [`expose`](#expose) and
+`middleware`, and the load-balancer port.
+
+The `disabled` flag switches all of that off for one service and emits
+`traefik.enable=false` in its place, nothing else, not even
+`traefik.docker.network=`, since Traefik's Docker provider never acts on
+a service that turns it off, so that label would have nothing to do.
+
+| Field | Accepts | Default |
+|---|---|---|
+| `disabled` | bare flag, no value | unset, Traefik labels computed normally |
+
+```hll,build
+service db {
+  image "postgres:15"
+  traefik {
+    disabled
+  }
+}
+```
+
+```yaml
+services:
+  db:
+    image: postgres:15
+    labels:
+      - "traefik.enable=false"
+```
+
+This is the dedicated answer to a shape several real homelab services
+share: a backing database with no `expose`/`middleware` of its own,
+sitting next to a Traefik-facing sibling service in the same file.
+Before this field, the only way to say "no Traefik" was to replace the
+*entire* computed label list through `raw`:
+
+```hll,fragment
+raw {
+  labels: ["traefik.enable=false"]
+}
+```
+
+That still works—`raw`'s override rule doesn't change—but it's a blunt
+instrument for a one-label change, and it silently stops tracking
+whatever `traefik.docker.network=`/router labels a future edit to the
+service would otherwise have added.
+
+Only `expose.host`, `expose.entrypoint`, and `middleware` conflict with
+`disabled`. Plain `expose.port` doesn't—it's Compose's own `expose:` key,
+container-network visibility with no Traefik involvement at all, so a
+service that turns Traefik off can still declare one:
+
+```hll,build
+service db {
+  image "postgres:15"
+  expose 5432
+  traefik {
+    disabled
+  }
+}
+```
+
+```yaml
+services:
+  db:
+    image: postgres:15
+    expose:
+      - 5432
+    labels:
+      - "traefik.enable=false"
+```
+
+Setting `expose.host`, `expose.entrypoint`, or `middleware` on a service
+that turns Traefik off is a **compile error**, the same treatment
+[`expose`](#expose)'s own router-less-middleware check gives the mirror
+mistake:
+
+```hll,ignore
+service db {
+  image "postgres:15"
+  expose 5432 as "db.example.com"
+  traefik {
+    disabled
+  }
+}
+```
+
+```text
+db.hll:3:18: service `db` sets `expose.host`, but `traefik` is disabled (at db.hll:5:5), so there is no router for it to attach to — drop the `expose.host` or remove `disabled`
+```
+
+Both sides of that contradiction mean something on their own—only the
+pair together doesn't—so `hllc` refuses to guess which one the service
+actually meant.
+
+No brace-free `traefik disabled` spelling exists—`disabled` needs the
+braced body, `traefik { disabled }`, exactly like
+[`healthcheck`](#healthcheck)'s own `disable` flag.
+
 ## `publish`
 
 Map-kind. Bare-entry separator: `->`, which points from the host port to

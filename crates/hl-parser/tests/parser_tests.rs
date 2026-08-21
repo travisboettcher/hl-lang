@@ -846,6 +846,65 @@ fn bool_flag_duplicate_is_error() {
     ));
 }
 
+// --- traefik (#159) ---
+
+#[test]
+fn traefik_disabled_bare_flag() {
+    let program = parse_ok("service s {\n  image \"x\"\n  traefik {\n    disabled\n  }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(service.fields.traefik.as_ref().unwrap().disabled.is_some());
+}
+
+#[test]
+fn service_without_traefik_field_defaults_to_none() {
+    let program = parse_ok("service s {\n  image \"x\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(service.fields.traefik.is_none());
+}
+
+/// `disabled` is bare-presence only, exactly like `network`'s `external`
+/// and `healthcheck`'s `disable` — a `:` after it is rejected rather than
+/// treated as an attempted value.
+#[test]
+fn traefik_disabled_rejects_a_colon_value() {
+    let err = parse("service s {\n  traefik { disabled: true }\n}\n").unwrap_err();
+    assert!(
+        matches!(err, ParseError::UnexpectedToken { .. }),
+        "got {err:?}"
+    );
+}
+
+/// `traefik` has no `primary_field` (see `schema::TRAEFIK`'s doc) — the
+/// bare, brace-free `traefik disabled` spelling the motivating issue
+/// (#159) first floated is rejected rather than parsed as sugar for
+/// anything.
+#[test]
+fn traefik_bare_value_without_braces_is_rejected() {
+    let err = parse("service s {\n  traefik disabled\n}\n").unwrap_err();
+    match err {
+        ParseError::UnexpectedToken {
+            expected: Expected::Token(TokenKind::LBrace),
+            ..
+        } => {}
+        other => panic!("expected UnexpectedToken expecting `{{`, got {other:?}"),
+    }
+}
+
+/// A second bare `disabled` is `DuplicateField`, the same regression
+/// coverage `bool_flag_duplicate_is_error` gives `network`'s `external`.
+#[test]
+fn traefik_disabled_duplicate_is_error() {
+    let err = parse("service s {\n  traefik {\n    disabled\n    disabled\n  }\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::DuplicateField {
+            type_name: "traefik",
+            field: "disabled",
+            ..
+        }
+    ));
+}
+
 // --- maps: volume / env ---
 
 #[test]

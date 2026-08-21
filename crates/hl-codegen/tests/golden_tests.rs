@@ -1806,3 +1806,236 @@ fn a_referenced_network_produces_no_warning() {
         generated.warnings
     );
 }
+
+// --- `traefik { disabled }` (#159) ---
+
+/// The issue's own worked example, end to end: `miniflux`'s `db` backing
+/// service opts out of every Traefik label with `traefik { disabled }`
+/// instead of replacing the whole computed `labels:` list through `raw`.
+/// `miniflux` itself is an ordinary Traefik-facing service, unaffected —
+/// this is the "one backend-only service in an otherwise
+/// Traefik-facing stack" shape #159 names directly.
+#[test]
+fn miniflux_db_disables_traefik_end_to_end() {
+    let yaml = generate_from(
+        "service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           expose 8080 as \"miniflux.example.com\"\n  \
+           depends_on db\n\
+         }\n\
+         service db {\n  \
+           image \"postgres:15\"\n  \
+           traefik {\n    disabled\n  }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  miniflux:
+    image: miniflux/miniflux:latest
+    networks:
+      - default
+    expose:
+      - 8080
+    depends_on:
+      - db
+    labels:
+      - "traefik.http.routers.miniflux.rule=Host(`miniflux.example.com`)"
+      - "traefik.http.services.miniflux.loadbalancer.server.port=8080"
+
+  db:
+    image: postgres:15
+    networks:
+      - default
+    labels:
+      - "traefik.enable=false"
+"#,
+    );
+}
+
+/// Without `docker_network`/`expose.host`/`middleware` in the way, a
+/// disabled service's label list really is exactly the one line —
+/// checked directly against the raw string, not just parsed-YAML
+/// equality, since "exactly one label and nothing else" is precisely
+/// the guarantee at stake.
+#[test]
+fn disabled_service_emits_exactly_one_label() {
+    let yaml = generate_from("service db {\n  image \"postgres:15\"\n  traefik { disabled }\n}\n");
+    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let labels = parsed["services"]["db"]["labels"]
+        .as_sequence()
+        .expect("labels is a sequence");
+    assert_eq!(labels.len(), 1);
+    assert_eq!(labels[0].as_str().unwrap(), "traefik.enable=false");
+}
+
+/// A service that never writes `traefik` at all is byte-for-byte
+/// unaffected by this field existing — the exact same assertion
+/// `syncthing_matches_real_deployed_service` already makes, re-run here
+/// to pin down that adding `traefik` to the schema changed nothing about
+/// a program that doesn't use it.
+#[test]
+fn a_service_without_traefik_field_is_unaffected() {
+    let yaml = generate_from(SYNCTHING);
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  syncthing:
+    image: lscr.io/linuxserver/syncthing:latest
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=100
+    volumes:
+      - syncthing-config:/config
+    networks:
+      - traefik-net
+    expose:
+      - 8384
+    labels:
+      - "traefik.docker.network=docker_default"
+      - "traefik.http.routers.syncthing.rule=Host(`syncthing.internal.techdebtor.io`)"
+      - "traefik.http.routers.syncthing.entrypoints=web-secure"
+      - "traefik.http.routers.syncthing.middlewares=local-ipwhitelist@file,forwardAuth-authentik@file"
+      - "traefik.http.services.syncthing.loadbalancer.server.port=8384"
+
+networks:
+  traefik-net:
+    name: docker_default
+    external: true
+
+volumes:
+  syncthing-config:
+"#,
+    );
+}
+
+/// `expose.port` alone doesn't conflict with `disabled` — it's Compose's
+/// own `expose:` key, plain container-network visibility, nothing to do
+/// with Traefik. `db`'s own `expose 5432` from the issue's real shape.
+#[test]
+fn disabled_service_may_still_declare_expose_port() {
+    let yaml = generate_from(
+        "service db {\n  image \"postgres:15\"\n  expose 5432\n  traefik { disabled }\n}\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  db:
+    image: postgres:15
+    expose:
+      - 5432
+    labels:
+      - "traefik.enable=false"
+"#,
+    );
+}
+
+#[test]
+fn traefik_disabled_with_expose_host_is_an_error() {
+    let err = generate_err(
+        "service db {\n  image \"postgres:15\"\n  expose 5432 as \"db.example.com\"\n  traefik { disabled }\n}\n",
+    );
+    assert!(
+        matches!(
+            &err,
+            CodegenError::TraefikDisabledWithRouterField {
+                service,
+                field: "expose.host",
+                ..
+            } if service == "db"
+        ),
+        "got {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "3:18: service `db` sets `expose.host`, but `traefik` is disabled (at 4:13), so there is \
+         no router for it to attach to — drop the `expose.host` or remove `disabled`"
+    );
+}
+
+#[test]
+fn traefik_disabled_with_middleware_is_an_error() {
+    let err = generate_err(
+        "service db {\n  image \"postgres:15\"\n  middleware auth\n  traefik { disabled }\n}\n",
+    );
+    assert!(
+        matches!(
+            err,
+            CodegenError::TraefikDisabledWithRouterField {
+                field: "middleware",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn traefik_disabled_with_entrypoint_is_an_error() {
+    let err = generate_err(
+        "service db {\n  \
+           image \"postgres:15\"\n  \
+           expose 5432, entrypoint: web-secure\n  \
+           traefik { disabled }\n\
+         }\n",
+    );
+    assert!(
+        matches!(
+            err,
+            CodegenError::TraefikDisabledWithRouterField {
+                field: "expose.entrypoint",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// `raw { labels: [...] }` still overrides the computed list entirely —
+/// including a disabled service's single `traefik.enable=false` line —
+/// exactly as it overrides the ordinary computed router labels.
+#[test]
+fn raw_labels_override_a_disabled_services_label_too() {
+    let yaml = generate_from(
+        "service db {\n  \
+           image \"postgres:15\"\n  \
+           traefik { disabled }\n  \
+           raw {\n    labels: [\"only.this=1\"]\n  }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  db:
+    image: postgres:15
+    labels:
+      - only.this=1
+"#,
+    );
+}
+
+/// `traefik { disabled }` composes through `with` just like any other
+/// nested field — a template can carry the "no Traefik" shape for every
+/// backend-only service that reuses it.
+#[test]
+fn traefik_disabled_composes_through_a_template() {
+    let yaml = generate_from(
+        "template backend_only {\n  traefik { disabled }\n}\n\
+         service db {\n  with backend_only\n  image \"postgres:15\"\n}\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  db:
+    image: postgres:15
+    labels:
+      - "traefik.enable=false"
+"#,
+    );
+}

@@ -179,6 +179,34 @@ pub enum CodegenError {
         field: &'static str,
         span: Span,
     },
+    /// A service sets `traefik { disabled }` (#159) and also sets one of
+    /// the Traefik-specific fields that flag exists to turn off:
+    /// `expose.host`, `expose.entrypoint`, or `middleware`. Plain
+    /// `expose.port` doesn't conflict — it's Compose's own `expose:` key,
+    /// container-network visibility with no Traefik involvement at all,
+    /// so a disabled service may still declare it. See
+    /// `labels::traefik_conflict_field`'s doc for the exact field order
+    /// checked.
+    ///
+    /// A hard error, the same treatment [`Self::RouterFieldWithoutHost`]
+    /// (#144) gives the mirror-image mistake, and for the same reason:
+    /// both are a field whose only meaning depends on a router existing,
+    /// contradicted by something else the same service says about that
+    /// very router. There's no reading of "disabled, but route this
+    /// through Traefik anyway" a user could have meant — silently
+    /// honoring one side over the other would reproduce exactly the
+    /// "valid output, wrong service" failure #144 already closed off for
+    /// the router-less case, just from the opposite direction.
+    ///
+    /// `field` is the offending field's name and `span` points at it;
+    /// `disabled_span` points at the `disabled` flag it contradicts, so
+    /// the rendered message can name both lines.
+    TraefikDisabledWithRouterField {
+        service: String,
+        field: &'static str,
+        disabled_span: Span,
+        span: Span,
+    },
 }
 
 impl CodegenError {
@@ -191,7 +219,8 @@ impl CodegenError {
             | CodegenError::MissingImage { span, .. }
             | CodegenError::UnsubstitutedParameter { span, .. }
             | CodegenError::UnsafeLabelValue { span, .. }
-            | CodegenError::RouterFieldWithoutHost { span, .. } => *span,
+            | CodegenError::RouterFieldWithoutHost { span, .. }
+            | CodegenError::TraefikDisabledWithRouterField { span, .. } => *span,
         }
     }
 
@@ -280,6 +309,16 @@ impl CodegenError {
             CodegenError::RouterFieldWithoutHost { service, field, .. } => write!(
                 f,
                 "{at}: service `{service}` sets `{field}` but has no `expose.host`, so there is no Traefik router to attach it to — add a host (`expose <port> as \"{service}.example.com\"`) or drop the `{field}`"
+            ),
+            CodegenError::TraefikDisabledWithRouterField {
+                service,
+                field,
+                disabled_span,
+                ..
+            } => write!(
+                f,
+                "{at}: service `{service}` sets `{field}`, but `traefik` is disabled (at {}), so there is no router for it to attach to — drop the `{field}` or remove `disabled`",
+                disabled_span.locate(files)
             ),
         }
     }

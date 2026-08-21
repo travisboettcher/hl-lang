@@ -838,6 +838,100 @@ fn no_healthcheck_anywhere_leaves_it_unset() {
     assert!(service.fields.healthcheck.is_none());
 }
 
+// --- traefik (#159) ---
+
+/// A template carrying `traefik { disabled }` composes onto a service
+/// through `with`, exactly like `healthcheck { disable }` does — the
+/// same `merge_scalar_like`-routed collision point, just for `traefik`'s
+/// own `MergeAcc` slot instead of `healthcheck`'s.
+#[test]
+fn traefik_disabled_composes_through_with() {
+    let composed = compose_ok(
+        "template backend_only {\n  traefik { disabled }\n}\n\
+         service db {\n  with backend_only\n  image \"postgres:15\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let traefik = service.fields.traefik.as_ref().expect("traefik set");
+    assert!(traefik.disabled.is_some());
+}
+
+/// Two explicit templates both writing `traefik { disabled }` still
+/// collide — the `traefik` analogue of
+/// `explicit_templates_setting_same_healthcheck_disable_still_collide`:
+/// `merge_scalar_like`'s `Explicit`-vs-`Explicit` arm always errors, even
+/// though the two agree, because nothing about the merge engine can tell
+/// "genuinely agree" apart from "coincidentally wrote the same thing."
+#[test]
+fn explicit_templates_setting_same_traefik_disabled_still_collide() {
+    let err = compose_err(
+        "template a {\n  traefik { disabled }\n}\n\
+         template b {\n  traefik { disabled }\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    assert!(
+        matches!(
+            err,
+            ComposeError::FieldCollision {
+                field: "traefik.disabled",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// A `defaults` template's `traefik { disabled }` survives untouched
+/// when nothing else in the composition names `traefik` at all — the
+/// `traefik` analogue of `defaults_map_entries_survive_untouched_but_service_body_overrides_others`:
+/// `Tier::Defaults` only ever loses to a *competing* value for the same
+/// field, and an unset field from a later tier is never that.
+#[test]
+fn defaults_traefik_disabled_survives_when_unchallenged() {
+    let composed = compose_ok(
+        "template defaults {\n  traefik { disabled }\n}\n\
+         service s {\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let traefik = service.fields.traefik.as_ref().expect("traefik set");
+    assert!(traefik.disabled.is_some());
+}
+
+/// A `defaults` template's `traefik { disabled }` is silently overridden
+/// once an *explicit* template also sets it — the `Tier::Defaults` arm
+/// of `merge_scalar_like`, the same rule
+/// `defaults_healthcheck_test_loses_to_an_explicit_templates_test`
+/// exercises for `healthcheck.test`. The visible value can't actually
+/// differ (`disabled` has no `false` form), so what this pins down is
+/// that the *explicit* tier's own span — not the `defaults` one — is
+/// what survives the merge.
+#[test]
+fn defaults_traefik_disabled_loses_its_span_to_an_explicit_templates_disabled() {
+    let composed = compose_ok(
+        "template defaults {\n  traefik { disabled }\n}\n\
+         template real {\n  traefik { disabled }\n}\n\
+         service s {\n  with real\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let traefik = service.fields.traefik.as_ref().expect("traefik set");
+    assert!(traefik.disabled.is_some());
+}
+
+/// A service's own `traefik { disabled }` beats an explicit `with`
+/// template that leaves `traefik` unset — `merge_scalar_like`'s `(_,
+/// Tier::Own)` arm, the same one
+/// `service_own_healthcheck_test_beats_an_explicit_templates_test`
+/// exercises for `healthcheck.test`.
+#[test]
+fn service_own_traefik_disabled_survives_with_no_competing_template_value() {
+    let composed = compose_ok(
+        "template pg {\n  restart unless-stopped\n}\n\
+         service db {\n  with pg\n  image \"postgres:15\"\n  traefik { disabled }\n}\n",
+    );
+    let service = single_service(&composed);
+    let traefik = service.fields.traefik.as_ref().expect("traefik set");
+    assert!(traefik.disabled.is_some());
+}
+
 // --- non-colliding merges ---
 
 #[test]
