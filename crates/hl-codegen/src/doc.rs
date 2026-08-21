@@ -178,6 +178,16 @@ pub(crate) struct ComposeServiceDoc {
     /// Compose refuses to start the second container with the same name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container_name: Option<String>,
+    /// Compose's own `command:` key (#156) — either a plain YAML string
+    /// (Compose's shell form) or a YAML sequence (Compose's exec form),
+    /// carried through in whichever shape `.hll` wrote it, exactly
+    /// mirroring [`HealthcheckDoc::test`] just below (see that field's
+    /// own doc for why the two forms aren't normalized into one
+    /// another). `None` when `.hll` sets no `command` field at all —
+    /// unlike `healthcheck`, there's no "every sub-field unset" case to
+    /// distinguish here, since `command` has no sub-fields of its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<serde_yaml_ng::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart: Option<String>,
     /// Compose's own `healthcheck:` key (#153). `None` both when
@@ -277,6 +287,7 @@ impl ComposeServiceDoc {
         let Self {
             image,
             container_name,
+            command,
             restart,
             healthcheck,
             environment,
@@ -298,6 +309,9 @@ impl ComposeServiceDoc {
         }
         if raw.contains_key("container_name") {
             *container_name = None;
+        }
+        if raw.contains_key("command") {
+            *command = None;
         }
         if raw.contains_key("restart") {
             *restart = None;

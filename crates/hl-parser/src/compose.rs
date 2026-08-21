@@ -23,9 +23,9 @@ use std::fmt;
 use hl_lexer::{SourceMap, Span};
 
 use crate::ast::{
-    DependsOnEntry, EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal,
-    Network, ParamType, Program, PublishEntry, PublishMap, RawMap, RawValue, Reference, Restart,
-    Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, Volume,
+    Command, DependsOnEntry, EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image,
+    Literal, Network, ParamType, Program, PublishEntry, PublishMap, RawMap, RawValue, Reference,
+    Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, Volume,
     VolumeEntry, VolumeHost, VolumeMap,
 };
 use crate::schema::MapSide;
@@ -1539,6 +1539,20 @@ fn substitute_params(
     if let Some(cn) = &mut fields.container_name {
         substitute_literal(cn, args, template_name)?;
     }
+    // `command`'s literals (#156) go through the same substitution walk
+    // as every other `Literal` slot above, so a `$param` reference
+    // inside a `command ["--user=$user"]` entry gets resolved here — see
+    // `ast::Literal::Param`'s own doc for why a `Param` surviving this
+    // pass unresolved would be a bug.
+    match &mut fields.command {
+        Some(Command::Shell(lit)) => substitute_literal(lit, args, template_name)?,
+        Some(Command::Exec(items, _)) => {
+            for item in items {
+                substitute_literal(item, args, template_name)?;
+            }
+        }
+        None => {}
+    }
     for v in &mut fields.volumes.entries {
         // Only a bind-mount host has a literal to substitute into. A
         // named-volume host is a `Reference`, exactly like a `networks
@@ -1802,6 +1816,18 @@ struct MergeAcc {
     /// rather than a name-keyed table since `traefik` has exactly this
     /// one sub-field today.
     traefik_disabled: Option<(Span, Tier)>,
+    /// `command`'s own collision point (#156) — not part of `scalars`
+    /// above for the same reason `healthcheck_test` isn't: [`Command`]
+    /// isn't a [`Literal`], so it can't ride [`SCALAR_FIELDS`]'s table
+    /// and goes through `merge_scalar_like` instead. Unlike
+    /// `healthcheck_test`, `command` lives directly on `ServiceFields`
+    /// rather than inside a nested struct, so
+    /// [`MergeAcc::into_service_fields`] writes it straight into
+    /// `fields.command` with no `get_or_insert` needed — see
+    /// [`ast::ServiceFields::command`]'s doc for why it's modeled on
+    /// `healthcheck.test`'s merge behavior rather than on
+    /// `container_name`'s.
+    command: Option<(Command, Tier)>,
 }
 
 impl MergeAcc {
@@ -1863,6 +1889,9 @@ impl MergeAcc {
                 .traefik
                 .get_or_insert(empty_traefik(disabled_span))
                 .disabled = Some(disabled_span);
+        }
+        if let Some((command, _)) = self.command {
+            fields.command = Some(command);
         }
         fields
     }
@@ -2200,6 +2229,13 @@ fn merge_tier(
             tier,
             |span| *span,
         )?;
+    }
+    // `command` (#156) isn't `Literal`-valued either, so it goes through
+    // `merge_scalar_like` exactly like `healthcheck.test` just above —
+    // see `MergeAcc::command`'s doc for why it isn't part of
+    // `SCALAR_FIELDS` and doesn't need a nested struct's `get_or_insert`.
+    if let Some(command) = incoming.command.take() {
+        merge_scalar_like(&mut acc.command, "command", command, tier, Command::span)?;
     }
     // Before the `merge_map` calls below only because those consume
     // `incoming`'s map entries by value, and `take` needs `incoming`

@@ -1,7 +1,7 @@
 use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    DependsOnCondition, Expected, Expose, HealthcheckTest, Literal, ParamType, ParseError,
+    Command, DependsOnCondition, Expected, Expose, HealthcheckTest, Literal, ParamType, ParseError,
     TemplateDecl, TopDecl, UseDecl, VolumeHost, parse,
 };
 
@@ -424,6 +424,135 @@ fn healthcheck_duplicate_test_is_error() {
         ),
         "got {err:?}"
     );
+}
+
+// --- command (#156) ---
+//
+// A plain scalar-or-list field directly on `service`/`template`, not a
+// nested struct type — see `ast::ServiceFields::command`'s doc. Shares
+// its grammar with `healthcheck.test` (#153) — a bare literal
+// (Compose's shell form) or a bracketed list (Compose's exec form) — so
+// these tests mirror that field's own tests above, minus the
+// braced-body plumbing `command` doesn't need.
+
+/// The shell form: a bare string with no braces, exactly like
+/// `container_name`'s own bare-value shorthand.
+#[test]
+fn command_shell_form() {
+    let program = parse_ok("service s {\n  command \"npm start\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    match service.fields.command.as_ref().unwrap() {
+        Command::Shell(lit) => assert_eq!(lit.text(), "npm start"),
+        other => panic!("expected Command::Shell, got {other:?}"),
+    }
+}
+
+/// The explicit `key: value` spelling of the shell form also parses,
+/// mirroring `container_name: "..."`.
+#[test]
+fn command_shell_form_with_colon() {
+    let program = parse_ok("service s {\n  command: \"npm start\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    match service.fields.command.as_ref().unwrap() {
+        Command::Shell(lit) => assert_eq!(lit.text(), "npm start"),
+        other => panic!("expected Command::Shell, got {other:?}"),
+    }
+}
+
+/// The exec form: a bracketed list of strings, matching the issue's own
+/// `cadvisor.hll` example (#156).
+#[test]
+fn command_exec_form() {
+    let program = parse_ok(
+        "service s {\n  \
+           command [\"--housekeeping_interval=30s\", \"--docker_only=true\"]\n\
+         }\n",
+    );
+    let service = as_service(&program.decls[0]);
+    match service.fields.command.as_ref().unwrap() {
+        Command::Exec(items, _) => {
+            let texts: Vec<&str> = items.iter().map(Literal::text).collect();
+            assert_eq!(
+                texts,
+                vec!["--housekeeping_interval=30s", "--docker_only=true"]
+            );
+        }
+        other => panic!("expected Command::Exec, got {other:?}"),
+    }
+}
+
+/// A comma embedded inside one quoted list item is data, not a list
+/// separator — `--enable_metrics=cpu,memory,network` has to survive as
+/// one item, not split into three. This is the exact value the issue
+/// calls out by name (#156).
+#[test]
+fn command_exec_form_item_with_embedded_comma_round_trips() {
+    let program = parse_ok(
+        "service s {\n  \
+           command [\"--enable_metrics=cpu,memory,network\"]\n\
+         }\n",
+    );
+    let service = as_service(&program.decls[0]);
+    match service.fields.command.as_ref().unwrap() {
+        Command::Exec(items, _) => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].text(), "--enable_metrics=cpu,memory,network");
+        }
+        other => panic!("expected Command::Exec, got {other:?}"),
+    }
+}
+
+/// An exec-form list of exactly one item is still the list form, not
+/// the shell form — brackets alone select exec syntax, matching
+/// `healthcheck.test`'s own `healthcheck_test_list_form_single_item`.
+#[test]
+fn command_exec_form_single_item() {
+    let program = parse_ok("service s {\n  command [\"npm\"]\n}\n");
+    let service = as_service(&program.decls[0]);
+    match service.fields.command.as_ref().unwrap() {
+        Command::Exec(items, _) => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].text(), "npm");
+        }
+        other => panic!("expected Command::Exec, got {other:?}"),
+    }
+}
+
+/// No `command` field at all leaves it unset — never defaulted or
+/// inferred from the image.
+#[test]
+fn command_unset_by_default() {
+    let program = parse_ok("service s {\n  image \"nginx\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(service.fields.command.is_none());
+}
+
+/// Writing `command` twice is a duplicate-scalar compile error, same as
+/// `healthcheck.test`'s own `healthcheck_duplicate_test_is_error` — a
+/// single-occurrence field, not repeatable.
+#[test]
+fn command_duplicate_is_error() {
+    let err = parse("service s {\n  command \"a\"\n  command \"b\"\n}\n").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::DuplicateField {
+                type_name: "service",
+                field: "command",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// Deliberately no bare comma-list sugar, matching `healthcheck.test`
+/// (see `schema::FieldKind::ScalarOrList`'s doc for why): a second
+/// quoted string right after the first isn't a two-item list, so this
+/// doesn't parse as `command ["a", "b"]` in disguise.
+#[test]
+fn command_bare_comma_list_is_rejected() {
+    assert!(parse("service s {\n  command \"a\", \"b\"\n}\n").is_err());
 }
 
 // --- bool flag ---
@@ -1099,6 +1228,127 @@ fn volume_same_host_different_container_is_ok() {
         parse_ok("service s {\n  volume \"a\" -> \"/data1\"\n  volume \"a\" -> \"/data2\"\n}\n");
     let service = as_service(&program.decls[0]);
     assert_eq!(service.fields.volumes.entries.len(), 2);
+}
+
+// --- maps: volume's `{ read_only }` flag (#158) ---
+
+/// The plain bind-mount case the issue itself is about: a host path
+/// mounted read-only with no top-level `volume` declaration involved at
+/// all.
+#[test]
+fn volume_bind_mount_with_read_only_flag() {
+    let program = parse_ok("service s {\n  volume \"/\" -> \"/rootfs\" { read_only }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.volumes.entries.len(), 1);
+    assert!(service.fields.volumes.entries[0].read_only);
+}
+
+/// And the named-volume case — the flag must work identically whether
+/// the host side is [`VolumeHost::BindMount`] or [`VolumeHost::Named`],
+/// since Compose's own `read_only` mount option applies to both alike.
+#[test]
+fn volume_named_volume_with_read_only_flag() {
+    let program = parse_ok(
+        "volume media {}\n\
+         service s {\n  volume media -> \"/data\" { read_only }\n}\n",
+    );
+    let service = as_service(&program.decls[1]);
+    assert_eq!(service.fields.volumes.entries.len(), 1);
+    assert!(matches!(
+        &service.fields.volumes.entries[0].host,
+        VolumeHost::Named(r) if r.name == "media"
+    ));
+    assert!(service.fields.volumes.entries[0].read_only);
+}
+
+/// No `{ read_only }` body at all is still legal, and must leave the flag
+/// unset — the overwhelmingly common case, and the one whose emitted
+/// Compose output must stay byte-for-byte unchanged (see
+/// `hl-codegen`'s golden tests).
+#[test]
+fn volume_entry_without_body_leaves_read_only_unset() {
+    let program = parse_ok("service s {\n  volume \"/mnt/media\" -> \"/data\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(!service.fields.volumes.entries[0].read_only);
+}
+
+/// The flag works the same way inside `volume`'s canonical multi-entry
+/// body, entry by entry — one flagged, one not, in the same body — which
+/// is also the shape that rules out the trailing-comma sugar the issue
+/// itself first suggested: see [`hl_parser::VolumeEntry`]'s doc for why.
+#[test]
+fn volume_read_only_flag_in_canonical_multi_entry_body() {
+    let program = parse_ok(
+        "service s {\n  \
+           volume {\n    \
+             \"/\" -> \"/rootfs\" { read_only },\n    \
+             \"/data\" -> \"/data\"\n  \
+           }\n\
+         }\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let entries = &service.fields.volumes.entries;
+    assert_eq!(entries.len(), 2);
+    assert!(entries[0].read_only, "first entry should be read-only");
+    assert!(!entries[1].read_only, "second entry should not be flagged");
+}
+
+/// The bare-presence flag, exactly like `external`/`disable`, takes no
+/// `:`/value — `{ read_only: true }` isn't legal syntax, it's an unknown
+/// field, since `read_only` isn't a struct field resolved through the
+/// generic engine here.
+#[test]
+fn volume_read_only_flag_rejects_a_colon_value() {
+    let err =
+        parse("service s {\n  volume \"/\" -> \"/rootfs\" { read_only: true }\n}\n").unwrap_err();
+    assert!(
+        matches!(err, ParseError::UnexpectedToken { .. }),
+        "expected a parse error on the unexpected `:`, got {err:?}"
+    );
+}
+
+/// Any other identifier inside a volume entry's `{ }` body is an unknown
+/// field, matching `depends_on`'s own `{ condition: ... }` precedent
+/// (#155) rather than silently accepting arbitrary Compose mount options
+/// this milestone deliberately doesn't cover (`:z`, `:Z`, tmpfs sizing).
+#[test]
+fn volume_entry_body_rejects_an_unknown_flag() {
+    let err =
+        parse("service s {\n  volume \"/\" -> \"/rootfs\" { mode: \"ro\" }\n}\n").unwrap_err();
+    match err {
+        ParseError::UnknownField {
+            type_name: "volume",
+            field,
+            raw_escape_hatch: false,
+            ..
+        } => assert_eq!(field, "mode"),
+        other => panic!("expected UnknownField on volume entry body, got {other:?}"),
+    }
+}
+
+/// The read-only flag rides along with whichever side collides — setting
+/// it doesn't change what counts as a duplicate container path, since
+/// uniqueness is still checked before the flag is even looked at.
+#[test]
+fn volume_duplicate_container_path_is_still_an_error_with_read_only_flag() {
+    let err = parse(
+        "service s {\n  \
+           volume \"a\" -> \"/data\" { read_only }\n  \
+           volume \"b\" -> \"/data\"\n\
+         }\n",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::DuplicateMapKey {
+                type_name: "volume",
+                side: MapSide::Value,
+                ..
+            }
+        ),
+        "expected DuplicateMapKey on volume container path, got {err:?}"
+    );
 }
 
 // --- maps: publish (#84) ---

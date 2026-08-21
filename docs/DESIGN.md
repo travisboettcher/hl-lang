@@ -45,7 +45,8 @@ Punctuation: { } [ ] ( ) : = -> , . $
   else that looks like a keyword (`service`, `network`, `image`, `volume`,
   `publish`, `env`, `env_file`, `restart`, `expose`, `healthcheck`,
   `middleware`, `depends_on`, `networks`, `dns`, `container_name`,
-  `with`, `as`, `external`, `use`, `raw`, `defaults`, and more) is an
+  `command`, `with`, `as`, `external`, `use`, `raw`, `defaults`, and
+  more) is an
   ordinary `IDENT`, resolved against a schema table at parse time—not a
   lexer-level keyword. `with`, `as`, `external`, and `use` are
   *contextual* keywords, meaningful only in the grammar position expected
@@ -259,6 +260,46 @@ is what selects the entry parser that draws the distinction. Every other
 map key—`env`, `publish`, `driver_opts`, `raw`—stays a plain literal,
 since none of them names anything an `.hll` file declares.
 
+Every `volume` entry, on either side of that host-kind split, may also
+carry an optional trailing `{ read_only }` body—`volume "/" ->
+"/rootfs" { read_only }`—appending Compose short syntax's `:ro` mode
+suffix to the emitted mount string, per #158. `depends_on`'s own
+per-entry `{ condition: ... }` body, covered later in this section,
+uses the identical shape: an entry that already parsed its primary pair
+can add `{ }` next, and the parser only checks for that per-entry `{`
+after parsing the pair, not at the point where the `SchemaKind::Map`
+branch decides whether the whole field opens with a canonical
+multi-entry `{ }` body or a single bare entry—so the two `{`s never
+compete for the same position. `read_only` is bare presence, matching
+`NETWORK`'s own `external`, not a `key: value` pair, since the only
+value this milestone tracks is present or absent.
+
+This design rejects two of the issue's own candidate shapes before
+landing on this one. A trailing bare flag after the primary form—`volume
+"/" -> "/rootfs", read_only`—turns out genuinely ambiguous, not just
+unfamiliar: inside `volume`'s existing canonical multi-entry body, a
+comma already separates one entry from the next, and a bare identifier
+there already names the host side of a named-volume entry—so `volume {
+"/" -> "/rootfs", read_only -> "/mnt2" }` already mounts a valid
+two-entry list, one entry naming a volume literally called `read_only`.
+Telling "a flag on the entry before the comma" apart from "the start of
+a new entry that ran out of input before its own `->`" would need
+unbounded lookahead the rest of the grammar never asks for. A `mode`
+sub-field—`{ mode: "ro" }`—fails on scope alone, not ambiguity: this
+milestone deliberately covers only `:ro`, leaving Compose's other
+short-syntax suffixes (the `z`/`Z` SELinux relabeling flags, tmpfs
+sizing) for a future issue, and a general string field would leave every
+value but `"ro"` silently unchecked rather than rejected the way an
+unknown bare flag already gets rejected.
+
+`merge_map`'s existing full-entry replacement gives `read_only` the
+correct override behavior for free—see "Composition" later in this
+document. A later tier's entry with the same container path replaces
+the earlier `VolumeEntry` outright, flag included, instead of merging
+field by field, so an overriding entry that writes no flag drops an
+inherited one, and an overriding entry that writes the flag never loses
+it. This field needed no merge-path change.
+
 `raw`'s "no uniqueness checking" is a *parser*-level statement: the
 parser never checks its own entries against each other or against any
 other field. Codegen does have one rule about them, because YAML forces
@@ -379,10 +420,22 @@ it's simply omitted from the generated service block rather than
 defaulting to anything—see #90. Compose's own per-project default
 naming is what most people want, and defaulting the built-in to the
 service's own name reliably collided across independent stacks sharing
-a common service name. `template` isn't a row either—it's the mechanism
-for adding new rows to this table at parse time. `defaults` is likewise
-not a row—it's an ordinary template, semantically special only in that
-it's implicitly applied—see Composition, below.
+a common service name. `command`, added in #156, isn't a row either,
+for the same reason as `container_name`: a plain field directly on
+`service`/`template` (`command "npm start"` / `command ["npm",
+"start"]`) rather than a nested struct type. Its kind is
+`FieldKind::ScalarOrList`, not `FieldKind::Scalar`, though—Compose's
+`command:` key takes `healthcheck.test`'s own shell-string-or-exec-list
+shape, overriding the image's entrypoint arguments rather than naming a
+health check—so `command` follows `test`'s own model everywhere but its
+position directly on `ServiceFields`, unlike `container_name`. Unset,
+it's simply omitted, leaving the image's own `CMD`/entrypoint in effect,
+the same "omit rather than default" rule `container_name` follows.
+`template` isn't a
+row either—it's the mechanism for adding new rows to this table at
+parse time. `defaults` is likewise not a row—it's an ordinary template,
+semantically special only in that it's implicitly applied—see
+Composition, below.
 
 ## Composition: templates and `with`
 
@@ -463,6 +516,15 @@ can't ride the same name-keyed `SCALAR_FIELDS` table
 `compose.rs` is `merge_scalar` generalized over the value type, applied
 to two dedicated `MergeAcc` slots instead of a third table row, since
 only these two fields need it—see #153.
+
+`command`'s own type, `Command`, shares this same shell-string-or-
+exec-list shape and merges through the same `merge_scalar_like`, with a
+third dedicated `MergeAcc` slot of its own—see #156. It's the direct
+`ServiceFields` case rather than the nested-struct one: `command` sets
+`ServiceFields::command` straight from `merge_scalar_like`'s result, the
+way `container_name`'s row in `SCALAR_FIELDS` sets its own field
+directly, rather than reaching through a `get_or_insert` on an enclosing
+struct the way `healthcheck.test` reaches into `Healthcheck` first.
 
 ```
 template internal_web(port: Number) {
