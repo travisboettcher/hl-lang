@@ -1513,6 +1513,74 @@ fn env_file_repeats_accumulate() {
     assert_eq!(entries, vec!["miniflux.env", "common.env"]);
 }
 
+// --- privileged / devices (#157) ---
+
+/// `privileged` is bare-presence only, modeled directly on `network`'s
+/// `external` — see `bool_flag_rejects_explicit_value`/
+/// `bool_flag_duplicate_is_error` for the generic mechanism this
+/// exercises.
+#[test]
+fn privileged_bare_flag_on_service() {
+    let program = parse_ok("service s {\n  image \"x\"\n  privileged\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(service.fields.privileged.is_some());
+}
+
+#[test]
+fn service_without_privileged_defaults_unset() {
+    let program = parse_ok("service s {\n  image \"x\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(service.fields.privileged.is_none());
+}
+
+#[test]
+fn privileged_rejects_a_colon_value() {
+    let err = parse("service s {\n  image \"x\"\n  privileged: true\n}\n").unwrap_err();
+    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+}
+
+#[test]
+fn devices_bare_single_form() {
+    let program = parse_ok("service s {\n  devices \"/dev/kmsg:/dev/kmsg\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    let entries: Vec<&str> = service
+        .fields
+        .devices
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(entries, vec!["/dev/kmsg:/dev/kmsg"]);
+}
+
+#[test]
+fn devices_bracket_list_form() {
+    let program =
+        parse_ok("service s {\n  devices [\"/dev/kmsg:/dev/kmsg\", \"/dev/fuse:/dev/fuse\"]\n}\n");
+    let service = as_service(&program.decls[0]);
+    let entries: Vec<&str> = service
+        .fields
+        .devices
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(entries, vec!["/dev/kmsg:/dev/kmsg", "/dev/fuse:/dev/fuse"]);
+}
+
+#[test]
+fn devices_repeats_accumulate() {
+    let program = parse_ok(
+        "service s {\n  devices \"/dev/kmsg:/dev/kmsg\"\n  devices \"/dev/fuse:/dev/fuse\"\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let entries: Vec<&str> = service
+        .fields
+        .devices
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(entries, vec!["/dev/kmsg:/dev/kmsg", "/dev/fuse:/dev/fuse"]);
+}
+
 // --- template declarations ---
 
 #[test]

@@ -80,11 +80,14 @@ volumes:
     );
 }
 
-/// `raw`'s job: entries land as sibling top-level service keys, matching
-/// the real `cadvisor/docker-compose.yml`'s `privileged`/`devices`/
-/// `security_opt` shape exactly (not asserting label parity — the real
-/// file's label has a typo, `traefiki.docker.network`, that's a bug in
-/// the source data, not a codegen target).
+/// `cadvisor`'s three host-access knobs, matching the real
+/// `cadvisor/docker-compose.yml`'s `privileged`/`devices`/`security_opt`
+/// shape exactly (not asserting label parity — the real file's label has
+/// a typo, `traefiki.docker.network`, that's a bug in the source data,
+/// not a codegen target): the first two are dedicated fields (#157), and
+/// `security_opt` still goes through `raw`, landing as a sibling
+/// top-level service key — the genuine long tail `raw`'s job narrowed to
+/// once `privileged`/`devices` graduated out of it.
 #[test]
 fn cadvisor_raw_passthrough_matches_real_service() {
     let yaml = generate_from(RAW_SERVICE);
@@ -96,7 +99,7 @@ services:
     image: gcr.io/cadvisor/cadvisor:latest
     privileged: true
     devices:
-      - /dev/kmsg
+      - /dev/kmsg:/dev/kmsg
     security_opt:
       seccomp: unconfined
 "#,
@@ -279,6 +282,110 @@ services:
     image: miniflux/miniflux:latest
     env_file:
       - raw.env
+"#,
+    );
+}
+
+// --- privileged / devices (#157) ---
+
+/// `privileged` is bare-presence, exactly like `network`'s `external` —
+/// setting it emits Compose's `privileged: true`.
+#[test]
+fn privileged_bare_flag_emits_true() {
+    let yaml = generate_from("service cadvisor {\n  image \"nginx\"\n  privileged\n}\n");
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  cadvisor:
+    image: nginx
+    privileged: true
+"#,
+    );
+}
+
+/// Leaving `privileged` unset emits no `privileged:` key at all —
+/// there's no `false` form to fall back to, since absence already means
+/// false.
+#[test]
+fn privileged_unset_emits_no_key() {
+    let yaml = generate_from("service cadvisor {\n  image \"nginx\"\n}\n");
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  cadvisor:
+    image: nginx
+"#,
+    );
+}
+
+/// `devices ["a"]` — the bare single-item sugar every reference-list
+/// field gets for free — emits Compose's `devices:` as a one-element
+/// list.
+#[test]
+fn devices_single_entry_emits_a_one_element_list() {
+    let yaml = generate_from(
+        "service cadvisor {\n  image \"nginx\"\n  devices \"/dev/kmsg:/dev/kmsg\"\n}\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  cadvisor:
+    image: nginx
+    devices:
+      - /dev/kmsg:/dev/kmsg
+"#,
+    );
+}
+
+/// The bracketed list form round-trips every mapping in order.
+#[test]
+fn devices_list_form_emits_every_mapping_in_order() {
+    let yaml = generate_from(
+        "service cadvisor {\n  \
+           image \"nginx\"\n  \
+           devices [\"/dev/kmsg:/dev/kmsg\", \"/dev/fuse:/dev/fuse\"]\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  cadvisor:
+    image: nginx
+    devices:
+      - /dev/kmsg:/dev/kmsg
+      - /dev/fuse:/dev/fuse
+"#,
+    );
+}
+
+/// `raw { privileged: ... }` / `raw { devices: ... }` override the
+/// built-in fields, the same way every other built-in field does.
+#[test]
+fn raw_privileged_and_devices_override_the_built_in_fields() {
+    let yaml = generate_from(
+        "service cadvisor {\n  \
+           image \"nginx\"\n  \
+           privileged\n  \
+           devices \"/dev/kmsg:/dev/kmsg\"\n  \
+           raw {\n    \
+             privileged: false\n    \
+             devices: [\"/dev/raw:/dev/raw\"]\n  \
+           }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  cadvisor:
+    image: nginx
+    privileged: false
+    devices:
+      - /dev/raw:/dev/raw
 "#,
     );
 }
@@ -1417,6 +1524,7 @@ fn every_built_in_field_is_overridable_by_raw() {
          service web {\n  \
            image \"nginx\"\n  \
            container_name \"web-ctr\"\n  \
+           privileged\n  \
            restart unless-stopped\n  \
            healthcheck { test: \"curl -f http://localhost\" }\n  \
            env PUID = \"1000\"\n  \
@@ -1424,12 +1532,14 @@ fn every_built_in_field_is_overridable_by_raw() {
            volume web-data -> \"/data\"\n  \
            networks [traefik-net]\n  \
            dns [\"192.168.50.182\"]\n  \
+           devices [\"/dev/original:/dev/original\"]\n  \
            publish 8080 -> 8080\n  \
            expose 8080 as \"web.example.com\"\n  \
            depends_on database\n  \
            raw {\n    \
              image: \"raw-image\"\n    \
              container_name: \"raw-name\"\n    \
+             privileged: false\n    \
              restart: \"always\"\n    \
              healthcheck: { test: \"raw-test\" }\n    \
              environment: [\"RAW=1\"]\n    \
@@ -1437,6 +1547,7 @@ fn every_built_in_field_is_overridable_by_raw() {
              volumes: [\"raw-vol:/raw\"]\n    \
              networks: [\"raw-net\"]\n    \
              dns: [\"1.1.1.1\"]\n    \
+             devices: [\"/dev/raw:/dev/raw\"]\n    \
              ports: [\"7777:7777\"]\n    \
              expose: [9999]\n    \
              depends_on: [\"raw-dep\"]\n    \
@@ -1451,6 +1562,7 @@ fn every_built_in_field_is_overridable_by_raw() {
         r#"
 image: raw-image
 container_name: raw-name
+privileged: false
 restart: always
 healthcheck:
   test: raw-test
@@ -1464,6 +1576,8 @@ networks:
   - raw-net
 dns:
   - 1.1.1.1
+devices:
+  - /dev/raw:/dev/raw
 ports:
   - "7777:7777"
 expose:

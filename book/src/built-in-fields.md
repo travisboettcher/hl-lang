@@ -559,6 +559,41 @@ same condition on both—are giving the same answer twice, not two
 different ones, so they still collapse to a single entry exactly as
 they always have.
 
+## `privileged` and `devices`
+
+Two more plain generic Compose keys, directly on `service`/`template`:
+
+```hll,fragment
+privileged
+
+devices ["/dev/kmsg:/dev/kmsg"]
+```
+
+| Field | Accepts | Default |
+|---|---|---|
+| `privileged` | bare flag, no value | unset, `false` |
+| `devices` | string or list of strings | empty |
+
+- `privileged` gives the container extended host privileges—Compose's
+  own `privileged:` key. Bare-presence only, matching `network`'s own
+  `external` field: there's no `privileged: false` form to write, since
+  absence already means false.
+- `devices` maps a host device into the container, as one or more
+  `"host:container"` strings—Compose's own `devices:` key. It's a plain
+  generic Compose key like `dns`, not homelab-specific itself even
+  though a real entry always is. `hllc` never validates or rewrites a
+  device path—write it exactly as `docker compose` would expect it.
+
+  Unlike `dns`/`env_file`, repeated `devices` entries dedupe across
+  `with` composition, the same way `networks`/`middleware` do: naming
+  the same `"host:container"` mapping twice means exactly what naming it
+  once means, and there's no Compose semantic—no resolver priority, no
+  last-file-wins rule—under which the position of a repeat matters.
+
+`cadvisor` is the service that motivated both: it needs `privileged` and
+a `devices` mount to read host `/proc`/cgroups, previously written
+through [`raw`](#raw) before these two fields existed.
+
 ## `container_name`
 
 A plain scalar field directly on `service`/`template`, not a nested
@@ -586,21 +621,23 @@ same name.
 
 Map-kind, schema-free: `hllc` accepts unknown keys as-is rather than
 checking them against a fixed field list, and their values pass
-straight through to the generated YAML. This is the escape hatch for
-any Compose key `hll` doesn't have a dedicated field for yet:
+straight through to the generated YAML. `raw`'s job has narrowed over
+time as more of its common uses graduated into dedicated fields—
+`privileged`/`devices` most recently—so what's left is the genuine long
+tail: real Compose keys that come up rarely enough, or are specific
+enough to one deployment, that a dedicated field isn't worth it. `cadvisor`'s
+`security_opt` is one:
 
 ```hll,fragment
 raw {
-  privileged: true,
-  cap_add: ["NET_ADMIN"]
+  security_opt: ["seccomp=unconfined"]
 }
 ```
 
 Each `raw` entry becomes a sibling top-level key on the generated
-Compose service block (`privileged: true`, `cap_add: [...]`), exactly as
-written—there's no validation, so `docker compose` itself is the first
-thing to reject a misspelled key or a value Compose doesn't
-understand.
+Compose service block (`security_opt: [...]`), exactly as written—there's
+no validation, so `docker compose` itself is the first thing to reject a
+misspelled key or a value Compose doesn't understand.
 
 A `raw` value's lists and maps may nest up to 128 levels deep. Past
 that, `hllc` reports an error rather than following the nesting
@@ -610,10 +647,10 @@ ever comes up for generated or pathological input.
 ### `raw` wins over a built-in field of the same name
 
 A `raw` key may name a field `hll` already has: `image`,
-`container_name`, `restart`, `healthcheck`, `environment`, `env_file`,
-`volumes`, `networks`, `dns`, `ports`, `expose`, `depends_on`, or
-`labels`. When it does, the `raw` value is what's emitted, and `hllc`
-drops the built-in one—the key appears exactly once:
+`container_name`, `privileged`, `restart`, `healthcheck`, `environment`,
+`env_file`, `volumes`, `networks`, `dns`, `devices`, `ports`, `expose`,
+`depends_on`, or `labels`. When it does, the `raw` value is what's
+emitted, and `hllc` drops the built-in one—the key appears exactly once:
 
 ```hll,fragment
 image "nginx"

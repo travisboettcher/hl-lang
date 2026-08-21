@@ -1682,6 +1682,14 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         Some(FieldValue::RefList(v)) => v,
         _ => Vec::new(),
     };
+    let privileged = match fields.remove("privileged") {
+        Some(FieldValue::Flag(s)) => Some(s),
+        _ => None,
+    };
+    let devices = match fields.remove("devices") {
+        Some(FieldValue::RefList(v)) => v,
+        _ => Vec::new(),
+    };
     let with = match fields.remove("with") {
         Some(FieldValue::Struct(mut with_fields, _)) => match with_fields.remove("templates") {
             Some(FieldValue::TemplateInvocations(v)) => v,
@@ -1703,6 +1711,8 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         networks,
         dns,
         env_file,
+        privileged,
+        devices,
         container_name,
         with,
     }

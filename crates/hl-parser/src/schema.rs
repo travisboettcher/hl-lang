@@ -25,8 +25,9 @@ pub enum FieldKind {
     /// A single literal value. Writing it twice in one body is a
     /// [`crate::ParseError::DuplicateField`].
     Scalar,
-    /// A boolean flag settable only by bare presence (`external`, with no
-    /// `: value` form this milestone) — its span is recorded when set.
+    /// A boolean flag settable only by bare presence (`external`,
+    /// `healthcheck.disable`, `privileged` — see #157), with no
+    /// `: value` form this milestone — its span is recorded when set.
     BoolFlag,
     /// The field's value is itself an instance of another registered
     /// type. Struct-kind nested types are single-occurrence (a second
@@ -34,10 +35,10 @@ pub enum FieldKind {
     /// entries across repeated writes (per docs/DESIGN.md's rule 4).
     Nested(&'static TypeSchema),
     /// A list of bare-identifier/string references (`middleware`,
-    /// `networks`, `dns`, `env_file`). Accumulates across repeats;
-    /// settable via a bracketed list, the bare comma-list sugar, or
-    /// repeated statements — never duplicate-checked, since list fields
-    /// can't collide.
+    /// `networks`, `dns`, `env_file`, `devices`). Accumulates across
+    /// repeats; settable via a bracketed list, the bare comma-list
+    /// sugar, or repeated statements — never duplicate-checked, since
+    /// list fields can't collide.
     ///
     /// `depends_on` moved off this kind and onto its own
     /// [`Self::DependsOnList`] when its entries gained an optional
@@ -549,6 +550,17 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
     },
     FieldSchema {
         name: "env_file",
+        kind: FieldKind::ReferenceList,
+    },
+    // `privileged` / `devices` (#157): both plain generic Compose keys
+    // promoted out of `raw` — see [`crate::ast::ServiceFields::privileged`]/
+    // [`crate::ast::ServiceFields::devices`] for the full reasoning.
+    FieldSchema {
+        name: "privileged",
+        kind: FieldKind::BoolFlag,
+    },
+    FieldSchema {
+        name: "devices",
         kind: FieldKind::ReferenceList,
     },
     FieldSchema {

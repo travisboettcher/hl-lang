@@ -178,6 +178,13 @@ pub(crate) struct ComposeServiceDoc {
     /// Compose refuses to start the second container with the same name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container_name: Option<String>,
+    /// Compose's own `privileged:` key (#157). Modeled on
+    /// [`NetworkDoc::external`]: bare-presence only, so this is always
+    /// emitted as `true` or omitted entirely, never `false` —
+    /// [`hl_parser::ServiceFields::privileged`] has no way to represent
+    /// an explicit `false` to begin with.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub privileged: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart: Option<String>,
     /// Compose's own `healthcheck:` key (#153). `None` both when
@@ -203,6 +210,14 @@ pub(crate) struct ComposeServiceDoc {
     pub networks: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dns: Vec<String>,
+    /// `devices ["/dev/kmsg:/dev/kmsg"]` entries, Compose's own
+    /// `devices:` key (#157), carried through verbatim as
+    /// `"host:container"` mapping strings — the same treatment
+    /// [`Self::env_file`] gives its own paths, for the same reason:
+    /// `hllc` neither validates nor rewrites a host device path, that's
+    /// the deploy target's concern.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<String>,
     /// `publish host -> container` entries, as Compose short-syntax
     /// `host:container` strings — one string per mapping, never a
     /// nested `{ target, published }` mapping.
@@ -228,8 +243,9 @@ pub(crate) struct ComposeServiceDoc {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
     /// `raw {}` entries — flattened so they land as sibling top-level
-    /// service keys (e.g. `privileged: true`), matching `raw`'s own
-    /// verbatim-passthrough design intent. `serde(flatten)` doesn't
+    /// service keys (e.g. `security_opt: [...]`), matching `raw`'s own
+    /// verbatim-passthrough design intent for the genuine long tail of
+    /// Compose keys `hll` has no dedicated field for. `serde(flatten)` doesn't
     /// support `skip_serializing_if`, but an empty map flattens to zero
     /// extra keys anyway, so nothing extra is needed here.
     ///
@@ -277,6 +293,7 @@ impl ComposeServiceDoc {
         let Self {
             image,
             container_name,
+            privileged,
             restart,
             healthcheck,
             environment,
@@ -284,6 +301,7 @@ impl ComposeServiceDoc {
             volumes,
             networks,
             dns,
+            devices,
             ports,
             expose,
             depends_on,
@@ -298,6 +316,9 @@ impl ComposeServiceDoc {
         }
         if raw.contains_key("container_name") {
             *container_name = None;
+        }
+        if raw.contains_key("privileged") {
+            *privileged = false;
         }
         if raw.contains_key("restart") {
             *restart = None;
@@ -319,6 +340,9 @@ impl ComposeServiceDoc {
         }
         if raw.contains_key("dns") {
             dns.clear();
+        }
+        if raw.contains_key("devices") {
+            devices.clear();
         }
         if raw.contains_key("ports") {
             ports.clear();

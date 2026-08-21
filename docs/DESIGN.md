@@ -44,8 +44,9 @@ Punctuation: { } [ ] ( ) : = -> , . $
 - `template` is the *only* reserved word in the entire language. Everything
   else that looks like a keyword (`service`, `network`, `image`, `volume`,
   `publish`, `env`, `env_file`, `restart`, `expose`, `healthcheck`,
-  `middleware`, `depends_on`, `networks`, `dns`, `container_name`,
-  `with`, `as`, `external`, `use`, `raw`, `defaults`, and more) is an
+  `middleware`, `depends_on`, `networks`, `dns`, `devices`,
+  `container_name`, `privileged`, `with`, `as`, `external`, `use`,
+  `raw`, `defaults`, and more) is an
   ordinary `IDENT`, resolved against a schema table at parse time—not a
   lexer-level keyword. `with`, `as`, `external`, and `use` are
   *contextual* keywords, meaningful only in the grammar position expected
@@ -268,6 +269,18 @@ adding a row to this table from breaking files that were already
 reaching for `raw` in that row's absence (see the `raw` section of the
 book's Built-in Fields page).
 
+`raw`'s own job has narrowed as the preceding schema table has grown.
+Early on, before this table had more than a handful of rows, `raw` stood
+in for nearly everything—it was, practically, the only way to reach most
+of Compose's service-level keys. Each row this table gains since then is
+one fewer key that has to route through it, so `raw`'s job today is
+better described as the genuine long tail: real Compose keys that come
+up too rarely, or are too specific to one deployment, to earn a row of
+their own. `privileged`/`devices` are the most recent pair to graduate
+out of it—see #157—following `dns`/`env_file`/`healthcheck` before them,
+leaving keys like `security_opt` as the kind of entry that stays in
+`raw` for good.
+
 `publish` and `expose` are separate rows on purpose, not two spellings
 of one concept. `publish` is Compose's `ports:` key, which puts the port
 on the Docker host where the local network can reach it, and `expose` is
@@ -312,17 +325,21 @@ homelab-specific in any of its own fields—the same "generic core"
 reasoning that already justified `dns`/`env_file`/`container_name`, see
 #153.
 
-`middleware`, `depends_on`, `networks`, `dns`, and `env_file` aren't
-rows in this table—they're plain list-of-reference fields directly on
-`service`/`template` (`dns ["192.168.50.182"]`: a per-service Domain
-Name System (DNS) resolver override, Compose's own `dns:` key—the field
-itself is generic, only a given entry's IP is homelab-specific, same
-reasoning as `volume`'s host path or an `env` entry's value already
-being homelab-specific without the field itself being one). `env_file`
-(`env_file "miniflux.env"` / `env_file ["miniflux.env", "common.env"]`)
-follows the exact same reasoning as `dns`—Compose's own `env_file:` key,
-generic itself even though a real entry almost always names a
-gitignored, homelab-specific `.env` file—see #154.
+`middleware`, `depends_on`, `networks`, `dns`, `env_file`, and `devices`
+aren't rows in this table—they're plain list-of-reference fields
+directly on `service`/`template` (`dns ["192.168.50.182"]`: a
+per-service Domain Name System (DNS) resolver override, Compose's own
+`dns:` key—the field itself is generic, only a given entry's IP is
+homelab-specific, same reasoning as `volume`'s host path or an `env`
+entry's value already being homelab-specific without the field itself
+being one). `env_file` (`env_file "miniflux.env"` / `env_file
+["miniflux.env", "common.env"]`) follows the exact same reasoning as
+`dns`—Compose's own `env_file:` key, generic itself even though a real
+entry almost always names a gitignored, homelab-specific `.env`
+file—see #154. `devices` (`devices ["/dev/kmsg:/dev/kmsg"]`) follows the
+same shape once more—Compose's own `devices:` key, a list of
+`"host:container"` device-mapping strings, generic itself even though a
+real mapping is specific to one machine's hardware—see #157.
 
 `depends_on` (`depends_on database` / `depends_on [database { condition:
 service_healthy }]`) shares this row's surface grammar—a bare reference,
@@ -362,7 +379,10 @@ it's simply omitted from the generated service block rather than
 defaulting to anything—see #90. Compose's own per-project default
 naming is what most people want, and defaulting the built-in to the
 service's own name reliably collided across independent stacks sharing
-a common service name. `template` isn't a row either—it's the mechanism
+a common service name. `privileged` isn't a row either, for the same
+reason `NETWORK`'s `external` isn't: a bare-presence `FieldKind::BoolFlag`
+directly on `service`/`template`, matching Compose's own `privileged:`
+key—see #157. `template` isn't a row either—it's the mechanism
 for adding new rows to this table at parse time. `defaults` is likewise
 not a row—it's an ordinary template, semantically special only in that
 it's implicitly applied—see Composition, below.
@@ -388,13 +408,23 @@ Merge priority, lowest to highest:
 3. the service's own body—always wins over everything
 
 List fields concatenate, so no collision is possible. The set-like ones
-(`middleware`, `networks`, `expose.entrypoint`) concatenate by *distinct*
-name, keeping the first occurrence, while `dns` and `env_file` keep
-duplicates since their order is observable—resolver priority for `dns`,
-Compose's own last-file-wins precedence for `env_file`—see #154. Map
+(`middleware`, `networks`, `expose.entrypoint`, `devices`) concatenate by
+*distinct* name, keeping the first occurrence, while `dns` and
+`env_file` keep duplicates since their order is observable—resolver
+priority for `dns`, Compose's own last-file-wins precedence for
+`env_file`—see #154. `devices` joins the set-like group rather than
+`dns`/`env_file`'s despite sharing their plain-literal-entry shape: a
+repeated `"host:container"` mapping has no order-dependent Compose
+behavior the way a repeated resolver IP or a repeated `env_file` entry
+can, so naming one twice is exactly as meaningless as naming the same
+network or middleware twice—see #157. Map
 fields merge key-by-key (or value-by-value for `volume` and `publish`),
 and scalar fields (`image`, `restart`) error on collision among explicit
-templates only.
+templates only. `privileged` gets the same collision rule as a scalar
+field even though it isn't one—see the `healthcheck.test`/`.disable`
+paragraph below for how a bare-presence flag rides the same
+Own-always-wins/`defaults`-always-loses/two-explicit-collide rule
+through `merge_scalar_like` instead of `merge_scalar`.
 
 `depends_on` merges key-by-key too, not by the set-like lists' rule,
 even though its surface grammar is still a reference list
@@ -439,13 +469,14 @@ service's own body can override just `expose.host` (or just
 only collide if they set the *same* scalar sub-field, not merely the
 same enclosing field overall.
 
-`healthcheck.test`, whose type is `HealthcheckTest`, and
-`healthcheck.disable`, a bare-presence flag, aren't `Literal`s, so they
-can't ride the same name-keyed `SCALAR_FIELDS` table
-`expose.port`/`.host`/`restart.policy` do—`merge_scalar_like` in
-`compose.rs` is `merge_scalar` generalized over the value type, applied
-to two dedicated `MergeAcc` slots instead of a third table row, since
-only these two fields need it—see #153.
+`healthcheck.test`, whose type is `HealthcheckTest`, `healthcheck.disable`,
+a bare-presence flag, and `privileged`, another bare-presence flag but a
+field directly on `ServiceFields` rather than nested inside a struct,
+aren't `Literal`s, so none of the three can ride the same name-keyed
+`SCALAR_FIELDS` table `expose.port`/`.host`/`restart.policy` do—
+`merge_scalar_like` in `compose.rs` is `merge_scalar` generalized over
+the value type, applied to three dedicated `MergeAcc` slots instead of
+more table rows, since only these three fields need it—see #153, #157.
 
 ```
 template internal_web(port: Number) {
@@ -481,9 +512,13 @@ use "docker.hll" as traefik
   `IDENT`: a `networks [...]` entry (`networks [traefik.traefik-net]`),
   a named-volume mount's host side (`volume storage.media -> "/data"`),
   or a `with` invocation's target (`with common.internal_web { ... }`).
-  `middleware`/`depends_on` don't support a qualified form—neither has
-  a coherent cross-file meaning (`depends_on` names a same-file sibling
-  service, and `middleware` isn't resolved against anything at all).
+  `middleware`/`depends_on`/`dns`/`env_file`/`devices` don't support a
+  qualified form. None has a coherent cross-file meaning: `depends_on`
+  names a same-file sibling service, and `middleware`/`dns`/`env_file`/
+  `devices` aren't resolved against anything an `.hll` file declares at
+  all—an `env_file` entry names a path on disk next to the generated
+  Compose file, and a `devices` entry names a host device path, see
+  #157.
 - **Templates are lexically scoped, not dynamically scoped.** If a
   template declared in `templates.hll` writes
   `networks [traefik.traefik-net]`, that `traefik` resolves against

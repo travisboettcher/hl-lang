@@ -623,6 +623,37 @@ pub struct ServiceFields {
     /// concern, not `hllc`'s, so a path is carried through verbatim
     /// either way and never needs a qualifier to mean anything.
     pub env_file: Vec<Reference>,
+    /// `privileged` — Compose's own `privileged:` key (#157), giving the
+    /// container extended host privileges (`cadvisor`'s classic use
+    /// case: reading host `/proc`/cgroups). A plain generic Compose key
+    /// like `dns`/`env_file`, not homelab-specific itself. Modeled
+    /// directly on [`Network::external`]: a bare-presence flag with no
+    /// `: value` form — there is no `privileged: false` to write, since
+    /// absence already means false, so a colon after it is a parse
+    /// error rather than an attempted value.
+    pub privileged: Option<Span>,
+    /// `devices ["/dev/kmsg:/dev/kmsg"]` — host device paths to expose
+    /// inside the container, Compose's own `devices:` key (#157). Same
+    /// reasoning as [`Self::dns`]/[`Self::env_file`]: a plain generic
+    /// Compose key, not homelab-specific itself even though a real entry
+    /// always is, list-typed and reference-list shaped like
+    /// `middleware`/`networks`/`dns`/`env_file` (settable via a
+    /// bracketed list, the bare single-item sugar, or repeated
+    /// statements), even though its entries are ordinary
+    /// `"host:container"` mapping strings rather than references to
+    /// another declaration. Reusing [`Reference`] costs nothing here for
+    /// the same reason it costs nothing for `dns`/`env_file`: a device
+    /// path isn't something any `.hll` file declares, so it never needs
+    /// a qualifier to mean anything, and a `STRING` entry can't carry
+    /// one anyway.
+    ///
+    /// Unlike `dns`/`env_file`, `devices` *does* dedupe across `with`
+    /// composition — see `compose.rs`'s `LIST_FIELDS` entry for this
+    /// field for why: there's no Compose semantic under which repeating
+    /// the exact same mapping twice means anything different from
+    /// stating it once, unlike `dns`'s resolver priority or `env_file`'s
+    /// last-file-wins rule.
+    pub devices: Vec<Reference>,
     /// Docker's own `container_name:` key. `None` means "default to the
     /// service's own name" (via the same `{{name}}` interpolation
     /// binding `expose`'s `as`-sugar already uses) — codegen, not the

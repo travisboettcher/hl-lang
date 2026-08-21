@@ -471,6 +471,13 @@ fn generate_service(
     // compile time (#154).
     let env_file = fields.env_file.iter().map(|r| r.name.clone()).collect();
 
+    // Bare-presence only, exactly like `network`'s `external` — see
+    // `ast::ServiceFields::privileged`'s doc (#157).
+    let privileged = fields.privileged.is_some();
+    // `"host:container"` mapping strings, carried through verbatim for
+    // the same reason `dns`/`env_file` are just above (#157).
+    let devices = fields.devices.iter().map(|r| r.name.clone()).collect();
+
     let mut raw_map = IndexMap::new();
     for entry in &fields.raw.entries {
         let key = interp::resolve(entry.key.text(), &bindings, entry.key.span())?;
@@ -480,6 +487,7 @@ fn generate_service(
     let mut service_doc = doc::ComposeServiceDoc {
         image: Some(image),
         container_name,
+        privileged,
         restart,
         healthcheck,
         environment,
@@ -487,6 +495,7 @@ fn generate_service(
         volumes: volume_entries,
         networks: compose_networks,
         dns,
+        devices,
         ports: publish_entries,
         expose,
         depends_on,
@@ -504,7 +513,7 @@ fn generate_service(
 /// [`DependsOnEntry`] list (#155) — see [`doc::DependsOnDoc`]'s own doc
 /// for the short-vs-long shape switch this picks between. Deliberately
 /// never `{{name}}`-interpolated, matching every other reference-list
-/// field (`middleware`/`networks`/`dns`/`env_file`): a `depends_on`
+/// field (`middleware`/`networks`/`dns`/`env_file`/`devices`): a `depends_on`
 /// entry names a same-file sibling service, not free text, so there is
 /// nothing in it a binding could ever apply to.
 ///

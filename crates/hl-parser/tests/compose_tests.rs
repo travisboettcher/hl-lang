@@ -1070,6 +1070,130 @@ fn env_file_keeps_duplicates() {
     assert_eq!(entries, vec!["common.env", "common.env"]);
 }
 
+// --- privileged / devices (#157) ---
+
+/// `devices` is list-typed just like `dns`/`env_file` — it concatenates
+/// across tiers rather than colliding.
+#[test]
+fn devices_concatenates_across_tiers() {
+    let composed = compose_ok(
+        "template a {\n  devices \"/dev/kmsg:/dev/kmsg\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n  devices \"/dev/fuse:/dev/fuse\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries: Vec<&str> = service
+        .fields
+        .devices
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(entries, vec!["/dev/kmsg:/dev/kmsg", "/dev/fuse:/dev/fuse"]);
+}
+
+/// Unlike `dns`/`env_file`, `devices` *is* deduped (#69): there's no
+/// Compose semantic under which repeating the exact same
+/// `"host:container"` mapping means anything different from stating it
+/// once, so it dedupes the same way the set-like lists
+/// (`networks`/`middleware`/`expose.entrypoint`) do — see
+/// `compose.rs`'s `LIST_FIELDS` entry for this field for the full
+/// reasoning.
+#[test]
+fn devices_deduplicates_across_tiers() {
+    let composed = compose_ok(
+        "template a {\n  devices \"/dev/kmsg:/dev/kmsg\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n  devices \"/dev/kmsg:/dev/kmsg\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries: Vec<&str> = service
+        .fields
+        .devices
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(entries, vec!["/dev/kmsg:/dev/kmsg"]);
+}
+
+/// A qualified `devices` entry has no cross-file meaning — a host device
+/// path lives on the deploy target, not as a declaration any `.hll` file
+/// could export — so it's rejected the same as `dns`/`env_file` (#157).
+#[test]
+fn qualified_devices_reference_is_rejected() {
+    let err = compose_err("service s {\n  image \"x\"\n  devices [other.device]\n}\n");
+    assert!(matches!(
+        err,
+        ComposeError::UnsupportedQualifiedReference { field: "devices", alias, .. } if alias == "other"
+    ));
+}
+
+#[test]
+fn unqualified_devices_is_accepted() {
+    let composed =
+        compose_ok("service s {\n  image \"x\"\n  devices [\"/dev/kmsg:/dev/kmsg\"]\n}\n");
+    let service = single_service(&composed);
+    assert_eq!(service.fields.devices.len(), 1);
+}
+
+/// `privileged` is a bare-presence `ServiceFields` field merged via
+/// `merge_scalar_like`, exactly like `healthcheck.disable` — same
+/// Own-always-wins rule, exercised directly here rather than through
+/// `healthcheck`'s nested struct. `Tier::Own` overwrites rather than
+/// colliding, unlike two `Explicit` tiers setting the same field (see
+/// `explicit_templates_setting_privileged_still_collide` below) — so
+/// composing succeeds here specifically because the service's own body
+/// is the tier doing the re-asserting.
+#[test]
+fn service_own_privileged_does_not_collide_with_an_explicit_templates_privileged() {
+    let composed = compose_ok(
+        "template needs_host_access {\n  privileged\n}\n\
+         service cadvisor {\n  with needs_host_access\n  image \"x\"\n  privileged\n}\n",
+    );
+    let service = single_service(&composed);
+    assert!(service.fields.privileged.is_some());
+}
+
+/// A `defaults` template setting `privileged` is silently overridden by
+/// an explicit template's own `privileged` for the same field, mirroring
+/// `defaults_healthcheck_test_loses_to_an_explicit_templates_test`'s
+/// `(Tier::Defaults, _)` arm. `privileged`'s "value" is only ever
+/// presence, so unlike `healthcheck.test`'s distinct strings, the two
+/// tiers can't be told apart by content — only by which span composition
+/// kept, so this pins that down by source line instead: `defaults`'s own
+/// `privileged` sits on line 2, `real`'s on line 5, and it's `real`'s
+/// that must survive.
+#[test]
+fn defaults_privileged_span_loses_to_an_explicit_templates_privileged() {
+    let composed = compose_ok(
+        "template defaults {\n  privileged\n}\n\
+         template real {\n  privileged\n}\n\
+         service s {\n  with real\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let span = service.fields.privileged.expect("privileged set");
+    assert_eq!(span.line, 5);
+}
+
+/// Two explicit templates both setting `privileged` collide, the same
+/// collision rule `healthcheck.disable` gets — see
+/// `explicit_templates_setting_same_healthcheck_disable_still_collide`.
+#[test]
+fn explicit_templates_setting_privileged_still_collide() {
+    let err = compose_err(
+        "template a {\n  privileged\n}\n\
+         template b {\n  privileged\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    assert!(
+        matches!(
+            err,
+            ComposeError::FieldCollision {
+                field: "privileged",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
 // --- cycles ---
 
 #[test]

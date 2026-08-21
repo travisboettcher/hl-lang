@@ -221,14 +221,15 @@ pub enum ComposeError {
     UnknownAlias { alias: String, span: Span },
     /// A qualified reference (`alias.name`) was used on a reference-list
     /// field that has no cross-file meaning — `middleware`,
-    /// `depends_on`, `dns`, `env_file`, or `expose.entrypoint`.
-    /// (`depends_on` names a same-file sibling service; the others
-    /// aren't resolved against anything an `.hll` file declares at
-    /// all — an entry point lives in the deployment's own
-    /// `traefik.yml`, and an `env_file` path lives on disk next to the
-    /// compose file.) Rejected rather than silently accepted or
-    /// silently dropped. Only `networks` resolves a qualifier, because
-    /// a `network` really is a declaration another file can export.
+    /// `depends_on`, `dns`, `env_file`, `devices`, or
+    /// `expose.entrypoint`. (`depends_on` names a same-file sibling
+    /// service; the others aren't resolved against anything an `.hll`
+    /// file declares at all — an entry point lives in the deployment's
+    /// own `traefik.yml`, an `env_file` path lives on disk next to the
+    /// compose file, and a `devices` entry names a host device path
+    /// (#157).) Rejected rather than silently accepted or silently
+    /// dropped. Only `networks` resolves a qualifier, because a
+    /// `network` really is a declaration another file can export.
     UnsupportedQualifiedReference {
         field: &'static str,
         alias: String,
@@ -1431,7 +1432,7 @@ fn resolve_invocation<R: SymbolResolver>(
 /// unqualified, resolved bare reference so [`merge_tier`] never needs to
 /// know imports exist, and recording the declaration it reached in
 /// `imports`. Qualified `middleware`/`depends_on`/`dns`/`env_file`/
-/// `expose.entrypoint` entries are rejected outright — see
+/// `devices`/`expose.entrypoint` entries are rejected outright — see
 /// [`ComposeError::UnsupportedQualifiedReference`]'s doc for why those
 /// have no cross-file meaning yet. Runs exactly once per scope, at
 /// the point that scope's own directly-written fields are merged (its
@@ -1482,6 +1483,10 @@ fn resolve_qualified_references<R: SymbolResolver>(
     // resolve against — same reasoning as `expose.entrypoint` just
     // below.
     reject_qualified(&fields.env_file, "env_file")?;
+    // A `devices` entry names a host device path (`/dev/kmsg:/dev/kmsg`),
+    // which no `.hll` file declares — same reasoning as `env_file` just
+    // above (#157).
+    reject_qualified(&fields.devices, "devices")?;
     // `expose.entrypoint` joined this list when it became a reference
     // list. An entry point names something in the deployment's own
     // `traefik.yml`, which no `.hll` file declares, so there is nothing
@@ -1749,14 +1754,14 @@ impl Spanned for PublishEntry {
 /// hand-written merge/rebuild logic.
 ///
 /// `lists` is the same idea for every plain reference-list field — the
-/// four bare ones on `ServiceFields` (`middleware`/`networks`/`dns`/
-/// `env_file`) plus `expose.entrypoint`, which lives inside a nested
-/// struct and so can't be a plain `MergeAcc` field the way the others
-/// once were. They carry no `Tier`: list fields concatenate
+/// five bare ones on `ServiceFields` (`middleware`/`networks`/`dns`/
+/// `env_file`/`devices`) plus `expose.entrypoint`, which lives inside a
+/// nested struct and so can't be a plain `MergeAcc` field the way the
+/// others once were. They carry no `Tier`: list fields concatenate
 /// unconditionally, so there is no collision to attribute to a tier.
 /// See [`LIST_FIELDS`].
 ///
-/// `depends_on` isn't one of the four — it moved into its own
+/// `depends_on` isn't one of the five — it moved into its own
 /// `depends_on` field below, merged key-by-key on the referenced
 /// service's own name through [`merge_depends_on`] rather than through
 /// [`LIST_FIELDS`], once #155 gave each entry an optional `condition`
@@ -1788,14 +1793,21 @@ struct MergeAcc {
     /// `healthcheck.test`'s own collision point — not part of `scalars`
     /// above because [`HealthcheckTest`] isn't a [`Literal`]. Merged by
     /// `merge_scalar_like`, which is [`merge_scalar`] generalized over
-    /// the value type since only this field and `healthcheck_disable`
-    /// need it — not worth a second name-keyed table for two rows.
+    /// the value type since only this field and `healthcheck_disable`/
+    /// `privileged` need it — not worth a second name-keyed table for
+    /// three rows.
     healthcheck_test: Option<(HealthcheckTest, Tier)>,
     /// `healthcheck.disable`'s own collision point. A `FieldKind::BoolFlag`
     /// carries no value beyond bare presence, so the "value" merged here
     /// is just the span it was set at — mirroring how [`Literal::span`]
     /// is all `merge_scalar` ever needs from a `Literal` too.
     healthcheck_disable: Option<(Span, Tier)>,
+    /// `privileged`'s own collision point (#157) — a bare
+    /// `ServiceFields` field rather than one nested inside a struct, but
+    /// merged exactly like `healthcheck_disable` for the same reason:
+    /// it's a `FieldKind::BoolFlag`, not a [`Literal`], so it can't ride
+    /// [`Self::scalars`]/[`SCALAR_FIELDS`] either.
+    privileged: Option<(Span, Tier)>,
 }
 
 impl MergeAcc {
@@ -1847,6 +1859,9 @@ impl MergeAcc {
                 .healthcheck
                 .get_or_insert(empty_healthcheck(disable_span))
                 .disable = Some(disable_span);
+        }
+        if let Some((privileged_span, _)) = self.privileged {
+            fields.privileged = Some(privileged_span);
         }
         fields
     }
@@ -2029,12 +2044,12 @@ fn empty_healthcheck(span: Span) -> Healthcheck {
 /// name each one — but `entrypoint` lives inside `expose`, which
 /// `into_service_fields` *rebuilds*, so it needs the same read-out/
 /// write-back indirection the scalars already had. Given one list field
-/// had to be described by function pointers, all five are (`depends_on`
+/// had to be described by function pointers, all six are (`depends_on`
 /// no longer among them — see [`MergeAcc`]'s doc for why #155 moved it
 /// onto its own [`merge_depends_on`]-based merge point instead): the whole
 /// point of [`SCALAR_FIELDS`] (see hl-lang#28) is that both merge
 /// functions stay one generic loop apiece with no hand-enumerated
-/// knowledge of `ServiceFields`'s shape, and leaving four lists
+/// knowledge of `ServiceFields`'s shape, and leaving five lists
 /// hand-named beside a one-row table would have kept exactly the shape
 /// that design set out to remove.
 struct ListField {
@@ -2043,22 +2058,31 @@ struct ListField {
     set: fn(&mut ServiceFields, Vec<Reference>),
     /// Whether repeats of an already-accumulated name are dropped
     /// rather than appended (hl-lang#69). True for the set-like fields
-    /// — `networks`, `middleware`, `expose.entrypoint` — where naming
-    /// the same thing twice means exactly what naming it once means, so
-    /// the repeat is pure noise: it duplicated `networks:` entries and
-    /// `middlewares=` label values in the output, made a single external
-    /// network look like an ambiguity with itself, and (since list size
-    /// then doubled per composition level) turned a few hundred bytes of
-    /// nested `with` into an out-of-memory abort.
+    /// — `networks`, `middleware`, `expose.entrypoint`, `devices` (#157)
+    /// — where naming the same thing twice means exactly what naming it
+    /// once means, so the repeat is pure noise: it duplicated
+    /// `networks:` entries and `middlewares=` label values in the
+    /// output, made a single external network look like an ambiguity
+    /// with itself, and (since list size then doubled per composition
+    /// level) turned a few hundred bytes of nested `with` into an
+    /// out-of-memory abort.
     ///
     /// `dns` and `env_file` are the two exceptions, deliberately: order
     /// is observable for both — `dns` as resolver priority, `env_file`
     /// as Compose's own last-file-wins rule when the same variable is
     /// set in two of the listed files (#154) — so their append
     /// semantics are left exactly as they were even though a repeat is
-    /// just as meaningless. Every other reference list here —
-    /// `expose.entrypoint` included — is a set, and a router attached
-    /// twice to the same entry point is attached to it once.
+    /// just as meaningless. `devices` doesn't share that exception even
+    /// though its entries are ordinary literal strings exactly like
+    /// `dns`'s and `env_file`'s: there's no Compose semantic under which
+    /// the *position* of a repeated `"host:container"` mapping changes
+    /// anything — unlike a resolver IP's priority or a same-named env
+    /// var's last-file-wins value, a device mapping is either present or
+    /// it isn't, so a repeat is exactly as meaningless as a repeated
+    /// `networks`/`middleware` entry and dedupes the same way. Every
+    /// other reference list here — `expose.entrypoint`/`devices`
+    /// included — is a set, and a router attached twice to the same
+    /// entry point is attached to it once.
     dedupe: bool,
 }
 
@@ -2113,6 +2137,12 @@ static LIST_FIELDS: &[ListField] = &[
         take: |f| std::mem::take(&mut f.env_file),
         set: |f, v| f.env_file = v,
     },
+    ListField {
+        key: "devices",
+        dedupe: true,
+        take: |f| std::mem::take(&mut f.devices),
+        set: |f, v| f.devices = v,
+    },
 ];
 
 /// Merges one tier's [`ServiceFields`] into `acc`. List fields (`raw`,
@@ -2157,6 +2187,20 @@ fn merge_tier(
                 |span| *span,
             )?;
         }
+    }
+    // `privileged` (#157) is a bare `ServiceFields` field, not nested,
+    // but it's the same `FieldKind::BoolFlag` shape as
+    // `healthcheck.disable` just above — not `Literal`-valued, so it
+    // gets the same `merge_scalar_like` treatment via its own
+    // `MergeAcc::privileged` slot.
+    if let Some(privileged_span) = incoming.privileged.take() {
+        merge_scalar_like(
+            &mut acc.privileged,
+            "privileged",
+            privileged_span,
+            tier,
+            |span| *span,
+        )?;
     }
     // Before the `merge_map` calls below only because those consume
     // `incoming`'s map entries by value, and `take` needs `incoming`
@@ -2358,14 +2402,15 @@ fn merge_scalar(
 }
 
 /// [`merge_scalar`] generalized over the value type via `span_of`, for
-/// the two `healthcheck` collision points whose slot isn't a [`Literal`]
-/// — `healthcheck.test` ([`HealthcheckTest`]) and `healthcheck.disable`
-/// (a bare-presence flag, whose "value" is just the span it was set
-/// at). Same Own-always-wins / Defaults-always-loses /
-/// two-`Explicit`-tiers-collide rule; `acc` is a single `Option` slot
-/// rather than a `HashMap` keyed by field name because there are only
-/// ever these two callers — see [`MergeAcc::healthcheck_test`]'s doc for
-/// why that didn't earn a second name-keyed table of its own.
+/// the collision points whose slot isn't a [`Literal`] — `healthcheck.test`
+/// ([`HealthcheckTest`]) and the two bare-presence flags,
+/// `healthcheck.disable` and `privileged` (#157), whose "value" is just
+/// the span each was set at. Same Own-always-wins / Defaults-always-loses
+/// / two-`Explicit`-tiers-collide rule; each caller passes its own single
+/// `Option` slot rather than sharing a `HashMap` keyed by field name
+/// because there are only ever these three callers — see
+/// [`MergeAcc::healthcheck_test`]'s doc for why that didn't earn a
+/// second name-keyed table of its own.
 fn merge_scalar_like<T>(
     acc: &mut Option<(T, Tier)>,
     field: &'static str,

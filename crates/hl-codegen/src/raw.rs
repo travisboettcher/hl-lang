@@ -1,8 +1,10 @@
 //! Transcribes `raw`'s schema-free [`RawValue`] tree into
 //! [`serde_yaml_ng::Value`] — mechanical passthrough, no domain modeling,
 //! matching `raw`'s own design intent (arbitrary Compose service keys
-//! the compiler has no opinion about, e.g. `privileged`/`devices`/
-//! `security_opt` in the real `cadvisor` service).
+//! the compiler has no opinion about, e.g. `security_opt` in the real
+//! `cadvisor` service — `privileged`/`devices`, the same service's other
+//! two host-access knobs, graduated to dedicated fields at #157, once
+//! `raw`'s job narrowed from "everything" to "the genuine long tail").
 
 use std::collections::HashMap;
 
@@ -40,8 +42,8 @@ pub fn to_yaml(
 }
 
 /// A `raw` literal's YAML type: numbers stay numbers; the bare
-/// identifiers `true`/`false` become actual YAML booleans (matching the
-/// real `cadvisor` example's `privileged: true`, an actual Compose
+/// identifiers `true`/`false` become actual YAML booleans (matching a
+/// long-tail boolean Compose key like `init: true`, an actual Compose
 /// boolean, not the string `"true"`); every other literal — including a
 /// quoted `"true"`, since the user explicitly asked for a string there —
 /// becomes a YAML string.
