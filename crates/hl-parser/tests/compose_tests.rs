@@ -5,8 +5,8 @@
 
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    ComposeError, ComposedProgram, Expose, Healthcheck, HealthcheckTest, Literal, RawValue,
-    Service, VolumeHost, compose, parse,
+    Command, ComposeError, ComposedProgram, Expose, Healthcheck, HealthcheckTest, Literal,
+    RawValue, Service, VolumeHost, compose, parse,
 };
 
 fn compose_ok(source: &str) -> ComposedProgram {
@@ -838,6 +838,120 @@ fn no_healthcheck_anywhere_leaves_it_unset() {
     assert!(service.fields.healthcheck.is_none());
 }
 
+// --- command merge (#156) ---
+//
+// `command` merges through `merge_scalar_like` — the same
+// Own-always-wins/Defaults-always-loses/two-explicit-collide rule
+// `healthcheck.test` uses (#153), since `Command` isn't a `Literal` and
+// so can't ride `SCALAR_FIELDS`. Unlike `healthcheck.test`, `command`
+// lives directly on `ServiceFields` rather than inside a nested struct,
+// so there's no "materializes the enclosing struct" case to cover the
+// way `healthcheck_disable_alone_still_materializes_healthcheck` does —
+// these tests otherwise mirror `container_name`'s own merge tests
+// above, since both are bare, indivisible fields on `ServiceFields`.
+
+fn command_shell_text(command: &Command) -> &str {
+    match command {
+        Command::Shell(lit) => lit.text(),
+        Command::Exec(..) => panic!("expected the shell form"),
+    }
+}
+
+/// The service's own body wins over an inherited template value.
+#[test]
+fn service_own_command_overrides_template() {
+    let composed = compose_ok(
+        "template a {\n  command \"from-template\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n  command \"own\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        command_shell_text(service.fields.command.as_ref().unwrap()),
+        "own"
+    );
+}
+
+/// With no service-level override, the template's own value comes
+/// through unchanged.
+#[test]
+fn command_inherited_from_template_when_service_unset() {
+    let composed = compose_ok(
+        "template a {\n  command \"from-template\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        command_shell_text(service.fields.command.as_ref().unwrap()),
+        "from-template"
+    );
+}
+
+/// Two explicit templates setting different `command` values still
+/// collide — unlike `healthcheck`, `command` has no sub-fields to
+/// narrow the collision to, so any two explicit templates that both set
+/// it disagree by definition.
+#[test]
+fn explicit_templates_command_collision_is_error() {
+    let err = compose_err(
+        "template a {\n  command \"a-cmd\"\n}\n\
+         template b {\n  command \"b-cmd\"\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::FieldCollision {
+            field: "command",
+            first_template,
+            second_template,
+            ..
+        } => {
+            assert_eq!(first_template, "a");
+            assert_eq!(second_template, "b");
+        }
+        other => panic!("expected FieldCollision on command, got {other:?}"),
+    }
+}
+
+/// A `defaults` template's `command` is silently overridden by an
+/// explicit template's own value — exercising `merge_scalar_like`'s
+/// `(Tier::Defaults, _)` arm on `command`'s own `MergeAcc` slot, the
+/// same arm `defaults_healthcheck_test_loses_to_an_explicit_templates_test`
+/// exercises on `healthcheck.test`'s.
+#[test]
+fn defaults_command_loses_to_an_explicit_templates_command() {
+    let composed = compose_ok(
+        "template defaults {\n  command \"placeholder\"\n}\n\
+         template real {\n  command \"npm start\"\n}\n\
+         service s {\n  with real\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        command_shell_text(service.fields.command.as_ref().unwrap()),
+        "npm start"
+    );
+}
+
+/// The exec form survives composition intact, including an item with an
+/// embedded comma — the `cadvisor.hll` shape the issue calls out
+/// (#156), reached through a template this time rather than directly on
+/// the service.
+#[test]
+fn command_exec_form_with_embedded_comma_survives_composition() {
+    let composed = compose_ok(
+        "template cadvisor_cmd {\n  \
+           command [\"--enable_metrics=cpu,memory,network\"]\n\
+         }\n\
+         service s {\n  with cadvisor_cmd\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    match service.fields.command.as_ref().unwrap() {
+        Command::Exec(items, _) => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].text(), "--enable_metrics=cpu,memory,network");
+        }
+        other => panic!("expected Command::Exec, got {other:?}"),
+    }
+}
+
 // --- non-colliding merges ---
 
 #[test]
@@ -1393,12 +1507,49 @@ fn template_param_is_substituted_inside_raw_scalar_list_and_map() {
 #[test]
 fn composed_service_never_contains_unsubstituted_param() {
     let composed = compose_ok(
-        "template inner(y) {\n  env Y = $y\n  expose $y\n}\n\
+        "template inner(y) {\n  env Y = $y\n  expose $y\n  command $y\n}\n\
          template outer(x) {\n  with inner { y: $x }\n}\n\
          service s {\n  with outer { x: 42 }\n  image \"img\"\n}\n",
     );
     let service = single_service(&composed);
     assert_no_params(service);
+}
+
+/// `command`'s literals (#156) get substituted through the same
+/// `substitute_params` walk as `restart.policy`/`expose.port` above,
+/// for both the shell form and the exec form — see
+/// `compose::substitute_params`'s own `command` case.
+#[test]
+fn command_param_is_substituted_in_shell_form() {
+    let composed = compose_ok(
+        "template t(cmd: String) {\n  command $cmd\n}\n\
+         service s {\n  with t { cmd: \"npm start\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        command_shell_text(service.fields.command.as_ref().unwrap()),
+        "npm start"
+    );
+}
+
+/// A `$param` reference names a whole literal slot (docs/DESIGN.md's
+/// lexical grammar — it's never string-interpolated inside a quoted
+/// literal the way `{{name}}` is), so this substitutes a whole exec-list
+/// item rather than a fragment inside one.
+#[test]
+fn command_param_is_substituted_in_exec_form() {
+    let composed = compose_ok(
+        "template t(arg: String) {\n  command [\"exec\", $arg]\n}\n\
+         service s {\n  with t { arg: \"--user=miniflux\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    match service.fields.command.as_ref().unwrap() {
+        Command::Exec(items, _) => {
+            let texts: Vec<&str> = items.iter().map(Literal::text).collect();
+            assert_eq!(texts, vec!["exec", "--user=miniflux"]);
+        }
+        other => panic!("expected Command::Exec, got {other:?}"),
+    }
 }
 
 fn assert_no_params(service: &Service) {
@@ -1434,6 +1585,15 @@ fn assert_no_params(service: &Service) {
     for e in &fields.env.entries {
         assert_not_param(&e.key);
         assert_not_param(&e.value);
+    }
+    match &fields.command {
+        Some(Command::Shell(lit)) => assert_not_param(lit),
+        Some(Command::Exec(items, _)) => {
+            for item in items {
+                assert_not_param(item);
+            }
+        }
+        None => {}
     }
     for entry in &fields.raw.entries {
         assert_not_param(&entry.key);

@@ -582,6 +582,60 @@ independent stacks that happen to share a service name (`db`, `broker`,
 and so on), and Compose refuses to start the second container with the
 same name.
 
+## `command`
+
+A plain scalar-or-list field directly on `service`/`template`, not a
+nested struct type, sharing its grammar with [`healthcheck`](#healthcheck)'s
+`test` sub-field—a bare string, Compose's shell form, or a bracketed
+list, Compose's exec form:
+
+```hll,fragment
+command "npm start"
+```
+
+```hll,fragment
+command ["--housekeeping_interval=30s", "--docker_only=true"]
+```
+
+| Accepts | Default |
+|---|---|
+| string or bracketed list | unset—the image's own `CMD`/entrypoint applies |
+
+`command` overrides the arguments Compose passes to the image's
+entrypoint, exactly like Compose's own `command:` key. `hllc` carries
+whichever form you write straight through to the generated `command:`
+key, rather than normalizing one into the other—the same rule
+[`healthcheck`](#healthcheck)'s `test` follows, and for the same
+reason: the shell form runs through the container's own shell, while the
+exec form runs directly with no shell involved, so the two aren't
+interchangeable. A comma inside one quoted list item is data, not a list
+separator:
+
+```hll,build
+service cadvisor {
+  image "gcr.io/cadvisor/cadvisor:latest"
+  command [
+    "--housekeeping_interval=30s",
+    "--docker_only=true",
+    "--enable_metrics=cpu,memory,network"
+  ]
+}
+```
+
+```yaml
+services:
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    command:
+      - --housekeeping_interval=30s
+      - --docker_only=true
+      - --enable_metrics=cpu,memory,network
+```
+
+Writing `command` more than once in the same body is a compile error,
+same as `image`/`restart`/`container_name`—it's single-occurrence, not
+repeatable.
+
 ## `raw`
 
 Map-kind, schema-free: `hllc` accepts unknown keys as-is rather than

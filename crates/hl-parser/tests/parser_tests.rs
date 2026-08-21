@@ -1,7 +1,7 @@
 use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    DependsOnCondition, Expected, Expose, HealthcheckTest, Literal, ParamType, ParseError,
+    Command, DependsOnCondition, Expected, Expose, HealthcheckTest, Literal, ParamType, ParseError,
     TemplateDecl, TopDecl, UseDecl, VolumeHost, parse,
 };
 
@@ -424,6 +424,135 @@ fn healthcheck_duplicate_test_is_error() {
         ),
         "got {err:?}"
     );
+}
+
+// --- command (#156) ---
+//
+// A plain scalar-or-list field directly on `service`/`template`, not a
+// nested struct type — see `ast::ServiceFields::command`'s doc. Shares
+// its grammar with `healthcheck.test` (#153) — a bare literal
+// (Compose's shell form) or a bracketed list (Compose's exec form) — so
+// these tests mirror that field's own tests above, minus the
+// braced-body plumbing `command` doesn't need.
+
+/// The shell form: a bare string with no braces, exactly like
+/// `container_name`'s own bare-value shorthand.
+#[test]
+fn command_shell_form() {
+    let program = parse_ok("service s {\n  command \"npm start\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    match service.fields.command.as_ref().unwrap() {
+        Command::Shell(lit) => assert_eq!(lit.text(), "npm start"),
+        other => panic!("expected Command::Shell, got {other:?}"),
+    }
+}
+
+/// The explicit `key: value` spelling of the shell form also parses,
+/// mirroring `container_name: "..."`.
+#[test]
+fn command_shell_form_with_colon() {
+    let program = parse_ok("service s {\n  command: \"npm start\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    match service.fields.command.as_ref().unwrap() {
+        Command::Shell(lit) => assert_eq!(lit.text(), "npm start"),
+        other => panic!("expected Command::Shell, got {other:?}"),
+    }
+}
+
+/// The exec form: a bracketed list of strings, matching the issue's own
+/// `cadvisor.hll` example (#156).
+#[test]
+fn command_exec_form() {
+    let program = parse_ok(
+        "service s {\n  \
+           command [\"--housekeeping_interval=30s\", \"--docker_only=true\"]\n\
+         }\n",
+    );
+    let service = as_service(&program.decls[0]);
+    match service.fields.command.as_ref().unwrap() {
+        Command::Exec(items, _) => {
+            let texts: Vec<&str> = items.iter().map(Literal::text).collect();
+            assert_eq!(
+                texts,
+                vec!["--housekeeping_interval=30s", "--docker_only=true"]
+            );
+        }
+        other => panic!("expected Command::Exec, got {other:?}"),
+    }
+}
+
+/// A comma embedded inside one quoted list item is data, not a list
+/// separator — `--enable_metrics=cpu,memory,network` has to survive as
+/// one item, not split into three. This is the exact value the issue
+/// calls out by name (#156).
+#[test]
+fn command_exec_form_item_with_embedded_comma_round_trips() {
+    let program = parse_ok(
+        "service s {\n  \
+           command [\"--enable_metrics=cpu,memory,network\"]\n\
+         }\n",
+    );
+    let service = as_service(&program.decls[0]);
+    match service.fields.command.as_ref().unwrap() {
+        Command::Exec(items, _) => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].text(), "--enable_metrics=cpu,memory,network");
+        }
+        other => panic!("expected Command::Exec, got {other:?}"),
+    }
+}
+
+/// An exec-form list of exactly one item is still the list form, not
+/// the shell form — brackets alone select exec syntax, matching
+/// `healthcheck.test`'s own `healthcheck_test_list_form_single_item`.
+#[test]
+fn command_exec_form_single_item() {
+    let program = parse_ok("service s {\n  command [\"npm\"]\n}\n");
+    let service = as_service(&program.decls[0]);
+    match service.fields.command.as_ref().unwrap() {
+        Command::Exec(items, _) => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].text(), "npm");
+        }
+        other => panic!("expected Command::Exec, got {other:?}"),
+    }
+}
+
+/// No `command` field at all leaves it unset — never defaulted or
+/// inferred from the image.
+#[test]
+fn command_unset_by_default() {
+    let program = parse_ok("service s {\n  image \"nginx\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(service.fields.command.is_none());
+}
+
+/// Writing `command` twice is a duplicate-scalar compile error, same as
+/// `healthcheck.test`'s own `healthcheck_duplicate_test_is_error` — a
+/// single-occurrence field, not repeatable.
+#[test]
+fn command_duplicate_is_error() {
+    let err = parse("service s {\n  command \"a\"\n  command \"b\"\n}\n").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::DuplicateField {
+                type_name: "service",
+                field: "command",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// Deliberately no bare comma-list sugar, matching `healthcheck.test`
+/// (see `schema::FieldKind::ScalarOrList`'s doc for why): a second
+/// quoted string right after the first isn't a two-item list, so this
+/// doesn't parse as `command ["a", "b"]` in disguise.
+#[test]
+fn command_bare_comma_list_is_rejected() {
+    assert!(parse("service s {\n  command \"a\", \"b\"\n}\n").is_err());
 }
 
 // --- bool flag ---

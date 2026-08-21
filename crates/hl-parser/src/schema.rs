@@ -51,10 +51,12 @@ pub enum FieldKind {
     /// duplicate-checked) except each item can carry an argument body.
     TemplateInvocationList,
     /// Either a single literal or a bracketed list of literals —
-    /// `healthcheck`'s `test` (#153), which carries Compose's own two
-    /// `healthcheck.test` shapes: a bare string (shell form, `test:
-    /// "curl -f http://localhost"`) or a list (exec form, `test: ["CMD",
-    /// "curl", "-f", "http://localhost"]`). Single-occurrence like
+    /// `healthcheck`'s `test` (#153) and `command` (#156), which each
+    /// carry Compose's own matching pair of shapes: a bare string (shell
+    /// form, `test: "curl -f http://localhost"` /
+    /// `command: "npm start"`) or a list (exec form, `test: ["CMD",
+    /// "curl", "-f", "http://localhost"]` /
+    /// `command: ["npm", "start"]`). Single-occurrence like
     /// [`Self::Scalar`] (a second write is `DuplicateField`) — unlike
     /// [`Self::ReferenceList`], there is no bare comma-list sugar here,
     /// since `test: "CMD", "curl"` would be ambiguous between "the shell
@@ -502,6 +504,23 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
     FieldSchema {
         name: "container_name",
         kind: FieldKind::Scalar,
+    },
+    // `command "npm start"` (shell form) / `command ["npm", "start"]`
+    // (exec form) — Compose's own generic `command:` key (#156),
+    // overriding the image's entrypoint arguments. A plain scalar-or-list
+    // field directly on `service`/`template`, not a nested struct type —
+    // it has no secondary fields of its own, so it needs
+    // `FieldKind::ScalarOrList` (see that variant's doc) rather than
+    // `Scalar` alone. Modeled directly on `healthcheck`'s `test`
+    // sub-field (#153), the only other field with this exact shape: both
+    // carry Compose's own shell-vs-exec distinction, carried through
+    // verbatim rather than normalized one into the other. See
+    // `ast::ServiceFields::command`'s doc for why `command` sits directly
+    // on `ServiceFields` instead of inside a nested struct the way
+    // `test` sits inside `healthcheck`.
+    FieldSchema {
+        name: "command",
+        kind: FieldKind::ScalarOrList,
     },
     FieldSchema {
         name: "expose",

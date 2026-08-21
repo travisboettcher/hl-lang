@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
-    DependsOnCondition, DependsOnEntry, EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest,
-    Ident, Image, Literal, Network, Param, ParamType, Program, PublishEntry, PublishMap, RawEntry,
-    RawMap, RawValue, Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation,
-    TopDecl, UseDecl, Volume, VolumeDriverOpt, VolumeEntry, VolumeHost, VolumeMap,
+    Command, DependsOnCondition, DependsOnEntry, EnvEntry, EnvMap, Expose, Healthcheck,
+    HealthcheckTest, Ident, Image, Literal, Network, Param, ParamType, Program, PublishEntry,
+    PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Service, ServiceFields,
+    TemplateDecl, TemplateInvocation, TopDecl, UseDecl, Volume, VolumeDriverOpt, VolumeEntry,
+    VolumeHost, VolumeMap,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -90,8 +91,8 @@ enum FieldValue {
     /// An accumulating template-invocation-list field (`with`'s `templates`).
     TemplateInvocations(Vec<TemplateInvocation>),
     /// A single-occurrence field whose value is either a bare literal or
-    /// a bracketed list of literals (`healthcheck`'s `test`). See
-    /// [`schema::FieldKind::ScalarOrList`]'s doc.
+    /// a bracketed list of literals (`healthcheck`'s `test` and
+    /// `command`, #156). See [`schema::FieldKind::ScalarOrList`]'s doc.
     ScalarOrList(ScalarOrList),
     /// An accumulating `depends_on`-list field. See
     /// [`schema::FieldKind::DependsOnList`]'s doc.
@@ -399,8 +400,9 @@ impl<'src> Parser<'src> {
 
     /// `"[" ( literal ( "," literal )* )? "]"` — the bracketed-list half
     /// of a [`schema::FieldKind::ScalarOrList`] value (`healthcheck`'s
-    /// `test`'s exec form, `["CMD", "pg_isready", "-U", "miniflux"]`).
-    /// Items are ordinary literals, not [`Reference`]s — unlike
+    /// `test`'s exec form, `["CMD", "pg_isready", "-U", "miniflux"]`, or
+    /// `command`'s own exec form, `["npm", "start"]`, #156). Items are
+    /// ordinary literals, not [`Reference`]s — unlike
     /// [`Self::parse_bracket_reference_list`], an entry here never
     /// resolves against anything an `.hll` file declares, so it never
     /// carries an `alias.` qualifier either.
@@ -1623,6 +1625,13 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         Some(FieldValue::Scalar(lit)) => Some(lit),
         _ => None,
     };
+    let command = match fields.remove("command") {
+        Some(FieldValue::ScalarOrList(ScalarOrList::Scalar(lit))) => Some(Command::Shell(lit)),
+        Some(FieldValue::ScalarOrList(ScalarOrList::List(items, list_span))) => {
+            Some(Command::Exec(items, list_span))
+        }
+        _ => None,
+    };
     let publish = match fields.remove("publish") {
         Some(FieldValue::LiteralMap(entries)) => PublishMap {
             entries: entries
@@ -1704,6 +1713,7 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         dns,
         env_file,
         container_name,
+        command,
         with,
     }
 }

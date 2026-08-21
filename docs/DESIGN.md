@@ -45,7 +45,8 @@ Punctuation: { } [ ] ( ) : = -> , . $
   else that looks like a keyword (`service`, `network`, `image`, `volume`,
   `publish`, `env`, `env_file`, `restart`, `expose`, `healthcheck`,
   `middleware`, `depends_on`, `networks`, `dns`, `container_name`,
-  `with`, `as`, `external`, `use`, `raw`, `defaults`, and more) is an
+  `command`, `with`, `as`, `external`, `use`, `raw`, `defaults`, and
+  more) is an
   ordinary `IDENT`, resolved against a schema table at parse time—not a
   lexer-level keyword. `with`, `as`, `external`, and `use` are
   *contextual* keywords, meaningful only in the grammar position expected
@@ -362,10 +363,22 @@ it's simply omitted from the generated service block rather than
 defaulting to anything—see #90. Compose's own per-project default
 naming is what most people want, and defaulting the built-in to the
 service's own name reliably collided across independent stacks sharing
-a common service name. `template` isn't a row either—it's the mechanism
-for adding new rows to this table at parse time. `defaults` is likewise
-not a row—it's an ordinary template, semantically special only in that
-it's implicitly applied—see Composition, below.
+a common service name. `command`, added in #156, isn't a row either,
+for the same reason as `container_name`: a plain field directly on
+`service`/`template` (`command "npm start"` / `command ["npm",
+"start"]`) rather than a nested struct type. Its kind is
+`FieldKind::ScalarOrList`, not `FieldKind::Scalar`, though—Compose's
+`command:` key takes `healthcheck.test`'s own shell-string-or-exec-list
+shape, overriding the image's entrypoint arguments rather than naming a
+health check—so `command` follows `test`'s own model everywhere but its
+position directly on `ServiceFields`, unlike `container_name`. Unset,
+it's simply omitted, leaving the image's own `CMD`/entrypoint in effect,
+the same "omit rather than default" rule `container_name` follows.
+`template` isn't a
+row either—it's the mechanism for adding new rows to this table at
+parse time. `defaults` is likewise not a row—it's an ordinary template,
+semantically special only in that it's implicitly applied—see
+Composition, below.
 
 ## Composition: templates and `with`
 
@@ -446,6 +459,15 @@ can't ride the same name-keyed `SCALAR_FIELDS` table
 `compose.rs` is `merge_scalar` generalized over the value type, applied
 to two dedicated `MergeAcc` slots instead of a third table row, since
 only these two fields need it—see #153.
+
+`command`'s own type, `Command`, shares this same shell-string-or-
+exec-list shape and merges through the same `merge_scalar_like`, with a
+third dedicated `MergeAcc` slot of its own—see #156. It's the direct
+`ServiceFields` case rather than the nested-struct one: `command` sets
+`ServiceFields::command` straight from `merge_scalar_like`'s result, the
+way `container_name`'s row in `SCALAR_FIELDS` sets its own field
+directly, rather than reaching through a `get_or_insert` on an enclosing
+struct the way `healthcheck.test` reaches into `Healthcheck` first.
 
 ```
 template internal_web(port: Number) {

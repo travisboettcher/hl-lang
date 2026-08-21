@@ -387,6 +387,36 @@ impl HealthcheckTest {
     }
 }
 
+/// `command`'s own value (#156): either a bare literal (Compose's shell
+/// form — a bare string, `command "npm start"`, is passed to the
+/// image's entrypoint as a single shell command) or a bracketed list of
+/// literals (Compose's exec form, `command ["npm", "start"]`, passed
+/// directly with no shell involved). Structurally identical to
+/// [`HealthcheckTest`] — the same shell-vs-exec split Compose itself
+/// draws for `healthcheck.test` (#153) — and kept as its own type for
+/// the same reason `HealthcheckTest` isn't reused for `test` and
+/// `command` both: neither is a natural sub-case of the other, and a
+/// shared name would suggest a connection Compose itself doesn't draw
+/// between the two keys. Carried through to codegen in whichever shape
+/// it was written rather than normalizing one into the other, exactly
+/// like `HealthcheckTest` — see that type's own doc.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Command {
+    Shell(Literal),
+    /// The list's own span (covering the brackets), since a `Vec` has
+    /// nowhere else to carry one.
+    Exec(Vec<Literal>, Span),
+}
+
+impl Command {
+    pub fn span(&self) -> Span {
+        match self {
+            Command::Shell(lit) => lit.span(),
+            Command::Exec(_, span) => *span,
+        }
+    }
+}
+
 /// `volume`'s entries. Uniqueness is checked on `container` (the value
 /// side of `host -> container`), matching Docker's own constraint that
 /// two mounts can't target the same container path even though the same
@@ -630,6 +660,18 @@ pub struct ServiceFields {
     /// [`Network::real_name`] staying `Option` defers its own default to
     /// a later stage.
     pub container_name: Option<Literal>,
+    /// Compose's own generic `command:` key (#156), overriding the
+    /// image's entrypoint arguments. A plain scalar-or-list field
+    /// directly on `service`/`template`, like [`Self::container_name`]
+    /// just above, rather than a nested struct type — it has no
+    /// secondary fields of its own. See [`Command`]'s own doc for the
+    /// shell-vs-exec shape it carries, structurally identical to
+    /// [`Healthcheck::test`]'s [`HealthcheckTest`] (#153) — `command` is
+    /// modeled on that field rather than on `dns`/`env_file`'s plain
+    /// [`Reference`] lists, since Compose's `command:` key, like
+    /// `healthcheck.test`, is either one bare string or a bracketed
+    /// list, never a bare comma-separated sequence.
+    pub command: Option<Command>,
     /// Unresolved template invocations pulled in via `with`. Always
     /// empty after [`crate::compose::compose`] runs — composition's job
     /// is precisely to merge each of these away.
