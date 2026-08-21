@@ -40,8 +40,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use hl_parser::{
-    ComposedProgram, DependsOnEntry, Healthcheck, HealthcheckTest, Network, Reference, Service,
-    SourceMap, Span, Volume, VolumeHost, VolumeMap,
+    Command, ComposedProgram, DependsOnEntry, Healthcheck, HealthcheckTest, Network, Reference,
+    Service, SourceMap, Span, Volume, VolumeHost, VolumeMap,
 };
 use indexmap::IndexMap;
 
@@ -412,6 +412,8 @@ fn generate_service(
         .map(|lit| interp::resolve(lit.text(), &bindings, lit.span()))
         .transpose()?;
 
+    let command = generate_command(fields.command.as_ref(), &bindings)?;
+
     let restart = fields
         .restart
         .as_ref()
@@ -480,6 +482,7 @@ fn generate_service(
     let mut service_doc = doc::ComposeServiceDoc {
         image: Some(image),
         container_name,
+        command,
         restart,
         healthcheck,
         environment,
@@ -537,6 +540,40 @@ fn generate_depends_on(entries: &[DependsOnEntry]) -> doc::DependsOnDoc {
         );
     }
     doc::DependsOnDoc::Long(long)
+}
+
+/// Builds a service's `command:` value from its parsed [`Command`]
+/// field (#156), `{{name}}`-interpolating each literal exactly like
+/// [`generate_healthcheck`]'s own `test` case just below — the two
+/// share the same shell-vs-exec [`Command`]/[`HealthcheckTest`] shape,
+/// so this function mirrors that one's `test` arm closely rather than
+/// factoring out a shared helper for two call sites. Returns `None`
+/// when `.hll` sets no `command` field at all — unlike `healthcheck`,
+/// there's no "every sub-field unset" case to distinguish here, since
+/// `command` has no sub-fields of its own to leave unset.
+fn generate_command(
+    command: Option<&Command>,
+    bindings: &HashMap<&str, &str>,
+) -> Result<Option<serde_yaml_ng::Value>, CodegenError> {
+    match command {
+        Some(Command::Shell(lit)) => Ok(Some(serde_yaml_ng::Value::String(interp::resolve(
+            lit.text(),
+            bindings,
+            lit.span(),
+        )?))),
+        Some(Command::Exec(items, _)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(serde_yaml_ng::Value::String(interp::resolve(
+                    item.text(),
+                    bindings,
+                    item.span(),
+                )?));
+            }
+            Ok(Some(serde_yaml_ng::Value::Sequence(out)))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Builds a service's `healthcheck:` doc from its parsed

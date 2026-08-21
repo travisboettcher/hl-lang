@@ -428,6 +428,123 @@ services:
     );
 }
 
+// --- command (#156) ---
+//
+// The issue's own motivating case: `cadvisor.hll` needs to override the
+// image's entrypoint arguments, previously only reachable through
+// `raw { command: [...] }`.
+
+/// The shell form: a bare string emits Compose's own shell-form
+/// `command:` — a plain scalar, not a sequence.
+#[test]
+fn command_shell_form_emits_a_plain_string() {
+    let yaml = generate_from("service web {\n  image \"nginx\"\n  command \"npm start\"\n}\n");
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  web:
+    image: nginx
+    command: npm start
+"#,
+    );
+}
+
+/// The exec form: a bracketed list emits a YAML sequence, exactly
+/// matching the issue's own `cadvisor.hll` example — including the one
+/// item with a comma embedded inside its own value
+/// (`--enable_metrics=cpu,memory,network`), which has to survive as one
+/// list entry rather than being split on the embedded comma.
+#[test]
+fn command_exec_form_emits_a_yaml_sequence() {
+    let yaml = generate_from(
+        "service cadvisor {\n  \
+           image \"gcr.io/cadvisor/cadvisor:latest\"\n  \
+           command [\n    \
+             \"--housekeeping_interval=30s\",\n    \
+             \"--docker_only=true\",\n    \
+             \"--enable_metrics=cpu,memory,network\"\n  \
+           ]\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    command:
+      - --housekeeping_interval=30s
+      - --docker_only=true
+      - --enable_metrics=cpu,memory,network
+"#,
+    );
+}
+
+/// No `command` field at all emits no `command:` key — never inferred
+/// or defaulted from the image.
+#[test]
+fn command_unset_emits_no_key() {
+    let yaml = generate_from("service web {\n  image \"nginx\"\n}\n");
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  web:
+    image: nginx
+"#,
+    );
+}
+
+/// `command` merges like `container_name` — the service's own body
+/// wins unconditionally over an inherited template value, with no
+/// per-sub-field merge to consider since `command` has no sub-fields.
+#[test]
+fn command_merges_through_a_with_template() {
+    let yaml = generate_from(
+        "template base_command {\n  command \"from-template\"\n}\n\
+         service web {\n  \
+           image \"nginx\"\n  \
+           with base_command\n  \
+           command \"own-command\"\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  web:
+    image: nginx
+    command: own-command
+"#,
+    );
+}
+
+/// `raw { command: ... }` overrides the built-in `command` field, the
+/// same way it overrides every other built-in field (#156) — this is
+/// the escape hatch the issue's own `cadvisor.hll` example used before
+/// `command` became a dedicated field.
+#[test]
+fn raw_command_overrides_the_built_in_command() {
+    let yaml = generate_from(
+        "service cadvisor {\n  \
+           image \"gcr.io/cadvisor/cadvisor:latest\"\n  \
+           command [\"--docker_only=true\"]\n  \
+           raw {\n    command: [\"--raw-override=true\"]\n  }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    command:
+      - --raw-override=true
+"#,
+    );
+}
+
 // --- depends_on (#155) ---
 //
 // Every fixture below declares at least two services, since a
@@ -1417,6 +1534,7 @@ fn every_built_in_field_is_overridable_by_raw() {
          service web {\n  \
            image \"nginx\"\n  \
            container_name \"web-ctr\"\n  \
+           command \"npm start\"\n  \
            restart unless-stopped\n  \
            healthcheck { test: \"curl -f http://localhost\" }\n  \
            env PUID = \"1000\"\n  \
@@ -1430,6 +1548,7 @@ fn every_built_in_field_is_overridable_by_raw() {
            raw {\n    \
              image: \"raw-image\"\n    \
              container_name: \"raw-name\"\n    \
+             command: [\"raw-command\"]\n    \
              restart: \"always\"\n    \
              healthcheck: { test: \"raw-test\" }\n    \
              environment: [\"RAW=1\"]\n    \
@@ -1451,6 +1570,8 @@ fn every_built_in_field_is_overridable_by_raw() {
         r#"
 image: raw-image
 container_name: raw-name
+command:
+  - raw-command
 restart: always
 healthcheck:
   test: raw-test
@@ -1541,6 +1662,7 @@ fn raw_leaves_built_in_fields_it_does_not_name_alone() {
          service web {\n  \
            image \"nginx\"\n  \
            container_name \"web-ctr\"\n  \
+           command \"npm start\"\n  \
            restart unless-stopped\n  \
            healthcheck { test: \"curl -f http://localhost\" }\n  \
            env PUID = \"1000\"\n  \
@@ -1561,6 +1683,7 @@ fn raw_leaves_built_in_fields_it_does_not_name_alone() {
         r#"
 image: nginx
 container_name: web-ctr
+command: npm start
 restart: unless-stopped
 healthcheck:
   test: curl -f http://localhost
