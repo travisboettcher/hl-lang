@@ -351,12 +351,12 @@ compile error, since both are scalar fields, not repeatable—unlike
 ## `healthcheck`
 
 No primary field—unlike `image`'s `ref` or `expose`'s `port`, no one
-sub-field stands in for the whole healthcheck, so the braced body
-(`healthcheck { ... }`) is required; `healthcheck "..."` doesn't parse.
+sub-field stands in for the whole healthcheck, so `healthcheck { ... }`
+requires the braced body. `healthcheck "..."` doesn't parse.
 
 | Field | Accepts | Default |
 |---|---|---|
-| `test` | string or bracketed list | unset—no healthcheck defined here (the image's own, if it has one, still applies) |
+| `test` | string or bracketed list | unset—no healthcheck defined here, though the image's own still applies if it has one |
 | `interval` | string | unset, matching Compose's own default |
 | `timeout` | string | unset, matching Compose's own default |
 | `retries` | number | unset, matching Compose's own default |
@@ -407,8 +407,8 @@ services:
       start_period: 30s
 ```
 
-`interval`/`timeout`/`start_period`/`start_interval`/`retries` are
-carried through exactly as written—`hllc` doesn't parse or validate
+`hllc` carries `interval`/`timeout`/`start_period`/`start_interval`/
+`retries` through exactly as written—it doesn't parse or validate
 Compose's duration syntax (`"10s"`, `"1m30s"`) or check that `retries`
 is a sane, non-negative count. A mistake there is `docker compose
 config`'s to catch, not `hllc`'s.
@@ -469,8 +469,8 @@ env_file ["miniflux.env", "common.env"]
   for the target's `healthcheck` to report healthy), or
   `service_completed_successfully` (wait for the target to exit
   zero—typically a one-shot init/migration container). Anything else is
-  a compile error naming all three. A plain, bare entry and a
-  conditioned one can sit side by side in the same list:
+  a compile error naming all three. A bare entry and a conditioned one
+  can sit side by side in the same list:
 
   ```hll,fragment
   depends_on [cache, database { condition: service_healthy }]
@@ -481,9 +481,9 @@ env_file ["miniflux.env", "common.env"]
   name to `{ condition: ... }`. `hllc` emits the plain list—unchanged
   from before this syntax existed—as long as *no* entry in the field
   carries a condition, and switches the whole field to the mapping form
-  as soon as *any* entry does; a sibling entry with no explicit
-  condition is then filled in with `service_started`, since the mapping
-  form requires every entry to name one.
+  once *any* entry does. A sibling entry with no explicit condition is
+  then filled in with `service_started`, since the mapping form
+  requires every entry to name one.
 
   `service_healthy` is only meaningful when the target service actually
   has a healthcheck to become healthy against—but `hllc` doesn't warn
@@ -531,12 +531,13 @@ env_file ["miniflux.env", "common.env"]
 - `env_file` sets Compose's own `env_file:` key—one or more paths to
   load environment variables from. It's a plain generic Compose key like
   `dns`, not homelab-specific itself, even though most real entries
-  point at a gitignored, per-homelab `.env` file. Compose always sees a
-  list: a single `env_file "one.env"` still emits a one-element
-  `env_file:` list, so the generated shape doesn't depend on how many
-  paths you wrote. Each path is resolved relative to the compose file by
-  Compose itself, not by `hllc`—write it exactly as `docker compose`
-  would expect it. When two files set the same variable, Compose lets
+  point at a gitignored, per-homelab `.env` file. The generated
+  `env_file:` value is always a list: a single `env_file "one.env"`
+  still emits a one-element `env_file:` list, so the generated shape
+  doesn't depend on how many paths you wrote. Compose itself resolves
+  each path relative to the Compose file, not `hllc`—write it exactly
+  as `docker compose` would expect it. When two files set the same
+  variable, Compose lets
   the later file win, so order matters here the same way it matters for
   `dns`'s resolver priority. Reach for [`env`](#env) instead when a
   value belongs directly in the `.hll` file rather than in an external
@@ -549,13 +550,14 @@ Composition](./templates-and-composition.md)), `middleware`/`networks`/
 since list fields can only ever grow. `depends_on` merges keyed on the
 service name instead, and the service's own body always wins over a
 template's entry for the same dependency—but two `with`-listed templates
-naming the same service is *not* automatically a compile error: it's
-only one when their `condition`s actually disagree (see above), exactly
-like two templates setting the same [`env`](#env) key to two
-different values would collide. Two templates that both say
-`depends_on [database]`—or that spell out the same condition on both—are
-giving the same answer twice, not two different ones, so they still
-compose to a single entry exactly as they always have.
+naming the same service is *not* automatically a compile error: as the
+preceding discussion of `depends_on` covers, it's only one when their
+`condition`s actually disagree, exactly like two templates setting the
+same [`env`](#env) key to two different values would collide. Two
+templates that both say `depends_on [database]`—or that spell out the
+same condition on both—are giving the same answer twice, not two
+different ones, so they still collapse to a single entry exactly as
+they always have.
 
 ## `container_name`
 
