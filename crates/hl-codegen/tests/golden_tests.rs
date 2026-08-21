@@ -84,7 +84,12 @@ volumes:
 /// the real `cadvisor/docker-compose.yml`'s `privileged`/`devices`/
 /// `security_opt` shape exactly (not asserting label parity — the real
 /// file's label has a typo, `traefiki.docker.network`, that's a bug in
-/// the source data, not a codegen target).
+/// the source data, not a codegen target). Also covers #158 end-to-end:
+/// the same real service's five read-only bind mounts, each written as
+/// a plain `volume "<host>" -> "<container>" { read_only }` entry, come
+/// out as Compose short syntax with the `:ro` suffix appended —
+/// `/:/rootfs:ro`, matching the issue's own worked example exactly —
+/// with no need to route any of them through `raw`.
 #[test]
 fn cadvisor_raw_passthrough_matches_real_service() {
     let yaml = generate_from(RAW_SERVICE);
@@ -94,6 +99,12 @@ fn cadvisor_raw_passthrough_matches_real_service() {
 services:
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:latest
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
     privileged: true
     devices:
       - /dev/kmsg
@@ -1804,5 +1815,41 @@ fn a_referenced_network_produces_no_warning() {
         generated.warnings.is_empty(),
         "unexpected warnings: {:?}",
         generated.warnings
+    );
+}
+
+/// #158's `{ read_only }` flag on a *named* Docker volume, not just a
+/// bind mount — the cadvisor fixture above only exercises the
+/// bind-mount side, and the two go through different `VolumeHost` arms
+/// in `resolve_volumes`, so this is the named-volume half of "must work
+/// for both." Mixes a flagged entry with an unflagged one in the same
+/// service, which is what actually exercises both of `resolve_volumes`'s
+/// `:ro`-or-not branches in one generated document (and is the surface a
+/// missed mutant on the `if v.read_only` check would show up on: flip it
+/// and either this entry loses its suffix or the other one gains one it
+/// shouldn't have).
+#[test]
+fn named_volume_read_only_flag_emits_ro_suffix_alongside_an_unflagged_entry() {
+    let yaml = generate_from(
+        "volume media {}\n\
+         service jellyfin {\n  \
+           image \"jellyfin/jellyfin:latest\"\n  \
+           volume media -> \"/data\" { read_only }\n  \
+           volume \"/mnt/config\" -> \"/config\"\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    volumes:
+      - media:/data:ro
+      - /mnt/config:/config
+
+volumes:
+  media:
+"#,
     );
 }

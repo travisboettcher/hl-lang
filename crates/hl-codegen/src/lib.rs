@@ -674,7 +674,17 @@ fn resolve_volumes(
             }
         };
         let container = interp::resolve(v.container.text(), bindings, v.container.span())?;
-        entries.push(format!("{host}:{container}"));
+        // `:ro` only when the entry's `{ read_only }` body (#158) set the
+        // flag — Compose short syntax has no third segment at all for
+        // the (overwhelmingly common) unset case, so this must not
+        // append an empty `:` suffix or a `:rw` one; either would change
+        // output for every `volume` entry ever written before this
+        // field existed.
+        if v.read_only {
+            entries.push(format!("{host}:{container}:ro"));
+        } else {
+            entries.push(format!("{host}:{container}"));
+        }
     }
 
     Ok((entries, docs))

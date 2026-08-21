@@ -258,6 +258,46 @@ is what selects the entry parser that draws the distinction. Every other
 map key—`env`, `publish`, `driver_opts`, `raw`—stays a plain literal,
 since none of them names anything an `.hll` file declares.
 
+Every `volume` entry, on either side of that host-kind split, may also
+carry an optional trailing `{ read_only }` body—`volume "/" ->
+"/rootfs" { read_only }`—appending Compose short syntax's `:ro` mode
+suffix to the emitted mount string, per #158. `depends_on`'s own
+per-entry `{ condition: ... }` body, covered later in this section,
+uses the identical shape: an entry that already parsed its primary pair
+can add `{ }` next, and the parser only checks for that per-entry `{`
+after parsing the pair, not at the point where the `SchemaKind::Map`
+branch decides whether the whole field opens with a canonical
+multi-entry `{ }` body or a single bare entry—so the two `{`s never
+compete for the same position. `read_only` is bare presence, matching
+`NETWORK`'s own `external`, not a `key: value` pair, since the only
+value this milestone tracks is present or absent.
+
+This design rejects two of the issue's own candidate shapes before
+landing on this one. A trailing bare flag after the primary form—`volume
+"/" -> "/rootfs", read_only`—turns out genuinely ambiguous, not just
+unfamiliar: inside `volume`'s existing canonical multi-entry body, a
+comma already separates one entry from the next, and a bare identifier
+there already names the host side of a named-volume entry—so `volume {
+"/" -> "/rootfs", read_only -> "/mnt2" }` already mounts a valid
+two-entry list, one entry naming a volume literally called `read_only`.
+Telling "a flag on the entry before the comma" apart from "the start of
+a new entry that ran out of input before its own `->`" would need
+unbounded lookahead the rest of the grammar never asks for. A `mode`
+sub-field—`{ mode: "ro" }`—fails on scope alone, not ambiguity: this
+milestone deliberately covers only `:ro`, leaving Compose's other
+short-syntax suffixes (the `z`/`Z` SELinux relabeling flags, tmpfs
+sizing) for a future issue, and a general string field would leave every
+value but `"ro"` silently unchecked rather than rejected the way an
+unknown bare flag already gets rejected.
+
+`merge_map`'s existing full-entry replacement gives `read_only` the
+correct override behavior for free—see "Composition" later in this
+document. A later tier's entry with the same container path replaces
+the earlier `VolumeEntry` outright, flag included, instead of merging
+field by field, so an overriding entry that writes no flag drops an
+inherited one, and an overriding entry that writes the flag never loses
+it. This field needed no merge-path change.
+
 `raw`'s "no uniqueness checking" is a *parser*-level statement: the
 parser never checks its own entries against each other or against any
 other field. Codegen does have one rule about them, because YAML forces

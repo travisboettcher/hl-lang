@@ -1042,6 +1042,127 @@ fn volume_same_host_different_container_is_ok() {
     assert_eq!(service.fields.volumes.entries.len(), 2);
 }
 
+// --- maps: volume's `{ read_only }` flag (#158) ---
+
+/// The plain bind-mount case the issue itself is about: a host path
+/// mounted read-only with no top-level `volume` declaration involved at
+/// all.
+#[test]
+fn volume_bind_mount_with_read_only_flag() {
+    let program = parse_ok("service s {\n  volume \"/\" -> \"/rootfs\" { read_only }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.volumes.entries.len(), 1);
+    assert!(service.fields.volumes.entries[0].read_only);
+}
+
+/// And the named-volume case — the flag must work identically whether
+/// the host side is [`VolumeHost::BindMount`] or [`VolumeHost::Named`],
+/// since Compose's own `read_only` mount option applies to both alike.
+#[test]
+fn volume_named_volume_with_read_only_flag() {
+    let program = parse_ok(
+        "volume media {}\n\
+         service s {\n  volume media -> \"/data\" { read_only }\n}\n",
+    );
+    let service = as_service(&program.decls[1]);
+    assert_eq!(service.fields.volumes.entries.len(), 1);
+    assert!(matches!(
+        &service.fields.volumes.entries[0].host,
+        VolumeHost::Named(r) if r.name == "media"
+    ));
+    assert!(service.fields.volumes.entries[0].read_only);
+}
+
+/// No `{ read_only }` body at all is still legal, and must leave the flag
+/// unset — the overwhelmingly common case, and the one whose emitted
+/// Compose output must stay byte-for-byte unchanged (see
+/// `hl-codegen`'s golden tests).
+#[test]
+fn volume_entry_without_body_leaves_read_only_unset() {
+    let program = parse_ok("service s {\n  volume \"/mnt/media\" -> \"/data\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(!service.fields.volumes.entries[0].read_only);
+}
+
+/// The flag works the same way inside `volume`'s canonical multi-entry
+/// body, entry by entry — one flagged, one not, in the same body — which
+/// is also the shape that rules out the trailing-comma sugar the issue
+/// itself first suggested: see [`hl_parser::VolumeEntry`]'s doc for why.
+#[test]
+fn volume_read_only_flag_in_canonical_multi_entry_body() {
+    let program = parse_ok(
+        "service s {\n  \
+           volume {\n    \
+             \"/\" -> \"/rootfs\" { read_only },\n    \
+             \"/data\" -> \"/data\"\n  \
+           }\n\
+         }\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let entries = &service.fields.volumes.entries;
+    assert_eq!(entries.len(), 2);
+    assert!(entries[0].read_only, "first entry should be read-only");
+    assert!(!entries[1].read_only, "second entry should not be flagged");
+}
+
+/// The bare-presence flag, exactly like `external`/`disable`, takes no
+/// `:`/value — `{ read_only: true }` isn't legal syntax, it's an unknown
+/// field, since `read_only` isn't a struct field resolved through the
+/// generic engine here.
+#[test]
+fn volume_read_only_flag_rejects_a_colon_value() {
+    let err =
+        parse("service s {\n  volume \"/\" -> \"/rootfs\" { read_only: true }\n}\n").unwrap_err();
+    assert!(
+        matches!(err, ParseError::UnexpectedToken { .. }),
+        "expected a parse error on the unexpected `:`, got {err:?}"
+    );
+}
+
+/// Any other identifier inside a volume entry's `{ }` body is an unknown
+/// field, matching `depends_on`'s own `{ condition: ... }` precedent
+/// (#155) rather than silently accepting arbitrary Compose mount options
+/// this milestone deliberately doesn't cover (`:z`, `:Z`, tmpfs sizing).
+#[test]
+fn volume_entry_body_rejects_an_unknown_flag() {
+    let err =
+        parse("service s {\n  volume \"/\" -> \"/rootfs\" { mode: \"ro\" }\n}\n").unwrap_err();
+    match err {
+        ParseError::UnknownField {
+            type_name: "volume",
+            field,
+            raw_escape_hatch: false,
+            ..
+        } => assert_eq!(field, "mode"),
+        other => panic!("expected UnknownField on volume entry body, got {other:?}"),
+    }
+}
+
+/// The read-only flag rides along with whichever side collides — setting
+/// it doesn't change what counts as a duplicate container path, since
+/// uniqueness is still checked before the flag is even looked at.
+#[test]
+fn volume_duplicate_container_path_is_still_an_error_with_read_only_flag() {
+    let err = parse(
+        "service s {\n  \
+           volume \"a\" -> \"/data\" { read_only }\n  \
+           volume \"b\" -> \"/data\"\n\
+         }\n",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::DuplicateMapKey {
+                type_name: "volume",
+                side: MapSide::Value,
+                ..
+            }
+        ),
+        "expected DuplicateMapKey on volume container path, got {err:?}"
+    );
+}
+
 // --- maps: publish (#84) ---
 
 #[test]
