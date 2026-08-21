@@ -39,3 +39,5 @@ Traefik
 Jellyfin
 Syncthing
 healthcheck
+Dockerfile
+gitignored

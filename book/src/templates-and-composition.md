@@ -132,13 +132,14 @@ Different field kinds merge differently:
   `expose`'s `entrypoint`) concatenate—no collision is possible, since
   there's nothing to overwrite. All but `dns` and `env_file` concatenate
   *by distinct name*: naming the same network in a template and again in
-  the service's own body means what naming it once means, so the repeat
-  is dropped rather than emitted twice. The first occurrence is the one
-  kept, so the surviving order is still `defaults`, then each `with`
-  target left to right, then the body's own entries. `dns` and
-  `env_file` are the exception and keep every entry, duplicates
+  the service's own body means what naming it once means, so `hllc`
+  drops the repeat rather than emitting it twice. The first occurrence
+  is the one kept, so the surviving order is still `defaults`, then
+  each `with` target left to right, then the body's own entries. `dns`
+  and `env_file` are the exception and keep every entry, duplicates
   included, because their order is observable—resolver priority for
-  `dns`, Compose's own last-file-wins precedence for `env_file` (#154).
+  `dns`, Compose's own last-file-wins precedence for `env_file`—see
+  #154.
 - **`depends_on`** looks like a list field—`depends_on [db]`—but merges
   like the map fields just below it, keyed on the referenced service's
   own name, so the service's own body always wins over a template's
@@ -147,7 +148,7 @@ Different field kinds merge differently:
   entries agree when their conditions match—including a bare entry and
   an explicit `condition: service_started`, which mean the same thing to
   Compose—and two templates that agree are giving the same answer twice,
-  not two different ones, so they still compose to a single entry
+  not two different ones, so they still collapse to a single entry
   exactly as a plain `depends_on [db]` always has. Only when two
   explicit templates' conditions genuinely *differ* is it the same
   `MapKeyCollision` compile error two templates setting the same `env`
@@ -156,7 +157,7 @@ Different field kinds merge differently:
   for `volume`, since its uniqueness check is on the container-path
   side)—a genuine collision on the same key, regardless of whether the
   two values happen to agree, is the preceding compile error case.
-  `depends_on` (see above) is keyed like a map field too, but its
+  The preceding entry's `depends_on` keys like a map field too, but its
   collision check also looks at the *value*: two entries that agree
   aren't a real collision the way two `env` entries sharing a key always
   are, whatever those two entries' values happen to be.
@@ -178,8 +179,8 @@ Different field kinds merge differently:
   `healthcheck.test` and `healthcheck.disable` collide the same way a
   scalar sub-field does, even though neither is a plain `Literal`:
   `test` carries Compose's own shell-string-or-exec-list shape, and
-  `disable` is a bare-presence flag whose only "value" is the fact it
-  was set at all. Two explicit templates each setting `test` (or each
+  `disable` is a bare-presence flag whose only "value" is that it's
+  present at all. Two explicit templates each setting `test` (or each
   setting `disable`) still collide, exactly as two explicit templates
   each setting `expose.port` do.
 

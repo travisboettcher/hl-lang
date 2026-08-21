@@ -291,8 +291,8 @@ codegen's to write rather than the user's—so no generated label value
 ever has to tolerate a user-written comma, and the metacharacter guard
 can reject `,` uniformly everywhere.
 
-`healthcheck` is the table's one struct-kind row (besides the three
-top-level types) with no primary field: unlike `image`'s `ref` or
+Besides the three top-level types, `healthcheck` is the table's one
+struct-kind row with no primary field: unlike `image`'s `ref` or
 `expose`'s `port`, no single sub-field of `test`/`interval`/`timeout`/
 `retries`/`start_period`/`start_interval`/`disable` obviously stands in
 for the whole healthcheck, so `healthcheck { ... }` requires the braced
@@ -304,12 +304,13 @@ exec form, `["CMD", "pg_isready", "-U", "miniflux"]`), single-occurrence
 like a plain scalar but with no bare comma-list sugar—`test: "a", "b"`
 would be ambiguous between the shell string plus garbage and a two-item
 exec list, so only a bare literal or an explicit `[...]` parses.
-`disable` is modeled directly on `NETWORK`'s `external`: a bare-presence
+`disable` mirrors `NETWORK`'s `external` directly: a bare-presence
 `FieldKind::BoolFlag`, matching Compose's own `disable: true`, which
 turns the healthcheck off entirely, including one inherited from the
 image. Every field here is a plain, generic Compose key, not
 homelab-specific in any of its own fields—the same "generic core"
-reasoning that already justified `dns`/`env_file`/`container_name` (#153).
+reasoning that already justified `dns`/`env_file`/`container_name`, see
+#153.
 
 `middleware`, `depends_on`, `networks`, `dns`, and `env_file` aren't
 rows in this table—they're plain list-of-reference fields directly on
@@ -327,9 +328,10 @@ gitignored, homelab-specific `.env` file—see #154.
 service_healthy }]`) shares this row's surface grammar—a bare reference,
 a bracketed list, the same accumulate-across-repeats rule—but each entry
 may also carry an optional `{ condition: ... }` body naming one of
-Compose's own three `depends_on` conditions (`service_started`, the
-default and the only thing a bare `depends_on database` has ever meant;
-`service_healthy`; `service_completed_successfully`)—see #155. A
+Compose's own three `depends_on` conditions: `service_started` (the
+default, and the only thing a bare `depends_on database` has ever
+meant), `service_healthy`, and `service_completed_successfully`—see
+#155. A
 `condition` value outside that fixed set of three is a compile error,
 checked in the parser at the point it's written (mirroring
 `UnknownParamType`'s own precedent for validating a literal's *value*,
@@ -339,17 +341,17 @@ reference the way an ordinary literal slot can. `hllc` does *not* warn
 when a `service_healthy` entry's target has no `.hll`-level
 `healthcheck` field: a Docker image can bake its own `HEALTHCHECK` into
 its Dockerfile, invisible to anything an `.hll` file declares, so a
-missing `healthcheck` field is not evidence the condition is
+missing `healthcheck` field isn't evidence the condition is
 meaningless.
 
 Compose's `depends_on:` key has two shapes that can't mix in one
-document: a plain list of names (the short form, "wait for container
-start") or a mapping of name to `{ condition: ... }` (the long form).
-Codegen emits the short form—unchanged from before this syntax
-existed—as long as no entry in a service's `depends_on` carries a
-condition, and the long form as soon as any entry does, filling in
-`service_started` for any sibling entry left bare (the long form
-requires every entry to be a mapping).
+document. The short form is a plain list of names and means "wait for
+container start." The long form is a mapping of name to
+`{ condition: ... }` and requires every entry to be a mapping. Codegen
+emits the short form—unchanged from before this syntax existed—as long
+as no entry in a service's `depends_on` carries a condition, and the
+long form once any entry does, filling in `service_started` for any
+sibling entry left bare.
 
 `container_name` isn't a row either, for the opposite reason: it's a
 plain *scalar* field directly on `service`/`template`
@@ -389,38 +391,39 @@ List fields concatenate, so no collision is possible. The set-like ones
 (`middleware`, `networks`, `expose.entrypoint`) concatenate by *distinct*
 name, keeping the first occurrence, while `dns` and `env_file` keep
 duplicates since their order is observable—resolver priority for `dns`,
-Compose's own last-file-wins precedence for `env_file` (#154). Map
+Compose's own last-file-wins precedence for `env_file`—see #154. Map
 fields merge key-by-key (or value-by-value for `volume` and `publish`),
 and scalar fields (`image`, `restart`) error on collision among explicit
 templates only.
 
 `depends_on` merges key-by-key too, not by the set-like lists' rule,
 even though its surface grammar is still a reference list
-(`depends_on [db]`): once an entry could carry a `condition` (#155), two
-entries naming the same service could genuinely disagree, so `hllc`
-keys the merge on the referenced service's own name via a dedicated
-`merge_depends_on`, not `LIST_FIELDS`'s distinct-name concatenation. The
-service's own body still always wins over a template's entry for the
-same dependency—but unlike `env`/`volume`/`publish`'s own `merge_map`,
-two explicit templates naming the same service are compared by their
-*effective* condition (a bare entry means the same thing as an explicit
-`service_started`) before anything is called a collision: agreeing
-entries (including two plain `depends_on [db]`, by far the common case)
-still silently compose to one, exactly as they did before #155 existed,
-while only two explicit templates whose conditions genuinely differ
-raise the same `MapKeyCollision` two explicit templates setting the
-same `env` key to different values would. Erroring on mere agreement
-would have been a gratuitous breaking change to every `.hll` file
-already composing two templates that each depend on the same
-service—the same reasoning `hl-codegen`'s `AmbiguousExternalNetwork`
-check already applies to a network named `external` twice: naming one
-thing more than once isn't an ambiguity between it and itself, it's one
-answer given twice.
+(`depends_on [db]`): once an entry can carry a `condition`, two entries
+naming the same service could genuinely disagree, so `hllc` keys the
+merge on the referenced service's own name via a dedicated
+`merge_depends_on`, not `LIST_FIELDS`'s distinct-name concatenation—see
+#155. The service's own body still always wins over a template's entry
+for the same dependency—but unlike `env`/`volume`/`publish`'s own
+`merge_map`, `hllc` compares two explicit templates naming the same
+service by their *effective* condition (a bare entry means the same
+thing as an explicit `service_started`) before it calls anything a
+collision: agreeing entries (including two plain `depends_on [db]`, by
+far the common case) still silently collapse to one, exactly as they
+did before #155 existed, while only two explicit templates whose
+conditions genuinely differ raise the same `MapKeyCollision` two
+explicit templates setting the same `env` key to different values
+would. Treating mere agreement as an error would have been a gratuitous
+breaking change to every `.hll` file already composing two templates
+that each depend on the same service—the same reasoning
+`hl-codegen`'s `AmbiguousExternalNetwork` check already applies to a
+network named `external` twice: naming one thing more than once isn't
+an ambiguity between it and itself, it's one answer given twice.
 
 `expose` and `healthcheck`, the built-in struct fields
 with more than one sub-field, both merge per sub-field (`expose`'s
-`port`/`host`/`entrypoint`; `healthcheck`'s `test`/`interval`/`timeout`/
-`retries`/`start_period`/`start_interval`/`disable`) rather than as one
+`port`/`host`/`entrypoint` and `healthcheck`'s
+`test`/`interval`/`timeout`/`retries`/`start_period`/`start_interval`/
+`disable`) rather than as one
 indivisible unit—the same key-by-key reasoning as a map field, applied
 to a struct's named fields instead of a map's keys. Each sub-field then
 merges by its own kind: `expose.port`/`.host` and every `healthcheck`
@@ -436,12 +439,13 @@ service's own body can override just `expose.host` (or just
 only collide if they set the *same* scalar sub-field, not merely the
 same enclosing field overall.
 
-`healthcheck.test` (`HealthcheckTest`) and `healthcheck.disable` (a
-bare-presence flag) aren't `Literal`s, so they can't ride the same
-name-keyed `SCALAR_FIELDS` table `expose.port`/`.host`/`restart.policy`
-do—`merge_scalar_like` in `compose.rs` is `merge_scalar` generalized
-over the value type, applied to two dedicated `MergeAcc` slots instead
-of a third table row, since only these two fields need it (#153).
+`healthcheck.test`, whose type is `HealthcheckTest`, and
+`healthcheck.disable`, a bare-presence flag, aren't `Literal`s, so they
+can't ride the same name-keyed `SCALAR_FIELDS` table
+`expose.port`/`.host`/`restart.policy` do—`merge_scalar_like` in
+`compose.rs` is `merge_scalar` generalized over the value type, applied
+to two dedicated `MergeAcc` slots instead of a third table row, since
+only these two fields need it—see #153.
 
 ```
 template internal_web(port: Number) {
