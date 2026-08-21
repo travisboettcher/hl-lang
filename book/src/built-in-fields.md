@@ -319,6 +319,41 @@ declare but never mount produces no entry, exactly as a `network`
 declaration no service names produces none—though only the `network`
 case raises a [warning](./cli.md#warnings) today.
 
+Either kind of entry may add a trailing `{ read_only }` body, appending
+Compose short syntax's `:ro` mode suffix—see #158:
+
+```hll,fragment
+volume "/" -> "/rootfs" { read_only }
+volume media -> "/data" { read_only }
+```
+
+produces:
+
+```yaml,fragment
+volumes:
+  - /:/rootfs:ro
+  - media:/data:ro
+```
+
+`read_only` is bare presence only, matching `network`'s own `external`
+flag—there's no `read_only: true`/`read_only: false` form, and no way to
+write `:rw` explicitly, since that's already Compose's own default for
+an entry with no mode suffix at all. It works the same way whether the
+host side is a bind-mount path or a named-volume reference, and inside
+`volume`'s canonical multi-entry body a flagged entry and an unflagged
+one can sit side by side:
+
+```hll,fragment
+volume {
+  "/" -> "/rootfs" { read_only }
+  "/data" -> "/data"
+}
+```
+
+`hll` covers only `:ro` today, not Compose's other short-syntax mount
+options (`:z`, `:Z`, tmpfs sizing)—see the design doc's `volume` section
+for why this design picked a bare flag over a general `mode` string.
+
 ## `env`
 
 Map-kind. Bare-entry separator: `=`, key equals value. `hllc` checks

@@ -984,6 +984,52 @@ fn service_body_overrides_inherited_map_entry_unconditionally() {
     assert_eq!(service.fields.volumes.entries[0].container.text(), "/data");
 }
 
+/// The `{ read_only }` flag (#158) rides along through `merge_map`'s
+/// full-entry replacement — an entry inherited from a template keeps its
+/// own flag when nothing overrides its container path.
+#[test]
+fn inherited_volume_entrys_read_only_flag_survives_composition_untouched() {
+    let composed = compose_ok(
+        "template a {\n  volume \"/\" -> \"/rootfs\" { read_only }\n}\n\
+         service s {\n  with a\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(service.fields.volumes.entries.len(), 1);
+    assert!(service.fields.volumes.entries[0].read_only);
+}
+
+/// And the twin of [`service_body_overrides_inherited_map_entry_unconditionally`]:
+/// when the service's own body overrides an inherited entry on the same
+/// container path, the *whole* entry is replaced, including the flag —
+/// a template's `{ read_only }` must not silently survive an own-body
+/// override that wrote no flag at all, and conversely an own-body
+/// override that *does* write the flag must not be lost either.
+#[test]
+fn own_body_override_replaces_the_inherited_entrys_read_only_flag_not_just_its_host() {
+    let composed = compose_ok(
+        "template a {\n  volume \"h1\" -> \"/data\" { read_only }\n}\n\
+         service s {\n  with a\n  volume \"h2\" -> \"/data\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(service.fields.volumes.entries.len(), 1);
+    assert_eq!(service.fields.volumes.entries[0].host.text(), "h2");
+    assert!(
+        !service.fields.volumes.entries[0].read_only,
+        "own body's unflagged entry must win outright, not silently keep the \
+         template's stale `read_only`"
+    );
+
+    // And the reverse direction: the own body adds the flag a template's
+    // entry never had.
+    let composed = compose_ok(
+        "template a {\n  volume \"h1\" -> \"/data\"\n}\n\
+         service s {\n  with a\n  volume \"h2\" -> \"/data\" { read_only }\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(service.fields.volumes.entries.len(), 1);
+    assert!(service.fields.volumes.entries[0].read_only);
+}
+
 #[test]
 fn raw_concatenates_across_tiers_with_repeated_key_no_error() {
     let composed = compose_ok(

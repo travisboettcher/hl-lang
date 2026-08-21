@@ -41,3 +41,6 @@ Syncthing
 healthcheck
 Dockerfile
 gitignored
+tmpfs
+unflagged
+SELinux

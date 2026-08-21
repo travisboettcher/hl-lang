@@ -426,11 +426,60 @@ pub struct VolumeMap {
     pub entries: Vec<VolumeEntry>,
 }
 
-/// One `host -> container` mount entry.
+/// One `host -> container` mount entry, plus an optional trailing
+/// `{ read_only }` flag (#158) that emits Compose short syntax's `:ro`
+/// mode suffix (`/mnt/media:/data:ro`).
+///
+/// `read_only` is a plain `bool`, not an `Option<Span>` like
+/// [`Network::external`]/[`Volume::external`]: those two report their own
+/// span back through [`crate::ParseError::DuplicateField`] when the same
+/// struct-kind body sets the flag twice, but a `volume` entry's body is
+/// hand-parsed (see the parser's own `parse_mount_map_entry`)
+/// rather than run through the generic struct-field engine, so there is
+/// no second occurrence within one entry for a span to ever distinguish—
+/// `{ read_only read_only }` is simply a syntax error at the second
+/// token, never a value this type has to represent.
+///
+/// Syntax choice (#158): the issue's own two suggestions were a trailing
+/// bare flag after the primary form (`volume "/" -> "/rootfs",
+/// read_only`) or a `mode` sub-field body. The trailing-comma form was
+/// rejected as genuinely ambiguous, not just unusual: inside `volume`'s
+/// existing canonical multi-entry body (`volume { "/" -> "/rootfs",
+/// "/var/run" -> "/var/run" }`), a comma already means "the next map
+/// entry starts here," and a bare identifier is *already* legal there as
+/// the host side of a named-volume entry (`volume { "/" -> "/rootfs",
+/// read_only -> "/mnt2" }` legitimately mounts a volume literally named
+/// `read_only`). Telling "a flag on the previous entry" from "the start
+/// of a new entry that happens to run out of input before its own `->`"
+/// apart would need unbounded lookahead the rest of the grammar never
+/// asks for, for a distinction the parser can't make locally. A `{ ... }`
+/// body sidesteps that entirely: the outer `{` that opens `volume`'s own
+/// multi-entry body is only ever checked *before* any entry starts
+/// parsing (the parser's own `parse_field`, `SchemaKind::Map` arm), so a
+/// second, per-entry `{` after the container literal is never reachable
+/// from that position and free of ambiguity. It also mirrors
+/// existing precedent directly: `depends_on`'s own per-entry `{
+/// condition: ... }` body (#155) is exactly this shape—`IDENT`
+/// (optionally qualified) `->`/`:` value, then an optional `{ }` tail—so
+/// `volume "/" -> "/rootfs" { read_only }` reuses a pattern this
+/// language's readers already know rather than inventing a second one. A
+/// `mode` sub-field (`{ mode: "ro" }`) was rejected on scope grounds
+/// alone, not ambiguity: this milestone deliberately covers `:ro` only,
+/// not Compose's other short-syntax suffixes (`:z`, `:Z`, tmpfs sizing),
+/// and a bare presence flag says exactly that, with nothing left
+/// unvalidated the way an arbitrary `mode` string would leave every
+/// value but `"ro"` silently unchecked.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VolumeEntry {
     pub host: VolumeHost,
     pub container: Literal,
+    /// Whether this entry carried a `{ read_only }` body (#158). `false`
+    /// for the overwhelming majority of entries, which carry no body at
+    /// all—Compose's short syntax omits the `:ro` suffix entirely rather
+    /// than spelling out `:rw`, and codegen matches that: this flag adds
+    /// a suffix when set and changes nothing about the emitted string
+    /// when it isn't (see `hl_codegen`'s `resolve_volumes`).
+    pub read_only: bool,
     pub span: Span,
 }
 

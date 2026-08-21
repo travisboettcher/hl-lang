@@ -161,6 +161,21 @@ fn raw_service_fixture_parses_to_expected_ast() {
     assert_eq!(service.name.name, "cadvisor");
     assert_eq!(service.fields.raw.entries.len(), 3);
 
+    // The five read-only bind mounts (#158) — every one of them a plain
+    // `volume` entry with its `{ read_only }` flag set, none of them
+    // routed through `raw`.
+    let volumes = &service.fields.volumes.entries;
+    assert_eq!(volumes.len(), 5);
+    let hosts: Vec<&str> = volumes.iter().map(|e| e.host.text()).collect();
+    assert_eq!(
+        hosts,
+        vec!["/", "/var/run", "/sys", "/var/lib/docker", "/dev/disk/"]
+    );
+    assert!(
+        volumes.iter().all(|e| e.read_only),
+        "every cadvisor mount is read-only, per the issue's own repro"
+    );
+
     let keys: Vec<&str> = service
         .fields
         .raw

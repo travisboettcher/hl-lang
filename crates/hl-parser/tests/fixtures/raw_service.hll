@@ -1,8 +1,19 @@
 # A service leaning on `raw` for fields the compiler has no opinion
-# about, per docs/DESIGN.md's `raw` passthrough example.
-
+# about, per docs/DESIGN.md's `raw` passthrough example — plus the real
+# `cadvisor` service's five read-only bind mounts (#158), each written
+# through the dedicated `volume` field's own `{ read_only }` flag instead
+# of `raw`. Before that flag existed, none of these five could be
+# expressed through `volume` at all (there was no way to add the
+# trailing `:ro`), so the whole list had to move to `raw` just to reach
+# it — this fixture is the issue's own repro, now compiling straight
+# through the real field.
 service cadvisor {
   image "gcr.io/cadvisor/cadvisor:latest"
+  volume "/" -> "/rootfs" { read_only }
+  volume "/var/run" -> "/var/run" { read_only }
+  volume "/sys" -> "/sys" { read_only }
+  volume "/var/lib/docker" -> "/var/lib/docker" { read_only }
+  volume "/dev/disk/" -> "/dev/disk" { read_only }
   raw {
     privileged: true
     devices: ["/dev/kmsg"]
