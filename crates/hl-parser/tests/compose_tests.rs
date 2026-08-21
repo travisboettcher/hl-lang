@@ -754,6 +754,57 @@ fn defaults_healthcheck_subfield_is_overridden_but_others_survive() {
     assert_eq!(hc.interval.as_ref().unwrap().text(), "10s");
 }
 
+/// A service's own `healthcheck.test` beats an explicit `with`
+/// template's `test` for the same sub-field — the `test`/`disable`
+/// analogue of `service_own_body_can_override_just_healthcheck_interval`
+/// above, but exercising `merge_scalar_like`'s `(_, Tier::Own)` arm
+/// directly rather than `merge_scalar`'s identical rule for plain
+/// `Literal` fields. `test`/`disable` are the only two `healthcheck`
+/// sub-fields that go through `merge_scalar_like` instead of
+/// `SCALAR_FIELDS`, so this is the only way to reach that arm at all.
+#[test]
+fn service_own_healthcheck_test_beats_an_explicit_templates_test() {
+    let composed = compose_ok(
+        "template pg_healthcheck {\n  healthcheck { test: \"pg_isready\" }\n}\n\
+         service db {\n  \
+           with pg_healthcheck\n  \
+           image \"postgres\"\n  \
+           healthcheck { test: \"custom-check\" }\n\
+         }\n",
+    );
+    let service = single_service(&composed);
+    let hc = service
+        .fields
+        .healthcheck
+        .as_ref()
+        .expect("healthcheck set");
+    assert_eq!(healthcheck_test_text(hc), "custom-check");
+}
+
+/// A `defaults` template's `healthcheck.test` is silently overridden by
+/// an *explicit* template's own `test` for the same sub-field — the
+/// `test`/`disable` analogue of
+/// `defaults_healthcheck_subfield_is_overridden_but_others_survive`
+/// above, but exercising `merge_scalar_like`'s `(Tier::Defaults, _)`
+/// arm directly. That test only exercises `interval` (a plain
+/// `Literal`, routed through `merge_scalar`); `test`'s collision point
+/// is a distinct function with its own copy of the same rule.
+#[test]
+fn defaults_healthcheck_test_loses_to_an_explicit_templates_test() {
+    let composed = compose_ok(
+        "template defaults {\n  healthcheck { test: \"placeholder\" }\n}\n\
+         template real {\n  healthcheck { test: \"pg_isready\" }\n}\n\
+         service s {\n  with real\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let hc = service
+        .fields
+        .healthcheck
+        .as_ref()
+        .expect("healthcheck set");
+    assert_eq!(healthcheck_test_text(hc), "pg_isready");
+}
+
 /// `healthcheck` lives entirely inside one `Option<Healthcheck>` that
 /// the merge rebuilds from scratch — so an inherited sub-field with no
 /// others beside it still has to materialize the enclosing

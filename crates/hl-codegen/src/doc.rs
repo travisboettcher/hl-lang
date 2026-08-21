@@ -334,3 +334,47 @@ impl ComposeServiceDoc {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `HealthcheckDoc::is_empty`'s own documented invariant, checked
+    /// directly against the struct rather than through
+    /// [`crate::generate_healthcheck`] — that function already turns
+    /// "every sub-field unset" into a bare `None` before a
+    /// `HealthcheckDoc` is ever constructed (see its own doc), so this
+    /// equality check is never actually reached with a truly-default
+    /// value along that path. It stays load-bearing all the same: it's
+    /// what [`ComposeServiceDoc::healthcheck`]'s `skip_serializing_if`
+    /// would fall back on for any future caller that constructs a
+    /// `HealthcheckDoc` some other way, exactly as
+    /// [`VolumeDoc::is_empty`] does for `volumes`.
+    #[test]
+    fn default_healthcheck_doc_is_empty() {
+        assert!(HealthcheckDoc::default().is_empty());
+    }
+
+    /// The mirror case: any one field set at all — here just
+    /// `interval` — makes it non-empty.
+    #[test]
+    fn healthcheck_doc_with_a_field_set_is_not_empty() {
+        let doc = HealthcheckDoc {
+            interval: Some("10s".to_string()),
+            ..HealthcheckDoc::default()
+        };
+        assert!(!doc.is_empty());
+    }
+
+    /// `disable: true` alone also counts as non-empty — it's a bare
+    /// `bool`, not an `Option`, so it doesn't ride the same "any field
+    /// is `Some`" shortcut the other five do.
+    #[test]
+    fn healthcheck_doc_with_only_disable_set_is_not_empty() {
+        let doc = HealthcheckDoc {
+            disable: true,
+            ..HealthcheckDoc::default()
+        };
+        assert!(!doc.is_empty());
+    }
+}

@@ -1302,6 +1302,28 @@ fn depends_on_bracket_list_form() {
     );
 }
 
+/// The bare comma-list sugar also works for `depends_on`, parsing every
+/// comma-separated reference as its own entry rather than stopping
+/// after the first — mirrors `networks_comma_sugar_form` for the
+/// analogous reference-list sugar. Exercises
+/// `parse_bare_depends_on_list`'s own comma-continuation loop directly:
+/// each entry here (`db`, then `cache`) is followed by another bare
+/// `IDENT`, never a `KEY :` pair, so `comma_starts_a_new_field` must
+/// correctly say "no, that's not a new field" for the loop to keep
+/// consuming instead of stopping after just `db`.
+#[test]
+fn depends_on_bare_comma_list_form() {
+    let program = parse_ok("service s {\n  depends_on db, cache\n}\n");
+    let service = as_service(&program.decls[0]);
+    let names: Vec<&str> = service
+        .fields
+        .depends_on
+        .iter()
+        .map(|e| e.reference.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["db", "cache"]);
+}
+
 /// `db { condition: service_healthy }` (#155): the bracketed extended
 /// form carries its condition alongside the plain reference.
 #[test]
@@ -1364,6 +1386,33 @@ fn depends_on_all_three_condition_values_parse() {
             service.fields.depends_on[0].condition.map(|(c, _)| c),
             Some(expected),
             "condition {text:?} did not round-trip"
+        );
+    }
+}
+
+/// `DependsOnCondition::compose_value` — the string
+/// [`hl_codegen::generate_depends_on`]'s long map form actually writes
+/// into the `condition:` key — round-trips through [`DependsOnCondition::parse`]
+/// to exactly the same spelling it was parsed from, for each of
+/// Compose's own three values. Checked directly against the enum here
+/// rather than only through generated YAML, since a golden-test
+/// assertion in another crate isn't exercised while this crate's own
+/// mutation-testing run is scoped to `hl-parser`.
+#[test]
+fn depends_on_condition_compose_value_matches_its_own_spelling() {
+    for (condition, expected) in [
+        (DependsOnCondition::ServiceStarted, "service_started"),
+        (DependsOnCondition::ServiceHealthy, "service_healthy"),
+        (
+            DependsOnCondition::ServiceCompletedSuccessfully,
+            "service_completed_successfully",
+        ),
+    ] {
+        assert_eq!(condition.compose_value(), expected);
+        assert_eq!(
+            DependsOnCondition::parse(expected),
+            Some(condition),
+            "{expected:?} did not parse back to the condition its own compose_value produced"
         );
     }
 }
