@@ -60,6 +60,110 @@ impl VolumeDoc {
     }
 }
 
+/// Compose's own `healthcheck:` key (#153) — mirrors [`NetworkDoc`]'s
+/// style, with `skip_serializing_if` on every field so an unset one is
+/// simply omitted rather than emitted as `null`.
+#[derive(Serialize, Default, PartialEq)]
+pub(crate) struct HealthcheckDoc {
+    /// Either a plain YAML string (Compose's shell form — a bare string
+    /// is shorthand for `CMD-SHELL <string>`) or a YAML sequence
+    /// (Compose's exec form, `["CMD", "pg_isready", "-U", "miniflux"]`),
+    /// carried through in whichever shape `.hll` wrote it rather than
+    /// normalizing one into the other — see
+    /// [`hl_parser::HealthcheckTest`]'s doc for why the two aren't
+    /// interchangeable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test: Option<serde_yaml_ng::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interval: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+    /// A YAML number when written as one (`retries: 3`), carried through
+    /// via [`crate::raw::scalar_value`] exactly like `expose.port` — see
+    /// that call site's own doc for why this field skips
+    /// `{{name}}`-interpolation the string fields above get.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retries: Option<serde_yaml_ng::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_period: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_interval: Option<String>,
+    /// Compose's `disable: true`. There's no `false` form to represent
+    /// — [`hl_parser::Healthcheck::disable`] is bare-presence-only, so
+    /// this is always emitted as `true` or omitted entirely, never
+    /// `false`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub disable: bool,
+}
+
+impl HealthcheckDoc {
+    /// Whether this `healthcheck` set nothing at all — in which case
+    /// [`ComposeServiceDoc::healthcheck`] stores `None` and the service
+    /// gets no `healthcheck:` key, rather than an empty `{}` mapping.
+    /// Mirrors [`VolumeDoc::is_empty`]; see that doc for why the empty
+    /// case is checked explicitly instead of just serializing whatever
+    /// came out.
+    pub(crate) fn is_empty(&self) -> bool {
+        *self == HealthcheckDoc::default()
+    }
+}
+
+/// Compose's `depends_on:` key, in whichever of its two mutually
+/// exclusive shapes this service's own entries need (#155). Compose
+/// allows either a plain sequence of service names (the *short* form —
+/// what `hll` has always emitted, "wait for the target container to
+/// start") or a mapping of name to `{ condition: ... }` (the *long*
+/// form — "wait for a named readiness condition"), but never a mix of
+/// the two in one document.
+///
+/// `hllc` picks `Short` when none of a service's `depends_on` entries
+/// carries an explicit `condition`, so every `depends_on [db]`/
+/// `depends_on database` file — which is to say, every file written
+/// before #155 — keeps emitting the exact YAML it always has, byte for
+/// byte. It picks `Long` as soon as *any* entry does, since Compose's
+/// long form is all-or-nothing per document: once one entry needs a
+/// mapping value, every entry does, so [`crate::generate_depends_on`]
+/// fills in Compose's own implicit default (`service_started`) for any
+/// sibling entry that named no condition — the same "wait for container
+/// start" behavior the short form always meant, just spelled the long
+/// way.
+#[derive(Serialize, PartialEq)]
+#[serde(untagged)]
+pub(crate) enum DependsOnDoc {
+    Short(Vec<String>),
+    Long(IndexMap<String, DependsOnConditionDoc>),
+}
+
+impl Default for DependsOnDoc {
+    /// The short, empty form — matching `Vec::default()`'s own
+    /// "nothing set" meaning for every other list field on
+    /// [`ComposeServiceDoc`], and what `skip_serializing_if` compares
+    /// against via [`Self::is_empty`].
+    fn default() -> Self {
+        DependsOnDoc::Short(Vec::new())
+    }
+}
+
+impl DependsOnDoc {
+    /// Whether this `depends_on` set nothing at all — in which case the
+    /// service gets no `depends_on:` key. Mirrors
+    /// [`HealthcheckDoc::is_empty`]/[`VolumeDoc::is_empty`]; `Long` is
+    /// never actually constructed empty (see
+    /// [`crate::generate_depends_on`]), but the check costs nothing and
+    /// keeps this type self-consistent regardless of who builds one.
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            DependsOnDoc::Short(v) => v.is_empty(),
+            DependsOnDoc::Long(m) => m.is_empty(),
+        }
+    }
+}
+
+#[derive(Serialize, PartialEq)]
+pub(crate) struct DependsOnConditionDoc {
+    pub condition: String,
+}
+
 #[derive(Serialize, Default)]
 pub(crate) struct ComposeServiceDoc {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,8 +180,23 @@ pub(crate) struct ComposeServiceDoc {
     pub container_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart: Option<String>,
+    /// Compose's own `healthcheck:` key (#153). `None` both when
+    /// `.hll` sets no `healthcheck` field at all and when it does but
+    /// leaves every sub-field unset (`healthcheck {}`) — see
+    /// [`HealthcheckDoc::is_empty`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub healthcheck: Option<HealthcheckDoc>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub environment: Vec<String>,
+    /// `env_file` paths, carried through verbatim (#154). Always emitted
+    /// as a list — even a single `env_file "one.env"` becomes a
+    /// one-element `env_file:` list — rather than Compose's alternative
+    /// bare-string shorthand, so the emitted shape doesn't depend on how
+    /// many paths were written. Compose resolves each path relative to
+    /// the compose file itself; that's the user's concern; `hllc` never
+    /// inspects or rewrites a path.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub env_file: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -102,8 +221,10 @@ pub(crate) struct ComposeServiceDoc {
     pub ports: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub expose: Vec<serde_yaml_ng::Value>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub depends_on: Vec<String>,
+    /// See [`DependsOnDoc`]'s own doc for the short-vs-long shape switch
+    /// (#155).
+    #[serde(skip_serializing_if = "DependsOnDoc::is_empty")]
+    pub depends_on: DependsOnDoc,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
     /// `raw {}` entries — flattened so they land as sibling top-level
@@ -157,7 +278,9 @@ impl ComposeServiceDoc {
             image,
             container_name,
             restart,
+            healthcheck,
             environment,
+            env_file,
             volumes,
             networks,
             dns,
@@ -179,8 +302,14 @@ impl ComposeServiceDoc {
         if raw.contains_key("restart") {
             *restart = None;
         }
+        if raw.contains_key("healthcheck") {
+            *healthcheck = None;
+        }
         if raw.contains_key("environment") {
             environment.clear();
+        }
+        if raw.contains_key("env_file") {
+            env_file.clear();
         }
         if raw.contains_key("volumes") {
             volumes.clear();
@@ -198,10 +327,54 @@ impl ComposeServiceDoc {
             expose.clear();
         }
         if raw.contains_key("depends_on") {
-            depends_on.clear();
+            *depends_on = DependsOnDoc::default();
         }
         if raw.contains_key("labels") {
             labels.clear();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `HealthcheckDoc::is_empty`'s own documented invariant, checked
+    /// directly against the struct rather than through
+    /// [`crate::generate_healthcheck`] — that function already turns
+    /// "every sub-field unset" into a bare `None` before a
+    /// `HealthcheckDoc` is ever constructed (see its own doc), so this
+    /// equality check is never actually reached with a truly-default
+    /// value along that path. It stays load-bearing all the same: it's
+    /// what [`ComposeServiceDoc::healthcheck`]'s `skip_serializing_if`
+    /// would fall back on for any future caller that constructs a
+    /// `HealthcheckDoc` some other way, exactly as
+    /// [`VolumeDoc::is_empty`] does for `volumes`.
+    #[test]
+    fn default_healthcheck_doc_is_empty() {
+        assert!(HealthcheckDoc::default().is_empty());
+    }
+
+    /// The mirror case: any one field set at all — here just
+    /// `interval` — makes it non-empty.
+    #[test]
+    fn healthcheck_doc_with_a_field_set_is_not_empty() {
+        let doc = HealthcheckDoc {
+            interval: Some("10s".to_string()),
+            ..HealthcheckDoc::default()
+        };
+        assert!(!doc.is_empty());
+    }
+
+    /// `disable: true` alone also counts as non-empty — it's a bare
+    /// `bool`, not an `Option`, so it doesn't ride the same "any field
+    /// is `Some`" shortcut the other five do.
+    #[test]
+    fn healthcheck_doc_with_only_disable_set_is_not_empty() {
+        let doc = HealthcheckDoc {
+            disable: true,
+            ..HealthcheckDoc::default()
+        };
+        assert!(!doc.is_empty());
     }
 }

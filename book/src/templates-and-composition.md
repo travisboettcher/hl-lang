@@ -128,36 +128,65 @@ survives the explicit tier.
 
 Different field kinds merge differently:
 
-- **List fields** (`middleware`, `depends_on`, `networks`, `dns`, and
+- **List fields** (`middleware`, `networks`, `dns`, `env_file`, and
   `expose`'s `entrypoint`) concatenate—no collision is possible, since
-  there's nothing to overwrite. All but `dns` concatenate *by distinct
-  name*: naming the same network in a template and again in the
-  service's own body means what naming it once means, so the repeat is
-  dropped rather than emitted twice. The first occurrence is the one
-  kept, so the surviving order is still `defaults`, then each `with`
-  target left to right, then the body's own entries. `dns` is the
-  exception and keeps every entry, duplicates included, because its
-  order is resolver priority and is therefore something you can observe.
+  there's nothing to overwrite. All but `dns` and `env_file` concatenate
+  *by distinct name*: naming the same network in a template and again in
+  the service's own body means what naming it once means, so `hllc`
+  drops the repeat rather than emitting it twice. The first occurrence
+  is the one kept, so the surviving order is still `defaults`, then
+  each `with` target left to right, then the body's own entries. `dns`
+  and `env_file` are the exception and keep every entry, duplicates
+  included, because their order is observable—resolver priority for
+  `dns`, Compose's own last-file-wins precedence for `env_file`—see
+  #154.
+- **`depends_on`** looks like a list field—`depends_on [db]`—but merges
+  like the map fields just below it, keyed on the referenced service's
+  own name, so the service's own body always wins over a template's
+  entry for the same dependency. Unlike the true map fields, though,
+  naming the same service twice isn't automatically a collision: two
+  entries agree when their conditions match—including a bare entry and
+  an explicit `condition: service_started`, which mean the same thing to
+  Compose—and two templates that agree are giving the same answer twice,
+  not two different ones, so they still collapse to a single entry
+  exactly as a plain `depends_on [db]` always has. Only when two
+  explicit templates' conditions genuinely *differ* is it the same
+  `MapKeyCollision` compile error two templates setting the same `env`
+  key to two different values would raise.
 - **Map fields** (`volume`, `env`) merge key-by-key (or value-by-value
   for `volume`, since its uniqueness check is on the container-path
-  side)—a genuine collision on the same key is the preceding compile
-  error case.
+  side)—a genuine collision on the same key, regardless of whether the
+  two values happen to agree, is the preceding compile error case.
+  The preceding entry's `depends_on` keys like a map field too, but its
+  collision check also looks at the *value*: two entries that agree
+  aren't a real collision the way two `env` entries sharing a key always
+  are, whatever those two entries' values happen to be.
 - **Scalar fields** (`image`, `restart`) error on collision among
   explicit templates only, per the preceding rule.
-- **`expose`** is the one built-in struct field with more than one
-  sub-field, and merges per sub-field (`port`/`host`/`entrypoint`
-  independently) rather than as one indivisible unit—the same
-  key-by-key reasoning as a map field, applied to a struct's named
-  fields instead of a map's keys. Each sub-field then follows its own
-  kind's rule: `port` and `host` are scalars and collide, while
-  `entrypoint` is a list and concatenates, so two explicit templates
-  each naming one entry point produce a router attached to both—and
-  two naming the *same* entry point produce a router attached to it
-  once, per the preceding distinct-name rule.
+- **`expose` and `healthcheck`** are the built-in struct fields with
+  more than one sub-field, and both merge per sub-field independently
+  rather than as one indivisible unit—the same key-by-key reasoning as
+  a map field, applied to a struct's named fields instead of a map's
+  keys. Each sub-field then follows its own kind's rule: `expose.port`/
+  `.host` and every `healthcheck` sub-field but `entrypoint`/`test` are
+  scalars and collide (`healthcheck.test` collides too, even though its
+  value isn't a plain string or number—see below), while
+  `expose.entrypoint` is a list and concatenates, so two explicit
+  templates each naming one entry point produce a router attached to
+  both—and two naming the *same* entry point produce a router attached
+  to it once, per the preceding distinct-name rule.
 
-That last point means a service's own body can override just
-`expose.host` while still inheriting `port`/`entrypoint` from a
-`with`-listed template, without repeating them:
+  `healthcheck.test` and `healthcheck.disable` collide the same way a
+  scalar sub-field does, even though neither is a plain `Literal`:
+  `test` carries Compose's own shell-string-or-exec-list shape, and
+  `disable` is a bare-presence flag whose only "value" is that it's
+  present at all. Two explicit templates each setting `test` (or each
+  setting `disable`) still collide, exactly as two explicit templates
+  each setting `expose.port` do.
+
+That last point about per-sub-field merging means a service's own body
+can override just `expose.host` while still inheriting `port`/
+`entrypoint` from a `with`-listed template, without repeating them:
 
 ```hll
 service it-tools {

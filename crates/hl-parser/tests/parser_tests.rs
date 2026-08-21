@@ -1,8 +1,8 @@
 use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    Expected, Expose, Literal, ParamType, ParseError, TemplateDecl, TopDecl, UseDecl, VolumeHost,
-    parse,
+    DependsOnCondition, Expected, Expose, HealthcheckTest, Literal, ParamType, ParseError,
+    TemplateDecl, TopDecl, UseDecl, VolumeHost, parse,
 };
 
 fn parse_ok(source: &str) -> hl_parser::Program {
@@ -270,6 +270,159 @@ fn alias_sugar_cannot_be_followed_by_further_secondary_fields() {
     assert!(
         err.to_string().contains("expose <port>, host:"),
         "expected the canonical form in the message, got: {err}"
+    );
+}
+
+// --- healthcheck (#153) ---
+
+/// Every field set at once, in the canonical struct form.
+#[test]
+fn healthcheck_full_field_set() {
+    let program = parse_ok(
+        "service s {\n  \
+           healthcheck {\n    \
+             test: \"curl -f http://localhost\"\n    \
+             interval: \"10s\"\n    \
+             timeout: \"5s\"\n    \
+             retries: 3\n    \
+             start_period: \"30s\"\n    \
+             start_interval: \"2s\"\n    \
+             disable\n  \
+           }\n\
+         }\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let hc = service.fields.healthcheck.as_ref().unwrap();
+    match hc.test.as_ref().unwrap() {
+        HealthcheckTest::Shell(lit) => assert_eq!(lit.text(), "curl -f http://localhost"),
+        other => panic!("expected HealthcheckTest::Shell, got {other:?}"),
+    }
+    assert_eq!(hc.interval.as_ref().unwrap().text(), "10s");
+    assert_eq!(hc.timeout.as_ref().unwrap().text(), "5s");
+    assert_eq!(hc.retries.as_ref().unwrap().text(), "3");
+    assert_eq!(hc.start_period.as_ref().unwrap().text(), "30s");
+    assert_eq!(hc.start_interval.as_ref().unwrap().text(), "2s");
+    assert!(hc.disable.is_some());
+}
+
+/// The minimal case — one field set, everything else left `None` (never
+/// enforced as required — see `ast::ServiceFields`'s doc).
+#[test]
+fn healthcheck_minimal_test_only() {
+    let program = parse_ok("service s {\n  healthcheck { test: \"exit 0\" }\n}\n");
+    let service = as_service(&program.decls[0]);
+    let hc = service.fields.healthcheck.as_ref().unwrap();
+    match hc.test.as_ref().unwrap() {
+        HealthcheckTest::Shell(lit) => assert_eq!(lit.text(), "exit 0"),
+        other => panic!("expected HealthcheckTest::Shell, got {other:?}"),
+    }
+    assert!(hc.interval.is_none());
+    assert!(hc.disable.is_none());
+}
+
+/// A syntactically empty body must still parse — no field on
+/// `Healthcheck` is enforced as required by the parser.
+#[test]
+fn healthcheck_empty_body_parses() {
+    let program = parse_ok("service s {\n  healthcheck {}\n}\n");
+    let service = as_service(&program.decls[0]);
+    let hc = service.fields.healthcheck.as_ref().unwrap();
+    assert!(hc.test.is_none());
+    assert!(hc.disable.is_none());
+}
+
+/// The exec form: `test` as a bracketed list rather than a bare string.
+#[test]
+fn healthcheck_test_list_form() {
+    let program = parse_ok(
+        "service s {\n  \
+           healthcheck {\n    \
+             test: [\"CMD\", \"pg_isready\", \"-U\", \"miniflux\"]\n  \
+           }\n\
+         }\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let hc = service.fields.healthcheck.as_ref().unwrap();
+    match hc.test.as_ref().unwrap() {
+        HealthcheckTest::Exec(items, _) => {
+            let texts: Vec<&str> = items.iter().map(Literal::text).collect();
+            assert_eq!(texts, vec!["CMD", "pg_isready", "-U", "miniflux"]);
+        }
+        other => panic!("expected HealthcheckTest::Exec, got {other:?}"),
+    }
+}
+
+/// A `test` list of exactly one item is still the list form, not the
+/// shell form — brackets are what select exec syntax, not item count.
+#[test]
+fn healthcheck_test_list_form_single_item() {
+    let program = parse_ok("service s {\n  healthcheck { test: [\"CMD-SHELL\"] }\n}\n");
+    let service = as_service(&program.decls[0]);
+    let hc = service.fields.healthcheck.as_ref().unwrap();
+    match hc.test.as_ref().unwrap() {
+        HealthcheckTest::Exec(items, _) => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].text(), "CMD-SHELL");
+        }
+        other => panic!("expected HealthcheckTest::Exec, got {other:?}"),
+    }
+}
+
+/// `retries` is a plain number literal.
+#[test]
+fn healthcheck_retries_is_a_number() {
+    let program = parse_ok("service s {\n  healthcheck { retries: 5 }\n}\n");
+    let service = as_service(&program.decls[0]);
+    let hc = service.fields.healthcheck.as_ref().unwrap();
+    match hc.retries.as_ref().unwrap() {
+        Literal::Number { value, .. } => assert_eq!(*value, 5),
+        other => panic!("expected Literal::Number, got {other:?}"),
+    }
+}
+
+/// `disable` is bare-presence only, exactly like `network`'s `external`
+/// — a `:` after it is rejected rather than treated as an attempted
+/// value.
+#[test]
+fn healthcheck_disable_rejects_a_colon_value() {
+    let err = parse("service s {\n  healthcheck { disable: true }\n}\n").unwrap_err();
+    assert!(
+        matches!(err, ParseError::UnexpectedToken { .. }),
+        "got {err:?}"
+    );
+}
+
+/// `healthcheck` has no `primary_field` (see `schema::HEALTHCHECK`'s
+/// doc) — unlike `expose`/`restart`/`image`, a bare value with no `{ }`
+/// is rejected rather than silently meaning nothing in particular.
+#[test]
+fn healthcheck_bare_value_without_braces_is_rejected() {
+    let err = parse("service s {\n  healthcheck \"exit 0\"\n}\n").unwrap_err();
+    match err {
+        ParseError::UnexpectedToken {
+            expected: Expected::Token(TokenKind::LBrace),
+            ..
+        } => {}
+        other => panic!("expected UnexpectedToken expecting `{{`, got {other:?}"),
+    }
+}
+
+/// Writing `test` twice is a duplicate-scalar compile error, same as
+/// any other single-occurrence field.
+#[test]
+fn healthcheck_duplicate_test_is_error() {
+    let err = parse("service s {\n  healthcheck {\n    test: \"a\"\n    test: \"b\"\n  }\n}\n")
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::DuplicateField {
+                type_name: "healthcheck",
+                field: "test",
+                ..
+            }
+        ),
+        "got {err:?}"
     );
 }
 
@@ -1137,9 +1290,156 @@ fn depends_on_bracket_list_form() {
         .fields
         .depends_on
         .iter()
-        .map(|r| r.name.as_str())
+        .map(|e| e.reference.name.as_str())
         .collect();
     assert_eq!(names, vec!["a", "b"]);
+    assert!(
+        service
+            .fields
+            .depends_on
+            .iter()
+            .all(|e| e.condition.is_none())
+    );
+}
+
+/// The bare comma-list sugar also works for `depends_on`, parsing every
+/// comma-separated reference as its own entry rather than stopping
+/// after the first — mirrors `networks_comma_sugar_form` for the
+/// analogous reference-list sugar. Exercises
+/// `parse_bare_depends_on_list`'s own comma-continuation loop directly:
+/// each entry here (`db`, then `cache`) is followed by another bare
+/// `IDENT`, never a `KEY :` pair, so `comma_starts_a_new_field` must
+/// correctly say "no, that's not a new field" for the loop to keep
+/// consuming instead of stopping after just `db`.
+#[test]
+fn depends_on_bare_comma_list_form() {
+    let program = parse_ok("service s {\n  depends_on db, cache\n}\n");
+    let service = as_service(&program.decls[0]);
+    let names: Vec<&str> = service
+        .fields
+        .depends_on
+        .iter()
+        .map(|e| e.reference.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["db", "cache"]);
+}
+
+/// `db { condition: service_healthy }` (#155): the bracketed extended
+/// form carries its condition alongside the plain reference.
+#[test]
+fn depends_on_extended_form_parses_the_condition() {
+    let program = parse_ok("service s {\n  depends_on [db { condition: service_healthy }]\n}\n");
+    let service = as_service(&program.decls[0]);
+    let entry = &service.fields.depends_on[0];
+    assert_eq!(entry.reference.name, "db");
+    assert_eq!(
+        entry.condition.map(|(c, _)| c),
+        Some(DependsOnCondition::ServiceHealthy)
+    );
+}
+
+/// The extended form also works unbracketed, as the bare single-item
+/// sugar every `depends_on` entry gets.
+#[test]
+fn depends_on_extended_form_works_without_brackets() {
+    let program = parse_ok("service s {\n  depends_on db { condition: service_healthy }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.depends_on.len(), 1);
+    assert_eq!(
+        service.fields.depends_on[0].condition.map(|(c, _)| c),
+        Some(DependsOnCondition::ServiceHealthy)
+    );
+}
+
+/// A mixed list — a plain reference alongside a conditioned one, in
+/// either order — parses each entry independently.
+#[test]
+fn depends_on_mixed_bare_and_conditioned_entries_parse() {
+    let program =
+        parse_ok("service s {\n  depends_on [cache, db { condition: service_healthy }]\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.depends_on.len(), 2);
+    assert_eq!(service.fields.depends_on[0].reference.name, "cache");
+    assert!(service.fields.depends_on[0].condition.is_none());
+    assert_eq!(service.fields.depends_on[1].reference.name, "db");
+    assert_eq!(
+        service.fields.depends_on[1].condition.map(|(c, _)| c),
+        Some(DependsOnCondition::ServiceHealthy)
+    );
+}
+
+/// All three of Compose's own condition values are accepted.
+#[test]
+fn depends_on_all_three_condition_values_parse() {
+    for (text, expected) in [
+        ("service_started", DependsOnCondition::ServiceStarted),
+        ("service_healthy", DependsOnCondition::ServiceHealthy),
+        (
+            "service_completed_successfully",
+            DependsOnCondition::ServiceCompletedSuccessfully,
+        ),
+    ] {
+        let source = format!("service s {{\n  depends_on [db {{ condition: {text} }}]\n}}\n");
+        let program = parse_ok(&source);
+        let service = as_service(&program.decls[0]);
+        assert_eq!(
+            service.fields.depends_on[0].condition.map(|(c, _)| c),
+            Some(expected),
+            "condition {text:?} did not round-trip"
+        );
+    }
+}
+
+/// `DependsOnCondition::compose_value` — the string
+/// [`hl_codegen::generate_depends_on`]'s long map form actually writes
+/// into the `condition:` key — round-trips through [`DependsOnCondition::parse`]
+/// to exactly the same spelling it was parsed from, for each of
+/// Compose's own three values. Checked directly against the enum here
+/// rather than only through generated YAML, since a golden-test
+/// assertion in another crate isn't exercised while this crate's own
+/// mutation-testing run is scoped to `hl-parser`.
+#[test]
+fn depends_on_condition_compose_value_matches_its_own_spelling() {
+    for (condition, expected) in [
+        (DependsOnCondition::ServiceStarted, "service_started"),
+        (DependsOnCondition::ServiceHealthy, "service_healthy"),
+        (
+            DependsOnCondition::ServiceCompletedSuccessfully,
+            "service_completed_successfully",
+        ),
+    ] {
+        assert_eq!(condition.compose_value(), expected);
+        assert_eq!(
+            DependsOnCondition::parse(expected),
+            Some(condition),
+            "{expected:?} did not parse back to the condition its own compose_value produced"
+        );
+    }
+}
+
+/// A condition outside Compose's own three fixed values is a compile
+/// error naming all three legal ones.
+#[test]
+fn depends_on_invalid_condition_is_error() {
+    let err = parse("service s {\n  depends_on [db { condition: service_ok }]\n}\n")
+        .expect_err("expected a parse error");
+    assert!(matches!(
+        err,
+        ParseError::InvalidDependsOnCondition { found, .. } if found == "service_ok"
+    ));
+}
+
+/// `condition` is the only legal key inside a `depends_on` entry's body
+/// — anything else is `UnknownField`, same as any other struct-shaped
+/// body.
+#[test]
+fn depends_on_entry_unknown_key_is_error() {
+    let err = parse("service s {\n  depends_on [db { bogus: 1 }]\n}\n")
+        .expect_err("expected a parse error");
+    assert!(matches!(
+        err,
+        ParseError::UnknownField { type_name: "depends_on", field, .. } if field == "bogus"
+    ));
 }
 
 #[test]
@@ -1169,6 +1469,48 @@ fn dns_repeats_accumulate() {
     let service = as_service(&program.decls[0]);
     let entries: Vec<&str> = service.fields.dns.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(entries, vec!["192.168.50.182", "192.168.50.183"]);
+}
+
+/// `env_file "one.env"` — the bare single-item sugar every reference-list
+/// field gets for free (#154).
+#[test]
+fn env_file_bare_single_form() {
+    let program = parse_ok("service s {\n  env_file \"miniflux.env\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    let entries: Vec<&str> = service
+        .fields
+        .env_file
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(entries, vec!["miniflux.env"]);
+}
+
+#[test]
+fn env_file_bracket_list_form() {
+    let program = parse_ok("service s {\n  env_file [\"miniflux.env\", \"common.env\"]\n}\n");
+    let service = as_service(&program.decls[0]);
+    let entries: Vec<&str> = service
+        .fields
+        .env_file
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(entries, vec!["miniflux.env", "common.env"]);
+}
+
+#[test]
+fn env_file_repeats_accumulate() {
+    let program =
+        parse_ok("service s {\n  env_file \"miniflux.env\"\n  env_file \"common.env\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    let entries: Vec<&str> = service
+        .fields
+        .env_file
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(entries, vec!["miniflux.env", "common.env"]);
 }
 
 // --- template declarations ---

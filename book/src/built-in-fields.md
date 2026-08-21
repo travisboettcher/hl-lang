@@ -348,11 +348,89 @@ Writing `image` or `restart` more than once in the same body is a
 compile error, since both are scalar fields, not repeatable—unlike
 `volume`/`publish`/`env`/`middleware`/`depends_on`.
 
-## `middleware`, `depends_on`, `networks`, `dns`
+## `healthcheck`
 
-All four are plain reference-list fields directly on `service`/`template`,
-not nested struct types, so there's no primary-field shorthand to learn
-for them. Write a bare identifier, a bracketed list, or repeat the
+No primary field—unlike `image`'s `ref` or `expose`'s `port`, no one
+sub-field stands in for the whole healthcheck, so `healthcheck { ... }`
+requires the braced body. `healthcheck "..."` doesn't parse.
+
+| Field | Accepts | Default |
+|---|---|---|
+| `test` | string or bracketed list | unset—no healthcheck defined here, though the image's own still applies if it has one |
+| `interval` | string | unset, matching Compose's own default |
+| `timeout` | string | unset, matching Compose's own default |
+| `retries` | number | unset, matching Compose's own default |
+| `start_period` | string | unset, matching Compose's own default |
+| `start_interval` | string | unset, matching Compose's own default |
+| `disable` | bare flag, no value | unset, `false` |
+
+```hll,fragment
+healthcheck {
+  test: "pg_isready -U miniflux"
+  interval: "10s"
+  timeout: "5s"
+  retries: 3
+  start_period: "30s"
+  start_interval: "5s"
+}
+```
+
+`test` accepts either a bare string—Compose's shell form, run through the
+container's own shell (a bare string is shorthand for `CMD-SHELL
+<string>`)—or a bracketed list—Compose's exec form, run directly with no
+shell involved. `hllc` carries whichever form you write straight through
+to the generated `test:` key, rather than normalizing one into the
+other:
+
+```hll,build
+service miniflux-db {
+  image "postgres:15"
+  healthcheck {
+    test: ["CMD", "pg_isready", "-U", "miniflux"]
+    interval: "10s"
+    start_period: "30s"
+  }
+}
+```
+
+```yaml
+services:
+  miniflux-db:
+    image: postgres:15
+    healthcheck:
+      test:
+        - CMD
+        - pg_isready
+        - -U
+        - miniflux
+      interval: 10s
+      start_period: 30s
+```
+
+`hllc` carries `interval`/`timeout`/`start_period`/`start_interval`/
+`retries` through exactly as written—it doesn't parse or validate
+Compose's duration syntax (`"10s"`, `"1m30s"`) or check that `retries`
+is a sane, non-negative count. A mistake there is `docker compose
+config`'s to catch, not `hllc`'s.
+
+`disable` sets Compose's own `disable: true`, which turns the
+healthcheck off entirely—including one the image itself defines:
+
+```hll,fragment
+healthcheck {
+  disable
+}
+```
+
+Writing `healthcheck` more than once in the same body is a compile
+error, same as `image`/`restart`/`expose`—it's a struct-kind field, not
+repeatable.
+
+## `middleware`, `depends_on`, `networks`, `dns`, `env_file`
+
+All five are plain list fields directly on `service`/`template`, not
+nested struct types, so there's no primary-field shorthand to learn for
+them. Write a bare identifier or string, a bracketed list, or repeat the
 field:
 
 ```hll,fragment
@@ -360,10 +438,14 @@ middleware local-ipwhitelist
 middleware forwardAuth-authentik   # repeating accumulates
 
 depends_on database
+depends_on [database { condition: service_healthy }]
 
 networks [traefik-net]
 
 dns ["192.168.50.182"]
+
+env_file "miniflux.env"
+env_file ["miniflux.env", "common.env"]
 ```
 
 - `middleware` names a Traefik middleware to attach to this service's
@@ -380,6 +462,35 @@ dns ["192.168.50.182"]
   describes.
 - `depends_on` names a same-file sibling `service` this one depends
   on—it's not cross-file, and doesn't accept a qualified `alias.name`.
+  Each entry may optionally add a `{ condition: ... }` body naming one
+  of Compose's own three readiness conditions—`service_started` (the
+  default: wait only for the target container to start, which is all a
+  bare `depends_on database` has ever meant), `service_healthy` (wait
+  for the target's `healthcheck` to report healthy), or
+  `service_completed_successfully` (wait for the target to exit
+  zero—typically a one-shot init/migration container). Anything else is
+  a compile error naming all three. A bare entry and a conditioned one
+  can sit side by side in the same list:
+
+  ```hll,fragment
+  depends_on [cache, database { condition: service_healthy }]
+  ```
+
+  Compose has two mutually exclusive shapes for `depends_on:` and never
+  mixes them in one document: a plain list of names, or a mapping of
+  name to `{ condition: ... }`. `hllc` emits the plain list—unchanged
+  from before this syntax existed—as long as *no* entry in the field
+  carries a condition, and switches the whole field to the mapping form
+  once *any* entry does. A sibling entry with no explicit condition is
+  then filled in with `service_started`, since the mapping form
+  requires every entry to name one.
+
+  `service_healthy` is only meaningful when the target service actually
+  has a healthcheck to become healthy against—but `hllc` doesn't warn
+  when the target's `.hll` body has no [`healthcheck`](#healthcheck)
+  field, because that's not evidence the condition is meaningless: a
+  Docker image can bake its own `HEALTHCHECK` into its Dockerfile,
+  invisible to anything an `.hll` file declares.
 - `networks` references a top-level `network` declared in the same
   program—see the preceding section. If exactly one referenced network
   is `external`, its real name also drives the
@@ -389,12 +500,64 @@ dns ["192.168.50.182"]
   section from these references, so a `network` no service names never
   reaches the output. That one is a warning on stderr rather than an
   error—see [Warnings](./cli.md#warnings).
+
+  `default` is the one network name every program gets for free, with or
+  without a matching declaration: `networks [default]` compiles even
+  when nothing in the file declares `network default { ... }`, resolving
+  to the same implicit default network `docker compose` itself creates
+  for a project. `hllc` adds nothing to the top-level `networks:`
+  section for it in that case—Compose already knows about `default`, so
+  there's nothing for `hllc` to declare.
+
+  Two or more `service` declarations in one file are, by construction,
+  one Compose stack meant to talk to each other, so every service in
+  such a file is implicitly attached to `default` in addition to
+  whatever it names explicitly—no `networks [default]` required. A
+  single-service file gets no such auto-attachment. Compose's own
+  implicit default network already covers a lone service for free, so
+  there's nothing for `hllc` to add. Auto-attachment is idempotent—a
+  service that writes `networks [default]` itself still ends up with one
+  `default` entry, not two—and, when explicit, always sorts last in that
+  service's `networks:` list.
+
+  An explicit `network default { ... }` declaration still wins: its
+  `external`/`name` settings apply exactly as they would to any other
+  named network, including feeding the `traefik.docker.network=` label
+  when it's `external`, and it still emits its own top-level `networks:`
+  entry. The implicit, undeclared `default` is only a fallback for when
+  no such declaration exists.
 - `dns` sets Compose's own per-service `dns:` key—a resolver override.
   Use it, for example, when a network has a local name server.
+- `env_file` sets Compose's own `env_file:` key—one or more paths to
+  load environment variables from. It's a plain generic Compose key like
+  `dns`, not homelab-specific itself, even though most real entries
+  point at a gitignored, per-homelab `.env` file. The generated
+  `env_file:` value is always a list: a single `env_file "one.env"`
+  still emits a one-element `env_file:` list, so the generated shape
+  doesn't depend on how many paths you wrote. Compose itself resolves
+  each path relative to the Compose file, not `hllc`—write it exactly
+  as `docker compose` would expect it. When two files set the same
+  variable, Compose lets
+  the later file win, so order matters here the same way it matters for
+  `dns`'s resolver priority. Reach for [`env`](#env) instead when a
+  value belongs directly in the `.hll` file rather than in an external
+  file.
 
-All four accumulate across repeated writes and across template
-composition (see [Templates & Composition](./templates-and-composition.md))—there's
-no collision to check since list fields can only ever grow.
+All five accumulate across repeated writes within one body. Across
+template composition (see [Templates &
+Composition](./templates-and-composition.md)), `middleware`/`networks`/
+`dns`/`env_file` also just accumulate—there's no collision to check
+since list fields can only ever grow. `depends_on` merges keyed on the
+service name instead, and the service's own body always wins over a
+template's entry for the same dependency—but two `with`-listed templates
+naming the same service is *not* automatically a compile error: as the
+preceding discussion of `depends_on` covers, it's only one when their
+`condition`s actually disagree, exactly like two templates setting the
+same [`env`](#env) key to two different values would collide. Two
+templates that both say `depends_on [database]`—or that spell out the
+same condition on both—are giving the same answer twice, not two
+different ones, so they still collapse to a single entry exactly as
+they always have.
 
 ## `container_name`
 
@@ -447,10 +610,10 @@ ever comes up for generated or pathological input.
 ### `raw` wins over a built-in field of the same name
 
 A `raw` key may name a field `hll` already has: `image`,
-`container_name`, `restart`, `environment`, `volumes`, `networks`,
-`dns`, `ports`, `expose`, `depends_on`, or `labels`. When it does, the
-`raw` value is what's emitted, and `hllc` drops the built-in one—the key
-appears exactly once:
+`container_name`, `restart`, `healthcheck`, `environment`, `env_file`,
+`volumes`, `networks`, `dns`, `ports`, `expose`, `depends_on`, or
+`labels`. When it does, the `raw` value is what's emitted, and `hllc`
+drops the built-in one—the key appears exactly once:
 
 ```hll,fragment
 image "nginx"

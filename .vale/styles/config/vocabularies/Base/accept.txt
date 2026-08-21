@@ -38,3 +38,6 @@ Traefik
 [Ll]exing
 Jellyfin
 Syncthing
+healthcheck
+Dockerfile
+gitignored

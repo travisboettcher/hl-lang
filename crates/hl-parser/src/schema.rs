@@ -34,10 +34,15 @@ pub enum FieldKind {
     /// entries across repeated writes (per docs/DESIGN.md's rule 4).
     Nested(&'static TypeSchema),
     /// A list of bare-identifier/string references (`middleware`,
-    /// `depends_on`, `networks`). Accumulates across repeats; settable
-    /// via a bracketed list, the bare comma-list sugar, or repeated
-    /// statements — never duplicate-checked, since list fields can't
-    /// collide.
+    /// `networks`, `dns`, `env_file`). Accumulates across repeats;
+    /// settable via a bracketed list, the bare comma-list sugar, or
+    /// repeated statements — never duplicate-checked, since list fields
+    /// can't collide.
+    ///
+    /// `depends_on` moved off this kind and onto its own
+    /// [`Self::DependsOnList`] when its entries gained an optional
+    /// `{ condition: ... }` body (#155) — a plain [`crate::ast::Reference`]
+    /// has nowhere to hang that.
     ReferenceList,
     /// A list of template invocations (`with`'s `templates` field): each
     /// item is an `IDENT` naming a template, optionally followed by a
@@ -45,6 +50,36 @@ pub enum FieldKind {
     /// (bracketed list, bare comma-list sugar, accumulates, never
     /// duplicate-checked) except each item can carry an argument body.
     TemplateInvocationList,
+    /// Either a single literal or a bracketed list of literals —
+    /// `healthcheck`'s `test` (#153), which carries Compose's own two
+    /// `healthcheck.test` shapes: a bare string (shell form, `test:
+    /// "curl -f http://localhost"`) or a list (exec form, `test: ["CMD",
+    /// "curl", "-f", "http://localhost"]`). Single-occurrence like
+    /// [`Self::Scalar`] (a second write is `DuplicateField`) — unlike
+    /// [`Self::ReferenceList`], there is no bare comma-list sugar here,
+    /// since `test: "CMD", "curl"` would be ambiguous between "the shell
+    /// string followed by garbage" and "a two-item exec list"; Compose's
+    /// own two forms are told apart by brackets alone, so `hll` requires
+    /// the same — a bare literal or an explicit `[...]`, nothing in
+    /// between.
+    ScalarOrList,
+    /// `depends_on`'s own list kind (#155): like [`Self::ReferenceList`]
+    /// — accumulates across repeats, settable via a bracketed list, the
+    /// bare comma-list sugar, or repeated statements, never
+    /// duplicate-checked at parse time — except each entry may also
+    /// carry an optional `{ condition: ... }` body, matching
+    /// [`Self::TemplateInvocationList`]'s own "`IDENT` optionally
+    /// followed by a `{ }` body" shape. Not literally
+    /// `TemplateInvocationList`, though, because that body isn't
+    /// schema-free the way a template invocation's argument bag is:
+    /// `condition` is the one and only legal key, and its value must be
+    /// one of Compose's own three fixed keywords
+    /// (`service_started`/`service_healthy`/
+    /// `service_completed_successfully`), checked immediately by the
+    /// parser rather than deferred — see
+    /// [`crate::ast::DependsOnEntry`]'s doc and
+    /// [`crate::ParseError::InvalidDependsOnCondition`].
+    DependsOnList,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -163,6 +198,76 @@ pub static RESTART: TypeSchema = TypeSchema {
         kind: FieldKind::Scalar,
     }],
     primary_field: Some("policy"),
+    map_separator: None,
+    uniqueness: None,
+    key_may_be_reference: false,
+    bare_keyword_alias: None,
+    needs_name: false,
+    schema_free: false,
+};
+
+/// `healthcheck { test: "...", interval: "10s", ... }` — Compose's own
+/// generic `healthcheck:` key (#153). Every field here
+/// (`test`/`interval`/`timeout`/`retries`/`start_period`/
+/// `start_interval`/`disable`) is a plain Compose key, not
+/// homelab-specific in any of its own fields — the same "generic core"
+/// reasoning that already justified [`NETWORK`]'s `external` and the
+/// reference-list fields on `SERVICE_FIELDS` (`dns`/`env_file`).
+///
+/// No `primary_field`, unlike [`IMAGE`]'s `ref` or [`EXPOSE`]'s `port`:
+/// there's no one sub-field an unadorned `healthcheck "..."` could
+/// obviously mean. `test` alone doesn't stand in for the whole
+/// healthcheck the way a single reference stands in for `image` — a
+/// realistic healthcheck sets `test` alongside `interval`/`timeout`/
+/// `retries` too, so the braced body (`healthcheck { ... }`) is
+/// required.
+///
+/// `interval`/`timeout`/`start_period`/`start_interval` are duration
+/// strings and `retries` is a number, all `FieldKind::Scalar` and
+/// carried through as literals exactly as written — `hllc` does not
+/// parse or validate Compose's duration syntax (`"10s"`, `"1m30s"`) or
+/// check that `retries` is non-negative; that's Compose's job at deploy
+/// time, not the compiler's at compile time.
+///
+/// `disable` is modeled directly on [`NETWORK`]'s `external`: a
+/// bare-presence [`FieldKind::BoolFlag`], matching Compose's own
+/// `disable: true` — there is no `disable: false` form this milestone,
+/// same reasoning as `external`. Compose's `disable: true` turns the
+/// healthcheck off entirely, including one inherited from the image.
+pub static HEALTHCHECK: TypeSchema = TypeSchema {
+    type_name: "healthcheck",
+    kind: SchemaKind::Struct,
+    fields: &[
+        FieldSchema {
+            name: "test",
+            kind: FieldKind::ScalarOrList,
+        },
+        FieldSchema {
+            name: "interval",
+            kind: FieldKind::Scalar,
+        },
+        FieldSchema {
+            name: "timeout",
+            kind: FieldKind::Scalar,
+        },
+        FieldSchema {
+            name: "retries",
+            kind: FieldKind::Scalar,
+        },
+        FieldSchema {
+            name: "start_period",
+            kind: FieldKind::Scalar,
+        },
+        FieldSchema {
+            name: "start_interval",
+            kind: FieldKind::Scalar,
+        },
+        FieldSchema {
+            name: "disable",
+            kind: FieldKind::BoolFlag,
+        },
+    ],
+    primary_field: None,
     map_separator: None,
     uniqueness: None,
     key_may_be_reference: false,
@@ -407,6 +512,10 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
         kind: FieldKind::Nested(&RESTART),
     },
     FieldSchema {
+        name: "healthcheck",
+        kind: FieldKind::Nested(&HEALTHCHECK),
+    },
+    FieldSchema {
         name: "publish",
         kind: FieldKind::Nested(&PUBLISH),
     },
@@ -428,7 +537,7 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
     },
     FieldSchema {
         name: "depends_on",
-        kind: FieldKind::ReferenceList,
+        kind: FieldKind::DependsOnList,
     },
     FieldSchema {
         name: "networks",
@@ -436,6 +545,10 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
     },
     FieldSchema {
         name: "dns",
+        kind: FieldKind::ReferenceList,
+    },
+    FieldSchema {
+        name: "env_file",
         kind: FieldKind::ReferenceList,
     },
     FieldSchema {

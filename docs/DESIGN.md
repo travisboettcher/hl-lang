@@ -43,14 +43,14 @@ Punctuation: { } [ ] ( ) : = -> , . $
 
 - `template` is the *only* reserved word in the entire language. Everything
   else that looks like a keyword (`service`, `network`, `image`, `volume`,
-  `publish`, `env`, `restart`, `expose`, `middleware`, `depends_on`,
-  `networks`, `dns`, `container_name`, `with`, `as`, `external`, `use`,
-  `raw`, `defaults`, and more) is an ordinary `IDENT`,
-  resolved against a schema table at parse time—not a lexer-level
-  keyword. `with`, `as`, `external`, and `use` are *contextual* keywords,
-  meaningful only in the grammar position expected (the same technique as
-  C#'s `var`/`async`/`await`/`yield`), not globally off-limits as
-  identifiers.
+  `publish`, `env`, `env_file`, `restart`, `expose`, `healthcheck`,
+  `middleware`, `depends_on`, `networks`, `dns`, `container_name`,
+  `with`, `as`, `external`, `use`, `raw`, `defaults`, and more) is an
+  ordinary `IDENT`, resolved against a schema table at parse time—not a
+  lexer-level keyword. `with`, `as`, `external`, and `use` are
+  *contextual* keywords, meaningful only in the grammar position expected
+  (the same technique as C#'s `var`/`async`/`await`/`yield`), not
+  globally off-limits as identifiers.
 - `.` separates an import alias from the name it qualifies (`alias.name`,
   see Imports, below) and never appears anywhere else in the grammar—
   `NUMBER` is integer-only, so there's no decimal-point ambiguity to
@@ -214,9 +214,11 @@ same two entries—see #81.
    `middleware`, or `depends_on` more than once in
    one body appends, since those fields are list/map-kinded—subject to
    the set-like lists' distinct-name rule under "Composition" below, which
-   drops a repeat of a name already present. Writing
-   `image` or `restart` twice in the same body is a duplicate-scalar
-   compile error.
+   drops a repeat of a name already present (`depends_on` instead keeps
+   only its own list's *last* entry for a repeated name, per the same
+   keyed-merge rule its own paragraph under "Composition" describes—#155).
+   Writing `image` or `restart` twice in the same body is a
+   duplicate-scalar compile error.
 
 ### Built-in schema table
 
@@ -232,6 +234,7 @@ same two entries—see #81.
 | `publish` | map |—| `->` | value—the container port | no |
 | `env` | map |—| `=` | key | no |
 | `restart` | struct | `policy` |—|—| no |
+| `healthcheck` | struct |—|—|—| no |
 | `with` | struct | `templates`—list of nested instantiations |—|—| no |
 | `raw` | map |—| `:` | none—schema-free, passthrough | no |
 
@@ -288,13 +291,68 @@ codegen's to write rather than the user's—so no generated label value
 ever has to tolerate a user-written comma, and the metacharacter guard
 can reject `,` uniformly everywhere.
 
-`middleware`, `depends_on`, `networks`, and `dns` aren't rows in this
-table—they're plain list-of-reference fields directly on
+Besides the three top-level types, `healthcheck` is the table's one
+struct-kind row with no primary field: unlike `image`'s `ref` or
+`expose`'s `port`, no single sub-field of `test`/`interval`/`timeout`/
+`retries`/`start_period`/`start_interval`/`disable` obviously stands in
+for the whole healthcheck, so `healthcheck { ... }` requires the braced
+body—`healthcheck "..."` is a parse error rather than sugar for
+anything. `test` needs a field kind none of the other struct fields do:
+`FieldKind::ScalarOrList` accepts either a bare literal (Compose's shell
+form, `CMD-SHELL <string>`) or a bracketed list of literals (Compose's
+exec form, `["CMD", "pg_isready", "-U", "miniflux"]`), single-occurrence
+like a plain scalar but with no bare comma-list sugar—`test: "a", "b"`
+would be ambiguous between the shell string plus garbage and a two-item
+exec list, so only a bare literal or an explicit `[...]` parses.
+`disable` mirrors `NETWORK`'s `external` directly: a bare-presence
+`FieldKind::BoolFlag`, matching Compose's own `disable: true`, which
+turns the healthcheck off entirely, including one inherited from the
+image. Every field here is a plain, generic Compose key, not
+homelab-specific in any of its own fields—the same "generic core"
+reasoning that already justified `dns`/`env_file`/`container_name`, see
+#153.
+
+`middleware`, `depends_on`, `networks`, `dns`, and `env_file` aren't
+rows in this table—they're plain list-of-reference fields directly on
 `service`/`template` (`dns ["192.168.50.182"]`: a per-service Domain
 Name System (DNS) resolver override, Compose's own `dns:` key—the field
 itself is generic, only a given entry's IP is homelab-specific, same
 reasoning as `volume`'s host path or an `env` entry's value already
-being homelab-specific without the field itself being one).
+being homelab-specific without the field itself being one). `env_file`
+(`env_file "miniflux.env"` / `env_file ["miniflux.env", "common.env"]`)
+follows the exact same reasoning as `dns`—Compose's own `env_file:` key,
+generic itself even though a real entry almost always names a
+gitignored, homelab-specific `.env` file—see #154.
+
+`depends_on` (`depends_on database` / `depends_on [database { condition:
+service_healthy }]`) shares this row's surface grammar—a bare reference,
+a bracketed list, the same accumulate-across-repeats rule—but each entry
+may also carry an optional `{ condition: ... }` body naming one of
+Compose's own three `depends_on` conditions: `service_started` (the
+default, and the only thing a bare `depends_on database` has ever
+meant), `service_healthy`, and `service_completed_successfully`—see
+#155. A
+`condition` value outside that fixed set of three is a compile error,
+checked in the parser at the point it's written (mirroring
+`UnknownParamType`'s own precedent for validating a literal's *value*,
+not just its syntactic kind, as early as possible)—there's no later
+stage this needs deferring to, since `condition` can't hold a `$param`
+reference the way an ordinary literal slot can. `hllc` does *not* warn
+when a `service_healthy` entry's target has no `.hll`-level
+`healthcheck` field: a Docker image can bake its own `HEALTHCHECK` into
+its Dockerfile, invisible to anything an `.hll` file declares, so a
+missing `healthcheck` field isn't evidence the condition is
+meaningless.
+
+Compose's `depends_on:` key has two shapes that can't mix in one
+document. The short form is a plain list of names and means "wait for
+container start." The long form is a mapping of name to
+`{ condition: ... }` and requires every entry to be a mapping. Codegen
+emits the short form—unchanged from before this syntax existed—as long
+as no entry in a service's `depends_on` carries a condition, and the
+long form once any entry does, filling in `service_started` for any
+sibling entry left bare.
+
 `container_name` isn't a row either, for the opposite reason: it's a
 plain *scalar* field directly on `service`/`template`
 (`container_name "uptime-kuma"` / `container_name: "uptime-kuma"`)
@@ -330,25 +388,64 @@ Merge priority, lowest to highest:
 3. the service's own body—always wins over everything
 
 List fields concatenate, so no collision is possible. The set-like ones
-(`middleware`, `depends_on`, `networks`, `expose.entrypoint`) concatenate
-by *distinct* name, keeping the first occurrence, while `dns` keeps
-duplicates since its order is observable resolver priority. Map fields
-merge key-by-key (or value-by-value for `volume` and `publish`), and
-scalar fields (`image`, `restart`) error on collision among explicit
-templates only. `expose`, the one built-in struct field with more than
-one sub-field, merges per sub-field (`port`/`host`/`entrypoint`
-independently) rather than as one indivisible unit—the same key-by-key
-reasoning as a map field, applied to a struct's named fields instead of
-a map's keys. Each sub-field then merges by its own kind: `port`/`host`
-are scalars and collide, `entrypoint` is a list and concatenates, so two
-explicit templates each naming one entry point yield a router attached to both
+(`middleware`, `networks`, `expose.entrypoint`) concatenate by *distinct*
+name, keeping the first occurrence, while `dns` and `env_file` keep
+duplicates since their order is observable—resolver priority for `dns`,
+Compose's own last-file-wins precedence for `env_file`—see #154. Map
+fields merge key-by-key (or value-by-value for `volume` and `publish`),
+and scalar fields (`image`, `restart`) error on collision among explicit
+templates only.
+
+`depends_on` merges key-by-key too, not by the set-like lists' rule,
+even though its surface grammar is still a reference list
+(`depends_on [db]`): once an entry can carry a `condition`, two entries
+naming the same service could genuinely disagree, so `hllc` keys the
+merge on the referenced service's own name via a dedicated
+`merge_depends_on`, not `LIST_FIELDS`'s distinct-name concatenation—see
+#155. The service's own body still always wins over a template's entry
+for the same dependency—but unlike `env`/`volume`/`publish`'s own
+`merge_map`, `hllc` compares two explicit templates naming the same
+service by their *effective* condition (a bare entry means the same
+thing as an explicit `service_started`) before it calls anything a
+collision: agreeing entries (including two plain `depends_on [db]`, by
+far the common case) still silently collapse to one, exactly as they
+did before #155 existed, while only two explicit templates whose
+conditions genuinely differ raise the same `MapKeyCollision` two
+explicit templates setting the same `env` key to different values
+would. Treating mere agreement as an error would have been a gratuitous
+breaking change to every `.hll` file already composing two templates
+that each depend on the same service—the same reasoning
+`hl-codegen`'s `AmbiguousExternalNetwork` check already applies to a
+network named `external` twice: naming one thing more than once isn't
+an ambiguity between it and itself, it's one answer given twice.
+
+`expose` and `healthcheck`, the built-in struct fields
+with more than one sub-field, both merge per sub-field (`expose`'s
+`port`/`host`/`entrypoint` and `healthcheck`'s
+`test`/`interval`/`timeout`/`retries`/`start_period`/`start_interval`/
+`disable`) rather than as one
+indivisible unit—the same key-by-key reasoning as a map field, applied
+to a struct's named fields instead of a map's keys. Each sub-field then
+merges by its own kind: `expose.port`/`.host` and every `healthcheck`
+sub-field but `entrypoint` are scalars and collide (`healthcheck.test`
+and `.disable` collide the same way even though neither is a `Literal`
+—see below), `entrypoint` is a list and concatenates, so two explicit
+templates each naming one entry point yield a router attached to both
 rather than a `FieldCollision`. Two naming the same entry point yield a
 router attached to it once, per the distinct-name rule. This means a
-service's own body can override just `expose.host` while still
-inheriting `port`/`entrypoint` from a `with`-listed template, without
-repeating them. Two explicit templates only collide if they set the
-*same* scalar `expose` sub-field, not merely the same `expose` field
-overall.
+service's own body can override just `expose.host` (or just
+`healthcheck.interval`) while still inheriting the rest from a
+`with`-listed template, without repeating them. Two explicit templates
+only collide if they set the *same* scalar sub-field, not merely the
+same enclosing field overall.
+
+`healthcheck.test`, whose type is `HealthcheckTest`, and
+`healthcheck.disable`, a bare-presence flag, aren't `Literal`s, so they
+can't ride the same name-keyed `SCALAR_FIELDS` table
+`expose.port`/`.host`/`restart.policy` do—`merge_scalar_like` in
+`compose.rs` is `merge_scalar` generalized over the value type, applied
+to two dedicated `MergeAcc` slots instead of a third table row, since
+only these two fields need it—see #153.
 
 ```
 template internal_web(port: Number) {
@@ -579,6 +676,23 @@ readability choice, not a different construct.
    `volumes:` section, and neither section carries a declaration nothing
    references. Bind-mount paths pass straight through and need no
    declaration, exactly as Docker asks for none.
+
+   `default` is the one exception to `UnknownNetwork`, and the one
+   network name that gets special codegen treatment at all—every program
+   has it whether or not it declares one. `networks [default]` with no
+   matching `network default { ... }` resolves to Compose's own implicit
+   default network rather than reporting `UnknownNetwork`, and
+   contributes nothing to `networks:`, since Compose defines that network
+   itself. On top of that, a program with two or more `service`
+   declarations—already one Compose stack, one output document—
+   implicitly attaches every service to `default` in addition to
+   whatever it names explicitly, exactly the behavior Compose itself
+   gives a project with no `networks:` key on any service. A
+   single-service program gets no such attachment, since Compose's own
+   default there is already implicit for free. An explicit `network
+   default { ... }` declaration still wins over both of those: its
+   `external`/`name` settings apply as they would to any other network,
+   and it still emits its own `networks:` entry.
 6. **Command-line tool** (`crates/hl-cli`, binary name `hllc`)—
    `hllc <file.hll>` lexes and prints tokens. `hllc --parse <file.hll>`
    parses and pretty-prints the Abstract Syntax Tree (AST). `hllc --build
@@ -640,9 +754,12 @@ nor its output. Three constructs warn today: a `service` in a non-entry
 file, a `defaults` template in a non-entry file, and a top-level
 `network` no service references. That last one drops out of assembling
 the `networks:` section from services' references, which leaves a
-declaration nothing names with nowhere to go. A top-level `volume` no
-service mounts drops out of `volumes:` for the same reason, but raises
-no warning yet.
+declaration nothing names with nowhere to go. An explicit `network
+default { ... }` in a multi-service program doesn't trigger it, even
+though no service writes `networks [default]` by hand: #152's
+auto-attach counts as a reference for exactly this check. A top-level
+`volume` no service mounts drops out of `volumes:` for the same reason,
+but raises no warning yet.
 
 The channel is deliberately minimal. Nothing promotes a warning to an
 error, and there's no `--quiet`, `-W`, or `-A` style suppression yet.

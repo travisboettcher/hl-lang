@@ -187,6 +187,538 @@ services:
     );
 }
 
+/// `env_file` (#154): a single `env_file "path"` still emits Compose's
+/// `env_file:` as a one-element list, the uniform shape codegen always
+/// produces regardless of how many paths were written.
+#[test]
+fn env_file_single_path_emits_a_one_element_list() {
+    let yaml = generate_from(
+        "service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           env_file \"miniflux.env\"\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  miniflux:
+    image: miniflux/miniflux:latest
+    env_file:
+      - miniflux.env
+"#,
+    );
+}
+
+/// The list form (`env_file ["a", "b"]`) round-trips as-written, in
+/// order — order matters here because Compose applies later files' env
+/// vars over earlier ones when a key repeats.
+#[test]
+fn env_file_list_form_emits_every_path_in_order() {
+    let yaml = generate_from(
+        "service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           env_file [\"common.env\", \"miniflux.env\"]\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  miniflux:
+    image: miniflux/miniflux:latest
+    env_file:
+      - common.env
+      - miniflux.env
+"#,
+    );
+}
+
+/// `env_file` entries merge across a `with` template just like `dns`:
+/// the template's own path, then the service body's, concatenated in
+/// tier order.
+#[test]
+fn env_file_entries_merge_through_a_with_template() {
+    let yaml = generate_from(
+        "template with_common_env {\n  env_file \"common.env\"\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           with with_common_env\n  \
+           env_file \"miniflux.env\"\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  miniflux:
+    image: miniflux/miniflux:latest
+    env_file:
+      - common.env
+      - miniflux.env
+"#,
+    );
+}
+
+/// `raw { env_file: ... }` overrides the built-in `env_file` field, the
+/// same way it overrides every other built-in field (#154).
+#[test]
+fn raw_env_file_overrides_the_built_in_env_file() {
+    let yaml = generate_from(
+        "service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           env_file \"miniflux.env\"\n  \
+           raw {\n    env_file: [\"raw.env\"]\n  }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  miniflux:
+    image: miniflux/miniflux:latest
+    env_file:
+      - raw.env
+"#,
+    );
+}
+
+// --- healthcheck (#153) ---
+
+/// Every field set at once, shell form (`test` as a bare string).
+#[test]
+fn healthcheck_full_field_set_emits_every_key() {
+    let yaml = generate_from(
+        "service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           healthcheck {\n    \
+             test: \"node /app/services/healthcheck\"\n    \
+             interval: \"1m\"\n    \
+             timeout: \"10s\"\n    \
+             retries: 3\n    \
+             start_period: \"10s\"\n    \
+             start_interval: \"5s\"\n  \
+           }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  miniflux:
+    image: miniflux/miniflux:latest
+    healthcheck:
+      test: node /app/services/healthcheck
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+      start_interval: 5s
+"#,
+    );
+}
+
+/// The exec form: `test` as a bracketed list becomes a YAML sequence,
+/// not the plain string the shell form emits.
+#[test]
+fn healthcheck_test_list_form_emits_a_yaml_sequence() {
+    let yaml = generate_from(
+        "service db {\n  \
+           image \"postgres\"\n  \
+           healthcheck {\n    \
+             test: [\"CMD\", \"pg_isready\", \"-U\", \"miniflux\"]\n  \
+           }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  db:
+    image: postgres
+    healthcheck:
+      test:
+        - CMD
+        - pg_isready
+        - -U
+        - miniflux
+"#,
+    );
+}
+
+/// `disable` emits Compose's `disable: true`, with no other keys when
+/// nothing else was set.
+#[test]
+fn healthcheck_disable_emits_true() {
+    let yaml = generate_from("service web {\n  image \"nginx\"\n  healthcheck { disable }\n}\n");
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  web:
+    image: nginx
+    healthcheck:
+      disable: true
+"#,
+    );
+}
+
+/// A `healthcheck {}` with every sub-field left unset emits no
+/// `healthcheck:` key at all — matching how a fully-unset `expose {}`
+/// emits no `expose:` key.
+#[test]
+fn healthcheck_with_nothing_set_emits_no_key() {
+    let yaml = generate_from("service web {\n  image \"nginx\"\n  healthcheck {}\n}\n");
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  web:
+    image: nginx
+"#,
+    );
+}
+
+/// `healthcheck` sub-fields merge across a `with` template per
+/// sub-field, exactly like `expose` — the template's `test` survives
+/// while the service's own body overrides just `interval`.
+#[test]
+fn healthcheck_merges_through_a_with_template() {
+    let yaml = generate_from(
+        "template pg_healthcheck {\n  healthcheck { test: \"pg_isready -U miniflux\" }\n}\n\
+         service db {\n  \
+           image \"postgres\"\n  \
+           with pg_healthcheck\n  \
+           healthcheck { interval: \"10s\" }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  db:
+    image: postgres
+    healthcheck:
+      test: pg_isready -U miniflux
+      interval: 10s
+"#,
+    );
+}
+
+/// `raw { healthcheck: ... }` overrides the built-in `healthcheck`
+/// field, the same way it overrides every other built-in field.
+#[test]
+fn raw_healthcheck_overrides_the_built_in_healthcheck() {
+    let yaml = generate_from(
+        "service db {\n  \
+           image \"postgres\"\n  \
+           healthcheck { test: \"pg_isready\" }\n  \
+           raw {\n    healthcheck: { test: \"raw-test\" }\n  }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  db:
+    image: postgres
+    healthcheck:
+      test: raw-test
+"#,
+    );
+}
+
+// --- depends_on (#155) ---
+//
+// Every fixture below declares at least two services, since a
+// `depends_on` entry has to name a real sibling — which means #152's
+// multi-service auto-attach also reaches every one of them, and each
+// expects its own `networks: [default]` alongside whatever `depends_on`
+// itself produces.
+
+/// The plain, unconditioned form still emits Compose's short-syntax
+/// `depends_on:` — a bare list of names — exactly as it did before
+/// #155, so every file written before the extended condition form
+/// existed keeps compiling to the same YAML.
+#[test]
+fn depends_on_plain_form_emits_the_short_list_form() {
+    let yaml = generate_from(
+        "service database {\n  image \"postgres\"\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           depends_on [database]\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  database:
+    image: postgres
+    networks:
+      - default
+  miniflux:
+    image: miniflux/miniflux:latest
+    networks:
+      - default
+    depends_on:
+      - database
+"#,
+    );
+}
+
+/// An entry carrying an explicit `condition` switches the whole field to
+/// Compose's long, mapping form — the two shapes can't mix in one
+/// document, so a single conditioned entry is enough to commit to it.
+#[test]
+fn depends_on_extended_condition_emits_the_long_map_form() {
+    let yaml = generate_from(
+        "service database {\n  image \"postgres\"\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           depends_on [database { condition: service_healthy }]\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  database:
+    image: postgres
+    networks:
+      - default
+  miniflux:
+    image: miniflux/miniflux:latest
+    networks:
+      - default
+    depends_on:
+      database:
+        condition: service_healthy
+"#,
+    );
+}
+
+/// A mixed list — one entry with an explicit condition, one without —
+/// still emits the long form for the whole field (Compose has no way to
+/// mix shapes), and the bare entry is filled in with Compose's own
+/// implicit default, `service_started`, since the long form requires
+/// every entry to be a mapping.
+#[test]
+fn depends_on_mixed_list_fills_in_the_default_condition() {
+    let yaml = generate_from(
+        "service cache {\n  image \"redis\"\n}\n\
+         service database {\n  image \"postgres\"\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           depends_on [cache, database { condition: service_healthy }]\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  cache:
+    image: redis
+    networks:
+      - default
+  database:
+    image: postgres
+    networks:
+      - default
+  miniflux:
+    image: miniflux/miniflux:latest
+    networks:
+      - default
+    depends_on:
+      cache:
+        condition: service_started
+      database:
+        condition: service_healthy
+"#,
+    );
+}
+
+/// All three of Compose's own condition values round-trip verbatim.
+#[test]
+fn depends_on_all_three_condition_values_round_trip() {
+    let yaml = generate_from(
+        "service a {\n  image \"x\"\n}\n\
+         service b {\n  image \"x\"\n}\n\
+         service c {\n  image \"x\"\n}\n\
+         service s {\n  \
+           image \"x\"\n  \
+           depends_on [\n    \
+             a { condition: service_started },\n    \
+             b { condition: service_healthy },\n    \
+             c { condition: service_completed_successfully }\n  \
+           ]\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  a:
+    image: x
+    networks:
+      - default
+  b:
+    image: x
+    networks:
+      - default
+  c:
+    image: x
+    networks:
+      - default
+  s:
+    image: x
+    networks:
+      - default
+    depends_on:
+      a:
+        condition: service_started
+      b:
+        condition: service_healthy
+      c:
+        condition: service_completed_successfully
+"#,
+    );
+}
+
+/// `depends_on` merges through a `with` template just like every other
+/// field — the template's own conditioned entry survives into the
+/// composed service untouched.
+#[test]
+fn depends_on_condition_merges_through_a_with_template() {
+    let yaml = generate_from(
+        "service database {\n  image \"postgres\"\n}\n\
+         template waits_for_db {\n  depends_on [database { condition: service_healthy }]\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           with waits_for_db\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  database:
+    image: postgres
+    networks:
+      - default
+  miniflux:
+    image: miniflux/miniflux:latest
+    networks:
+      - default
+    depends_on:
+      database:
+        condition: service_healthy
+"#,
+    );
+}
+
+/// Two explicit `with`-listed templates that each write the same plain
+/// `depends_on [database]` — no condition on either — are giving the
+/// same answer twice, not two different ones, so they compose to a
+/// single entry rather than colliding (see `compose.rs`'s
+/// `merge_depends_on`), and the field still emits Compose's short list
+/// form: nothing about composing two templates that happen to agree
+/// should ever be able to flip a plain `depends_on` into the long map
+/// form on its own.
+#[test]
+fn depends_on_identical_bare_entries_across_templates_stay_short_form() {
+    let yaml = generate_from(
+        "service database {\n  image \"postgres\"\n}\n\
+         template a {\n  depends_on [database]\n}\n\
+         template b {\n  depends_on [database]\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           with a, b\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  database:
+    image: postgres
+    networks:
+      - default
+  miniflux:
+    image: miniflux/miniflux:latest
+    networks:
+      - default
+    depends_on:
+      - database
+"#,
+    );
+}
+
+/// The same agreement holds when both templates spell the condition
+/// out explicitly and it matches: still one entry, still no collision —
+/// just the long form this time, since a `condition` was actually
+/// written.
+#[test]
+fn depends_on_identical_explicit_conditions_across_templates_merge_to_one_entry() {
+    let yaml = generate_from(
+        "service database {\n  image \"postgres\"\n}\n\
+         template a {\n  depends_on [database { condition: service_healthy }]\n}\n\
+         template b {\n  depends_on [database { condition: service_healthy }]\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           with a, b\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  database:
+    image: postgres
+    networks:
+      - default
+  miniflux:
+    image: miniflux/miniflux:latest
+    networks:
+      - default
+    depends_on:
+      database:
+        condition: service_healthy
+"#,
+    );
+}
+
+/// `raw { depends_on: ... }` overrides the built-in `depends_on` field,
+/// the same way it overrides every other built-in field — including
+/// when the built-in would otherwise have emitted the long map form.
+#[test]
+fn raw_depends_on_overrides_the_built_in_depends_on() {
+    let yaml = generate_from(
+        "service database {\n  image \"postgres\"\n}\n\
+         service miniflux {\n  \
+           image \"miniflux/miniflux:latest\"\n  \
+           depends_on [database { condition: service_healthy }]\n  \
+           raw {\n    depends_on: [\"raw-dep\"]\n  }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  database:
+    image: postgres
+    networks:
+      - default
+  miniflux:
+    image: miniflux/miniflux:latest
+    networks:
+      - default
+    depends_on:
+      - raw-dep
+"#,
+    );
+}
+
 #[test]
 fn unknown_network_reference_is_error() {
     let err = generate_err("service s {\n  image \"x\"\n  networks [nonexistent]\n}\n");
@@ -273,6 +805,151 @@ fn two_declarations_sharing_one_real_name_are_not_ambiguous() {
         labels,
         &serde_yaml_ng::Value::from(vec!["traefik.docker.network=shared_real"])
     );
+}
+
+// --- implicit `default` network (#152) ---
+
+/// `default` needs no `network default {}` declaration at all: an
+/// undeclared `networks [default]` resolves to Compose's own implicit
+/// default network rather than raising `UnknownNetwork` — the first half
+/// of #152, and true regardless of how many services the program has.
+/// No top-level `networks:` entry is emitted for it either, since
+/// Compose defines `default` itself.
+#[test]
+fn undeclared_default_network_reference_compiles() {
+    let yaml = generate_from("service s {\n  image \"x\"\n  networks [default]\n}\n");
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert_eq!(
+        value["services"]["s"]["networks"],
+        serde_yaml_ng::Value::from(vec!["default"])
+    );
+    assert!(
+        value.get("networks").is_none(),
+        "an undeclared `default` must not emit a top-level `networks:` entry: {yaml}"
+    );
+}
+
+/// The auto-attach half of #152: two or more services in one program are
+/// one Compose stack by construction, so every one of them lands on
+/// `default` even though neither named it — with no top-level
+/// `networks:` entry, exactly as the single-service case above.
+#[test]
+fn two_service_program_auto_attaches_default() {
+    let yaml = generate_from(
+        "service app {\n  image \"app\"\n}\nservice db {\n  image \"postgres:15\"\n}\n",
+    );
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    for service in ["app", "db"] {
+        assert_eq!(
+            value["services"][service]["networks"],
+            serde_yaml_ng::Value::from(vec!["default"]),
+            "expected `{service}` on `default`, got: {yaml}"
+        );
+    }
+    assert!(value.get("networks").is_none());
+}
+
+/// A lone service gets no auto-attach: Compose's own implicit default
+/// network already covers a single-service project for free, so
+/// emitting nothing here — no `networks:` key on the service at all —
+/// is correct and matches pre-#152 output exactly.
+#[test]
+fn single_service_program_does_not_auto_attach() {
+    let yaml = generate_from("service s {\n  image \"x\"\n}\n");
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert!(
+        value["services"]["s"].get("networks").is_none(),
+        "a single-service program must get no `networks:` key: {yaml}"
+    );
+}
+
+/// Idempotence (#152): a service that already writes `networks
+/// [default]` itself still ends up with exactly one `default` entry once
+/// auto-attach runs, not two.
+#[test]
+fn explicit_default_reference_plus_auto_attach_is_not_duplicated() {
+    let yaml = generate_from(
+        "service app {\n  image \"app\"\n  networks [default]\n}\n\
+         service db {\n  image \"postgres:15\"\n}\n",
+    );
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert_eq!(
+        value["services"]["app"]["networks"],
+        serde_yaml_ng::Value::from(vec!["default"])
+    );
+}
+
+/// An explicit `network default { ... }` declaration still wins over the
+/// implicit fallback: its `external`/`name` settings are honored exactly
+/// as any other declared network's, and it still emits its own top-level
+/// `networks:` entry — the implicit, doc-free `default` is only a
+/// fallback for when no declaration exists at all.
+#[test]
+fn explicit_default_declaration_is_honored_and_emitted() {
+    let yaml = generate_from(
+        "network default {\n  external\n  name: \"shared_net\"\n}\n\
+         service app {\n  image \"app\"\n}\nservice db {\n  image \"postgres:15\"\n}\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  app:
+    image: app
+    networks: [default]
+    labels:
+      - "traefik.docker.network=shared_net"
+  db:
+    image: postgres:15
+    networks: [default]
+    labels:
+      - "traefik.docker.network=shared_net"
+
+networks:
+  default:
+    name: shared_net
+    external: true
+"#,
+    );
+}
+
+/// #152's note on `UnusedNetwork`: auto-attach feeds `default` into the
+/// same referenced-networks set the warning is checked against, so a
+/// `network default {}` declared explicitly in a multi-service program
+/// — now reached by every service via auto-attach — must not warn as
+/// unused, even though no service names it in an explicit `networks
+/// [...]` list.
+#[test]
+fn declared_default_in_multi_service_program_is_not_unused() {
+    let program = parse(
+        "network default {}\n\
+         service app {\n  image \"app\"\n}\nservice db {\n  image \"postgres:15\"\n}\n",
+    )
+    .unwrap();
+    let composed = compose(program).unwrap();
+    let generated = generate(composed).unwrap();
+    assert!(
+        generated.warnings.is_empty(),
+        "an explicitly declared `default` reached by auto-attach must not warn: {:?}",
+        generated.warnings
+    );
+}
+
+/// A genuinely undeclared network that isn't named `default` gets no
+/// fallback and still errors — the implicit-network carve-out is
+/// specific to that one name, not a general "any undeclared network is
+/// fine" relaxation.
+#[test]
+fn undeclared_non_default_network_still_errors() {
+    let err = generate_err(
+        "service app {\n  image \"app\"\n  networks [proxy]\n}\n\
+         service db {\n  image \"postgres:15\"\n}\n",
+    );
+    assert!(matches!(
+        err,
+        CodegenError::UnknownNetwork { service, network, .. }
+            if service == "app" && network == "proxy"
+    ));
 }
 
 // --- named volumes (#60) ---
@@ -366,6 +1043,10 @@ fn unknown_volume_error_points_at_the_offending_reference() {
 /// `volumes:` and both services mount it. Before #60 this was
 /// indistinguishable from two services that happened to write the same
 /// string; now it's stated by referencing one declaration.
+///
+/// Two services also means both land on the implicit `default` network
+/// (#152) — neither names one, but they're one Compose stack by
+/// construction.
 #[test]
 fn one_volume_shared_by_two_services_is_declared_once() {
     let yaml = generate_from(
@@ -381,10 +1062,12 @@ services:
     image: jellyfin/jellyfin
     volumes:
       - shared-media:/data
+    networks: [default]
   sonarr:
     image: lscr.io/linuxserver/sonarr
     volumes:
       - shared-media:/media
+    networks: [default]
 
 volumes:
   shared-media:
@@ -735,7 +1418,9 @@ fn every_built_in_field_is_overridable_by_raw() {
            image \"nginx\"\n  \
            container_name \"web-ctr\"\n  \
            restart unless-stopped\n  \
+           healthcheck { test: \"curl -f http://localhost\" }\n  \
            env PUID = \"1000\"\n  \
+           env_file \"web.env\"\n  \
            volume web-data -> \"/data\"\n  \
            networks [traefik-net]\n  \
            dns [\"192.168.50.182\"]\n  \
@@ -746,7 +1431,9 @@ fn every_built_in_field_is_overridable_by_raw() {
              image: \"raw-image\"\n    \
              container_name: \"raw-name\"\n    \
              restart: \"always\"\n    \
+             healthcheck: { test: \"raw-test\" }\n    \
              environment: [\"RAW=1\"]\n    \
+             env_file: [\"raw.env\"]\n    \
              volumes: [\"raw-vol:/raw\"]\n    \
              networks: [\"raw-net\"]\n    \
              dns: [\"1.1.1.1\"]\n    \
@@ -765,8 +1452,12 @@ fn every_built_in_field_is_overridable_by_raw() {
 image: raw-image
 container_name: raw-name
 restart: always
+healthcheck:
+  test: raw-test
 environment:
   - RAW=1
+env_file:
+  - raw.env
 volumes:
   - raw-vol:/raw
 networks:
@@ -837,6 +1528,10 @@ volumes:
 /// alone. Same service, same `raw` arity — only the keys differ — so
 /// the two together pin the override to key equality rather than to
 /// "there is a `raw` block".
+///
+/// `web`'s `networks:` list ends with `default` alongside its explicit
+/// `traefik-net` — this fixture declares two services, so #152's
+/// auto-attach reaches it too.
 #[test]
 fn raw_leaves_built_in_fields_it_does_not_name_alone() {
     let yaml = generate_from(
@@ -847,7 +1542,9 @@ fn raw_leaves_built_in_fields_it_does_not_name_alone() {
            image \"nginx\"\n  \
            container_name \"web-ctr\"\n  \
            restart unless-stopped\n  \
+           healthcheck { test: \"curl -f http://localhost\" }\n  \
            env PUID = \"1000\"\n  \
+           env_file \"web.env\"\n  \
            volume web-data -> \"/data\"\n  \
            networks [traefik-net]\n  \
            dns [\"192.168.50.182\"]\n  \
@@ -865,12 +1562,17 @@ fn raw_leaves_built_in_fields_it_does_not_name_alone() {
 image: nginx
 container_name: web-ctr
 restart: unless-stopped
+healthcheck:
+  test: curl -f http://localhost
 environment:
   - PUID=1000
+env_file:
+  - web.env
 volumes:
   - web-data:/data
 networks:
   - traefik-net
+  - default
 dns:
   - 192.168.50.182
 ports:

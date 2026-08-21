@@ -40,7 +40,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use hl_parser::{
-    ComposedProgram, Network, Reference, Service, SourceMap, Span, Volume, VolumeHost, VolumeMap,
+    ComposedProgram, DependsOnEntry, Healthcheck, HealthcheckTest, Network, Reference, Service,
+    SourceMap, Span, Volume, VolumeHost, VolumeMap,
 };
 use indexmap::IndexMap;
 
@@ -66,6 +67,16 @@ pub struct GeneratedProgram {
 /// program's top-level `networks:` section.
 type NetworkDocs = Vec<(String, doc::NetworkDoc)>;
 
+/// The one network name every program gets for free, whether or not it
+/// declares one (#152): Compose itself creates a `default` network for
+/// any project and attaches every service with no explicit `networks:`
+/// key to it, so a same-file, multi-service `.hll` program — already one
+/// Compose stack, one output document — gets the same behavior without
+/// spelling out `network default {}` purely to name it. See
+/// [`resolve_networks`] for the undeclared-reference fallback this
+/// enables and [`generate`] for the auto-attach half.
+const IMPLICIT_DEFAULT_NETWORK: &str = "default";
+
 /// `(volume identifier, its Compose doc)` pairs to merge into the
 /// program's top-level `volumes:` section. `None` means the declaration
 /// set no options — see [`doc::ComposeDoc::volumes`].
@@ -80,6 +91,11 @@ pub enum CodegenError {
     /// top-level `network` declaration in the same program. A hard
     /// error, not silent implicit-network creation — every real network
     /// reference in the target homelab has a corresponding declaration.
+    ///
+    /// The one exception is `x == "default"` (#152): every program gets
+    /// that name for free, so an undeclared `networks [default]` resolves
+    /// to Compose's own implicit default network instead of reaching this
+    /// variant. See `IMPLICIT_DEFAULT_NETWORK` in this crate.
     UnknownNetwork {
         service: String,
         network: String,
@@ -307,9 +323,21 @@ pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenErr
     let mut volumes: IndexMap<String, Option<doc::VolumeDoc>> = IndexMap::new();
     let mut referenced_networks: HashSet<&str> = HashSet::new();
 
+    // Two or more `service` decls in one program are, by construction,
+    // one Compose stack meant to talk to each other — that's the whole
+    // premise of #152. A lone service gets no auto-attach: Compose's own
+    // implicit default network already covers it for free, and emitting
+    // nothing there is correct, matching the pre-#152 behavior for every
+    // single-service program that exists today.
+    let auto_attach_default = program.services.len() >= 2;
+
     for service in &program.services {
-        let (service_doc, network_docs, volume_docs) =
-            generate_service(service, &program.networks, &program.volumes)?;
+        let (service_doc, network_docs, volume_docs) = generate_service(
+            service,
+            &program.networks,
+            &program.volumes,
+            auto_attach_default,
+        )?;
         for (net_name, net_doc) in network_docs {
             networks.entry(net_name).or_insert(net_doc);
         }
@@ -320,6 +348,16 @@ pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenErr
             referenced_networks.insert(r.name.as_str());
         }
         services.insert(service.name.name.clone(), service_doc);
+    }
+    // Auto-attach reaches every service's *generated* `networks:` list
+    // without going through a `Reference` in `service.fields.networks`,
+    // so the loop above never sees it. Feeding it in here too keeps the
+    // `UnusedNetwork` check below honest: an explicitly declared `network
+    // default { ... }` in a multi-service program is referenced by every
+    // service, same as if each had written `networks [default]` by hand,
+    // and must not warn (#152).
+    if auto_attach_default {
+        referenced_networks.insert(IMPLICIT_DEFAULT_NETWORK);
     }
 
     // `networks:` is assembled from what services reference, never from
@@ -352,6 +390,7 @@ fn generate_service(
     service: &Service,
     declared_networks: &[Network],
     declared_volumes: &[Volume],
+    auto_attach_default: bool,
 ) -> Result<(doc::ComposeServiceDoc, NetworkDocs, VolumeDocs), CodegenError> {
     let name = &service.name.name;
     let fields = &service.fields;
@@ -380,6 +419,8 @@ fn generate_service(
         .map(|lit| interp::resolve(lit.text(), &bindings, lit.span()))
         .transpose()?;
 
+    let healthcheck = generate_healthcheck(fields.healthcheck.as_ref(), &bindings)?;
+
     let mut environment = Vec::with_capacity(fields.env.entries.len());
     for e in &fields.env.entries {
         let key = interp::resolve(e.key.text(), &bindings, e.key.span())?;
@@ -402,8 +443,13 @@ fn generate_service(
         publish_entries.push(format!("{host}:{container}"));
     }
 
-    let (compose_networks, network_docs, docker_network) =
-        resolve_networks(&fields.networks, declared_networks, name, service.span)?;
+    let (compose_networks, network_docs, docker_network) = resolve_networks(
+        &fields.networks,
+        declared_networks,
+        name,
+        service.span,
+        auto_attach_default,
+    )?;
 
     let expose: Vec<serde_yaml_ng::Value> = fields
         .expose
@@ -415,8 +461,15 @@ fn generate_service(
 
     let labels = labels::compute(name, fields, docker_network.as_deref(), &bindings)?;
 
-    let depends_on = fields.depends_on.iter().map(|r| r.name.clone()).collect();
+    let depends_on = generate_depends_on(&fields.depends_on);
     let dns = fields.dns.iter().map(|r| r.name.clone()).collect();
+    // Paths, carried through verbatim — never resolved against `bindings`
+    // (matching `dns`/`middleware`/`depends_on`/`networks` just above:
+    // none of `hll`'s reference-list fields interpolate `{{name}}`) and
+    // never inspected for existence, since Compose itself resolves each
+    // one relative to the compose file at deploy time, not `hllc` at
+    // compile time (#154).
+    let env_file = fields.env_file.iter().map(|r| r.name.clone()).collect();
 
     let mut raw_map = IndexMap::new();
     for entry in &fields.raw.entries {
@@ -428,7 +481,9 @@ fn generate_service(
         image: Some(image),
         container_name,
         restart,
+        healthcheck,
         environment,
+        env_file,
         volumes: volume_entries,
         networks: compose_networks,
         dns,
@@ -443,6 +498,120 @@ fn generate_service(
     service_doc.apply_raw_overrides();
 
     Ok((service_doc, network_docs, volume_docs))
+}
+
+/// Builds a service's `depends_on:` doc from its parsed
+/// [`DependsOnEntry`] list (#155) — see [`doc::DependsOnDoc`]'s own doc
+/// for the short-vs-long shape switch this picks between. Deliberately
+/// never `{{name}}`-interpolated, matching every other reference-list
+/// field (`middleware`/`networks`/`dns`/`env_file`): a `depends_on`
+/// entry names a same-file sibling service, not free text, so there is
+/// nothing in it a binding could ever apply to.
+///
+/// Neither this function nor anything upstream of it warns when a
+/// `service_healthy` entry targets a service with no `hll`-level
+/// `healthcheck` field — deliberately. A Docker image can bake its own
+/// `HEALTHCHECK` into its Dockerfile, entirely outside anything an
+/// `.hll` file declares, so "no `healthcheck` field on the target
+/// service" is not evidence the condition is meaningless; `hllc` has no
+/// way to see an image's own healthcheck, and guessing wrong here would
+/// be worse than saying nothing.
+fn generate_depends_on(entries: &[DependsOnEntry]) -> doc::DependsOnDoc {
+    if entries.iter().all(|e| e.condition.is_none()) {
+        return doc::DependsOnDoc::Short(
+            entries.iter().map(|e| e.reference.name.clone()).collect(),
+        );
+    }
+    let mut long = IndexMap::new();
+    for entry in entries {
+        // An entry with no explicit condition still needs a mapping
+        // value once the document has committed to the long form —
+        // filled in with Compose's own implicit default via
+        // `effective_condition`, which is exactly what the short form
+        // always meant.
+        long.insert(
+            entry.reference.name.clone(),
+            doc::DependsOnConditionDoc {
+                condition: entry.effective_condition().compose_value().to_string(),
+            },
+        );
+    }
+    doc::DependsOnDoc::Long(long)
+}
+
+/// Builds a service's `healthcheck:` doc from its parsed
+/// [`Healthcheck`], `{{name}}`-interpolating every string sub-field the
+/// same way `restart.policy`/`container_name` are above — a `test`
+/// command or a duration string is exactly as likely to want the
+/// service's own name spliced in as those are. `retries` is the one
+/// exception, handled via [`raw::scalar_value`] instead so a bare
+/// `retries: 3` reaches Compose as the YAML integer it was written as,
+/// matching `expose.port`'s own precedent just above in
+/// [`generate_service`] for the same reason: a number is a number, not
+/// text to interpolate into.
+///
+/// Returns `None` both when `hc` is `None` (no `healthcheck` field at
+/// all) and when every sub-field it holds is unset (`healthcheck {}`) —
+/// [`doc::HealthcheckDoc::is_empty`] is what tells those two cases
+/// apart from "something was actually set."
+fn generate_healthcheck(
+    hc: Option<&Healthcheck>,
+    bindings: &HashMap<&str, &str>,
+) -> Result<Option<doc::HealthcheckDoc>, CodegenError> {
+    let Some(hc) = hc else {
+        return Ok(None);
+    };
+
+    let test =
+        match &hc.test {
+            Some(HealthcheckTest::Shell(lit)) => Some(serde_yaml_ng::Value::String(
+                interp::resolve(lit.text(), bindings, lit.span())?,
+            )),
+            Some(HealthcheckTest::Exec(items, _)) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    out.push(serde_yaml_ng::Value::String(interp::resolve(
+                        item.text(),
+                        bindings,
+                        item.span(),
+                    )?));
+                }
+                Some(serde_yaml_ng::Value::Sequence(out))
+            }
+            None => None,
+        };
+    let interval = hc
+        .interval
+        .as_ref()
+        .map(|lit| interp::resolve(lit.text(), bindings, lit.span()))
+        .transpose()?;
+    let timeout = hc
+        .timeout
+        .as_ref()
+        .map(|lit| interp::resolve(lit.text(), bindings, lit.span()))
+        .transpose()?;
+    let retries = hc.retries.as_ref().map(raw::scalar_value);
+    let start_period = hc
+        .start_period
+        .as_ref()
+        .map(|lit| interp::resolve(lit.text(), bindings, lit.span()))
+        .transpose()?;
+    let start_interval = hc
+        .start_interval
+        .as_ref()
+        .map(|lit| interp::resolve(lit.text(), bindings, lit.span()))
+        .transpose()?;
+
+    let doc = doc::HealthcheckDoc {
+        test,
+        interval,
+        timeout,
+        retries,
+        start_period,
+        start_interval,
+        disable: hc.disable.is_some(),
+    };
+    Ok(if doc.is_empty() { None } else { Some(doc) })
 }
 
 /// Resolves a service's `volume` entries into the Compose-level
@@ -523,50 +692,84 @@ fn resolve_volumes(
 /// than of any one entry in it — there is no single offending
 /// reference to point at. [`CodegenError::UnknownNetwork`] does have
 /// one, and points at it (#70).
+///
+/// `auto_attach_default` is the multi-service half of #152: when set,
+/// [`IMPLICIT_DEFAULT_NETWORK`] is appended to the returned list if it
+/// isn't there already, exactly as if the service had written `networks
+/// [default]` itself. Appended, not prepended, so explicitly named
+/// networks keep their source order and the auto-attached one always
+/// sorts last; checked for first so an explicit `networks [default]`
+/// doesn't end up listed twice.
 fn resolve_networks(
     refs: &[Reference],
     declared: &[Network],
     service_name: &str,
     service_span: Span,
+    auto_attach_default: bool,
 ) -> Result<(Vec<String>, NetworkDocs, Option<String>), CodegenError> {
-    let mut compose_networks = Vec::with_capacity(refs.len());
+    let mut compose_networks = Vec::with_capacity(refs.len() + 1);
     let mut docs = Vec::with_capacity(refs.len());
     let mut external_candidates = Vec::new();
 
     for r in refs {
-        let decl = declared
-            .iter()
-            .find(|n| n.name.name == r.name)
-            .ok_or_else(|| CodegenError::UnknownNetwork {
-                service: service_name.to_string(),
-                network: r.name.clone(),
-                span: r.span,
-            })?;
-        compose_networks.push(decl.name.name.clone());
-        let is_external = decl.external.is_some();
-        let real_name = decl
-            .real_name
-            .as_ref()
-            .map(|l| l.text().to_string())
-            .unwrap_or_else(|| decl.name.name.clone());
-        // By *distinct* real name (#69): naming one external network
-        // more than once is not an ambiguity between it and itself,
-        // it's one answer given twice. Composition already drops
-        // repeated `networks` entries, so a duplicate can only reach
-        // here from a caller that built a `ComposedProgram` some other
-        // way, or from two declarations that differ in `hll` name but
-        // resolve to the same real one — neither of which leaves
-        // `traefik.docker.network` with an actual choice to make.
-        if is_external && !external_candidates.contains(&real_name) {
-            external_candidates.push(real_name.clone());
+        match declared.iter().find(|n| n.name.name == r.name) {
+            Some(decl) => push_declared_network(
+                decl,
+                &mut compose_networks,
+                &mut docs,
+                &mut external_candidates,
+            ),
+            // The one name every program has whether or not it's
+            // declared (#152): Compose defines `default` itself, so an
+            // otherwise-unknown reference to exactly that name resolves
+            // to it instead of erroring, and — since there's no
+            // declaration to draw a `NetworkDoc` from — contributes
+            // nothing to `docs`, leaving the top-level `networks:`
+            // section to say nothing about it, same as Compose's own
+            // output would.
+            None if r.name == IMPLICIT_DEFAULT_NETWORK => {
+                compose_networks.push(IMPLICIT_DEFAULT_NETWORK.to_string());
+            }
+            None => {
+                return Err(CodegenError::UnknownNetwork {
+                    service: service_name.to_string(),
+                    network: r.name.clone(),
+                    span: r.span,
+                });
+            }
         }
-        docs.push((
-            decl.name.name.clone(),
-            doc::NetworkDoc {
-                name: decl.real_name.as_ref().map(|l| l.text().to_string()),
-                external: is_external,
-            },
-        ));
+    }
+
+    // The auto-attach half of #152: every service in a multi-service
+    // program is implicitly on `default` in addition to whatever it
+    // named explicitly. Guarded on not already being present so a
+    // service that writes `networks [default]` itself ends up with
+    // exactly one entry, not two — auto-attach is a fallback for
+    // services that said nothing, not a second copy for services that
+    // already said it themselves.
+    if auto_attach_default
+        && !compose_networks
+            .iter()
+            .any(|n| n == IMPLICIT_DEFAULT_NETWORK)
+    {
+        match declared
+            .iter()
+            .find(|n| n.name.name == IMPLICIT_DEFAULT_NETWORK)
+        {
+            // An explicit `network default { ... }` still wins: its
+            // `external`/`name` settings are honored exactly as any
+            // other declared network's would be, including
+            // participating in the `traefik.docker.network=` /
+            // `AmbiguousExternalNetwork` logic below when it's
+            // `external`.
+            Some(decl) => push_declared_network(
+                decl,
+                &mut compose_networks,
+                &mut docs,
+                &mut external_candidates,
+            ),
+            None => compose_networks.push(IMPLICIT_DEFAULT_NETWORK.to_string()),
+        }
     }
 
     let docker_network = match external_candidates.as_slice() {
@@ -582,6 +785,44 @@ fn resolve_networks(
     };
 
     Ok((compose_networks, docs, docker_network))
+}
+
+/// The shared body of resolving one *declared* network reference,
+/// factored out of [`resolve_networks`] so its explicit-`refs` loop and
+/// its `auto_attach_default` fallback — which both need to resolve
+/// `default` against an actual declaration when one exists — can't drift
+/// apart.
+fn push_declared_network(
+    decl: &Network,
+    compose_networks: &mut Vec<String>,
+    docs: &mut NetworkDocs,
+    external_candidates: &mut Vec<String>,
+) {
+    compose_networks.push(decl.name.name.clone());
+    let is_external = decl.external.is_some();
+    let real_name = decl
+        .real_name
+        .as_ref()
+        .map(|l| l.text().to_string())
+        .unwrap_or_else(|| decl.name.name.clone());
+    // By *distinct* real name (#69): naming one external network
+    // more than once is not an ambiguity between it and itself,
+    // it's one answer given twice. Composition already drops
+    // repeated `networks` entries, so a duplicate can only reach
+    // here from a caller that built a `ComposedProgram` some other
+    // way, or from two declarations that differ in `hll` name but
+    // resolve to the same real one — neither of which leaves
+    // `traefik.docker.network` with an actual choice to make.
+    if is_external && !external_candidates.contains(&real_name) {
+        external_candidates.push(real_name.clone());
+    }
+    docs.push((
+        decl.name.name.clone(),
+        doc::NetworkDoc {
+            name: decl.real_name.as_ref().map(|l| l.text().to_string()),
+            external: is_external,
+        },
+    ));
 }
 
 #[cfg(test)]

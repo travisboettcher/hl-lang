@@ -145,6 +145,89 @@ pub struct Reference {
     pub span: Span,
 }
 
+/// One of Compose's own three `depends_on` readiness conditions (#155):
+/// wait for the target container to merely start (`ServiceStarted` —
+/// what a plain `depends_on [db]` has always meant, and still means
+/// when no entry names a condition at all), wait for its `healthcheck`
+/// to report healthy (`ServiceHealthy` — only meaningful when the
+/// target actually declares one, whether via `hll`'s own `healthcheck`
+/// field or a `HEALTHCHECK` baked into its image, which `hll` has no
+/// visibility into either way — see [`ServiceFields::depends_on`]'s doc
+/// for why that's deliberately not checked here), or wait for it to
+/// exit zero (`ServiceCompletedSuccessfully` — a one-shot init/migration
+/// container). Exactly Compose's own three; nothing else is legal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependsOnCondition {
+    ServiceStarted,
+    ServiceHealthy,
+    ServiceCompletedSuccessfully,
+}
+
+impl DependsOnCondition {
+    /// Parses one of Compose's three condition spellings, exactly as
+    /// they appear in `.hll` source and in the generated YAML alike —
+    /// `hll` doesn't rename or abbreviate any of them. `None` for
+    /// anything else, which the caller turns into
+    /// [`crate::ParseError::InvalidDependsOnCondition`].
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "service_started" => Some(Self::ServiceStarted),
+            "service_healthy" => Some(Self::ServiceHealthy),
+            "service_completed_successfully" => Some(Self::ServiceCompletedSuccessfully),
+            _ => None,
+        }
+    }
+
+    /// The exact string Compose's own `condition:` key expects, and the
+    /// same string [`Self::parse`] accepts back — `hll` never renames a
+    /// Compose keyword on its way through.
+    pub fn compose_value(self) -> &'static str {
+        match self {
+            Self::ServiceStarted => "service_started",
+            Self::ServiceHealthy => "service_healthy",
+            Self::ServiceCompletedSuccessfully => "service_completed_successfully",
+        }
+    }
+}
+
+/// One `depends_on`-list entry (#155): a plain same-file service
+/// reference (`db`), or a reference plus an explicit readiness
+/// condition (`db { condition: service_healthy }`). `condition` also
+/// carries the span of just the condition value, separate from the
+/// entry's own `span`, so a future diagnostic can point at exactly the
+/// keyword rather than the whole entry.
+///
+/// Not a [`TemplateInvocation`] with a schema-free [`RawMap`] argument
+/// bag, even though the two share the same "`IDENT` optionally followed
+/// by a `{ }` body" shape: `condition` is this body's one and only
+/// legal key, and its value is one of exactly three fixed Compose
+/// keywords rather than an arbitrary one, checked immediately at parse
+/// time (see [`crate::ParseError::InvalidDependsOnCondition`]) rather
+/// than deferred to composition the way a template argument's binding
+/// is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DependsOnEntry {
+    pub reference: Reference,
+    pub condition: Option<(DependsOnCondition, Span)>,
+    pub span: Span,
+}
+
+impl DependsOnEntry {
+    /// This entry's condition as Compose itself would read it: a bare
+    /// entry (`condition: None`) means exactly what an explicit
+    /// `condition: service_started` means, since that's Compose's own
+    /// implicit default for `depends_on`. Used both by composition's
+    /// merge (to tell "two entries that agree" apart from "two entries
+    /// that genuinely conflict," regardless of which one spelled the
+    /// condition out — see `compose.rs`'s `merge_depends_on`) and by
+    /// codegen (to fill in the long map form's value for an entry that
+    /// left `condition` unset).
+    pub fn effective_condition(&self) -> DependsOnCondition {
+        self.condition
+            .map_or(DependsOnCondition::ServiceStarted, |(c, _)| c)
+    }
+}
+
 /// The name a `network` or `service` declaration is given.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ident {
@@ -252,6 +335,56 @@ pub struct Expose {
 pub struct Restart {
     pub policy: Option<Literal>,
     pub span: Span,
+}
+
+/// A parsed `healthcheck` field — Compose's own generic `healthcheck:`
+/// key (#153). Every sub-field is `Option` for the same reason as
+/// [`Image::reference`] (see that doc): the parser doesn't enforce
+/// required fields, so `healthcheck {}` must still parse.
+///
+/// `interval`/`timeout`/`start_period`/`start_interval` are duration
+/// strings and `retries` is a number, all carried through as literals
+/// exactly as written — see [`crate::schema::HEALTHCHECK`]'s doc for why
+/// `hllc` never parses or validates any of them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Healthcheck {
+    pub test: Option<HealthcheckTest>,
+    pub interval: Option<Literal>,
+    pub timeout: Option<Literal>,
+    pub retries: Option<Literal>,
+    pub start_period: Option<Literal>,
+    pub start_interval: Option<Literal>,
+    /// `Some(span)` of the bare `disable` flag if it was set; `None`
+    /// otherwise — bare-presence only, modeled directly on
+    /// [`Network::external`] (see that doc). There is no `disable:
+    /// false` form this milestone.
+    pub disable: Option<Span>,
+    pub span: Span,
+}
+
+/// `healthcheck`'s `test` sub-field: either a bare literal (Compose's
+/// shell form — a bare string is shorthand for `CMD-SHELL <string>`) or
+/// a bracketed list of literals (Compose's exec form, `["CMD",
+/// "pg_isready", "-U", "miniflux"]`). Carried through to codegen in
+/// whichever shape it was written rather than normalizing one into the
+/// other (#153) — the two aren't interchangeable: `CMD-SHELL` runs the
+/// string through the container's shell, `CMD` execs the list directly
+/// with no shell involved.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HealthcheckTest {
+    Shell(Literal),
+    /// The list's own span (covering the brackets), since a `Vec` has
+    /// nowhere else to carry one.
+    Exec(Vec<Literal>, Span),
+}
+
+impl HealthcheckTest {
+    pub fn span(&self) -> Span {
+        match self {
+            HealthcheckTest::Shell(lit) => lit.span(),
+            HealthcheckTest::Exec(_, span) => *span,
+        }
+    }
 }
 
 /// `volume`'s entries. Uniqueness is checked on `container` (the value
@@ -424,6 +557,9 @@ pub struct ServiceFields {
     pub image: Option<Image>,
     pub expose: Option<Expose>,
     pub restart: Option<Restart>,
+    /// Compose's own `healthcheck:` key (#153). See [`Healthcheck`]'s
+    /// doc.
+    pub healthcheck: Option<Healthcheck>,
     /// `publish 8096 -> 8096` entries — Compose's `ports:` key. Distinct
     /// from `expose` above, which is Compose's `expose:` (visible to
     /// other containers on the same network, never published to the
@@ -433,7 +569,31 @@ pub struct ServiceFields {
     pub env: EnvMap,
     pub raw: RawMap,
     pub middleware: Vec<Reference>,
-    pub depends_on: Vec<Reference>,
+    /// `depends_on [db]` / `depends_on [db { condition: service_healthy }]`
+    /// (#155) — each entry is a same-file service reference, optionally
+    /// carrying an explicit Compose readiness condition. Unlike
+    /// `middleware`/`networks`/`dns`/`env_file`, this isn't a plain
+    /// [`Reference`] list: a `Reference` has nowhere to hang the
+    /// optional `{ condition: ... }` body, so it's its own
+    /// [`DependsOnEntry`] type instead — see that type's own doc for why
+    /// it isn't shaped as a [`TemplateInvocation`] either, despite the
+    /// surface syntax looking similar. Still accumulates across repeated
+    /// `depends_on` statements and gets the bare single-item sugar every
+    /// list field gets, exactly as it always has.
+    ///
+    /// Composition merges this field keyed on the referenced service's
+    /// own name, via `compose.rs`'s dedicated `merge_depends_on` rather
+    /// than the plain set-like distinct-name dedupe every other
+    /// reference-list field goes through — but a plain, all-bare
+    /// `depends_on` behaves exactly as it always has: two templates each
+    /// naming the same dependency with no condition (or with the same
+    /// one) still silently collapse to one entry, since they say the
+    /// same thing twice, not two different things. Only two *explicit*
+    /// templates naming the same service with *differing* conditions
+    /// have anything to disagree about, so only that case raises a
+    /// [`crate::compose::ComposeError::MapKeyCollision`] — see
+    /// `compose.rs`'s `merge_depends_on` for the exact rule.
+    pub depends_on: Vec<DependsOnEntry>,
     pub networks: Vec<Reference>,
     /// A per-service DNS resolver override (Compose's own `dns:` key,
     /// e.g. a LAN resolver IP) — a plain generic Compose key like
@@ -447,6 +607,22 @@ pub struct ServiceFields {
     /// `IDENT`'s grammar can't contain a `.`) can never carry a
     /// qualifier anyway.
     pub dns: Vec<Reference>,
+    /// `env_file "one.env"` / `env_file ["one.env", "two.env"]` — paths
+    /// to load environment variables from, Compose's own `env_file:`
+    /// key (#154). Same reasoning as [`Self::dns`] just above: a plain
+    /// generic Compose key, not homelab-specific itself even though most
+    /// real entries point at a gitignored, homelab-specific `.env` file,
+    /// list-typed and reference-list shaped like
+    /// `middleware`/`depends_on`/`networks`/`dns` (accumulates across
+    /// repeats, never duplicate-checked, and a bare `env_file "one.env"`
+    /// is sugar for a one-element list), even though its entries are
+    /// ordinary path strings rather than references to another
+    /// declaration. Reusing [`Reference`] costs nothing here for the
+    /// same reason it costs nothing for `dns`: Compose's paths are
+    /// resolved relative to the compose file, which is the user's
+    /// concern, not `hllc`'s, so a path is carried through verbatim
+    /// either way and never needs a qualifier to mean anything.
+    pub env_file: Vec<Reference>,
     /// Docker's own `container_name:` key. `None` means "default to the
     /// service's own name" (via the same `{{name}}` interpolation
     /// binding `expose`'s `as`-sugar already uses) — codegen, not the
