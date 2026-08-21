@@ -337,6 +337,21 @@ pub struct Restart {
     pub span: Span,
 }
 
+/// A parsed `traefik` field (#159) — the one way to opt a service out of
+/// every Traefik label `hl-codegen`'s `labels.rs` otherwise computes for
+/// it. See [`crate::schema::TRAEFIK`]'s doc for why this is a `Nested`
+/// struct field rather than the bare `traefik disabled` spelling the
+/// motivating issue first floated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Traefik {
+    /// `Some(span)` of the bare `disabled` flag if it was set; `None`
+    /// otherwise — bare-presence only, modeled directly on
+    /// [`Network::external`] (see that doc). There is no `disabled:
+    /// false` form this milestone.
+    pub disabled: Option<Span>,
+    pub span: Span,
+}
+
 /// A parsed `healthcheck` field — Compose's own generic `healthcheck:`
 /// key (#153). Every sub-field is `Option` for the same reason as
 /// [`Image::reference`] (see that doc): the parser doesn't enforce
@@ -635,6 +650,10 @@ pub struct TemplateInvocation {
 pub struct ServiceFields {
     pub image: Option<Image>,
     pub expose: Option<Expose>,
+    /// `traefik { disabled }` (#159). See [`Traefik`]'s doc. Codegen's
+    /// `labels.rs` is the sole reader — a service that leaves this unset
+    /// gets exactly today's computed label list, byte for byte.
+    pub traefik: Option<Traefik>,
     pub restart: Option<Restart>,
     /// Compose's own `healthcheck:` key (#153). See [`Healthcheck`]'s
     /// doc.

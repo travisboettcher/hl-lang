@@ -63,8 +63,8 @@ pub use ast::{
     Command, DependsOnCondition, DependsOnEntry, EnvEntry, EnvMap, Expose, Healthcheck,
     HealthcheckTest, Ident, Image, Literal, Network, Param, ParamType, Program, PublishEntry,
     PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Service, ServiceFields,
-    TemplateDecl, TemplateInvocation, TopDecl, UseDecl, Volume, VolumeDriverOpt, VolumeEntry,
-    VolumeHost, VolumeMap,
+    TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume, VolumeDriverOpt,
+    VolumeEntry, VolumeHost, VolumeMap,
 };
 pub use compose::{
     ComposeError, ComposedProgram, MAX_TEMPLATE_DEPTH, MapKeyCollision, SymbolResolver, compose,

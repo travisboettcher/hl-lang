@@ -236,6 +236,7 @@ same two entries—see #81.
 | `env` | map |—| `=` | key | no |
 | `restart` | struct | `policy` |—|—| no |
 | `healthcheck` | struct |—|—|—| no |
+| `traefik` | struct |—|—|—| no |
 | `with` | struct | `templates`—list of nested instantiations |—|—| no |
 | `raw` | map |—| `:` | none—schema-free, passthrough | no |
 
@@ -332,12 +333,13 @@ codegen's to write rather than the user's—so no generated label value
 ever has to tolerate a user-written comma, and the metacharacter guard
 can reject `,` uniformly everywhere.
 
-Besides the three top-level types, `healthcheck` is the table's one
-struct-kind row with no primary field: unlike `image`'s `ref` or
-`expose`'s `port`, no single sub-field of `test`/`interval`/`timeout`/
-`retries`/`start_period`/`start_interval`/`disable` obviously stands in
-for the whole healthcheck, so `healthcheck { ... }` requires the braced
-body—`healthcheck "..."` is a parse error rather than sugar for
+Besides the three top-level types, `healthcheck` and `traefik` are the
+table's struct-kind rows with no primary field: unlike `image`'s `ref`
+or `expose`'s `port`, no single sub-field of `healthcheck`'s
+`test`/`interval`/`timeout`/`retries`/`start_period`/`start_interval`/
+`disable`, nor of `traefik`'s own lone `disabled`, obviously stands in
+for the whole struct, so both require the braced body—`healthcheck
+"..."` and `traefik disabled` are parse errors rather than sugar for
 anything. `test` needs a field kind none of the other struct fields do:
 `FieldKind::ScalarOrList` accepts either a bare literal (Compose's shell
 form, `CMD-SHELL <string>`) or a bracketed list of literals (Compose's
@@ -352,6 +354,21 @@ image. Every field here is a plain, generic Compose key, not
 homelab-specific in any of its own fields—the same "generic core"
 reasoning that already justified `dns`/`env_file`/`container_name`, see
 #153.
+
+`traefik`'s own `disabled` mirrors that same `disable`/`external`
+bare-presence shape directly, but for the opposite reason: it isn't a
+generic Compose key at all, it's the one label `hll`'s own Traefik
+support computes but a service can now switch off—see #159. The issue
+that motivated it floats a brace-free `traefik disabled` spelling first,
+but that doesn't fit the schema engine: a brace-free form exists only
+for a type with a `primary_field`, and `FieldKind::BoolFlag` can never
+be one—a primary field always supplies a *value*
+(`parse_struct_primary_shorthand`'s only bare-value path calls
+`parse_literal`), while a bare-presence flag carries no value beyond
+itself. Making `traefik { disabled }`'s braced form the only spelling
+costs nothing beyond what `healthcheck { disable }` already pays for,
+and leaves `traefik` a home a later Traefik knob can join without
+inventing a second `traefik`-prefixed field name.
 
 `middleware`, `depends_on`, `networks`, `dns`, and `env_file` aren't
 rows in this table—they're plain list-of-reference fields directly on
@@ -834,6 +851,24 @@ Both fields only exist as labels on a Traefik router, and `expose.host`
 is what creates that router, so no reading of the pair means anything.
 Dropping them quietly, by contrast, shipped a service with its
 forward-auth missing and nothing to say so.
+
+`traefik`'s own `disabled` flag raises the mirror-image error—see
+#159: setting `expose.host`, `expose.entrypoint`, or `middleware` on a
+service that also switches Traefik off. Both diagnostics share one
+shape, a field whose only meaning depends on a router existing,
+contradicted by something else the same service says about that very
+router, so this gets the same hard-error treatment rather than a fourth
+warning. The router-less case is a missing piece silently completing
+itself the wrong way. This one is a direct contradiction between two
+things the author wrote on purpose, which reads as even less likely to
+be an accident, not more. Letting the flag lose silently would keep a
+router alive against the service's own stated intent. Letting the
+router-attached field lose silently would build a compile-broken
+deploy that looks fine until Traefik never picks it up, and neither
+failure mode is one `hllc` should choose on the author's behalf.
+`expose.port` is exempt: it's Compose's own `expose:` key, plain
+container-network visibility with nothing to do with Traefik, so a
+service with Traefik off may still declare one.
 
 ## Future work
 
