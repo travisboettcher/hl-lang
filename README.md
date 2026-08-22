@@ -88,6 +88,26 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
 
+`crates/hl-codegen/tests/golden_tests.rs` keeps its expected Compose YAML
+as [`insta`](https://insta.rs) inline snapshots, so a deliberate codegen
+change updates those expectations through a review step rather than
+through dozens of hand-edited YAML literals:
+
+```sh
+cargo install cargo-insta --locked
+
+# Step through each changed snapshot, accepting or rejecting one at a time.
+cargo insta review
+
+# Take every pending snapshot at once, once you've read the diffs.
+cargo insta accept
+```
+
+Read every diff before you accept it. A snapshot states what the compiler
+must emit, so taking a new one asserts that the new output is correct—make
+that call deliberately rather than to clear a red test. Both `cargo test
+--workspace` and CI fail on a mismatch and never rewrite a snapshot.
+
 CI also gates on coverage and runs fuzz and mutation testing:
 
 ```sh

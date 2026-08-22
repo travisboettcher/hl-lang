@@ -10,3 +10,6 @@ hl-parser = { path = "../hl-parser" }
 serde = { version = "1", features = ["derive"] }
 serde_yaml_ng = "0.10"
 indexmap = { version = "2", features = ["serde"] }
+
+[dev-dependencies]
+insta = { version = "1.48", features = ["yaml"] }

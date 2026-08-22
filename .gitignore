@@ -3,3 +3,9 @@
 
 # Fetched by `vale sync`; not vendored. Run `vale sync` after cloning.
 /.vale/styles/Google
+
+# Written by `insta` when an inline snapshot fails locally, and consumed
+# by `cargo insta review`; it's scratch state for that one run, not
+# something to commit. CI never produces one — INSTA_UPDATE=no in
+# .github/workflows/ci.yml stops insta writing pending snapshots there.
+*.pending-snap

@@ -85,6 +85,20 @@ keeps `cargo test --workspace --doc` as its own, separate CI step. If
 you're adding a new code path, add tests alongside it rather than
 relying on existing coverage margin.
 
+`crates/hl-codegen/tests/golden_tests.rs` states its expected Compose
+YAML as [`insta`](https://insta.rs) inline snapshots. Install
+`cargo-insta` first with `cargo install cargo-insta --locked`, then run
+`cargo insta review` to step through each changed snapshot, or `cargo
+insta accept` to take a batch you've already read.
+
+Accepting a snapshot is a deliberate decision, not a reflex. The
+snapshot **is** the assertion, so taking a new one declares that the
+changed output is what codegen should now produce. Read the diff, decide
+the change is one you meant to make, and only then accept it—and if a
+snapshot moves for a reason you can't explain, that's a bug to chase,
+not a diff to bless. CI sets `INSTA_UPDATE=no`, so a mismatch there
+fails the build rather than quietly rewriting the expectation.
+
 If you're touching the lexer, parser, or codegen, consider whether the
 fuzz targets in `fuzz/` need a new corpus seed or cover the change
 already—see the README's "Building & testing" section for how to run

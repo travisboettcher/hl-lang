@@ -4,9 +4,18 @@
 //! are between *parsed* YAML values, not raw strings — `serde_yaml_ng`'s
 //! scalar-quoting choices don't need to match the real files
 //! byte-for-byte, only semantically.
+//!
+//! `insta` is what performs that comparison. Every expectation is an
+//! inline snapshot sitting next to the test that produced it, taken of
+//! the parsed `serde_yaml_ng::Value` rather than of the rendered text,
+//! so a change in how the serializer quotes a scalar still compares
+//! equal. After a deliberate codegen change, `cargo insta review` walks
+//! the pending diffs one at a time — reading each one is the point,
+//! because accepting a snapshot claims the new output is correct.
 
 use hl_codegen::{CodegenError, CodegenWarning, generate};
 use hl_parser::{compose, parse};
+use insta::assert_yaml_snapshot;
 
 const SYNCTHING: &str = include_str!("../../hl-parser/tests/fixtures/syncthing.hll");
 const RAW_SERVICE: &str = include_str!("../../hl-parser/tests/fixtures/raw_service.hll");
@@ -26,14 +35,9 @@ fn generate_err(source: &str) -> CodegenError {
     generate(composed).expect_err("expected a codegen error")
 }
 
-fn assert_yaml_eq(actual: &str, expected: &str) {
-    let a: serde_yaml_ng::Value = serde_yaml_ng::from_str(actual)
-        .unwrap_or_else(|err| panic!("actual output isn't valid YAML: {err}\n{actual}"));
-    let e: serde_yaml_ng::Value = serde_yaml_ng::from_str(expected).unwrap();
-    assert_eq!(
-        a, e,
-        "\n--- actual ---\n{actual}\n--- expected ---\n{expected}"
-    );
+fn yaml_value(rendered: &str) -> serde_yaml_ng::Value {
+    serde_yaml_ng::from_str(rendered)
+        .unwrap_or_else(|err| panic!("output isn't valid YAML: {err}\n{rendered}"))
 }
 
 /// The design doc's own worked composition example, checked against the
@@ -46,38 +50,33 @@ fn assert_yaml_eq(actual: &str, expected: &str) {
 #[test]
 fn syncthing_matches_real_deployed_service() {
     let yaml = generate_from(SYNCTHING);
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  syncthing:
-    image: lscr.io/linuxserver/syncthing:latest
-    restart: unless-stopped
-    environment:
-      - PUID=1000
-      - PGID=100
-    volumes:
-      - syncthing-config:/config
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      syncthing:
+        image: "lscr.io/linuxserver/syncthing:latest"
+        restart: unless-stopped
+        environment:
+          - PUID=1000
+          - PGID=100
+        volumes:
+          - "syncthing-config:/config"
+        networks:
+          - traefik-net
+        expose:
+          - 8384
+        labels:
+          - traefik.docker.network=docker_default
+          - "traefik.http.routers.syncthing.rule=Host(`syncthing.internal.techdebtor.io`)"
+          - traefik.http.routers.syncthing.entrypoints=web-secure
+          - "traefik.http.routers.syncthing.middlewares=local-ipwhitelist@file,forwardAuth-authentik@file"
+          - traefik.http.services.syncthing.loadbalancer.server.port=8384
     networks:
-      - traefik-net
-    expose:
-      - 8384
-    labels:
-      - "traefik.docker.network=docker_default"
-      - "traefik.http.routers.syncthing.rule=Host(`syncthing.internal.techdebtor.io`)"
-      - "traefik.http.routers.syncthing.entrypoints=web-secure"
-      - "traefik.http.routers.syncthing.middlewares=local-ipwhitelist@file,forwardAuth-authentik@file"
-      - "traefik.http.services.syncthing.loadbalancer.server.port=8384"
-
-networks:
-  traefik-net:
-    name: docker_default
-    external: true
-
-volumes:
-  syncthing-config:
-"#,
-    );
+      traefik-net:
+        name: docker_default
+        external: true
+    volumes:
+      syncthing-config: ~
+    "#);
 }
 
 /// `raw`'s job: entries land as sibling top-level service keys, matching
@@ -93,25 +92,22 @@ volumes:
 #[test]
 fn cadvisor_raw_passthrough_matches_real_service() {
     let yaml = generate_from(RAW_SERVICE);
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest
-    volumes:
-      - /:/rootfs:ro
-      - /var/run:/var/run:ro
-      - /sys:/sys:ro
-      - /var/lib/docker:/var/lib/docker:ro
-      - /dev/disk/:/dev/disk:ro
-    privileged: true
-    devices:
-      - /dev/kmsg
-    security_opt:
-      seccomp: unconfined
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      cadvisor:
+        image: "gcr.io/cadvisor/cadvisor:latest"
+        volumes:
+          - "/:/rootfs:ro"
+          - "/var/run:/var/run:ro"
+          - "/sys:/sys:ro"
+          - "/var/lib/docker:/var/lib/docker:ro"
+          - "/dev/disk/:/dev/disk:ro"
+        privileged: true
+        devices:
+          - /dev/kmsg
+        security_opt:
+          seccomp: unconfined
+    "#);
 }
 
 /// A plain service with no templates, no networks, no middleware — the
@@ -119,24 +115,21 @@ services:
 #[test]
 fn jellyfin_plain_service_produces_minimal_doc() {
     let yaml = generate_from(JELLYFIN);
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  jellyfin:
-    image: jellyfin/jellyfin:latest
-    restart: unless-stopped
-    environment:
-      - PUID=1000
-    volumes:
-      - /mnt/media:/data
-    expose:
-      - 8096
-    labels:
-      - "traefik.http.routers.jellyfin.rule=Host(`media.techdebtor.io`)"
-      - "traefik.http.services.jellyfin.loadbalancer.server.port=8096"
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      jellyfin:
+        image: "jellyfin/jellyfin:latest"
+        restart: unless-stopped
+        environment:
+          - PUID=1000
+        volumes:
+          - "/mnt/media:/data"
+        expose:
+          - 8096
+        labels:
+          - "traefik.http.routers.jellyfin.rule=Host(`media.techdebtor.io`)"
+          - traefik.http.services.jellyfin.loadbalancer.server.port=8096
+    "#);
 }
 
 /// `container_name` (#90): never emitted unless `.hll` sets it
@@ -186,16 +179,13 @@ fn dns_field_emits_dns_compose_key() {
            dns \"192.168.50.182\"\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  uptime-kuma:
-    image: louislam/uptime-kuma:latest
-    dns:
-      - 192.168.50.182
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      uptime-kuma:
+        image: "louislam/uptime-kuma:latest"
+        dns:
+          - 192.168.50.182
+    "#);
 }
 
 /// `env_file` (#154): a single `env_file "path"` still emits Compose's
@@ -209,16 +199,13 @@ fn env_file_single_path_emits_a_one_element_list() {
            env_file \"miniflux.env\"\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  miniflux:
-    image: miniflux/miniflux:latest
-    env_file:
-      - miniflux.env
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      miniflux:
+        image: "miniflux/miniflux:latest"
+        env_file:
+          - miniflux.env
+    "#);
 }
 
 /// The list form (`env_file ["a", "b"]`) round-trips as-written, in
@@ -232,17 +219,14 @@ fn env_file_list_form_emits_every_path_in_order() {
            env_file [\"common.env\", \"miniflux.env\"]\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  miniflux:
-    image: miniflux/miniflux:latest
-    env_file:
-      - common.env
-      - miniflux.env
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      miniflux:
+        image: "miniflux/miniflux:latest"
+        env_file:
+          - common.env
+          - miniflux.env
+    "#);
 }
 
 /// `env_file` entries merge across a `with` template just like `dns`:
@@ -258,17 +242,14 @@ fn env_file_entries_merge_through_a_with_template() {
            env_file \"miniflux.env\"\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  miniflux:
-    image: miniflux/miniflux:latest
-    env_file:
-      - common.env
-      - miniflux.env
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      miniflux:
+        image: "miniflux/miniflux:latest"
+        env_file:
+          - common.env
+          - miniflux.env
+    "#);
 }
 
 /// `raw { env_file: ... }` overrides the built-in `env_file` field, the
@@ -282,16 +263,13 @@ fn raw_env_file_overrides_the_built_in_env_file() {
            raw {\n    env_file: [\"raw.env\"]\n  }\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  miniflux:
-    image: miniflux/miniflux:latest
-    env_file:
-      - raw.env
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      miniflux:
+        image: "miniflux/miniflux:latest"
+        env_file:
+          - raw.env
+    "#);
 }
 
 // --- healthcheck (#153) ---
@@ -312,21 +290,18 @@ fn healthcheck_full_field_set_emits_every_key() {
            }\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  miniflux:
-    image: miniflux/miniflux:latest
-    healthcheck:
-      test: node /app/services/healthcheck
-      interval: 1m
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-      start_interval: 5s
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      miniflux:
+        image: "miniflux/miniflux:latest"
+        healthcheck:
+          test: node /app/services/healthcheck
+          interval: 1m
+          timeout: 10s
+          retries: 3
+          start_period: 10s
+          start_interval: 5s
+    "#);
 }
 
 /// The exec form: `test` as a bracketed list becomes a YAML sequence,
@@ -341,20 +316,17 @@ fn healthcheck_test_list_form_emits_a_yaml_sequence() {
            }\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  db:
-    image: postgres
-    healthcheck:
-      test:
-        - CMD
-        - pg_isready
-        - -U
-        - miniflux
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      db:
+        image: postgres
+        healthcheck:
+          test:
+            - CMD
+            - pg_isready
+            - "-U"
+            - miniflux
+    "#);
 }
 
 /// `disable` emits Compose's `disable: true`, with no other keys when
@@ -362,16 +334,13 @@ services:
 #[test]
 fn healthcheck_disable_emits_true() {
     let yaml = generate_from("service web {\n  image \"nginx\"\n  healthcheck { disable }\n}\n");
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  web:
-    image: nginx
-    healthcheck:
-      disable: true
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      web:
+        image: nginx
+        healthcheck:
+          disable: true
+    ");
 }
 
 /// A `healthcheck {}` with every sub-field left unset emits no
@@ -380,14 +349,11 @@ services:
 #[test]
 fn healthcheck_with_nothing_set_emits_no_key() {
     let yaml = generate_from("service web {\n  image \"nginx\"\n  healthcheck {}\n}\n");
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  web:
-    image: nginx
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      web:
+        image: nginx
+    ");
 }
 
 /// `healthcheck` sub-fields merge across a `with` template per
@@ -403,17 +369,14 @@ fn healthcheck_merges_through_a_with_template() {
            healthcheck { interval: \"10s\" }\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  db:
-    image: postgres
-    healthcheck:
-      test: pg_isready -U miniflux
-      interval: 10s
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      db:
+        image: postgres
+        healthcheck:
+          test: pg_isready -U miniflux
+          interval: 10s
+    ");
 }
 
 /// `raw { healthcheck: ... }` overrides the built-in `healthcheck`
@@ -427,16 +390,13 @@ fn raw_healthcheck_overrides_the_built_in_healthcheck() {
            raw {\n    healthcheck: { test: \"raw-test\" }\n  }\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  db:
-    image: postgres
-    healthcheck:
-      test: raw-test
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      db:
+        image: postgres
+        healthcheck:
+          test: raw-test
+    ");
 }
 
 // --- command (#156) ---
@@ -450,15 +410,12 @@ services:
 #[test]
 fn command_shell_form_emits_a_plain_string() {
     let yaml = generate_from("service web {\n  image \"nginx\"\n  command \"npm start\"\n}\n");
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  web:
-    image: nginx
-    command: npm start
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      web:
+        image: nginx
+        command: npm start
+    ");
 }
 
 /// The exec form: a bracketed list emits a YAML sequence, exactly
@@ -478,18 +435,15 @@ fn command_exec_form_emits_a_yaml_sequence() {
            ]\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest
-    command:
-      - --housekeeping_interval=30s
-      - --docker_only=true
-      - --enable_metrics=cpu,memory,network
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      cadvisor:
+        image: "gcr.io/cadvisor/cadvisor:latest"
+        command:
+          - "--housekeeping_interval=30s"
+          - "--docker_only=true"
+          - "--enable_metrics=cpu,memory,network"
+    "#);
 }
 
 /// No `command` field at all emits no `command:` key — never inferred
@@ -497,14 +451,11 @@ services:
 #[test]
 fn command_unset_emits_no_key() {
     let yaml = generate_from("service web {\n  image \"nginx\"\n}\n");
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  web:
-    image: nginx
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      web:
+        image: nginx
+    ");
 }
 
 /// `command` merges like `container_name` — the service's own body
@@ -520,15 +471,12 @@ fn command_merges_through_a_with_template() {
            command \"own-command\"\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  web:
-    image: nginx
-    command: own-command
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      web:
+        image: nginx
+        command: own-command
+    ");
 }
 
 /// `raw { command: ... }` overrides the built-in `command` field, the
@@ -544,16 +492,13 @@ fn raw_command_overrides_the_built_in_command() {
            raw {\n    command: [\"--raw-override=true\"]\n  }\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest
-    command:
-      - --raw-override=true
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      cadvisor:
+        image: "gcr.io/cadvisor/cadvisor:latest"
+        command:
+          - "--raw-override=true"
+    "#);
 }
 
 // --- depends_on (#155) ---
@@ -577,22 +522,19 @@ fn depends_on_plain_form_emits_the_short_list_form() {
            depends_on [database]\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  database:
-    image: postgres
-    networks:
-      - default
-  miniflux:
-    image: miniflux/miniflux:latest
-    networks:
-      - default
-    depends_on:
-      - database
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      database:
+        image: postgres
+        networks:
+          - default
+      miniflux:
+        image: "miniflux/miniflux:latest"
+        networks:
+          - default
+        depends_on:
+          - database
+    "#);
 }
 
 /// An entry carrying an explicit `condition` switches the whole field to
@@ -607,23 +549,20 @@ fn depends_on_extended_condition_emits_the_long_map_form() {
            depends_on [database { condition: service_healthy }]\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  database:
-    image: postgres
-    networks:
-      - default
-  miniflux:
-    image: miniflux/miniflux:latest
-    networks:
-      - default
-    depends_on:
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
       database:
-        condition: service_healthy
-"#,
-    );
+        image: postgres
+        networks:
+          - default
+      miniflux:
+        image: "miniflux/miniflux:latest"
+        networks:
+          - default
+        depends_on:
+          database:
+            condition: service_healthy
+    "#);
 }
 
 /// A mixed list — one entry with an explicit condition, one without —
@@ -641,29 +580,26 @@ fn depends_on_mixed_list_fills_in_the_default_condition() {
            depends_on [cache, database { condition: service_healthy }]\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  cache:
-    image: redis
-    networks:
-      - default
-  database:
-    image: postgres
-    networks:
-      - default
-  miniflux:
-    image: miniflux/miniflux:latest
-    networks:
-      - default
-    depends_on:
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
       cache:
-        condition: service_started
+        image: redis
+        networks:
+          - default
       database:
-        condition: service_healthy
-"#,
-    );
+        image: postgres
+        networks:
+          - default
+      miniflux:
+        image: "miniflux/miniflux:latest"
+        networks:
+          - default
+        depends_on:
+          cache:
+            condition: service_started
+          database:
+            condition: service_healthy
+    "#);
 }
 
 /// All three of Compose's own condition values round-trip verbatim.
@@ -682,35 +618,32 @@ fn depends_on_all_three_condition_values_round_trip() {
            ]\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  a:
-    image: x
-    networks:
-      - default
-  b:
-    image: x
-    networks:
-      - default
-  c:
-    image: x
-    networks:
-      - default
-  s:
-    image: x
-    networks:
-      - default
-    depends_on:
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
       a:
-        condition: service_started
+        image: x
+        networks:
+          - default
       b:
-        condition: service_healthy
+        image: x
+        networks:
+          - default
       c:
-        condition: service_completed_successfully
-"#,
-    );
+        image: x
+        networks:
+          - default
+      s:
+        image: x
+        networks:
+          - default
+        depends_on:
+          a:
+            condition: service_started
+          b:
+            condition: service_healthy
+          c:
+            condition: service_completed_successfully
+    ");
 }
 
 /// `depends_on` merges through a `with` template just like every other
@@ -726,23 +659,20 @@ fn depends_on_condition_merges_through_a_with_template() {
            with waits_for_db\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  database:
-    image: postgres
-    networks:
-      - default
-  miniflux:
-    image: miniflux/miniflux:latest
-    networks:
-      - default
-    depends_on:
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
       database:
-        condition: service_healthy
-"#,
-    );
+        image: postgres
+        networks:
+          - default
+      miniflux:
+        image: "miniflux/miniflux:latest"
+        networks:
+          - default
+        depends_on:
+          database:
+            condition: service_healthy
+    "#);
 }
 
 /// Two explicit `with`-listed templates that each write the same plain
@@ -764,22 +694,19 @@ fn depends_on_identical_bare_entries_across_templates_stay_short_form() {
            with a, b\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  database:
-    image: postgres
-    networks:
-      - default
-  miniflux:
-    image: miniflux/miniflux:latest
-    networks:
-      - default
-    depends_on:
-      - database
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      database:
+        image: postgres
+        networks:
+          - default
+      miniflux:
+        image: "miniflux/miniflux:latest"
+        networks:
+          - default
+        depends_on:
+          - database
+    "#);
 }
 
 /// The same agreement holds when both templates spell the condition
@@ -797,23 +724,20 @@ fn depends_on_identical_explicit_conditions_across_templates_merge_to_one_entry(
            with a, b\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  database:
-    image: postgres
-    networks:
-      - default
-  miniflux:
-    image: miniflux/miniflux:latest
-    networks:
-      - default
-    depends_on:
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
       database:
-        condition: service_healthy
-"#,
-    );
+        image: postgres
+        networks:
+          - default
+      miniflux:
+        image: "miniflux/miniflux:latest"
+        networks:
+          - default
+        depends_on:
+          database:
+            condition: service_healthy
+    "#);
 }
 
 /// `raw { depends_on: ... }` overrides the built-in `depends_on` field,
@@ -829,22 +753,19 @@ fn raw_depends_on_overrides_the_built_in_depends_on() {
            raw {\n    depends_on: [\"raw-dep\"]\n  }\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  database:
-    image: postgres
-    networks:
-      - default
-  miniflux:
-    image: miniflux/miniflux:latest
-    networks:
-      - default
-    depends_on:
-      - raw-dep
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      database:
+        image: postgres
+        networks:
+          - default
+      miniflux:
+        image: "miniflux/miniflux:latest"
+        networks:
+          - default
+        depends_on:
+          - raw-dep
+    "#);
 }
 
 #[test]
@@ -906,13 +827,19 @@ fn external_network_named_by_several_tiers_is_not_ambiguous() {
          template b {\n  networks [proxy]\n}\n\
          service web {\n  image \"nginx\"\n  with a, b\n  networks [proxy]\n}\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        "services:\n  web:\n    image: nginx\n\
-         \n    networks: [proxy]\n    labels:\n\
-         \n      - traefik.docker.network=docker_default\n\
-         networks:\n  proxy:\n    name: docker_default\n    external: true\n",
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      web:
+        image: nginx
+        networks:
+          - proxy
+        labels:
+          - traefik.docker.network=docker_default
+    networks:
+      proxy:
+        name: docker_default
+        external: true
+    ");
 }
 
 /// Two distinct declarations that resolve to the *same* real name are
@@ -1018,27 +945,25 @@ fn explicit_default_declaration_is_honored_and_emitted() {
         "network default {\n  external\n  name: \"shared_net\"\n}\n\
          service app {\n  image \"app\"\n}\nservice db {\n  image \"postgres:15\"\n}\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  app:
-    image: app
-    networks: [default]
-    labels:
-      - "traefik.docker.network=shared_net"
-  db:
-    image: postgres:15
-    networks: [default]
-    labels:
-      - "traefik.docker.network=shared_net"
-
-networks:
-  default:
-    name: shared_net
-    external: true
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      app:
+        image: app
+        networks:
+          - default
+        labels:
+          - traefik.docker.network=shared_net
+      db:
+        image: "postgres:15"
+        networks:
+          - default
+        labels:
+          - traefik.docker.network=shared_net
+    networks:
+      default:
+        name: shared_net
+        external: true
+    "#);
 }
 
 /// #152's note on `UnusedNetwork`: auto-attach feeds `default` into the
@@ -1102,29 +1027,25 @@ fn declared_volume_options_reach_the_top_level_volumes_section() {
            volume plain -> \"/plain\"\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  jellyfin:
-    image: jellyfin/jellyfin:latest
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      jellyfin:
+        image: "jellyfin/jellyfin:latest"
+        volumes:
+          - "media:/data"
+          - "backups:/backups"
+          - "plain:/plain"
     volumes:
-      - media:/data
-      - backups:/backups
-      - plain:/plain
-
-volumes:
-  media:
-    name: media_store
-    external: true
-  backups:
-    driver: local
-    driver_opts:
-      type: nfs
-      device: ":/exports/backups"
-  plain:
-"#,
-    );
+      media:
+        name: media_store
+        external: true
+      backups:
+        driver: local
+        driver_opts:
+          type: nfs
+          device: ":/exports/backups"
+      plain: ~
+    "#);
 }
 
 /// The motivating case: a typo'd (or simply undeclared) named-volume
@@ -1182,25 +1103,23 @@ fn one_volume_shared_by_two_services_is_declared_once() {
          service jellyfin {\n  image \"jellyfin/jellyfin\"\n  volume shared-media -> \"/data\"\n}\n\
          service sonarr {\n  image \"lscr.io/linuxserver/sonarr\"\n  volume shared-media -> \"/media\"\n}\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  jellyfin:
-    image: jellyfin/jellyfin
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      jellyfin:
+        image: jellyfin/jellyfin
+        volumes:
+          - "shared-media:/data"
+        networks:
+          - default
+      sonarr:
+        image: lscr.io/linuxserver/sonarr
+        volumes:
+          - "shared-media:/media"
+        networks:
+          - default
     volumes:
-      - shared-media:/data
-    networks: [default]
-  sonarr:
-    image: lscr.io/linuxserver/sonarr
-    volumes:
-      - shared-media:/media
-    networks: [default]
-
-volumes:
-  shared-media:
-"#,
-    );
+      shared-media: ~
+    "#);
 }
 
 /// Bind mounts are entirely unaffected by the declaration requirement:
@@ -1216,18 +1135,15 @@ fn bind_mount_paths_need_no_declaration() {
            volume \"../shared\" -> \"/shared\"\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  jellyfin:
-    image: jellyfin/jellyfin
-    volumes:
-      - /mnt/media:/data
-      - ./config:/config
-      - ../shared:/shared
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      jellyfin:
+        image: jellyfin/jellyfin
+        volumes:
+          - "/mnt/media:/data"
+          - "./config:/config"
+          - "../shared:/shared"
+    "#);
 }
 
 /// A declared volume nothing mounts isn't emitted — same as an
@@ -1249,16 +1165,13 @@ fn declared_but_unreferenced_volume_is_not_emitted() {
 #[test]
 fn a_quoted_host_is_a_bind_mount_whatever_it_says() {
     let yaml = generate_from("service s {\n  image \"x\"\n  volume \"media\" -> \"/data\"\n}\n");
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  s:
-    image: x
-    volumes:
-      - media:/data
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      s:
+        image: x
+        volumes:
+          - "media:/data"
+    "#);
 }
 
 /// A bind-mount path is an ordinary value, so `{{name}}` interpolates
@@ -1270,16 +1183,13 @@ fn interpolation_reaches_a_bind_mount_path() {
     let yaml = generate_from(
         "service syncthing {\n  image \"x\"\n  volume \"/srv/{{name}}\" -> \"/config\"\n}\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  syncthing:
-    image: x
-    volumes:
-      - /srv/syncthing:/config
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      syncthing:
+        image: x
+        volumes:
+          - "/srv/syncthing:/config"
+    "#);
 }
 
 #[test]
@@ -1393,21 +1303,18 @@ fn publish_becomes_the_compose_ports_list() {
            restart unless-stopped\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  pihole:
-    image: pihole/pihole:latest
-    restart: unless-stopped
-    ports:
-      - "53:53/tcp"
-      - "53:53/udp"
-      - "8081:80"
-    expose:
-      - 80
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      pihole:
+        image: "pihole/pihole:latest"
+        restart: unless-stopped
+        ports:
+          - "53:53/tcp"
+          - "53:53/udp"
+          - "8081:80"
+        expose:
+          - 80
+    "#);
 }
 
 /// A `publish` entry inherited from a template resolves its `{{name}}`
@@ -1422,16 +1329,13 @@ fn publish_entries_from_a_template_are_fully_resolved() {
            with published { port: 8096 }\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  jellyfin:
-    image: jellyfin/jellyfin:latest
-    ports:
-      - "8096:8096"
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      jellyfin:
+        image: "jellyfin/jellyfin:latest"
+        ports:
+          - "8096:8096"
+    "#);
 }
 
 /// #84's `publish` and #60's top-level `volume` declaration are
@@ -1453,24 +1357,20 @@ fn publish_and_a_declared_named_volume_compose_together() {
            volume \"/mnt/media\" -> \"/data\"\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  syncthing:
-    image: lscr.io/linuxserver/syncthing:latest
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      syncthing:
+        image: "lscr.io/linuxserver/syncthing:latest"
+        volumes:
+          - "syncthing-config:/config"
+          - "/mnt/media:/data"
+        ports:
+          - "8384:8384"
+          - "22000:22000/tcp"
     volumes:
-      - syncthing-config:/config
-      - /mnt/media:/data
-    ports:
-      - "8384:8384"
-      - "22000:22000/tcp"
-
-volumes:
-  syncthing-config:
-    driver: local
-"#,
-    );
+      syncthing-config:
+        driver: local
+    "#);
 }
 
 /// #68: `raw` used to be flattened in on top of the built-in fields
@@ -1494,15 +1394,12 @@ fn raw_key_shadowing_a_built_in_field_overrides_it() {
            }\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  web:
-    image: override
-    container_name: boom
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      web:
+        image: override
+        container_name: boom
+    ");
 }
 
 /// The sharp edge of override semantics, asserted deliberately: `raw`'s
@@ -1518,18 +1415,15 @@ fn raw_labels_replace_the_computed_traefik_labels() {
            raw {\n    labels: [\"only.this=1\"]\n  }\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  web:
-    image: nginx
-    expose:
-      - 8080
-    labels:
-      - only.this=1
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      web:
+        image: nginx
+        expose:
+          - 8080
+        labels:
+          - only.this=1
+    ");
 }
 
 /// Every field `ComposeServiceDoc` serializes is overridable, checked in
@@ -1574,40 +1468,35 @@ fn every_built_in_field_is_overridable_by_raw() {
            }\n\
          }\n",
     );
-    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml)
-        .unwrap_or_else(|err| panic!("output isn't valid YAML: {err}\n{yaml}"));
+    let parsed = yaml_value(&yaml);
     let web = &parsed["services"]["web"];
-    let expected: serde_yaml_ng::Value = serde_yaml_ng::from_str(
-        r#"
-image: raw-image
-container_name: raw-name
-command:
-  - raw-command
-restart: always
-healthcheck:
-  test: raw-test
-environment:
-  - RAW=1
-env_file:
-  - raw.env
-volumes:
-  - raw-vol:/raw
-networks:
-  - raw-net
-dns:
-  - 1.1.1.1
-ports:
-  - "7777:7777"
-expose:
-  - 9999
-depends_on:
-  - raw-dep
-labels:
-  - raw.label=1
-"#,
-    )
-    .unwrap();
-    assert_eq!(web, &expected, "\n--- actual ---\n{yaml}");
+    assert_yaml_snapshot!(web, @r#"
+    image: raw-image
+    container_name: raw-name
+    command:
+      - raw-command
+    restart: always
+    healthcheck:
+      test: raw-test
+    environment:
+      - RAW=1
+    env_file:
+      - raw.env
+    volumes:
+      - "raw-vol:/raw"
+    networks:
+      - raw-net
+    dns:
+      - 1.1.1.1
+    ports:
+      - "7777:7777"
+    expose:
+      - 9999
+    depends_on:
+      - raw-dep
+    labels:
+      - raw.label=1
+    "#);
 }
 
 /// Overriding the service's own `volumes:`/`networks:` keys doesn't
@@ -1631,28 +1520,23 @@ fn raw_override_keeps_the_top_level_volume_and_network_declarations() {
            }\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  web:
-    image: nginx
-    labels:
-      - "traefik.docker.network=docker_default"
-    volumes:
-      - web-data:/elsewhere
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      web:
+        image: nginx
+        labels:
+          - traefik.docker.network=docker_default
+        volumes:
+          - "web-data:/elsewhere"
+        networks:
+          - traefik-net
     networks:
-      - traefik-net
-
-networks:
-  traefik-net:
-    name: docker_default
-    external: true
-
-volumes:
-  web-data:
-"#,
-    );
+      traefik-net:
+        name: docker_default
+        external: true
+    volumes:
+      web-data: ~
+    "#);
 }
 
 /// The symmetric half of `every_built_in_field_is_overridable_by_raw`:
@@ -1687,45 +1571,40 @@ fn raw_leaves_built_in_fields_it_does_not_name_alone() {
            raw {\n    privileged: true\n    cap_add: [\"NET_ADMIN\"]\n  }\n\
          }\n",
     );
-    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml)
-        .unwrap_or_else(|err| panic!("output isn't valid YAML: {err}\n{yaml}"));
+    let parsed = yaml_value(&yaml);
     let web = &parsed["services"]["web"];
-    let expected: serde_yaml_ng::Value = serde_yaml_ng::from_str(
-        r#"
-image: nginx
-container_name: web-ctr
-command: npm start
-restart: unless-stopped
-healthcheck:
-  test: curl -f http://localhost
-environment:
-  - PUID=1000
-env_file:
-  - web.env
-volumes:
-  - web-data:/data
-networks:
-  - traefik-net
-  - default
-dns:
-  - 192.168.50.182
-ports:
-  - "8080:8080"
-expose:
-  - 8080
-depends_on:
-  - database
-labels:
-  - "traefik.docker.network=docker_default"
-  - "traefik.http.routers.web.rule=Host(`web.example.com`)"
-  - "traefik.http.services.web.loadbalancer.server.port=8080"
-privileged: true
-cap_add:
-  - NET_ADMIN
-"#,
-    )
-    .unwrap();
-    assert_eq!(web, &expected, "\n--- actual ---\n{yaml}");
+    assert_yaml_snapshot!(web, @r#"
+    image: nginx
+    container_name: web-ctr
+    command: npm start
+    restart: unless-stopped
+    healthcheck:
+      test: "curl -f http://localhost"
+    environment:
+      - PUID=1000
+    env_file:
+      - web.env
+    volumes:
+      - "web-data:/data"
+    networks:
+      - traefik-net
+      - default
+    dns:
+      - 192.168.50.182
+    ports:
+      - "8080:8080"
+    expose:
+      - 8080
+    depends_on:
+      - database
+    labels:
+      - traefik.docker.network=docker_default
+      - "traefik.http.routers.web.rule=Host(`web.example.com`)"
+      - traefik.http.services.web.loadbalancer.server.port=8080
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+    "#);
 }
 
 /// Values that look like YAML structure — `: `, a leading/embedded `#`,
@@ -1961,18 +1840,14 @@ fn named_volume_read_only_flag_emits_ro_suffix_alongside_an_unflagged_entry() {
            volume \"/mnt/config\" -> \"/config\"\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  jellyfin:
-    image: jellyfin/jellyfin:latest
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      jellyfin:
+        image: "jellyfin/jellyfin:latest"
+        volumes:
+          - "media:/data:ro"
+          - "/mnt/config:/config"
     volumes:
-      - media:/data:ro
-      - /mnt/config:/config
-
-volumes:
-  media:
-"#,
-    );
+      media: ~
+    "#);
 }

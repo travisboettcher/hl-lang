@@ -21,6 +21,16 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # `insta`'s inline snapshots in crates/hl-codegen/tests/golden_tests.rs
+  # are the expected Compose YAML, so a mismatch is a real failure and
+  # has to be reviewed by a person. `no` forbids insta from writing
+  # anything: it neither rewrites a snapshot in place nor leaves a
+  # `.pending-snap` file behind, so the only outcome CI can reach is a
+  # failed assertion with a diff. insta already infers this from the
+  # `CI` variable GitHub sets, but that inference is a default the
+  # library could change, and the cost of stating it is one line
+  # against a silently self-approving test suite.
+  INSTA_UPDATE: "no"
 
 jobs:
   test:
