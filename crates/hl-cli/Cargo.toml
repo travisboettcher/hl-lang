@@ -28,5 +28,20 @@ hl-linker = { path = "../hl-linker" }
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
+datatest-stable = "0.3"
 serde_yaml_ng = "0.10"
+snapbox = "1.2"
 trycmd = "1.2"
+
+# `tests/cases.rs` supplies its own `main` (`datatest_stable::harness!`)
+# instead of letting `libtest` collect `#[test]` functions, because the
+# tests it runs don't exist at compile time: each is one `.hll` file
+# found on disk at startup. That's what gives every case in
+# `tests/cases/` its own name in the run, so `cargo test issue_168`
+# selects one file and a failure names it. Verified to leave `cargo
+# llvm-cov --workspace --fail-under-lines 80` and `cargo mutants`
+# working — a custom harness is invisible to both, since each drives
+# `cargo test` and reads the process's exit status.
+[[test]]
+name = "cases"
+harness = false

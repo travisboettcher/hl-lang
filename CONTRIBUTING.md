@@ -122,6 +122,54 @@ you need the returned `ExitCode`, or need to assert that a file is
 *absent*—a directory comparison can only speak about the files it
 names.
 
+### Adding a regression case
+
+`crates/hl-cli/tests/cases/` is a file-driven regression corpus. A case
+is one `.hll` input, with what the compiler makes of it recorded beside
+it in a `.expected` file: the generated Compose document under a
+`--- compose ---` label, the rendered diagnostic under `--- error ---`,
+and any warnings under `--- warnings ---`. There's no Rust to write and
+no test function to name—adding a case is dropping in a file:
+
+1. Write `crates/hl-cli/tests/cases/issue_168_healthcheck_param.hll`,
+   opening the file with a `#` comment saying what it pins down. The
+   harness rejects a case that doesn't, because a directory of inputs
+   has nowhere else to record why a case exists.
+2. Record what the compiler makes of it:
+   `SNAPSHOTS=overwrite cargo test -p hl-cli --test cases`.
+3. Read the generated `.expected` file, confirm it says what the fix
+   should make it say, and commit both files.
+
+**A bug fix should come with a case file named for its issue.** The file
+name becomes the test name, so `cargo test issue_168` runs that one case,
+and a failure names the file rather than a Rust function three files
+away.
+
+Reach for the corpus when a case is "this input produces this output or
+this diagnostic," which is what most issue-shaped regressions are. Stay
+in the hand-written suites when a case needs anything the file can't
+express: a specific error *variant* rather than its rendered text, an
+in-memory `SymbolResolver` (`multi_scope_tests.rs`), a returned
+`ExitCode`, or a fixture tree on disk.
+
+The corpus is the on-ramp for new cases, not a replacement for those
+suites—nothing moved into it. Their doc comments explaining why each
+case exists are worth more than uniformity.
+
+`SNAPSHOTS` is the same variable `snapbox` already reads for the
+transcripts' `.out/` directories, so the corpus isn't a third way to
+update an expected output, and the `SNAPSHOTS=verify` pin CI already
+carries stops it blessing anything here. The standing rule applies
+unchanged: the `.expected` file **is** the assertion, so rewriting one
+declares that the new YAML or the new diagnostic is what the compiler
+should now produce.
+
+The corpus also reads the fixtures under
+`crates/hl-parser/tests/fixtures/` where they live, recording their
+expectations under `tests/cases/fixtures/`. Editing one of those
+fixtures changes what several suites see, so re-bless deliberately
+rather than reflexively.
+
 `crates/hl-cli/tests/compose_differential.rs` puts every document
 codegen produces in front of Docker Compose's own parser, over the
 fixtures under `crates/hl-parser/tests/fixtures/` and the `build`-tagged

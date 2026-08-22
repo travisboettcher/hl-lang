@@ -1,0 +1,18 @@
+# #63: two top-level declarations of the same network name is an error,
+# not a last-one-wins merge — a service naming `traefik-net` would
+# otherwise get whichever declaration happened to be parsed last.
+# compose_tests.rs pins the `DuplicateNetwork` variant; this pins the
+# sentence a user reads, including which of the two lines it points at.
+network traefik-net {
+  external
+  name: "docker_default"
+}
+
+network traefik-net {
+  name: "something_else"
+}
+
+service web {
+  image "nginx:alpine"
+  networks [traefik-net]
+}

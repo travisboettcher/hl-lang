@@ -132,6 +132,26 @@ rewriting one asserts that the new diagnostic wording, the new exit code,
 or the newly generated file is what users should now get. CI pins `TRYCMD`
 to a value that never writes, so a mismatch there fails the build.
 
+`crates/hl-cli/tests/cases/` is a file-driven regression corpus: one
+`.hll` input per case, with what the compiler makes of it recorded beside
+it in a `.expected` file—the generated Compose document, or the rendered
+diagnostic, or both a warning and a document, each under its own label.
+Adding a case means dropping in a file rather than writing a Rust test:
+
+```sh
+# Record what the compiler makes of every case that has no expectation
+# yet, or whose expectation no longer matches.
+SNAPSHOTS=overwrite cargo test -p hl-cli --test cases
+```
+
+A case file has to open with a `#` comment saying what it pins down, and
+its name becomes the test name—so a case called
+`issue_168_healthcheck_param.hll` runs under `cargo test issue_168`, and
+a failure names the file. `SNAPSHOTS` is the variable the transcripts
+already use, so this adds no further way to update an expected output.
+See "Adding a regression case" in `CONTRIBUTING.md` for which cases
+belong here and which belong in the hand-written suites.
+
 `crates/hl-cli/tests/compose_differential.rs` hands every document
 codegen produces to Docker Compose's own parser. Snapshots and
 transcripts prove the output stays stable against expectations this

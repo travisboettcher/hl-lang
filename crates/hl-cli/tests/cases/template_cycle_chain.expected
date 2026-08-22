@@ -1,0 +1,2 @@
+--- error ---
+template_cycle_chain.hll:6:10: template composition cycle: a -> b -> a

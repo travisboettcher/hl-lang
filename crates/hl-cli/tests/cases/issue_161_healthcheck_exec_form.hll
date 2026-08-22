@@ -1,0 +1,14 @@
+# #161's `healthcheck`, in Compose's exec form: the bracketed list has to
+# reach `test:` as a YAML sequence, unchanged — `hllc` carries whichever
+# form you write straight through instead of normalizing shell form and
+# exec form into one another, and #165's `command` does the same.
+service miniflux-db {
+  image "postgres:15"
+  command ["postgres", "-c", "max_connections=50"]
+  healthcheck {
+    test: ["CMD", "pg_isready", "-U", "miniflux"]
+    interval: "10s"
+    retries: 3
+    start_period: "30s"
+  }
+}

@@ -46,6 +46,11 @@ env:
   # `snapbox` is what compares the `.out/` directories, and it reads
   # its own action out of SNAPSHOTS. `verify` is its default and its
   # name for "fail on mismatch"; `overwrite` is the one to keep out.
+  # The same pin covers the regression corpus in
+  # crates/hl-cli/tests/cases/, which deliberately reuses this variable
+  # rather than introducing a third one: a `.expected` file there is the
+  # compiler's expected output, so CI must fail on a mismatch rather
+  # than rewrite the file it just disagreed with.
   SNAPSHOTS: "verify"
 
 jobs:
