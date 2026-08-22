@@ -1,0 +1,6 @@
+use "interpolating-template.hll" as lib
+
+service web {
+  image "nginx:alpine"
+  with lib.named
+}

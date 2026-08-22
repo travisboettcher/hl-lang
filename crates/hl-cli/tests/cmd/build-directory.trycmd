@@ -1,0 +1,34 @@
+Flat directory mode: every `.hll` file sitting directly in the
+directory is its own entry point, and each one's output lands in
+`<out>/<file stem>/docker-compose.yml`. `--out` is required here,
+because there is no single sensible default location for the output of
+however many files. `build-directory.out/` holds both generated
+documents, so this case asserts what was written across the whole tree
+rather than reading each file back one at a time.
+
+`services/networks.hll` declares no service. It is a library file, so
+it is skipped rather than compiled into a service-less document, and
+the run stays silent about it.
+
+```console
+$ hllc --build services --out dist
+dist/api/docker-compose.yml
+dist/web/docker-compose.yml
+
+```
+
+A directory in which *nothing* declares a service is not an error — a
+build that produces no output still exits 0 — but it says so, because
+silently doing nothing is indistinguishable from a broken invocation.
+
+The two blocks together check the "nothing was built" message from both
+directions, which is what protects the running `built` counter. A
+mutation that swaps its `== 0` test makes the first block print the
+message where the transcript expects silence; one that stops the
+counter incrementing makes the message appear in both.
+
+```console
+$ hllc --build library --out dist
+library: none of the .hll files here declare a service — nothing was built
+
+```

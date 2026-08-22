@@ -99,6 +99,29 @@ snapshot moves for a reason you can't explain, that's a bug to chase,
 not a diff to bless. CI sets `INSTA_UPDATE=no`, so a mismatch there
 fails the build rather than quietly rewriting the expectation.
 
+`crates/hl-cli/tests/cmd/` states the `hllc` command line's own expected
+output as [`trycmd`](https://docs.rs/trycmd) transcripts—an invocation,
+its stdout and stderr, and its exit code, per `.trycmd` file, with a
+`<name>.in/` directory supplying the working directory and a
+`<name>.out/` directory stating what that directory must hold when the
+commands finish. No extra tool to install: run `TRYCMD=overwrite cargo
+test -p hl-cli --test cli_tests` to rewrite the steps that no longer
+match, or `TRYCMD=dump` to write the real output to
+`crates/hl-cli/dump/` and compare it yourself.
+
+The same standing rule applies. A transcript **is** the assertion, so
+rewriting one declares that the new diagnostic wording, exit code, or
+generated file is what `hllc` should now produce—which makes it a
+user-visible change to weigh against the preceding "Picking a semver
+label" section, not a red test to clear. CI pins `TRYCMD` and
+`SNAPSHOTS` to values that never write.
+
+Add a case to a transcript rather than to `build_tests.rs` when what
+you're checking is text a user reads. Keep it in `build_tests.rs` when
+you need the returned `ExitCode`, or need to assert that a file is
+*absent*—a directory comparison can only speak about the files it
+names.
+
 If you're touching the lexer, parser, or codegen, consider whether the
 fuzz targets in `fuzz/` need a new corpus seed or cover the change
 already—see the README's "Building & testing" section for how to run

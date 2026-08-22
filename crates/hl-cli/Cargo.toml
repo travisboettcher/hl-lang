@@ -18,3 +18,4 @@ clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 serde_yaml_ng = "0.10"
+trycmd = "1.2"

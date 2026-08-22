@@ -1,0 +1,3 @@
+template named {
+  container_name "{{nmae}}"
+}

@@ -1,0 +1,3 @@
+template mostly_up {
+  restart unless-stopped
+}

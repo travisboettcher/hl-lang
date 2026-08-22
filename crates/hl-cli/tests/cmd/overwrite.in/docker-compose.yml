@@ -1,0 +1,5 @@
+# hand-written by me, tuned over months
+services:
+  web:
+    image: nginx
+    deploy: { resources: { limits: { memory: 512M } } }

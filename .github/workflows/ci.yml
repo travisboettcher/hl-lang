@@ -31,6 +31,22 @@ env:
   # library could change, and the cost of stating it is one line
   # against a silently self-approving test suite.
   INSTA_UPDATE: "no"
+  # The same standing rule for `trycmd`'s transcripts in
+  # crates/hl-cli/tests/cmd/: the `.trycmd` file and its `.out/`
+  # directory are the expected output of the `hllc` binary, so a
+  # mismatch has to be read by a person rather than blessed by the
+  # machine that produced it. `trycmd` only writes when TRYCMD is
+  # literally `overwrite` (or `dump`) and fails on a mismatch
+  # otherwise, so this is already its default — stating it means a
+  # `TRYCMD` leaking in from a runner image or a repository variable
+  # can't quietly turn CI into a rubber stamp. Any value that isn't
+  # `overwrite`/`dump` selects the failing mode; `fail` is the name
+  # `trycmd` uses for it internally.
+  TRYCMD: "fail"
+  # `snapbox` is what compares the `.out/` directories, and it reads
+  # its own action out of SNAPSHOTS. `verify` is its default and its
+  # name for "fail on mismatch"; `overwrite` is the one to keep out.
+  SNAPSHOTS: "verify"
 
 jobs:
   test:

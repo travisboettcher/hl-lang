@@ -1,0 +1,76 @@
+One transcript per compiler stage, in pipeline order, so the whole
+catalogue of things a user can hit sits in one readable file. Every one
+of them exits 1 and writes to stderr; nothing is written to disk.
+
+A lexer error, reported by the default (token-dump) mode. Note the
+`path:line:col` prefix with no space after the path:
+
+```console
+$ hllc unterminated-string.hll
+? 1
+1:1 Ident "service"
+1:9 Ident "web"
+1:13 LBrace "{"
+2:3 Ident "image"
+unterminated-string.hll:2:9: unterminated string literal
+
+```
+
+The same file through `--parse` prints the same error, except that this
+path puts a space after the path. The inconsistency is real and worth
+having recorded rather than hidden — `--parse` prefixes the whole
+rendered error, which already begins with its own `line:col`.
+
+```console
+$ hllc --parse unterminated-string.hll
+? 1
+unterminated-string.hll: 2:9: unterminated string literal
+
+```
+
+A parser error:
+
+```console
+$ hllc --parse missing-value.hll
+? 1
+missing-value.hll: 3:1: expected a value or `{`, found `}`
+
+```
+
+A composition error: `with` naming a template that does not exist.
+
+```console
+$ hllc --build unknown-template.hll
+? 1
+unknown-template.hll:3:8: unknown template `hardened`
+
+```
+
+A link error: a `use` whose target is not there. The message names the
+file that could not be opened, which is the imported path rather than
+the one on the command line.
+
+```console
+$ hllc --build missing-import.hll
+? 1
+shared/templates.hll: No such file or directory (os error 2)
+
+```
+
+A codegen error: an interpolation with no matching source.
+
+```console
+$ hllc --build bad-interpolation.hll
+? 1
+bad-interpolation.hll:3:18: unknown interpolation `{{nmae}}`
+
+```
+
+And the plainest failure of all, an input file that does not exist:
+
+```console
+$ hllc --build nonexistent.hll
+? 1
+nonexistent.hll: No such file or directory (os error 2)
+
+```

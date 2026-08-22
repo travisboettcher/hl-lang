@@ -1,0 +1,5 @@
+# Declares no service, so flat mode skips it rather than writing a
+# service-less docker-compose.yml for it.
+network traefik-net {
+  external
+}

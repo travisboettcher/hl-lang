@@ -1,0 +1,7 @@
+use "restart-always.hll" as one
+use "restart-unless-stopped.hll" as two
+
+service web {
+  image "nginx:alpine"
+  with one.always_up, two.mostly_up
+}

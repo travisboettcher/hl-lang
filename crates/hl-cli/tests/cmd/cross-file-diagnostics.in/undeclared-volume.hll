@@ -1,0 +1,6 @@
+volume syncthing-config {}
+
+service syncthing {
+  image "lscr.io/linuxserver/syncthing"
+  volume snycthing-config -> "/config"
+}

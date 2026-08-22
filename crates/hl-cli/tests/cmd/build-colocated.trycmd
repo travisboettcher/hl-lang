@@ -1,0 +1,25 @@
+Co-located mode: a directory that holds no `.hll` files of its own is
+walked recursively, looking for service directories — a directory with
+exactly one `.hll` file that declares a `service`. Each one builds in
+place, next to its own source, with no `--out` needed. Intermediate
+directories that hold no service, `homelab/services/` here, are walked
+through rather than treated as an error.
+
+```console
+$ hllc --build homelab
+homelab/services/web/docker-compose.yml
+
+```
+
+As in flat mode, a tree with no service anywhere in it exits 0 and
+says what it looked for, rather than leaving the user to wonder why
+nothing appeared. Co-located mode keeps its own `built` counter, so
+this pairs with the block above for the same reason
+`build-directory.trycmd`'s two blocks do: each direction catches a
+different way of breaking the counter.
+
+```console
+$ hllc --build library
+library: no service directories found (looked for a single .hll file declaring a `service`, in this directory or any subdirectory) — nothing was built
+
+```

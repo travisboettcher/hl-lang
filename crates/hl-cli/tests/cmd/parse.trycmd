@@ -1,0 +1,92 @@
+`--parse` pretty-prints the AST for one file. It is a debugging aid, so
+the transcript is deliberately the whole dump for the smallest service
+that parses: the point is that the shape of the AST — including the
+spans and the `FileId` every node carries — is visible somewhere as
+text, and that adding a field to the AST shows up here as a reviewable
+diff rather than silently.
+
+```console
+$ hllc --parse web.hll
+Program {
+    decls: [
+        Service(
+            Service {
+                name: Ident {
+                    name: "web",
+                    span: Span {
+                        start: 8,
+                        end: 11,
+                        line: 1,
+                        col: 9,
+                        file: FileId(
+                            0,
+                        ),
+                    },
+                },
+                fields: ServiceFields {
+                    image: Some(
+                        Image {
+                            reference: Some(
+                                Str(
+                                    "nginx:alpine",
+                                    Span {
+                                        start: 22,
+                                        end: 36,
+                                        line: 2,
+                                        col: 9,
+                                        file: FileId(
+                                            0,
+                                        ),
+                                    },
+                                ),
+                            ),
+                            span: Span {
+                                start: 22,
+                                end: 36,
+                                line: 2,
+                                col: 9,
+                                file: FileId(
+                                    0,
+                                ),
+                            },
+                        },
+                    ),
+                    expose: None,
+                    restart: None,
+                    healthcheck: None,
+                    publish: PublishMap {
+                        entries: [],
+                    },
+                    volumes: VolumeMap {
+                        entries: [],
+                    },
+                    env: EnvMap {
+                        entries: [],
+                    },
+                    raw: RawMap {
+                        entries: [],
+                    },
+                    middleware: [],
+                    depends_on: [],
+                    networks: [],
+                    dns: [],
+                    env_file: [],
+                    container_name: None,
+                    command: None,
+                    with: [],
+                },
+                span: Span {
+                    start: 0,
+                    end: 38,
+                    line: 1,
+                    col: 1,
+                    file: FileId(
+                        0,
+                    ),
+                },
+            },
+        ),
+    ],
+}
+
+```

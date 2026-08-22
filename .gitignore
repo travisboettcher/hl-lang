@@ -9,3 +9,10 @@
 # something to commit. CI never produces one — INSTA_UPDATE=no in
 # .github/workflows/ci.yml stops insta writing pending snapshots there.
 *.pending-snap
+
+# Written by `TRYCMD=dump cargo test -p hl-cli --test cli_tests`, which
+# dumps every transcript's real output for inspection instead of
+# comparing it. Scratch state for one run, same as insta's pending
+# snapshots; CI never produces one, since TRYCMD is pinned to a
+# non-writing value in .github/workflows/ci.yml.
+/crates/hl-cli/dump/

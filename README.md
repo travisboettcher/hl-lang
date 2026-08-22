@@ -108,6 +108,30 @@ must emit, so taking a new one asserts that the new output is correct—make
 that call deliberately rather than to clear a red test. Both `cargo test
 --workspace` and CI fail on a mismatch and never rewrite a snapshot.
 
+`crates/hl-cli/tests/cmd/` covers the `hllc` command line itself with
+[`trycmd`](https://docs.rs/trycmd) transcripts. Each `.trycmd` file states
+an invocation, the stdout and stderr it produces, and its exit code, as
+plain text you can read. A `<name>.in/` directory beside it supplies the
+working directory those commands run in, and a `<name>.out/` directory
+states what that working directory must hold afterwards, which is how the
+multi-file `--build --out <dir>` cases assert everything they wrote at
+once. Bless a deliberate change to the output the same way:
+
+```sh
+# Rewrite every transcript step whose output no longer matches.
+TRYCMD=overwrite cargo test -p hl-cli --test cli_tests
+
+# Or write each command's real output to crates/hl-cli/dump/ and
+# compare it yourself, leaving the transcripts alone.
+TRYCMD=dump cargo test -p hl-cli --test cli_tests
+```
+
+Read the resulting diff line by line before you commit it. A transcript
+states what `hllc` must print and what exit code it must return, so
+rewriting one asserts that the new diagnostic wording, the new exit code,
+or the newly generated file is what users should now get. CI pins `TRYCMD`
+to a value that never writes, so a mismatch there fails the build.
+
 CI also gates on coverage and runs fuzz and mutation testing:
 
 ```sh
