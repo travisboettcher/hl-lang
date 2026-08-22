@@ -12,4 +12,4 @@ services:
     devices:
     - /dev/kmsg:/dev/kmsg
     security_opt:
-      seccomp: unconfined
+    - seccomp:unconfined

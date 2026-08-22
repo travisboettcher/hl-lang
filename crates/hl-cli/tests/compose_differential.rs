@@ -102,14 +102,13 @@ const NON_BUILDING_FIXTURES: &[&str] = &["unknown_template.hll"];
 /// failure. A listed case that starts *passing* fails the test too, so
 /// the list cannot outlive the problem it describes.
 ///
-/// `raw_service.hll` writes `security_opt` as a nested map, where
-/// Compose's schema demands a list of `option:value` strings. Fixing it
-/// means editing the fixture and reblessing hl-codegen's snapshots,
-/// which belongs in its own issue rather than widening this one.
-const KNOWN_REJECTIONS: &[(&str, &str)] = &[(
-    "hl-parser/tests/fixtures/raw_service.hll",
-    "services.cadvisor.security_opt",
-)];
+/// The list is empty, and empty is the state to keep it in. Its one
+/// entry recorded `raw_service.hll` writing `security_opt` as a nested
+/// map where Compose's schema demands a list of `option:value` strings;
+/// #174 rewrote the fixture's `raw` body as that list, so the rejection
+/// is gone and the entry went with it. The mechanism stays for the next
+/// fixture that deliberately exercises the unvalidated path.
+const KNOWN_REJECTIONS: &[(&str, &str)] = &[];
 
 /// One document to put in front of Compose: a human-readable name for
 /// failure messages, plus the generated YAML.

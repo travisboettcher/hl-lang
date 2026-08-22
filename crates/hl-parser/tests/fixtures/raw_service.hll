@@ -16,6 +16,6 @@ service cadvisor {
   privileged
   devices "/dev/kmsg" -> "/dev/kmsg"
   raw {
-    security_opt: { seccomp: "unconfined" }
+    security_opt: ["seccomp:unconfined"]
   }
 }

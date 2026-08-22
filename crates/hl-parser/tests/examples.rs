@@ -198,9 +198,22 @@ fn raw_service_fixture_parses_to_expected_ast() {
         .collect();
     assert_eq!(keys, vec!["security_opt"]);
 
+    // Compose's schema reads `security_opt` as a list of
+    // `option:value` strings rather than a nested mapping (#174), and
+    // `raw` passes through whatever the author wrote — so the fixture
+    // has to write the list shape itself.
     match &service.fields.raw.entries[0].value {
-        hl_parser::RawValue::Map(entries, _) => assert_eq!(entries.len(), 1),
-        other => panic!("expected `security_opt` to be a nested raw map, got {other:?}"),
+        hl_parser::RawValue::List(items, _) => {
+            let texts: Vec<&str> = items
+                .iter()
+                .map(|item| match item {
+                    hl_parser::RawValue::Literal(lit) => lit.text(),
+                    other => panic!("expected a string entry, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(texts, vec!["seccomp:unconfined"]);
+        }
+        other => panic!("expected `security_opt` to be a raw list, got {other:?}"),
     }
 }
 
