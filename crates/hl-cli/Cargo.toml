@@ -9,6 +9,17 @@ license.workspace = true
 name = "hllc"
 path = "src/main.rs"
 
+[features]
+# Off by default: `tests/compose_differential.rs` shells out to
+# `docker compose` to have Compose's own parser validate every document
+# codegen produces, and Docker is not something a contributor should
+# have to install to run `cargo test --workspace`. The feature is the
+# opt-in, and it is also the assertion — see that file's own doc for
+# why the test fails rather than skips when the feature is on and
+# Compose is missing. CI enables it in its own job so the gated code
+# cannot rot.
+docker-differential = []
+
 [dependencies]
 hl-lexer = { path = "../hl-lexer" }
 hl-parser = { path = "../hl-parser" }

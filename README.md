@@ -84,7 +84,7 @@ floor honest.
 ```sh
 cargo build --workspace
 cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --check
 ```
 
@@ -132,7 +132,28 @@ rewriting one asserts that the new diagnostic wording, the new exit code,
 or the newly generated file is what users should now get. CI pins `TRYCMD`
 to a value that never writes, so a mismatch there fails the build.
 
-CI also gates on coverage and runs fuzz and mutation testing:
+`crates/hl-cli/tests/compose_differential.rs` hands every document
+codegen produces to Docker Compose's own parser. Snapshots and
+transcripts prove the output stays stable against expectations this
+repo wrote itself, which says nothing about whether Compose agrees—so
+this test asks Compose, over the fixtures under
+`crates/hl-parser/tests/fixtures/` and every `build`-tagged worked
+example in `book/src/`. It also compares Compose's normalized reading
+of each document against the generated one, catching a label or an
+`expose` entry that Compose accepts but reads differently than codegen
+meant it.
+
+An off-by-default Cargo feature gates that test, because no contributor
+should need Docker to run `cargo test --workspace`. Enabling the feature
+**is** the request to run it, so a missing Compose plugin fails the test
+rather than skipping it—a skip would read as coverage in a CI log, which
+is worse than no test at all. Nothing needs a running Docker daemon:
+`docker compose config` parses and validates on the client side. CI runs
+the test in its own job, kept clear of the coverage gate so a Compose
+upgrade can't block unrelated pull requests.
+
+CI also gates on coverage and runs fuzz, mutation, and differential
+testing:
 
 ```sh
 # Coverage gate: CI fails if workspace-wide line coverage drops below 80%.
@@ -158,6 +179,13 @@ cargo +nightly fuzz run --target x86_64-unknown-linux-gnu fuzz_pipeline -- -max_
 # mutants that hang rather than fail.
 cargo install cargo-mutants --locked
 cargo mutants --workspace --timeout-multiplier 3
+
+# Differential test: Docker Compose's own parser validates every
+# document codegen produces, over the parser fixtures and the book's
+# `build`-tagged worked examples. Needs the Compose v2 plugin, not a
+# running daemon. Off by default, and it fails rather than skips when
+# the plugin is missing.
+cargo test -p hl-cli --features docker-differential --test compose_differential
 
 # Advisories, licenses, and dependency bans — see deny.toml.
 cargo install cargo-deny --locked

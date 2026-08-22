@@ -67,7 +67,7 @@ Run the same checks CI runs:
 
 ```sh
 cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo test --workspace --doc
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -121,6 +121,33 @@ you're checking is text a user reads. Keep it in `build_tests.rs` when
 you need the returned `ExitCode`, or need to assert that a file is
 *absent*—a directory comparison can only speak about the files it
 names.
+
+`crates/hl-cli/tests/compose_differential.rs` puts every document
+codegen produces in front of Docker Compose's own parser, over the
+fixtures under `crates/hl-parser/tests/fixtures/` and the `build`-tagged
+worked examples in `book/src/`. Snapshots and transcripts only ever
+compare output against an expectation this repo wrote, so Compose is the
+one check that grades the output contract from outside. An off-by-default
+Cargo feature gates it, and CI runs it in its own job:
+
+```sh
+cargo test -p hl-cli --features docker-differential --test compose_differential
+```
+
+You need the Compose v2 plugin for that, and nothing more—`docker compose
+config` parses and validates on the client side, so no daemon has to be
+running. Enabling the feature **is** the request to run the test, so the
+test fails rather than skips when the plugin is missing: `libtest` hides
+a passing test's output, which would turn a printed skip into what looks
+like coverage. Leave the feature off and the rest of the suite runs
+unchanged. `--all-features` in the preceding `cargo clippy` line is what
+lints the gated code, so it can't rot while nobody compiles it.
+
+A `raw` body Compose rejects is a bug in the `raw` body, not in codegen:
+`raw` promises verbatim passthrough of keys the compiler has no opinion
+about. The test records those in its own `KNOWN_REJECTIONS` list rather
+than tolerating the whole category, so the exception stays one case wide
+and a case that starts passing fails until someone deletes the entry.
 
 If you're touching the lexer, parser, or codegen, consider whether the
 fuzz targets in `fuzz/` need a new corpus seed or cover the change

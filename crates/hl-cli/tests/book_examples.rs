@@ -27,89 +27,16 @@
 //!   marked `entry` is the one `link`+`generate` runs against.
 //! - `ignore` — excluded from validation entirely.
 
+// The fence scanner itself lives in `book_blocks/` because
+// `compose_differential.rs` needs the same blocks — see that module's
+// own doc for why it isn't duplicated. The tag list above stays here,
+// with the test that gives each tag its meaning.
+mod book_blocks;
+
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-struct Block {
-    /// `book/src/<file>.md`, for error messages.
-    source: String,
-    /// 1-based line number of the fence's opening ` ``` `, for error
-    /// messages.
-    line: usize,
-    code: String,
-    attrs: Vec<String>,
-}
-
-impl Block {
-    fn attr<'a>(&'a self, prefix: &str) -> Option<&'a str> {
-        self.attrs.iter().find_map(|a| a.strip_prefix(prefix))
-    }
-
-    fn has(&self, attr: &str) -> bool {
-        self.attrs.iter().any(|a| a == attr)
-    }
-
-    fn location(&self) -> String {
-        format!("{}:{}", self.source, self.line)
-    }
-}
-
-fn book_src_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../book/src")
-}
-
-/// Scans every `.md` file directly under `book/src` for ` ```hll `-tagged
-/// fenced blocks. Deliberately not a general Markdown parser — a
-/// hand-rolled line scan is enough for the book's own consistent
-/// ` ```hll[,attr,...] ` / ` ``` ` fence style, and avoids a new
-/// dev-dependency for a workspace with none today.
-fn extract_blocks() -> Vec<Block> {
-    let dir = book_src_dir();
-    let mut md_files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|err| panic!("reading {}: {err}", dir.display()))
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
-        .collect();
-    md_files.sort();
-
-    let mut blocks = Vec::new();
-    for path in md_files {
-        let source_name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
-
-        let mut lines = text.lines().enumerate().peekable();
-        while let Some((idx, line)) = lines.next() {
-            let Some(info) = line.strip_prefix("```hll") else {
-                continue;
-            };
-            let attrs: Vec<String> = info
-                .trim_start_matches(',')
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect();
-
-            let mut code = String::new();
-            for (_, body_line) in lines.by_ref() {
-                if body_line == "```" {
-                    break;
-                }
-                code.push_str(body_line);
-                code.push('\n');
-            }
-
-            blocks.push(Block {
-                source: source_name.clone(),
-                line: idx + 1,
-                code,
-                attrs,
-            });
-        }
-    }
-    blocks
-}
+use book_blocks::{Block, book_src_dir, extract_blocks};
 
 fn parse_ok(src: &str) -> Result<(), String> {
     hl_parser::parse(src)
