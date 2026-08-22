@@ -83,6 +83,33 @@ fn router_field_needing_host(fields: &ServiceFields) -> Option<(&'static str, Sp
         })
 }
 
+/// The first Traefik-specific field a *disabled* service also sets, if
+/// it sets one at all (#159) — checked in the same order [`compute`]
+/// would have emitted their labels were the service not disabled
+/// (`expose.host`, then `expose.entrypoint`, then `middleware`), so the
+/// field named in the diagnostic is the first one that contradicts
+/// `traefik { disabled }`.
+///
+/// `expose.port` deliberately isn't checked here: it's Compose's own
+/// `expose:` key, plain container-network visibility with nothing to do
+/// with Traefik, so a disabled service may still declare it (#159) —
+/// see [`crate::CodegenError::TraefikDisabledWithRouterField`]'s doc.
+/// The other three all reuse [`router_field_needing_host`] for
+/// `expose.entrypoint`/`middleware`, since a disabled service's
+/// contradiction is checked against exactly the same two router-attached
+/// fields the router-less-middleware check (#144) already knows about —
+/// only `expose.host` itself is new here, since disabling Traefik makes
+/// even the host that would have *created* the router a contradiction,
+/// not just the fields that would attach to it.
+fn traefik_conflict_field(fields: &ServiceFields) -> Option<(&'static str, Span)> {
+    fields
+        .expose
+        .as_ref()
+        .and_then(|e| e.host.as_ref())
+        .map(|host| ("expose.host", host.span()))
+        .or_else(|| router_field_needing_host(fields))
+}
+
 /// Computes `service_name`'s Traefik label list, in this order:
 /// `traefik.docker.network=` (if `docker_network` is set — the real name
 /// of whichever of the service's declared networks is `external`),
@@ -103,12 +130,38 @@ fn router_field_needing_host(fields: &ServiceFields) -> Option<(&'static str, Sp
 /// attach to. Setting either without a host is
 /// [`CodegenError::RouterFieldWithoutHost`], not a silently label-less
 /// service (#80).
+///
+/// A service that sets `traefik { disabled }` (#159) short-circuits all
+/// of the above: the returned list is exactly `["traefik.enable=false"]`,
+/// full stop — no `traefik.docker.network=` label either. That label
+/// only matters for routing traffic *to* the container once Traefik's
+/// Docker provider has decided to act on it; with `enable=false` it
+/// never acts on the container at all, so the network label would be
+/// dead configuration, and leaving it out keeps "disabled" reading as
+/// exactly one label rather than one meaningful label plus one inert
+/// one. `raw { labels: [...] }` still overrides this entirely, same as
+/// it overrides the ordinary computed list — see
+/// [`crate::doc::ComposeServiceDoc::apply_raw_overrides`].
 pub fn compute(
     service_name: &str,
     fields: &ServiceFields,
     docker_network: Option<&str>,
     bindings: &HashMap<&str, &str>,
 ) -> Result<Vec<String>, CodegenError> {
+    if let Some(traefik) = &fields.traefik
+        && let Some(disabled_span) = traefik.disabled
+    {
+        if let Some((field, span)) = traefik_conflict_field(fields) {
+            return Err(CodegenError::TraefikDisabledWithRouterField {
+                service: service_name.to_string(),
+                field,
+                disabled_span,
+                span,
+            });
+        }
+        return Ok(vec!["traefik.enable=false".to_string()]);
+    }
+
     let mut labels = Vec::new();
 
     if let Some(net) = docker_network {
@@ -198,7 +251,7 @@ pub fn compute(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hl_parser::{Expose, Literal, Reference};
+    use hl_parser::{Expose, Literal, Reference, Traefik};
     use hl_parser::{FileId, Span};
 
     fn span() -> Span {
@@ -574,6 +627,169 @@ mod tests {
                 "traefik.http.routers.syncthing.middlewares=local-ipwhitelist@file,forwardAuth-authentik@file",
                 "traefik.http.services.syncthing.loadbalancer.server.port=8384",
             ]
+        );
+    }
+
+    // --- traefik { disabled } (#159) ---
+
+    fn disabled_traefik() -> Traefik {
+        Traefik {
+            disabled: Some(span()),
+            span: span(),
+        }
+    }
+
+    /// The baseline case: a disabled service with nothing else set emits
+    /// exactly `traefik.enable=false`, no `traefik.docker.network=`
+    /// included even when one would otherwise apply — see [`compute`]'s
+    /// own doc for why that label is left out too.
+    #[test]
+    fn disabled_service_emits_only_enable_false() {
+        let fields = ServiceFields {
+            traefik: Some(disabled_traefik()),
+            ..Default::default()
+        };
+        let labels = compute("db", &fields, Some("docker_default"), &bindings()).unwrap();
+        assert_eq!(labels, vec!["traefik.enable=false"]);
+    }
+
+    /// `expose.port` is Compose's own `expose:` key, not Traefik's — a
+    /// disabled service may still declare it, and doing so changes
+    /// nothing about the Traefik label list.
+    #[test]
+    fn disabled_service_with_only_expose_port_still_emits_only_enable_false() {
+        let fields = ServiceFields {
+            traefik: Some(disabled_traefik()),
+            expose: Some(Expose {
+                port: Some(Literal::Number {
+                    text: "5432".to_string(),
+                    value: 5432,
+                    span: span(),
+                }),
+                host: None,
+                entrypoint: Vec::new(),
+                span: span(),
+            }),
+            ..Default::default()
+        };
+        let labels = compute("db", &fields, None, &bindings()).unwrap();
+        assert_eq!(labels, vec!["traefik.enable=false"]);
+    }
+
+    /// `expose.host` on a disabled service is the direct contradiction
+    /// the issue calls out: reported before `expose.entrypoint` and
+    /// `middleware`, since it's the field that would have created the
+    /// router those two attach to.
+    #[test]
+    fn disabled_service_with_expose_host_is_rejected() {
+        let fields = ServiceFields {
+            traefik: Some(disabled_traefik()),
+            expose: Some(Expose {
+                port: None,
+                host: Some(lit("db.example.com")),
+                entrypoint: Vec::new(),
+                span: span(),
+            }),
+            ..Default::default()
+        };
+        let err = compute("db", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodegenError::TraefikDisabledWithRouterField {
+                    field: "expose.host",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn disabled_service_with_entrypoint_is_rejected() {
+        let mut fields = ServiceFields {
+            traefik: Some(disabled_traefik()),
+            ..Default::default()
+        };
+        fields.expose = Some(Expose {
+            port: None,
+            host: None,
+            entrypoint: refs(&["web-secure"]),
+            span: span(),
+        });
+        let err = compute("db", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodegenError::TraefikDisabledWithRouterField {
+                    field: "expose.entrypoint",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn disabled_service_with_middleware_is_rejected() {
+        let fields = ServiceFields {
+            traefik: Some(disabled_traefik()),
+            middleware: refs(&["forwardAuth-authentik"]),
+            ..Default::default()
+        };
+        let err = compute("db", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodegenError::TraefikDisabledWithRouterField {
+                    field: "middleware",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// When a disabled service contradicts itself on more than one
+    /// front, `expose.host` is the one named — the same "first in
+    /// emission order" convention `entrypoint_without_a_host_is_rejected_before_middleware`
+    /// already documents for the router-less case.
+    #[test]
+    fn disabled_service_with_host_and_middleware_reports_host_first() {
+        let fields = ServiceFields {
+            traefik: Some(disabled_traefik()),
+            expose: Some(Expose {
+                port: None,
+                host: Some(lit("db.example.com")),
+                entrypoint: Vec::new(),
+                span: span(),
+            }),
+            middleware: refs(&["forwardAuth-authentik"]),
+            ..Default::default()
+        };
+        let err = compute("db", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodegenError::TraefikDisabledWithRouterField {
+                    field: "expose.host",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// A service that never touches `traefik` at all keeps every
+    /// existing behavior byte for byte — the guard clause only fires
+    /// when `fields.traefik.disabled` is actually `Some`.
+    #[test]
+    fn no_traefik_field_leaves_ordinary_computation_untouched() {
+        let fields = expose_with_host("syncthing.internal.techdebtor.io");
+        let labels = compute("syncthing", &fields, None, &bindings()).unwrap();
+        assert_eq!(
+            labels,
+            vec!["traefik.http.routers.syncthing.rule=Host(`syncthing.internal.techdebtor.io`)"]
         );
     }
 }

@@ -278,6 +278,56 @@ pub static HEALTHCHECK: TypeSchema = TypeSchema {
     schema_free: false,
 };
 
+/// `traefik { disabled }` — the one way to opt a service out of every
+/// Traefik label `hl-codegen`'s `labels.rs` otherwise computes for it
+/// (#159). `disabled` mirrors [`HEALTHCHECK`]'s `disable` and
+/// [`NETWORK`]'s `external` exactly: a bare-presence
+/// [`FieldKind::BoolFlag`], with no `disabled: false` form this
+/// milestone.
+///
+/// **Rejected alternative: `traefik disabled`, no braces.** The issue
+/// that motivated this field (#159) floats that spelling first, but it
+/// doesn't fit the schema engine without bending it. A bare, brace-free
+/// form only exists for a type with a `primary_field`
+/// (docs/DESIGN.md's desugaring rule 1), and
+/// `parse_struct_primary_shorthand`'s only bare-value path parses a
+/// *literal* (`self.parse_literal()`) — it has no notion of "the bare
+/// word names one of my own sub-fields," which is what `disabled` would
+/// have to mean here. Making `disabled` a primary field can't work
+/// either way that keeps faith with what a primary field means
+/// elsewhere: `FieldKind::BoolFlag` carries no value beyond its own bare
+/// presence, so there's no *value* for `traefik disabled` to hand the
+/// primary-shorthand parser, only a second field name masquerading as
+/// one. Reaching `traefik disabled` regardless would mean either
+/// treating the identifier `disabled` as a magic scalar payload (special
+/// syntax for this one field, invisible to `resolve_field`) or teaching
+/// the primary-shorthand parser a "bare keyword names a sub-field"
+/// grammar no other type uses — both routes bend the generic engine
+/// around one field instead of reusing it, which is exactly what
+/// `schema.rs`'s table-driven design exists to avoid (see this module's
+/// own doc). `traefik { disabled }` costs nothing beyond what
+/// `healthcheck { disable }` and `network n { external }` already pay
+/// for, and — being `Nested` rather than a bare `BoolFlag` field
+/// directly on `SERVICE_FIELDS` — leaves a namespace open for a future
+/// Traefik knob (a router priority, a TLS resolver name, ...) to land in
+/// without inventing a second `traefik`-prefixed field name or promoting
+/// this to its own top-level type.
+pub static TRAEFIK: TypeSchema = TypeSchema {
+    type_name: "traefik",
+    kind: SchemaKind::Struct,
+    fields: &[FieldSchema {
+        name: "disabled",
+        kind: FieldKind::BoolFlag,
+    }],
+    primary_field: None,
+    map_separator: None,
+    uniqueness: None,
+    key_may_be_reference: false,
+    bare_keyword_alias: None,
+    needs_name: false,
+    schema_free: false,
+};
+
 /// The `volume` *field* on a `service`/`template`: `volume "/host/path"
 /// -> "/container"` / `volume { "/host/path": "/container" }` for a bind
 /// mount, `volume named-volume -> "/container"` for a named one.
@@ -525,6 +575,14 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
     FieldSchema {
         name: "expose",
         kind: FieldKind::Nested(&EXPOSE),
+    },
+    // `traefik { disabled }` (#159) sits next to `expose` on purpose:
+    // the two jointly decide whether — and how — a service gets a
+    // Traefik router, so `hl-codegen`'s `labels.rs` reads them as one
+    // related pair.
+    FieldSchema {
+        name: "traefik",
+        kind: FieldKind::Nested(&TRAEFIK),
     },
     FieldSchema {
         name: "restart",

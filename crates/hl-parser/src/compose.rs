@@ -25,7 +25,7 @@ use hl_lexer::{SourceMap, Span};
 use crate::ast::{
     Command, DependsOnEntry, EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image,
     Literal, Network, ParamType, Program, PublishEntry, PublishMap, RawMap, RawValue, Reference,
-    Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Volume,
+    Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, Volume,
     VolumeEntry, VolumeHost, VolumeMap,
 };
 use crate::schema::MapSide;
@@ -1810,6 +1810,12 @@ struct MergeAcc {
     /// is just the span it was set at — mirroring how [`Literal::span`]
     /// is all `merge_scalar` ever needs from a `Literal` too.
     healthcheck_disable: Option<(Span, Tier)>,
+    /// `traefik.disabled`'s own collision point (#159) — same shape as
+    /// [`Self::healthcheck_disable`] and for the same reason: a bare
+    /// `FieldKind::BoolFlag` merged via `merge_scalar_like`, one slot
+    /// rather than a name-keyed table since `traefik` has exactly this
+    /// one sub-field today.
+    traefik_disabled: Option<(Span, Tier)>,
     /// `command`'s own collision point (#156) — not part of `scalars`
     /// above for the same reason `healthcheck_test` isn't: [`Command`]
     /// isn't a [`Literal`], so it can't ride [`SCALAR_FIELDS`]'s table
@@ -1873,6 +1879,16 @@ impl MergeAcc {
                 .healthcheck
                 .get_or_insert(empty_healthcheck(disable_span))
                 .disable = Some(disable_span);
+        }
+        // Same "no other `traefik` sub-field exists to run first" span
+        // reasoning as the two blocks above — there's nothing else in
+        // `TRAEFIK` yet for a freshly materialized `Traefik`'s span to
+        // prefer over this one (#159).
+        if let Some((disabled_span, _)) = self.traefik_disabled {
+            fields
+                .traefik
+                .get_or_insert(empty_traefik(disabled_span))
+                .disabled = Some(disabled_span);
         }
         if let Some((command, _)) = self.command {
             fields.command = Some(command);
@@ -2043,6 +2059,19 @@ fn empty_healthcheck(span: Span) -> Healthcheck {
     }
 }
 
+/// A freshly materialized [`Traefik`] with `disabled` unset, mirroring
+/// [`empty_healthcheck`] for the same reason (#159): the one call site
+/// today (`traefik_disabled`'s `get_or_insert`) doesn't need the
+/// indirection yet, but a second `Traefik` sub-field would otherwise
+/// force every existing call site to be revisited instead of just
+/// gaining a new one.
+fn empty_traefik(span: Span) -> Traefik {
+    Traefik {
+        disabled: None,
+        span,
+    }
+}
+
 /// [`ScalarField`]'s counterpart for reference-list fields — the same
 /// `key`/`take`/`set` triple, minus everything scalars need only
 /// because they can collide. A list never collides (tiers concatenate,
@@ -2186,6 +2215,20 @@ fn merge_tier(
                 |span| *span,
             )?;
         }
+    }
+    // `traefik.disabled` (#159) isn't `Literal`-valued either, for the
+    // same reason `healthcheck.disable` isn't — see `MergeAcc::traefik_disabled`'s
+    // doc.
+    if let Some(traefik) = incoming.traefik.as_mut()
+        && let Some(disabled_span) = traefik.disabled.take()
+    {
+        merge_scalar_like(
+            &mut acc.traefik_disabled,
+            "traefik.disabled",
+            disabled_span,
+            tier,
+            |span| *span,
+        )?;
     }
     // `command` (#156) isn't `Literal`-valued either, so it goes through
     // `merge_scalar_like` exactly like `healthcheck.test` just above —
