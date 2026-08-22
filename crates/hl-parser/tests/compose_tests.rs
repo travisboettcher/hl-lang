@@ -1838,6 +1838,72 @@ fn command_param_is_substituted_in_exec_form() {
     }
 }
 
+/// Every literal-valued `healthcheck` sub-field (#153) goes through the
+/// same `substitute_params` walk as `command` above (#168) — a `$param`
+/// written into any of them used to survive composition unresolved and
+/// reach codegen as the parameter's own name.
+#[test]
+fn healthcheck_params_are_substituted_in_every_literal_subfield() {
+    let composed = compose_ok(
+        "template checked(cmd: String, every: String, wait: String, tries: Number, \
+         grace: String, probe: String) {\n  \
+           healthcheck {\n    \
+             test: $cmd\n    \
+             interval: $every\n    \
+             timeout: $wait\n    \
+             retries: $tries\n    \
+             start_period: $grace\n    \
+             start_interval: $probe\n  \
+           }\n\
+         }\n\
+         service db {\n  image \"postgres:15\"\n  \
+           with checked { cmd: \"pg_isready -U app\", every: \"10s\", wait: \"5s\", \
+           tries: 3, grace: \"30s\", probe: \"2s\" }\n\
+         }\n",
+    );
+    let service = single_service(&composed);
+    let hc = service
+        .fields
+        .healthcheck
+        .as_ref()
+        .expect("healthcheck set");
+    assert_eq!(healthcheck_test_text(hc), "pg_isready -U app");
+    assert_eq!(hc.interval.as_ref().unwrap().text(), "10s");
+    assert_eq!(hc.timeout.as_ref().unwrap().text(), "5s");
+    assert_eq!(hc.retries.as_ref().unwrap().text(), "3");
+    assert_eq!(hc.start_period.as_ref().unwrap().text(), "30s");
+    assert_eq!(hc.start_interval.as_ref().unwrap().text(), "2s");
+    assert_no_params(service);
+}
+
+/// A `$param` reference names a whole literal slot, so an exec-form
+/// `test` substitutes one list item at a time — the same shape as
+/// `command_param_is_substituted_in_exec_form`.
+#[test]
+fn healthcheck_test_params_are_substituted_in_exec_form() {
+    let composed = compose_ok(
+        "template checked(bin: String, user: String) {\n  \
+           healthcheck { test: [\"CMD\", $bin, \"-U\", $user] }\n\
+         }\n\
+         service db {\n  image \"postgres:15\"\n  \
+           with checked { bin: \"pg_isready\", user: \"app\" }\n}\n",
+    );
+    let service = single_service(&composed);
+    let hc = service
+        .fields
+        .healthcheck
+        .as_ref()
+        .expect("healthcheck set");
+    match hc.test.as_ref().expect("test set") {
+        HealthcheckTest::Exec(items, _) => {
+            let texts: Vec<&str> = items.iter().map(Literal::text).collect();
+            assert_eq!(texts, vec!["CMD", "pg_isready", "-U", "app"]);
+        }
+        other => panic!("expected HealthcheckTest::Exec, got {other:?}"),
+    }
+    assert_no_params(service);
+}
+
 fn assert_no_params(service: &Service) {
     let fields = &service.fields;
     assert!(fields.with.is_empty(), "with should be fully resolved");
@@ -1880,6 +1946,29 @@ fn assert_no_params(service: &Service) {
             }
         }
         None => {}
+    }
+    if let Some(hc) = &fields.healthcheck {
+        match &hc.test {
+            Some(HealthcheckTest::Shell(lit)) => assert_not_param(lit),
+            Some(HealthcheckTest::Exec(items, _)) => {
+                for item in items {
+                    assert_not_param(item);
+                }
+            }
+            None => {}
+        }
+        for lit in [
+            hc.interval.as_ref(),
+            hc.timeout.as_ref(),
+            hc.retries.as_ref(),
+            hc.start_period.as_ref(),
+            hc.start_interval.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert_not_param(lit);
+        }
     }
     for entry in &fields.raw.entries {
         assert_not_param(&entry.key);
