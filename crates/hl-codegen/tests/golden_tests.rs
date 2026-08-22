@@ -91,7 +91,10 @@ fn syncthing_matches_real_deployed_service() {
 /// `security_opt` still goes through `raw`, landing as a sibling
 /// top-level service key — the genuine long tail `raw`'s job narrowed to
 /// once `privileged`/`devices` graduated out of it. None of the five
-/// needs `raw` any more.
+/// needs `raw` any more. That `raw` body writes `security_opt` as the
+/// list of `option:value` strings Compose's schema asks for (#174):
+/// nothing validates a `raw` value on the way through, so the shape
+/// Compose wants has to be the shape the author writes.
 #[test]
 fn cadvisor_raw_passthrough_matches_real_service() {
     let yaml = generate_from(RAW_SERVICE);
@@ -109,7 +112,7 @@ fn cadvisor_raw_passthrough_matches_real_service() {
         devices:
           - "/dev/kmsg:/dev/kmsg"
         security_opt:
-          seccomp: unconfined
+          - "seccomp:unconfined"
     "#);
 }
 
