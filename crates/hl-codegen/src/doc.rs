@@ -220,12 +220,14 @@ pub(crate) struct ComposeServiceDoc {
     pub networks: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dns: Vec<String>,
-    /// `devices ["/dev/kmsg:/dev/kmsg"]` entries, Compose's own
-    /// `devices:` key (#157), carried through verbatim as
-    /// `"host:container"` mapping strings — the same treatment
-    /// [`Self::env_file`] gives its own paths, for the same reason:
-    /// `hllc` neither validates nor rewrites a host device path, that's
-    /// the deploy target's concern.
+    /// `devices "/dev/kmsg" -> "/dev/kmsg"` entries, Compose's own
+    /// `devices:` key (#157), rendered as `"host:container"`
+    /// Compose-short-syntax strings — the same shape [`Self::ports`]
+    /// gives `publish`'s entries, and for the same reason (#167): a
+    /// quoted container side is how an optional cgroup permissions
+    /// suffix rides along (`"/dev/xvda:rwm"`). `hllc` neither validates
+    /// nor rewrites a host device path beyond that, that's the deploy
+    /// target's concern.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<String>,
     /// `publish host -> container` entries, as Compose short-syntax

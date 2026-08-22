@@ -35,10 +35,15 @@ pub enum FieldKind {
     /// entries across repeated writes (per docs/DESIGN.md's rule 4).
     Nested(&'static TypeSchema),
     /// A list of bare-identifier/string references (`middleware`,
-    /// `networks`, `dns`, `env_file`, `devices`). Accumulates across
+    /// `networks`, `dns`, `env_file`). Accumulates across
     /// repeats; settable via a bracketed list, the bare comma-list
     /// sugar, or repeated statements — never duplicate-checked, since
     /// list fields can't collide.
+    ///
+    /// `devices` moved off this kind and onto [`SchemaKind::Map`] (see
+    /// [`DEVICES`]) once #167's review feedback asked for the same
+    /// `"host" -> "container"` arrow spelling `publish`/`volume` already
+    /// use, rather than a pre-joined `"host:container"` string.
     ///
     /// `depends_on` moved off this kind and onto its own
     /// [`Self::DependsOnList`] when its entries gained an optional
@@ -390,6 +395,40 @@ pub static PUBLISH: TypeSchema = TypeSchema {
     schema_free: false,
 };
 
+/// `devices "/dev/kmsg" -> "/dev/kmsg"` / `devices { "/dev/kmsg":
+/// "/dev/kmsg" }` — a host device path → container device path mapping,
+/// emitted as Compose's `devices:` list. Spelled with the same `->`
+/// separator as [`VOLUME`]/[`PUBLISH`] because it's the same shape once
+/// more: a host-side resource mapped onto a container-side one. Grew
+/// this arrow spelling in place of a pre-joined `"host:container"`
+/// string per review feedback on #167, after #157 originally shipped it
+/// as a [`FieldKind::ReferenceList`].
+///
+/// Uniqueness on the value (container path) side — exactly [`PUBLISH`]'s
+/// own reasoning, and it transfers over unchanged. Docker's real
+/// conflict on a `devices` short-syntax entry is on the host side, but
+/// Compose's short syntax is `HOST:CONTAINER[:CGROUP_PERMISSIONS]`, so
+/// an optional `rwm`-style permissions suffix rides the *container*
+/// half (`"/dev/sda" -> "/dev/xvda:rwm"`) — the direct analogue of
+/// `publish`'s protocol suffix riding its own container half (`53 ->
+/// "53/udp"`). A host-side uniqueness check would reject the legitimate
+/// case this makes expressible: the same host device mapped to two
+/// different container paths, each with its own permissions. Checking
+/// the container side still catches the copy-paste case (the same
+/// target path written twice) and leaves the legitimate one alone.
+pub static DEVICES: TypeSchema = TypeSchema {
+    type_name: "devices",
+    kind: SchemaKind::Map,
+    fields: &[],
+    primary_field: None,
+    map_separator: Some(TokenKind::Arrow),
+    uniqueness: Some(MapSide::Value),
+    key_may_be_reference: false,
+    bare_keyword_alias: None,
+    needs_name: false,
+    schema_free: false,
+};
+
 /// `env KEY = "value"` / `env { KEY: "value" }`. Uniqueness on the key
 /// side.
 pub static ENV: TypeSchema = TypeSchema {
@@ -629,16 +668,19 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
         name: "env_file",
         kind: FieldKind::ReferenceList,
     },
-    // `privileged` / `devices` (#157): both plain generic Compose keys
-    // promoted out of `raw` — see [`crate::ast::ServiceFields::privileged`]/
-    // [`crate::ast::ServiceFields::devices`] for the full reasoning.
+    // `privileged` (#157): a plain generic Compose key promoted out of
+    // `raw` — see [`crate::ast::ServiceFields::privileged`] for the full
+    // reasoning.
     FieldSchema {
         name: "privileged",
         kind: FieldKind::BoolFlag,
     },
+    // `devices` (#157), map-kind since #167's review feedback — see
+    // [`DEVICES`] and [`crate::ast::ServiceFields::devices`] for the
+    // full reasoning.
     FieldSchema {
         name: "devices",
-        kind: FieldKind::ReferenceList,
+        kind: FieldKind::Nested(&DEVICES),
     },
     FieldSchema {
         name: "with",

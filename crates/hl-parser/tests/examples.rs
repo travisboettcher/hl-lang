@@ -163,13 +163,14 @@ fn raw_service_fixture_parses_to_expected_ast() {
     };
     assert_eq!(service.name.name, "cadvisor");
     assert!(service.fields.privileged.is_some());
-    let devices: Vec<&str> = service
+    let devices: Vec<(&str, &str)> = service
         .fields
         .devices
+        .entries
         .iter()
-        .map(|r| r.name.as_str())
+        .map(|e| (e.host.text(), e.container.text()))
         .collect();
-    assert_eq!(devices, vec!["/dev/kmsg:/dev/kmsg"]);
+    assert_eq!(devices, vec![("/dev/kmsg", "/dev/kmsg")]);
 
     assert_eq!(service.fields.raw.entries.len(), 1);
 

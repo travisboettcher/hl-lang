@@ -331,13 +331,14 @@ services:
     );
 }
 
-/// `devices ["a"]` — the bare single-item sugar every reference-list
-/// field gets for free — emits Compose's `devices:` as a one-element
-/// list.
+/// `devices "/dev/kmsg" -> "/dev/kmsg"` — the arrow bare-entry sugar
+/// every map-kind field gets, mirroring `publish`'s own syntax per
+/// #167's review feedback — emits Compose's `devices:` as a one-element
+/// `"host:container"` list.
 #[test]
 fn devices_single_entry_emits_a_one_element_list() {
     let yaml = generate_from(
-        "service cadvisor {\n  image \"nginx\"\n  devices \"/dev/kmsg:/dev/kmsg\"\n}\n",
+        "service cadvisor {\n  image \"nginx\"\n  devices \"/dev/kmsg\" -> \"/dev/kmsg\"\n}\n",
     );
     assert_yaml_eq(
         &yaml,
@@ -351,13 +352,14 @@ services:
     );
 }
 
-/// The bracketed list form round-trips every mapping in order.
+/// The canonical multi-entry `{ }` body round-trips every mapping in
+/// order, exactly like `publish`'s own canonical body.
 #[test]
-fn devices_list_form_emits_every_mapping_in_order() {
+fn devices_canonical_body_emits_every_mapping_in_order() {
     let yaml = generate_from(
         "service cadvisor {\n  \
            image \"nginx\"\n  \
-           devices [\"/dev/kmsg:/dev/kmsg\", \"/dev/fuse:/dev/fuse\"]\n\
+           devices { \"/dev/kmsg\": \"/dev/kmsg\", \"/dev/fuse\": \"/dev/fuse\" }\n\
          }\n",
     );
     assert_yaml_eq(
@@ -373,6 +375,26 @@ services:
     );
 }
 
+/// A quoted container side carries Compose's optional cgroup
+/// permissions suffix through untouched, exactly like `publish`'s own
+/// protocol suffix.
+#[test]
+fn devices_container_side_permissions_suffix_rides_through() {
+    let yaml = generate_from(
+        "service cadvisor {\n  image \"nginx\"\n  devices \"/dev/sda\" -> \"/dev/xvda:rwm\"\n}\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  cadvisor:
+    image: nginx
+    devices:
+      - /dev/sda:/dev/xvda:rwm
+"#,
+    );
+}
+
 /// `raw { privileged: ... }` / `raw { devices: ... }` override the
 /// built-in fields, the same way every other built-in field does.
 #[test]
@@ -381,7 +403,7 @@ fn raw_privileged_and_devices_override_the_built_in_fields() {
         "service cadvisor {\n  \
            image \"nginx\"\n  \
            privileged\n  \
-           devices \"/dev/kmsg:/dev/kmsg\"\n  \
+           devices \"/dev/kmsg\" -> \"/dev/kmsg\"\n  \
            raw {\n    \
              privileged: false\n    \
              devices: [\"/dev/raw:/dev/raw\"]\n  \
@@ -1541,6 +1563,31 @@ services:
     );
 }
 
+/// `devices` (#167) resolves `$param` substitution on both sides of an
+/// inherited mapping exactly like `publish`'s own entries just above —
+/// the same live bug class issue #168 covers, guarding against a
+/// `$param` surviving composition unresolved.
+#[test]
+fn devices_entries_from_a_template_are_fully_resolved() {
+    let yaml = generate_from(
+        "template gpu(dev: String) {\n  devices $dev -> $dev\n}\n\
+         service jellyfin {\n  \
+           image \"jellyfin/jellyfin:latest\"\n  \
+           with gpu { dev: \"/dev/dri\" }\n\
+         }\n",
+    );
+    assert_yaml_eq(
+        &yaml,
+        r#"
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    devices:
+      - /dev/dri:/dev/dri
+"#,
+    );
+}
+
 /// #84's `publish` and #60's top-level `volume` declaration are
 /// unrelated features that landed in the same release, so one service
 /// using both at once is the case neither one's own tests cover: the
@@ -1661,7 +1708,7 @@ fn every_built_in_field_is_overridable_by_raw() {
            volume web-data -> \"/data\"\n  \
            networks [traefik-net]\n  \
            dns [\"192.168.50.182\"]\n  \
-           devices [\"/dev/original:/dev/original\"]\n  \
+           devices \"/dev/original\" -> \"/dev/original\"\n  \
            publish 8080 -> 8080\n  \
            expose 8080 as \"web.example.com\"\n  \
            depends_on database\n  \

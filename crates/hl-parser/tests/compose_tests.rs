@@ -1323,67 +1323,90 @@ fn env_file_keeps_duplicates() {
     assert_eq!(entries, vec!["common.env", "common.env"]);
 }
 
-// --- privileged / devices (#157) ---
+// --- privileged / devices (#157, map-kind since #167) ---
 
-/// `devices` is list-typed just like `dns`/`env_file` — it concatenates
-/// across tiers rather than colliding.
+/// `devices` merges exactly like `publish` (#167) — keyed on the
+/// container side, so non-colliding entries from different tiers
+/// concatenate rather than colliding. Compare
+/// `explicit_templates_publish_container_port_collision_is_error` for
+/// the collision case this field now shares too.
 #[test]
-fn devices_concatenates_across_tiers() {
+fn devices_accumulates_across_tiers() {
     let composed = compose_ok(
-        "template a {\n  devices \"/dev/kmsg:/dev/kmsg\"\n}\n\
-         service s {\n  with a\n  image \"x\"\n  devices \"/dev/fuse:/dev/fuse\"\n}\n",
+        "template a {\n  devices \"/dev/kmsg\" -> \"/dev/kmsg\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n  devices \"/dev/fuse\" -> \"/dev/fuse\"\n}\n",
     );
     let service = single_service(&composed);
-    let entries: Vec<&str> = service
+    let entries: Vec<(&str, &str)> = service
         .fields
         .devices
+        .entries
         .iter()
-        .map(|r| r.name.as_str())
+        .map(|e| (e.host.text(), e.container.text()))
         .collect();
-    assert_eq!(entries, vec!["/dev/kmsg:/dev/kmsg", "/dev/fuse:/dev/fuse"]);
+    assert_eq!(
+        entries,
+        vec![("/dev/kmsg", "/dev/kmsg"), ("/dev/fuse", "/dev/fuse")]
+    );
 }
 
-/// Unlike `dns`/`env_file`, `devices` *is* deduped (#69): there's no
-/// Compose semantic under which repeating the exact same
-/// `"host:container"` mapping means anything different from stating it
-/// once, so it dedupes the same way the set-like lists
-/// (`networks`/`middleware`/`expose.entrypoint`) do — see
-/// `compose.rs`'s `LIST_FIELDS` entry for this field for the full
-/// reasoning.
+/// The service's own body always wins over an inherited template entry
+/// for the same container path — `merge_map`'s ordinary Own-always-wins
+/// rule, which happens to look like deduplication when the two entries
+/// agree, exactly as it would for `publish`/`volume`.
 #[test]
-fn devices_deduplicates_across_tiers() {
+fn devices_own_body_overrides_template_for_same_container_path() {
     let composed = compose_ok(
-        "template a {\n  devices \"/dev/kmsg:/dev/kmsg\"\n}\n\
-         service s {\n  with a\n  image \"x\"\n  devices \"/dev/kmsg:/dev/kmsg\"\n}\n",
+        "template a {\n  devices \"/dev/kmsg\" -> \"/dev/kmsg\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n  devices \"/dev/kmsg\" -> \"/dev/kmsg\"\n}\n",
     );
     let service = single_service(&composed);
-    let entries: Vec<&str> = service
+    assert_eq!(service.fields.devices.entries.len(), 1);
+}
+
+/// Two *explicit* templates mapping different hosts onto the same
+/// container path disagree about what that path should be — a compile
+/// error, matching `publish`'s own
+/// `explicit_templates_publish_container_port_collision_is_error`.
+#[test]
+fn explicit_templates_devices_container_path_collision_is_error() {
+    let err = compose_err(
+        "template a {\n  devices \"/dev/kmsg\" -> \"/dev/shared\"\n}\n\
+         template b {\n  devices \"/dev/fuse\" -> \"/dev/shared\"\n}\n\
+         service s {\n  with a, b\n}\n",
+    );
+    match err {
+        ComposeError::MapKeyCollision(details) => {
+            assert_eq!(details.field, "devices");
+            assert_eq!(details.side, MapSide::Value);
+            assert_eq!(details.key, "/dev/shared");
+        }
+        other => panic!("expected MapKeyCollision on devices, got {other:?}"),
+    }
+}
+
+/// Non-colliding entries accumulate across tiers, and a `$param` in
+/// either half of a mapping is substituted like any other literal
+/// slot — the same live bug class issue #168 covers, and the same test
+/// shape as `publish_accumulates_across_tiers_and_substitutes_params`.
+#[test]
+fn devices_accumulates_across_tiers_and_substitutes_params() {
+    let composed = compose_ok(
+        "template dev(d: String) {\n  devices $d -> $d\n}\n\
+         service s {\n  with dev { d: \"/dev/kmsg\" }\n  devices \"/dev/fuse\" -> \"/dev/fuse\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries: Vec<(&str, &str)> = service
         .fields
         .devices
+        .entries
         .iter()
-        .map(|r| r.name.as_str())
+        .map(|e| (e.host.text(), e.container.text()))
         .collect();
-    assert_eq!(entries, vec!["/dev/kmsg:/dev/kmsg"]);
-}
-
-/// A qualified `devices` entry has no cross-file meaning — a host device
-/// path lives on the deploy target, not as a declaration any `.hll` file
-/// could export — so it's rejected the same as `dns`/`env_file` (#157).
-#[test]
-fn qualified_devices_reference_is_rejected() {
-    let err = compose_err("service s {\n  image \"x\"\n  devices [other.device]\n}\n");
-    assert!(matches!(
-        err,
-        ComposeError::UnsupportedQualifiedReference { field: "devices", alias, .. } if alias == "other"
-    ));
-}
-
-#[test]
-fn unqualified_devices_is_accepted() {
-    let composed =
-        compose_ok("service s {\n  image \"x\"\n  devices [\"/dev/kmsg:/dev/kmsg\"]\n}\n");
-    let service = single_service(&composed);
-    assert_eq!(service.fields.devices.len(), 1);
+    assert_eq!(
+        entries,
+        vec![("/dev/kmsg", "/dev/kmsg"), ("/dev/fuse", "/dev/fuse")]
+    );
 }
 
 /// `privileged` is a bare-presence `ServiceFields` field merged via

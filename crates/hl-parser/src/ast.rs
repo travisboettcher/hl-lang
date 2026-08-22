@@ -567,6 +567,30 @@ pub struct PublishEntry {
     pub span: Span,
 }
 
+/// `devices`'s entries — host device path → container device path
+/// mappings, emitted as Compose's `devices:` list (#167, replacing
+/// #157's original pre-joined `"host:container"` string per review
+/// feedback). Uniqueness is checked on `container` (the value side of
+/// `host -> container`), exactly [`PublishMap`]'s own convention; see
+/// [`crate::schema::DEVICES`] for why that side rather than the host
+/// one.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DeviceMap {
+    pub entries: Vec<DeviceEntry>,
+}
+
+/// One `host -> container` device-mapping entry. Both sides are plain
+/// [`Literal`]s, mirroring [`PublishEntry`]: a quoted container side is
+/// how Compose's optional `rwm`-style cgroup permissions suffix is
+/// written (`devices "/dev/sda" -> "/dev/xvda:rwm"`), and a bare path is
+/// the ordinary case.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceEntry {
+    pub host: Literal,
+    pub container: Literal,
+    pub span: Span,
+}
+
 /// `env`'s entries. Uniqueness is checked on `key`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EnvMap {
@@ -730,28 +754,19 @@ pub struct ServiceFields {
     /// absence already means false, so a colon after it is a parse
     /// error rather than an attempted value.
     pub privileged: Option<Span>,
-    /// `devices ["/dev/kmsg:/dev/kmsg"]` — host device paths to expose
-    /// inside the container, Compose's own `devices:` key (#157). Same
-    /// reasoning as [`Self::dns`]/[`Self::env_file`]: a plain generic
-    /// Compose key, not homelab-specific itself even though a real entry
-    /// always is, list-typed and reference-list shaped like
-    /// `middleware`/`networks`/`dns`/`env_file` (settable via a
-    /// bracketed list, the bare single-item sugar, or repeated
-    /// statements), even though its entries are ordinary
-    /// `"host:container"` mapping strings rather than references to
-    /// another declaration. Reusing [`Reference`] costs nothing here for
-    /// the same reason it costs nothing for `dns`/`env_file`: a device
-    /// path isn't something any `.hll` file declares, so it never needs
-    /// a qualifier to mean anything, and a `STRING` entry can't carry
-    /// one anyway.
-    ///
-    /// Unlike `dns`/`env_file`, `devices` *does* dedupe across `with`
-    /// composition — see `compose.rs`'s `LIST_FIELDS` entry for this
-    /// field for why: there's no Compose semantic under which repeating
-    /// the exact same mapping twice means anything different from
-    /// stating it once, unlike `dns`'s resolver priority or `env_file`'s
-    /// last-file-wins rule.
-    pub devices: Vec<Reference>,
+    /// `devices "/dev/kmsg" -> "/dev/kmsg"` — host device paths mapped
+    /// onto container device paths, Compose's own `devices:` key (#157).
+    /// A plain generic Compose key, not homelab-specific itself even
+    /// though a real entry always is — but map-kind rather than
+    /// reference-list shaped, mirroring [`Self::publish`] field for
+    /// field rather than `dns`/`env_file`: #167's review feedback asked
+    /// for the same `host -> container` arrow spelling `publish`/
+    /// `volume` already use in place of the original pre-joined
+    /// `"host:container"` string, so this now merges key-by-key on the
+    /// container side through `compose.rs`'s `merge_map`, exactly like
+    /// `publish`, rather than concatenating through `LIST_FIELDS`. See
+    /// [`crate::schema::DEVICES`] for the uniqueness-side reasoning.
+    pub devices: DeviceMap,
     /// Docker's own `container_name:` key. `None` means "default to the
     /// service's own name" (via the same `{{name}}` interpolation
     /// binding `expose`'s `as`-sugar already uses) — codegen, not the

@@ -23,10 +23,10 @@ use std::fmt;
 use hl_lexer::{SourceMap, Span};
 
 use crate::ast::{
-    Command, DependsOnEntry, EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image,
-    Literal, Network, ParamType, Program, PublishEntry, PublishMap, RawMap, RawValue, Reference,
-    Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, Volume,
-    VolumeEntry, VolumeHost, VolumeMap,
+    Command, DependsOnEntry, DeviceEntry, DeviceMap, EnvEntry, EnvMap, Expose, Healthcheck,
+    HealthcheckTest, Ident, Image, Literal, Network, ParamType, Program, PublishEntry, PublishMap,
+    RawMap, RawValue, Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation,
+    TopDecl, Traefik, Volume, VolumeEntry, VolumeHost, VolumeMap,
 };
 use crate::schema::MapSide;
 
@@ -221,15 +221,18 @@ pub enum ComposeError {
     UnknownAlias { alias: String, span: Span },
     /// A qualified reference (`alias.name`) was used on a reference-list
     /// field that has no cross-file meaning — `middleware`,
-    /// `depends_on`, `dns`, `env_file`, `devices`, or
-    /// `expose.entrypoint`. (`depends_on` names a same-file sibling
-    /// service; the others aren't resolved against anything an `.hll`
-    /// file declares at all — an entry point lives in the deployment's
-    /// own `traefik.yml`, an `env_file` path lives on disk next to the
-    /// compose file, and a `devices` entry names a host device path
-    /// (#157).) Rejected rather than silently accepted or silently
-    /// dropped. Only `networks` resolves a qualifier, because a
-    /// `network` really is a declaration another file can export.
+    /// `depends_on`, `dns`, `env_file`, or `expose.entrypoint`.
+    /// (`depends_on` names a same-file sibling service; the others
+    /// aren't resolved against anything an `.hll` file declares at
+    /// all — an entry point lives in the deployment's own
+    /// `traefik.yml`, and an `env_file` path lives on disk next to the
+    /// compose file.) `devices` isn't among these any more: since #167
+    /// its entries are plain [`Literal`]s, like `publish`'s and `env`'s,
+    /// which have no `alias.` qualifier to carry in the first place, so
+    /// there's nothing here to reject. Rejected rather than silently
+    /// accepted or silently dropped. Only `networks` resolves a
+    /// qualifier, because a `network` really is a declaration another
+    /// file can export.
     UnsupportedQualifiedReference {
         field: &'static str,
         alias: String,
@@ -1432,9 +1435,12 @@ fn resolve_invocation<R: SymbolResolver>(
 /// unqualified, resolved bare reference so [`merge_tier`] never needs to
 /// know imports exist, and recording the declaration it reached in
 /// `imports`. Qualified `middleware`/`depends_on`/`dns`/`env_file`/
-/// `devices`/`expose.entrypoint` entries are rejected outright — see
+/// `expose.entrypoint` entries are rejected outright — see
 /// [`ComposeError::UnsupportedQualifiedReference`]'s doc for why those
-/// have no cross-file meaning yet. Runs exactly once per scope, at
+/// have no cross-file meaning yet. `devices` needs no such rejection any
+/// more: since #167 its entries are plain [`Literal`]s, like `publish`'s
+/// and `env`'s, which have no `alias.` qualifier to even carry — a
+/// [`Reference`] is the only shape that could. Runs exactly once per scope, at
 /// the point that scope's own directly-written fields are merged (its
 /// `Tier::Own` step in [`compose_service`]/[`resolve_template`]) — by
 /// induction, every `ServiceFields` [`merge_tier`] ever sees has already
@@ -1483,10 +1489,6 @@ fn resolve_qualified_references<R: SymbolResolver>(
     // resolve against — same reasoning as `expose.entrypoint` just
     // below.
     reject_qualified(&fields.env_file, "env_file")?;
-    // A `devices` entry names a host device path (`/dev/kmsg:/dev/kmsg`),
-    // which no `.hll` file declares — same reasoning as `env_file` just
-    // above (#157).
-    reject_qualified(&fields.devices, "devices")?;
     // `expose.entrypoint` joined this list when it became a reference
     // list. An entry point names something in the deployment's own
     // `traefik.yml`, which no `.hll` file declares, so there is nothing
@@ -1571,6 +1573,15 @@ fn substitute_params(
     for p in &mut fields.publish.entries {
         substitute_literal(&mut p.host, args, template_name)?;
         substitute_literal(&mut p.container, args, template_name)?;
+    }
+    // `devices` (#167) walks the same way `publish` just above does —
+    // both sides are plain `Literal`s now, so a `$param` in either half
+    // of a `devices` mapping needs the same substitution `publish`'s
+    // own entries get, or it would survive composition unresolved (see
+    // issue #168's live bug class this guards against).
+    for d in &mut fields.devices.entries {
+        substitute_literal(&mut d.host, args, template_name)?;
+        substitute_literal(&mut d.container, args, template_name)?;
     }
     for e in &mut fields.env.entries {
         substitute_literal(&mut e.key, args, template_name)?;
@@ -1743,6 +1754,11 @@ impl Spanned for PublishEntry {
         self.span
     }
 }
+impl Spanned for DeviceEntry {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
 /// The accumulator a field-bag's tiers merge into, tracking which tier
 /// last set each value so [`merge_scalar`]/[`merge_map`] can tell
 /// "explicit-vs-explicit" (an error) apart from "defaults-vs-anything"
@@ -1768,14 +1784,16 @@ impl Spanned for PublishEntry {
 /// hand-written merge/rebuild logic.
 ///
 /// `lists` is the same idea for every plain reference-list field — the
-/// five bare ones on `ServiceFields` (`middleware`/`networks`/`dns`/
-/// `env_file`/`devices`) plus `expose.entrypoint`, which lives inside a
+/// four bare ones on `ServiceFields` (`middleware`/`networks`/`dns`/
+/// `env_file`) plus `expose.entrypoint`, which lives inside a
 /// nested struct and so can't be a plain `MergeAcc` field the way the
 /// others once were. They carry no `Tier`: list fields concatenate
 /// unconditionally, so there is no collision to attribute to a tier.
-/// See [`LIST_FIELDS`].
+/// See [`LIST_FIELDS`]. `devices` isn't among them any more either — see
+/// [`Self::devices`]'s own doc for why it moved onto the same
+/// `merge_map` path as `env`/`volume`/`publish` (#167).
 ///
-/// `depends_on` isn't one of the five — it moved into its own
+/// `depends_on` isn't one of the four — it moved into its own
 /// `depends_on` field below, merged key-by-key on the referenced
 /// service's own name through [`merge_depends_on`] rather than through
 /// [`LIST_FIELDS`], once #155 gave each entry an optional `condition`
@@ -1799,6 +1817,13 @@ struct MergeAcc {
     volumes: Vec<(VolumeEntry, Tier)>,
     env: Vec<(EnvEntry, Tier)>,
     publish: Vec<(PublishEntry, Tier)>,
+    /// `devices`'s own merge point (#167) — moved here from
+    /// [`Self::lists`] once its entries stopped being plain
+    /// [`Reference`]s and gained the same `host -> container` shape
+    /// `publish`'s entries have. Merged key-by-key on the container
+    /// side through the same [`merge_map`] `publish` uses, not
+    /// `LIST_FIELDS`'s distinct-name concatenation.
+    devices: Vec<(DeviceEntry, Tier)>,
     /// `depends_on`'s own merge point — see this struct's own doc for
     /// why it's merged like a map field (keyed by the referenced
     /// service's name) rather than riding [`Self::lists`].
@@ -1853,6 +1878,9 @@ impl MergeAcc {
             },
             publish: PublishMap {
                 entries: self.publish.into_iter().map(|(v, _)| v).collect(),
+            },
+            devices: DeviceMap {
+                entries: self.devices.into_iter().map(|(v, _)| v).collect(),
             },
             depends_on: self.depends_on.into_iter().map(|(v, _)| v).collect(),
             raw: self.raw,
@@ -2102,12 +2130,14 @@ fn empty_traefik(span: Span) -> Traefik {
 /// name each one — but `entrypoint` lives inside `expose`, which
 /// `into_service_fields` *rebuilds*, so it needs the same read-out/
 /// write-back indirection the scalars already had. Given one list field
-/// had to be described by function pointers, all six are (`depends_on`
+/// had to be described by function pointers, all five are (`depends_on`
 /// no longer among them — see [`MergeAcc`]'s doc for why #155 moved it
-/// onto its own [`merge_depends_on`]-based merge point instead): the whole
-/// point of [`SCALAR_FIELDS`] (see hl-lang#28) is that both merge
+/// onto its own [`merge_depends_on`]-based merge point instead, and
+/// `devices` never was — see [`MergeAcc::devices`]'s doc for why #167
+/// gave it the same `merge_map` treatment `publish` gets instead): the
+/// whole point of [`SCALAR_FIELDS`] (see hl-lang#28) is that both merge
 /// functions stay one generic loop apiece with no hand-enumerated
-/// knowledge of `ServiceFields`'s shape, and leaving five lists
+/// knowledge of `ServiceFields`'s shape, and leaving four lists
 /// hand-named beside a one-row table would have kept exactly the shape
 /// that design set out to remove.
 struct ListField {
@@ -2116,31 +2146,26 @@ struct ListField {
     set: fn(&mut ServiceFields, Vec<Reference>),
     /// Whether repeats of an already-accumulated name are dropped
     /// rather than appended (hl-lang#69). True for the set-like fields
-    /// — `networks`, `middleware`, `expose.entrypoint`, `devices` (#157)
-    /// — where naming the same thing twice means exactly what naming it
-    /// once means, so the repeat is pure noise: it duplicated
-    /// `networks:` entries and `middlewares=` label values in the
-    /// output, made a single external network look like an ambiguity
-    /// with itself, and (since list size then doubled per composition
-    /// level) turned a few hundred bytes of nested `with` into an
-    /// out-of-memory abort.
+    /// — `networks`, `middleware`, `expose.entrypoint` — where naming
+    /// the same thing twice means exactly what naming it once means, so
+    /// the repeat is pure noise: it duplicated `networks:` entries and
+    /// `middlewares=` label values in the output, made a single
+    /// external network look like an ambiguity with itself, and (since
+    /// list size then doubled per composition level) turned a few
+    /// hundred bytes of nested `with` into an out-of-memory abort.
     ///
     /// `dns` and `env_file` are the two exceptions, deliberately: order
     /// is observable for both — `dns` as resolver priority, `env_file`
     /// as Compose's own last-file-wins rule when the same variable is
     /// set in two of the listed files (#154) — so their append
     /// semantics are left exactly as they were even though a repeat is
-    /// just as meaningless. `devices` doesn't share that exception even
-    /// though its entries are ordinary literal strings exactly like
-    /// `dns`'s and `env_file`'s: there's no Compose semantic under which
-    /// the *position* of a repeated `"host:container"` mapping changes
-    /// anything — unlike a resolver IP's priority or a same-named env
-    /// var's last-file-wins value, a device mapping is either present or
-    /// it isn't, so a repeat is exactly as meaningless as a repeated
-    /// `networks`/`middleware` entry and dedupes the same way. Every
-    /// other reference list here — `expose.entrypoint`/`devices`
-    /// included — is a set, and a router attached twice to the same
-    /// entry point is attached to it once.
+    /// just as meaningless. (`devices` used to sit in this same list,
+    /// deduped like `networks`/`middleware` rather than kept like
+    /// `dns`/`env_file` — see #157's original reasoning, superseded by
+    /// #167's move onto [`merge_map`], which dedupes every map-kind
+    /// field's repeats by construction: a later entry with the same key
+    /// simply replaces the earlier one, so there is no separate
+    /// `dedupe` flag to set for it any more.)
     dedupe: bool,
 }
 
@@ -2194,12 +2219,6 @@ static LIST_FIELDS: &[ListField] = &[
         dedupe: false,
         take: |f| std::mem::take(&mut f.env_file),
         set: |f, v| f.env_file = v,
-    },
-    ListField {
-        key: "devices",
-        dedupe: true,
-        take: |f| std::mem::take(&mut f.devices),
-        set: |f, v| f.devices = v,
     },
 ];
 
@@ -2346,6 +2365,17 @@ fn merge_tier(
         "publish",
         MapSide::Value,
         incoming.publish.entries,
+        tier,
+        |e| e.container.text().to_string(),
+    )?;
+    // `devices` (#167) merges exactly like `publish` just above — keyed
+    // on the container side, same [`MapSide::Value`] uniqueness
+    // convention, same reasoning (see `schema::DEVICES`'s doc).
+    merge_map(
+        &mut acc.devices,
+        "devices",
+        MapSide::Value,
+        incoming.devices.entries,
         tier,
         |e| e.container.text().to_string(),
     )?;

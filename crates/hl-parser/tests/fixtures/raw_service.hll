@@ -14,7 +14,7 @@ service cadvisor {
   volume "/var/lib/docker" -> "/var/lib/docker" { read_only }
   volume "/dev/disk/" -> "/dev/disk" { read_only }
   privileged
-  devices ["/dev/kmsg:/dev/kmsg"]
+  devices "/dev/kmsg" -> "/dev/kmsg"
   raw {
     security_opt: { seccomp: "unconfined" }
   }
