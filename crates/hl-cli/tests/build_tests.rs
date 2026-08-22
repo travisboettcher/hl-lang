@@ -979,6 +979,57 @@ fn build_reports_a_real_stdout_write_failure_instead_of_exiting_clean() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// What `--build` writes to stdout has to be *parseable* Compose YAML,
+/// not merely the bytes we last recorded. `cmd/build-stdout.trycmd`
+/// pins those bytes exactly, which catches any change to them, but
+/// byte-equality against a recorded run can't tell a valid document
+/// from an invalid one — if the generated header and the YAML body
+/// ever concatenated into something a parser rejects, the transcript
+/// would happily keep asserting the broken output.
+///
+/// So this stays a Rust test: it spawns the binary (the stdout path
+/// prints straight to the process's real stdout, which an in-process
+/// `run()` call can't intercept) and feeds the result to a real YAML
+/// parser. It also keeps the shared `syncthing.hll` fixture on the
+/// stdout path — the transcript deliberately uses its own small
+/// service, since a trycmd sandbox needs its own copy of every input
+/// and a second copy of that fixture would drift from the original.
+#[test]
+fn build_to_stdout_emits_parseable_yaml_for_the_shared_fixture() {
+    let dir = scratch_dir("stdout-parseable");
+    let input = dir.join("syncthing.hll");
+    fs::write(&input, SYNCTHING_HLL).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_hllc"))
+        .args(["--build", input.to_str().unwrap()])
+        .output()
+        .expect("failed to run the hllc binary");
+
+    assert!(
+        output.status.success(),
+        "building the shared syncthing fixture should succeed, got {:?}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
+    assert!(
+        stdout.starts_with(GENERATED_HEADER),
+        "stdout should carry the generated-file header"
+    );
+
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("stdout isn't valid YAML: {err}\n{stdout}"));
+    assert!(
+        doc.get("services")
+            .and_then(|s| s.get("syncthing"))
+            .is_some(),
+        "the parsed document should declare the syncthing service, got:\n{stdout}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// A named volume imported through an alias resolves against the
 /// *aliased* file's declarations, and the imported declaration's own
 /// options ride along into the generated `volumes:` section — the same
