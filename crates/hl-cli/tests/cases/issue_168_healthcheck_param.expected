@@ -1,0 +1,24 @@
+--- compose ---
+services:
+  db:
+    image: postgres:15
+    healthcheck:
+      test: pg_isready -U app
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
+    networks:
+    - default
+  db-exec:
+    image: postgres:15
+    healthcheck:
+      test:
+      - CMD
+      - pg_isready
+      - -U
+      - app
+      interval: 15s
+    networks:
+    - default

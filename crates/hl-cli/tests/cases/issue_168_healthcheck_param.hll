@@ -1,0 +1,48 @@
+# #168: a `$param` written inside a template's `healthcheck` body has to
+# reach the generated Compose document as the argument the `with` bound
+# to it, not as the parameter's own name. Composition used to skip
+# `healthcheck` entirely, so every literal-valued sub-field emitted the
+# parameter name as an ordinary string — silently wrong output, exit 0.
+# Both `test` forms are covered: the shell string below, and the exec
+# list, where each item substitutes on its own.
+template checked(
+  cmd: String,
+  every: String,
+  wait: String,
+  tries: Number,
+  grace: String,
+  probe: String
+) {
+  healthcheck {
+    test: $cmd
+    interval: $every
+    timeout: $wait
+    retries: $tries
+    start_period: $grace
+    start_interval: $probe
+  }
+}
+
+template exec_checked(bin: String, user: String, every: String) {
+  healthcheck {
+    test: ["CMD", $bin, "-U", $user]
+    interval: $every
+  }
+}
+
+service db {
+  image "postgres:15"
+  with checked {
+    cmd: "pg_isready -U app",
+    every: "10s",
+    wait: "5s",
+    tries: 3,
+    grace: "30s",
+    probe: "2s"
+  }
+}
+
+service db-exec {
+  image "postgres:15"
+  with exec_checked { bin: "pg_isready", user: "app", every: "15s" }
+}

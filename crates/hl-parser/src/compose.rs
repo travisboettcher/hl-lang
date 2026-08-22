@@ -1560,6 +1560,36 @@ fn substitute_params(
         }
         None => {}
     }
+    // `healthcheck`'s literal-valued sub-fields (#153) walk exactly like
+    // `command`'s just above (#168): every one of them is a plain
+    // `Literal` slot a `$param` can be written into, and `test` carries
+    // the same shell/exec split `command` does, so the exec form's items
+    // each get substituted individually. Missing any of them left the
+    // `Literal::Param` in place for codegen to emit as the parameter's
+    // own name.
+    if let Some(hc) = &mut fields.healthcheck {
+        match &mut hc.test {
+            Some(HealthcheckTest::Shell(lit)) => substitute_literal(lit, args, template_name)?,
+            Some(HealthcheckTest::Exec(items, _)) => {
+                for item in items {
+                    substitute_literal(item, args, template_name)?;
+                }
+            }
+            None => {}
+        }
+        for lit in [
+            hc.interval.as_mut(),
+            hc.timeout.as_mut(),
+            hc.retries.as_mut(),
+            hc.start_period.as_mut(),
+            hc.start_interval.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            substitute_literal(lit, args, template_name)?;
+        }
+    }
     for v in &mut fields.volumes.entries {
         // Only a bind-mount host has a literal to substitute into. A
         // named-volume host is a `Reference`, exactly like a `networks
