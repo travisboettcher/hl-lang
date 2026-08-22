@@ -1,0 +1,2 @@
+--- error ---
+missing_template_argument.hll:12:8: missing required argument `host` for template `proxied`

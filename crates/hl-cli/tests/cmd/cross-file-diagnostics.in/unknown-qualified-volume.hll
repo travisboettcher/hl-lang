@@ -1,0 +1,6 @@
+use "storage.hll" as storage
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  volume storage.medai -> "/data"
+}

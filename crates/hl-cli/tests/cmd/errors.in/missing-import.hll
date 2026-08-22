@@ -1,0 +1,5 @@
+use "shared/templates.hll" as common
+
+service web {
+  image "nginx:alpine"
+}

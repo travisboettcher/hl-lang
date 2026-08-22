@@ -1,0 +1,13 @@
+# A `with` that supplies some but not all of a template's parameters
+# names the one it left out, and points at the invocation rather than at
+# the declaration. compose_tests.rs pins the variant and its fields;
+# nothing pinned what a user actually reads.
+template proxied(port, host) {
+  expose $port
+  env HOST = $host
+}
+
+service web {
+  image "nginx:alpine"
+  with proxied { port: 8080 }
+}

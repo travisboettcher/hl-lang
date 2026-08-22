@@ -84,11 +84,96 @@ floor honest.
 ```sh
 cargo build --workspace
 cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --check
 ```
 
-CI also gates on coverage and runs fuzz and mutation testing:
+`crates/hl-codegen/tests/golden_tests.rs` keeps its expected Compose YAML
+as [`insta`](https://insta.rs) inline snapshots, so a deliberate codegen
+change updates those expectations through a review step rather than
+through dozens of hand-edited YAML literals:
+
+```sh
+cargo install cargo-insta --locked
+
+# Step through each changed snapshot, accepting or rejecting one at a time.
+cargo insta review
+
+# Take every pending snapshot at once, once you've read the diffs.
+cargo insta accept
+```
+
+Read every diff before you accept it. A snapshot states what the compiler
+must emit, so taking a new one asserts that the new output is correct—make
+that call deliberately rather than to clear a red test. Both `cargo test
+--workspace` and CI fail on a mismatch and never rewrite a snapshot.
+
+`crates/hl-cli/tests/cmd/` covers the `hllc` command line itself with
+[`trycmd`](https://docs.rs/trycmd) transcripts. Each `.trycmd` file states
+an invocation, the stdout and stderr it produces, and its exit code, as
+plain text you can read. A `<name>.in/` directory beside it supplies the
+working directory those commands run in, and a `<name>.out/` directory
+states what that working directory must hold afterwards, which is how the
+multi-file `--build --out <dir>` cases assert everything they wrote at
+once. Bless a deliberate change to the output the same way:
+
+```sh
+# Rewrite every transcript step whose output no longer matches.
+TRYCMD=overwrite cargo test -p hl-cli --test cli_tests
+
+# Or write each command's real output to crates/hl-cli/dump/ and
+# compare it yourself, leaving the transcripts alone.
+TRYCMD=dump cargo test -p hl-cli --test cli_tests
+```
+
+Read the resulting diff line by line before you commit it. A transcript
+states what `hllc` must print and what exit code it must return, so
+rewriting one asserts that the new diagnostic wording, the new exit code,
+or the newly generated file is what users should now get. CI pins `TRYCMD`
+to a value that never writes, so a mismatch there fails the build.
+
+`crates/hl-cli/tests/cases/` is a file-driven regression corpus: one
+`.hll` input per case, with what the compiler makes of it recorded beside
+it in a `.expected` file—the generated Compose document, or the rendered
+diagnostic, or both a warning and a document, each under its own label.
+Adding a case means dropping in a file rather than writing a Rust test:
+
+```sh
+# Record what the compiler makes of every case that has no expectation
+# yet, or whose expectation no longer matches.
+SNAPSHOTS=overwrite cargo test -p hl-cli --test cases
+```
+
+A case file has to open with a `#` comment saying what it pins down, and
+its name becomes the test name—so a case called
+`issue_168_healthcheck_param.hll` runs under `cargo test issue_168`, and
+a failure names the file. `SNAPSHOTS` is the variable the transcripts
+already use, so this adds no further way to update an expected output.
+See "Adding a regression case" in `CONTRIBUTING.md` for which cases
+belong here and which belong in the hand-written suites.
+
+`crates/hl-cli/tests/compose_differential.rs` hands every document
+codegen produces to Docker Compose's own parser. Snapshots and
+transcripts prove the output stays stable against expectations this
+repo wrote itself, which says nothing about whether Compose agrees—so
+this test asks Compose, over the fixtures under
+`crates/hl-parser/tests/fixtures/` and every `build`-tagged worked
+example in `book/src/`. It also compares Compose's normalized reading
+of each document against the generated one, catching a label or an
+`expose` entry that Compose accepts but reads differently than codegen
+meant it.
+
+An off-by-default Cargo feature gates that test, because no contributor
+should need Docker to run `cargo test --workspace`. Enabling the feature
+**is** the request to run it, so a missing Compose plugin fails the test
+rather than skipping it—a skip would read as coverage in a CI log, which
+is worse than no test at all. Nothing needs a running Docker daemon:
+`docker compose config` parses and validates on the client side. CI runs
+the test in its own job, kept clear of the coverage gate so a Compose
+upgrade can't block unrelated pull requests.
+
+CI also gates on coverage and runs fuzz, mutation, and differential
+testing:
 
 ```sh
 # Coverage gate: CI fails if workspace-wide line coverage drops below 80%.
@@ -114,6 +199,13 @@ cargo +nightly fuzz run --target x86_64-unknown-linux-gnu fuzz_pipeline -- -max_
 # mutants that hang rather than fail.
 cargo install cargo-mutants --locked
 cargo mutants --workspace --timeout-multiplier 3
+
+# Differential test: Docker Compose's own parser validates every
+# document codegen produces, over the parser fixtures and the book's
+# `build`-tagged worked examples. Needs the Compose v2 plugin, not a
+# running daemon. Off by default, and it fails rather than skips when
+# the plugin is missing.
+cargo test -p hl-cli --features docker-differential --test compose_differential
 
 # Advisories, licenses, and dependency bans — see deny.toml.
 cargo install cargo-deny --locked

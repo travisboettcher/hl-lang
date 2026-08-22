@@ -1,0 +1,7 @@
+template defaults {
+  restart unless-stopped
+}
+
+service db {
+  image "postgres"
+}

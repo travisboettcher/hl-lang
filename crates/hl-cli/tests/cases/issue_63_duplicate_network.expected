@@ -1,0 +1,2 @@
+--- error ---
+issue_63_duplicate_network.hll:11:9: duplicate network `traefik-net` (first declared at issue_63_duplicate_network.hll:6:9)

@@ -1,0 +1,5 @@
+--- warnings ---
+network.hll:4:9: warning: network `traefik-net` is declared but no service references it, so it is not emitted — add it to a service's `networks [...]` list, or remove the declaration
+network.hll:8:9: warning: network `internal` is declared but no service references it, so it is not emitted — add it to a service's `networks [...]` list, or remove the declaration
+--- compose ---
+services: {}

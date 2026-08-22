@@ -1,0 +1,17 @@
+# `with` cycles have to be reported as cycles, naming the whole chain,
+# rather than as a stack overflow or a depth-limit error. The chain is
+# what tells you where to cut it, so the rendered text is the contract —
+# compose_tests.rs matches on the `TemplateCycle` variant's fields and
+# never renders it.
+template a {
+  with b
+}
+
+template b {
+  with a
+}
+
+service s {
+  image "nginx:alpine"
+  with a
+}

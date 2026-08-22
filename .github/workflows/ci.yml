@@ -21,6 +21,37 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # `insta`'s inline snapshots in crates/hl-codegen/tests/golden_tests.rs
+  # are the expected Compose YAML, so a mismatch is a real failure and
+  # has to be reviewed by a person. `no` forbids insta from writing
+  # anything: it neither rewrites a snapshot in place nor leaves a
+  # `.pending-snap` file behind, so the only outcome CI can reach is a
+  # failed assertion with a diff. insta already infers this from the
+  # `CI` variable GitHub sets, but that inference is a default the
+  # library could change, and the cost of stating it is one line
+  # against a silently self-approving test suite.
+  INSTA_UPDATE: "no"
+  # The same standing rule for `trycmd`'s transcripts in
+  # crates/hl-cli/tests/cmd/: the `.trycmd` file and its `.out/`
+  # directory are the expected output of the `hllc` binary, so a
+  # mismatch has to be read by a person rather than blessed by the
+  # machine that produced it. `trycmd` only writes when TRYCMD is
+  # literally `overwrite` (or `dump`) and fails on a mismatch
+  # otherwise, so this is already its default — stating it means a
+  # `TRYCMD` leaking in from a runner image or a repository variable
+  # can't quietly turn CI into a rubber stamp. Any value that isn't
+  # `overwrite`/`dump` selects the failing mode; `fail` is the name
+  # `trycmd` uses for it internally.
+  TRYCMD: "fail"
+  # `snapbox` is what compares the `.out/` directories, and it reads
+  # its own action out of SNAPSHOTS. `verify` is its default and its
+  # name for "fail on mismatch"; `overwrite` is the one to keep out.
+  # The same pin covers the regression corpus in
+  # crates/hl-cli/tests/cases/, which deliberately reuses this variable
+  # rather than introducing a third one: a `.expected` file there is the
+  # compiler's expected output, so CI must fail on a mismatch rather
+  # than rewrite the file it just disagreed with.
+  SNAPSHOTS: "verify"
 
 jobs:
   test:
@@ -44,8 +75,14 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --check
 
+      # `--all-features` is what reaches hl-cli's off-by-default
+      # `docker-differential` feature, whose test code nothing else in
+      # this job compiles. Linting needs no Docker — the test only
+      # shells out to it at run time — so the gated code stays honest
+      # here, in the required check, instead of rotting until someone
+      # enables the feature.
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
@@ -72,6 +109,42 @@ jobs:
           name: coverage-report
           path: target/llvm-cov/html
           if-no-files-found: ignore
+
+  compose-differential:
+    name: differential test (docker compose config)
+    runs-on: ubuntu-latest
+    # Two `docker compose config` invocations per document over a corpus
+    # of roughly fifteen, each a client-side parse with no image pull and
+    # no container start, so the budget here is a Rust build plus a few
+    # seconds. The cap exists for the same reason every other job's does.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.94.1
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `ubuntu-latest` ships both the Docker CLI and the Compose v2
+      # plugin, so there is nothing to install. Printing the version
+      # anyway records which Compose actually graded this run: the
+      # oracle is external, so its version is part of the result, and a
+      # rejection that appears out of nowhere is usually a Compose
+      # upgrade rather than a codegen change.
+      - name: docker compose version
+        run: docker compose version
+
+      # Deliberately its own job rather than another step in `test`.
+      # That job is the coverage gate every pull request has to clear,
+      # and this one depends on a tool outside the Rust toolchain
+      # entirely — a Compose upgrade that rejects something new, or a
+      # runner image without the plugin, would otherwise block changes
+      # that have nothing to do with generated YAML. Splitting them
+      # keeps the failure legible: a red `test` is the code, a red
+      # `compose-differential` is the output contract.
+      - name: cargo test (docker-differential)
+        run: cargo test -p hl-cli --features docker-differential --test compose_differential
 
   build:
     name: build (release)

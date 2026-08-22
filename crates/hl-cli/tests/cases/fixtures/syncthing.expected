@@ -1,0 +1,26 @@
+--- compose ---
+services:
+  syncthing:
+    image: lscr.io/linuxserver/syncthing:latest
+    restart: unless-stopped
+    environment:
+    - PUID=1000
+    - PGID=100
+    volumes:
+    - syncthing-config:/config
+    networks:
+    - traefik-net
+    expose:
+    - 8384
+    labels:
+    - traefik.docker.network=docker_default
+    - traefik.http.routers.syncthing.rule=Host(`syncthing.internal.techdebtor.io`)
+    - traefik.http.routers.syncthing.entrypoints=web-secure
+    - traefik.http.routers.syncthing.middlewares=local-ipwhitelist@file,forwardAuth-authentik@file
+    - traefik.http.services.syncthing.loadbalancer.server.port=8384
+networks:
+  traefik-net:
+    name: docker_default
+    external: true
+volumes:
+  syncthing-config: null

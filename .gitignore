@@ -3,3 +3,25 @@
 
 # Fetched by `vale sync`; not vendored. Run `vale sync` after cloning.
 /.vale/styles/Google
+
+# Written by `insta` when an inline snapshot fails locally, and consumed
+# by `cargo insta review`; it's scratch state for that one run, not
+# something to commit. CI never produces one — INSTA_UPDATE=no in
+# .github/workflows/ci.yml stops insta writing pending snapshots there.
+*.pending-snap
+
+# Written by `TRYCMD=dump cargo test -p hl-cli --test cli_tests`, which
+# dumps every transcript's real output for inspection instead of
+# comparing it. Scratch state for one run, same as insta's pending
+# snapshots; CI never produces one, since TRYCMD is pinned to a
+# non-writing value in .github/workflows/ci.yml.
+/crates/hl-cli/dump/
+
+# Written by `cargo mutants` on every local run: the mutated source
+# tree, per-mutant logs, and the caught/missed summary. Scratch state
+# for one run, same as the two entries above. `mutants.out.old/` is the
+# previous run, which cargo-mutants rotates aside rather than deleting.
+# CI produces both too, in the `mutation-test` job, but never commits
+# from that job.
+/mutants.out/
+/mutants.out.old/

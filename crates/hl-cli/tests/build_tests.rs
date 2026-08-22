@@ -3,6 +3,20 @@
 //! own extensive test coverage (`hl-parser`, `hl-codegen`); these tests
 //! only check the CLI's own plumbing — argument handling, file I/O,
 //! directory iteration.
+//!
+//! Everything here calls `run()` in-process, and that is the dividing
+//! line against `cli_tests.rs` (#171): these tests assert on a returned
+//! `ExitCode` and on the state of the filesystem afterwards — including
+//! files that must *not* exist, which no output comparison can express.
+//! The tests that only ever asserted on printed text moved to the
+//! transcripts under `tests/cmd/`, where the text is readable as text
+//! instead of as a Rust string literal.
+//!
+//! Two tests below still spawn the real binary, because what they check
+//! is what happens to `hllc`'s *pipe*: a reader closing early, and a
+//! write that fails for a reason other than that. Neither is reachable
+//! from an in-process call or from a transcript, both of which need the
+//! child's output to arrive intact.
 
 use std::fs;
 use std::path::PathBuf;
@@ -33,21 +47,6 @@ fn scratch_dir(name: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-/// Runs the real `hllc` binary (built by Cargo before integration tests
-/// run, per `CARGO_BIN_EXE_<name>`) as a subprocess and returns its
-/// captured output. `run()`'s own `eprintln!`/`println!` calls write
-/// straight to the process's real stdout/stderr, which an in-process
-/// call to `run()` has no way to intercept — the zero-output/skip
-/// messages this file's tests check below only exist as printed text,
-/// with no other observable side effect, so this is the one place that
-/// needs the real binary rather than calling `run()` directly.
-fn hllc_output(args: &[&str]) -> std::process::Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_hllc"))
-        .args(args)
-        .output()
-        .expect("failed to run the hllc binary")
 }
 
 #[test]
@@ -472,92 +471,6 @@ fn build_flat_directory_builds_only_the_files_that_declare_a_service() {
     assert!(generated.exists());
     assert!(!out_dir.join("network").exists());
     assert!(!out_dir.join("templates").exists());
-
-    fs::remove_dir_all(&dir).ok();
-}
-
-/// The "nothing was built" message (#89) is printed exactly when the
-/// running `built` count stayed zero — checked from both directions, so
-/// a `==`/`!=` swap on that check, or a `+=`/`*=` swap on the counter
-/// itself (which would leave `built` stuck at zero even after a real
-/// build), each flips one of these two assertions.
-#[test]
-fn build_flat_directory_prints_no_message_when_something_builds() {
-    let dir = scratch_dir("flat-message-positive");
-    fs::write(dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
-    let out_dir = dir.join("out");
-
-    let output = hllc_output(&[
-        "--build",
-        dir.to_str().unwrap(),
-        "--out",
-        out_dir.to_str().unwrap(),
-    ]);
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("nothing was built"),
-        "expected no 'nothing was built' message when a service did build, got: {stderr}"
-    );
-
-    fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn build_flat_directory_prints_a_message_when_nothing_builds() {
-    let dir = scratch_dir("flat-message-negative");
-    fs::write(dir.join("network.hll"), IMPORTS_NETWORK_HLL).unwrap();
-    let out_dir = dir.join("out");
-
-    let output = hllc_output(&[
-        "--build",
-        dir.to_str().unwrap(),
-        "--out",
-        out_dir.to_str().unwrap(),
-    ]);
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("nothing was built"),
-        "expected a 'nothing was built' message when no service built, got: {stderr}"
-    );
-
-    fs::remove_dir_all(&dir).ok();
-}
-
-/// Same pair, for co-located mode's own `built` counter and zero-output
-/// check in `run_build`.
-#[test]
-fn build_colocated_prints_no_message_when_something_builds() {
-    let dir = scratch_dir("colocated-message-positive");
-    let service_dir = dir.join("syncthing");
-    fs::create_dir_all(&service_dir).unwrap();
-    fs::write(service_dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
-
-    let output = hllc_output(&["--build", dir.to_str().unwrap()]);
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("nothing was built"),
-        "expected no 'nothing was built' message when a service did build, got: {stderr}"
-    );
-
-    fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn build_colocated_prints_a_message_when_nothing_builds() {
-    let dir = scratch_dir("colocated-message-negative");
-    fs::create_dir_all(dir.join("shared")).unwrap();
-    fs::write(dir.join("shared").join("network.hll"), IMPORTS_NETWORK_HLL).unwrap();
-
-    let output = hllc_output(&["--build", dir.to_str().unwrap()]);
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("nothing was built"),
-        "expected a 'nothing was built' message when no service built, got: {stderr}"
-    );
 
     fs::remove_dir_all(&dir).ok();
 }
@@ -1028,33 +941,6 @@ fn parse_does_not_panic_when_stdout_closes_early() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// `--build` with no `--out` prints the generated YAML through
-/// `write_stdout` to the process's real stdout. `run()` called in-process
-/// can't observe that (see `hllc_output`'s doc comment), so this has to
-/// go through the real binary — it's the only thing that would notice
-/// `write_stdout` silently doing nothing instead of writing.
-#[test]
-fn build_single_file_with_no_out_prints_yaml_to_real_stdout() {
-    let dir = scratch_dir("stdout-yaml");
-    let input = dir.join("syncthing.hll");
-    fs::write(&input, SYNCTHING_HLL).unwrap();
-
-    let output = hllc_output(&["--build", input.to_str().unwrap()]);
-    assert!(output.status.success());
-
-    let yaml = String::from_utf8(output.stdout).unwrap();
-    let value: serde_yaml_ng::Value =
-        serde_yaml_ng::from_str(&yaml).expect("stdout should be valid YAML");
-    assert!(
-        value
-            .get("services")
-            .and_then(|s| s.get("syncthing"))
-            .is_some()
-    );
-
-    fs::remove_dir_all(&dir).ok();
-}
-
 /// `write_stdout` treats a closed pipe (`BrokenPipe`) as a clean exit,
 /// but any *other* write failure is a real error and must still fail
 /// loudly. `/dev/full` always fails writes with `ENOSPC`, a distinct
@@ -1093,71 +979,52 @@ fn build_reports_a_real_stdout_write_failure_instead_of_exiting_clean() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// The diagnostic side of #75, end to end: a field collision between two
-/// *imported* templates now names the file each location is in, rather
-/// than printing two bare `line:col` pairs (identical ones, in this
-/// case) for two positions in two different files.
+/// What `--build` writes to stdout has to be *parseable* Compose YAML,
+/// not merely the bytes we last recorded. `cmd/build-stdout.trycmd`
+/// pins those bytes exactly, which catches any change to them, but
+/// byte-equality against a recorded run can't tell a valid document
+/// from an invalid one — if the generated header and the YAML body
+/// ever concatenated into something a parser rejects, the transcript
+/// would happily keep asserting the broken output.
+///
+/// So this stays a Rust test: it spawns the binary (the stdout path
+/// prints straight to the process's real stdout, which an in-process
+/// `run()` call can't intercept) and feeds the result to a real YAML
+/// parser. It also keeps the shared `syncthing.hll` fixture on the
+/// stdout path — the transcript deliberately uses its own small
+/// service, since a trycmd sandbox needs its own copy of every input
+/// and a second copy of that fixture would drift from the original.
 #[test]
-fn compose_error_across_imported_files_names_both_files() {
-    let dir = scratch_dir("cross-file-collision");
-    fs::write(dir.join("t1.hll"), "template x {\n  restart always\n}\n").unwrap();
-    fs::write(
-        dir.join("t2.hll"),
-        "template y {\n  restart unless-stopped\n}\n",
-    )
-    .unwrap();
-    let entry = dir.join("svc.hll");
-    fs::write(
-        &entry,
-        "use \"t1.hll\" as one\n\
-         use \"t2.hll\" as two\n\
-         service web {\n  image \"nginx\"\n  with one.x, two.y\n}\n",
-    )
-    .unwrap();
+fn build_to_stdout_emits_parseable_yaml_for_the_shared_fixture() {
+    let dir = scratch_dir("stdout-parseable");
+    let input = dir.join("syncthing.hll");
+    fs::write(&input, SYNCTHING_HLL).unwrap();
 
-    let output = hllc_output(&["--build", entry.to_str().unwrap()]);
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let expected = format!(
-        "{}:2:11: field `restart.policy` set by both template `x` (at {}:2:11) \
-         and template `y`—explicit templates must not conflict\n",
-        dir.join("t2.hll").display(),
-        dir.join("t1.hll").display(),
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_hllc"))
+        .args(["--build", input.to_str().unwrap()])
+        .output()
+        .expect("failed to run the hllc binary");
+
+    assert!(
+        output.status.success(),
+        "building the shared syncthing fixture should succeed, got {:?}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(stderr, expected);
 
-    fs::remove_dir_all(&dir).ok();
-}
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
+    assert!(
+        stdout.starts_with(GENERATED_HEADER),
+        "stdout should carry the generated-file header"
+    );
 
-/// #60, end to end through the real binary: an undeclared named-volume
-/// reference fails the build with a `path:line:col`-located message,
-/// rendered through the same `SourceMap` machinery as every other
-/// codegen diagnostic. The `.hll` here is the exact "before" of this
-/// change — it compiled silently until the top-level declaration became
-/// mandatory.
-#[test]
-fn build_reports_an_undeclared_named_volume_with_its_path_line_and_col() {
-    let dir = scratch_dir("unknown-volume");
-    let entry = dir.join("syncthing.hll");
-    fs::write(
-        &entry,
-        "volume syncthing-config {}\n\
-         service syncthing {\n  \
-           image \"lscr.io/linuxserver/syncthing\"\n  \
-           volume snycthing-config -> \"/config\"\n\
-         }\n",
-    )
-    .unwrap();
-
-    let output = hllc_output(&["--build", entry.to_str().unwrap()]);
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        stderr,
-        format!(
-            "{}:4:10: service `syncthing` references undeclared volume `snycthing-config`\n",
-            entry.display()
-        )
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("stdout isn't valid YAML: {err}\n{stdout}"));
+    assert!(
+        doc.get("services")
+            .and_then(|s| s.get("syncthing"))
+            .is_some(),
+        "the parsed document should declare the syncthing service, got:\n{stdout}"
     );
 
     fs::remove_dir_all(&dir).ok();
@@ -1212,34 +1079,6 @@ fn build_resolves_an_imported_named_volume_through_its_alias() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// And an alias that resolves to a real file with no such `volume` is a
-/// located error, not a silently-created volume.
-#[test]
-fn build_reports_an_unknown_qualified_volume() {
-    let dir = scratch_dir("unknown-qualified-volume");
-    fs::write(dir.join("storage.hll"), "volume media {}\n").unwrap();
-    let entry = dir.join("jellyfin.hll");
-    fs::write(
-        &entry,
-        "use \"storage.hll\" as storage\n\
-         service jellyfin {\n  \
-           image \"jellyfin/jellyfin\"\n  \
-           volume storage.medai -> \"/data\"\n\
-         }\n",
-    )
-    .unwrap();
-
-    let output = hllc_output(&["--build", entry.to_str().unwrap()]);
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        stderr,
-        format!("{}:4:10: no volume `medai` in `storage`\n", entry.display())
-    );
-
-    fs::remove_dir_all(&dir).ok();
-}
-
 /// The other half: with the declaration present, the same file builds
 /// and the named volume lands in the document's top-level `volumes:`
 /// section carrying its declaration's options.
@@ -1283,102 +1122,15 @@ fn build_emits_a_declared_volumes_options_in_the_top_level_section() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// Same for a codegen error raised inside an imported template: the
-/// position is in a file the user never opened, so the message has to
-/// say which one.
-#[test]
-fn codegen_error_inside_an_imported_template_names_that_file() {
-    let dir = scratch_dir("cross-file-codegen");
-    fs::write(
-        dir.join("lib.hll"),
-        "template t {\n  container_name \"{{nmae}}\"\n}\n",
-    )
-    .unwrap();
-    let entry = dir.join("svc.hll");
-    fs::write(
-        &entry,
-        "use \"lib.hll\" as l\n\
-         service web {\n  image \"nginx\"\n  with l.t\n}\n",
-    )
-    .unwrap();
-
-    let output = hllc_output(&["--build", entry.to_str().unwrap()]);
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        stderr,
-        format!(
-            "{}:2:18: unknown interpolation `{{{{nmae}}}}`\n",
-            dir.join("lib.hll").display()
-        )
-    );
-
-    fs::remove_dir_all(&dir).ok();
-}
-
-/// #80: all three warning cases at once — an imported file's own
-/// `service`, an imported `defaults`, and a declared-but-unreferenced
-/// `network`. Every one of them is printed to stderr, naming the file it
-/// belongs to, and none of them stops the build: the YAML is written and
-/// `hllc` still exits 0, so a warning can't break a CI gate.
-#[test]
-fn build_prints_warnings_to_stderr_and_still_exits_zero() {
-    let dir = scratch_dir("warnings");
-    fs::write(
-        dir.join("lib.hll"),
-        "template defaults {\n  restart unless-stopped\n}\n\
-         service db {\n  image \"postgres\"\n}\n",
-    )
-    .unwrap();
-    let entry = dir.join("svc.hll");
-    fs::write(
-        &entry,
-        "use \"lib.hll\" as common\n\
-         network unused {\n  external\n}\n\
-         service web {\n  image \"nginx\"\n}\n",
-    )
-    .unwrap();
-    let out = dir.join("docker-compose.yml");
-
-    let output = hllc_output(&[
-        "--build",
-        entry.to_str().unwrap(),
-        "--out",
-        out.to_str().unwrap(),
-    ]);
-
-    assert!(
-        output.status.success(),
-        "warnings must not change the exit code"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let lib = dir.join("lib.hll");
-    assert_eq!(
-        stderr,
-        format!(
-            "{lib}:1:10: warning: template `defaults` is declared in an imported file and is \
-             not applied — `defaults` is only looked up in the entry file; give it an ordinary \
-             name and apply it with `with`\n\
-             {lib}:4:9: warning: service `db` is declared in an imported file and is not \
-             compiled — only the entry file's services are built\n\
-             {entry}:2:9: warning: network `unused` is declared but no service references it, \
-             so it is not emitted — add it to a service's `networks [...]` list, or remove the \
-             declaration\n",
-            lib = lib.display(),
-            entry = entry.display(),
-        )
-    );
-    // The build still produced its document.
-    let yaml = fs::read_to_string(&out).unwrap();
-    assert!(yaml.starts_with(GENERATED_HEADER));
-    assert!(yaml.contains("web:"));
-
-    fs::remove_dir_all(&dir).ok();
-}
-
 /// #80's one hard error: `middleware` with no `expose.host` used to
 /// build a service with the middleware silently missing. It now fails
-/// the build, with a message naming the service and the fix.
+/// the build.
+///
+/// The message itself lives in `tests/cmd/cross-file-diagnostics.trycmd`.
+/// What stays here is the half a transcript can't see: a failed build
+/// must leave *no* output behind, and a directory comparison can only
+/// assert that a file it names is present and correct, never that an
+/// unnamed one is absent.
 #[test]
 fn build_fails_on_middleware_without_a_host() {
     let dir = scratch_dir("router-less-middleware");
@@ -1390,24 +1142,15 @@ fn build_fails_on_middleware_without_a_host() {
     .unwrap();
     let out = dir.join("docker-compose.yml");
 
-    let output = hllc_output(&[
-        "--build",
-        entry.to_str().unwrap(),
-        "--out",
-        out.to_str().unwrap(),
-    ]);
+    let code = run(Cli {
+        file: entry,
+        parse: false,
+        build: true,
+        out: Some(out.clone()),
+        force: false,
+    });
 
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        stderr,
-        format!(
-            "{}:4:14: service `web` sets `middleware` but has no `expose.host`, so there is no \
-             Traefik router to attach it to — add a host (`expose <port> as \
-             \"web.example.com\"`) or drop the `middleware`\n",
-            entry.display()
-        )
-    );
+    assert_eq!(code, ExitCode::FAILURE);
     assert!(!out.exists(), "a failed build must not write output");
 
     fs::remove_dir_all(&dir).ok();

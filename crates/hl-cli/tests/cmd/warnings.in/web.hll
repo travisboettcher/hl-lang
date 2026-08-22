@@ -1,0 +1,9 @@
+use "lib.hll" as common
+
+network unused {
+  external
+}
+
+service web {
+  image "nginx:alpine"
+}

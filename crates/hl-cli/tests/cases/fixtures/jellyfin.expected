@@ -1,0 +1,14 @@
+--- compose ---
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    restart: unless-stopped
+    environment:
+    - PUID=1000
+    volumes:
+    - /mnt/media:/data
+    expose:
+    - 8096
+    labels:
+    - traefik.http.routers.jellyfin.rule=Host(`media.techdebtor.io`)
+    - traefik.http.services.jellyfin.loadbalancer.server.port=8096

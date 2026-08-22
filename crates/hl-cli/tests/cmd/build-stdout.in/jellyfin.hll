@@ -1,0 +1,13 @@
+network traefik-net {
+  external
+  name: "docker_default"
+}
+
+service jellyfin {
+  image "jellyfin/jellyfin:latest"
+  restart unless-stopped
+  networks [traefik-net]
+  env PUID = 1000
+  expose 8096, host: "jellyfin.example.com", entrypoint: web-secure
+  middleware local-ipwhitelist
+}

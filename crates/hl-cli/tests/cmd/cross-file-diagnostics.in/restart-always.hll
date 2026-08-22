@@ -1,0 +1,3 @@
+template always_up {
+  restart always
+}
