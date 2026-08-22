@@ -41,16 +41,31 @@ const LABEL_METACHARACTERS: &[char] = &['`', '(', ')', '{', '}', '|', '&', ',', 
 /// references, only the second of which got the `@file` suffix (#65).
 const MIDDLEWARE_METACHARACTERS: &[char] = &[','];
 
-/// Rejects `value` if it contains any of `forbidden`. Always applied to
-/// the *resolved* value, after `{{}}` interpolation, since that's the
-/// text that actually reaches the label.
+/// Rejects `value` if it contains any of `forbidden`, or any control
+/// character. Always applied to the *resolved* value, after `{{}}`
+/// interpolation, since that's the text that actually reaches the label.
+///
+/// The control-character half is what keeps the sets above honest now
+/// that a string literal has escape sequences (#181). A newline used to
+/// be unrepresentable in `.hll` source, so `host "a\nb"` could only ever
+/// be the two characters `\` and `n` — and `\` is already forbidden.
+/// Written as `\n` it's now one real newline, which no list of shell and
+/// rule metacharacters would have caught, and which cannot appear in a
+/// hostname or an entry point name for any legitimate reason. Testing
+/// the character class rather than adding three more entries to
+/// [`LABEL_METACHARACTERS`] also covers a control character typed
+/// directly into a literal, which was always possible for every one of
+/// them except the newline.
 fn reject_metacharacters(
     value: &str,
     field: &'static str,
     forbidden: &[char],
     span: Span,
 ) -> Result<(), CodegenError> {
-    match value.chars().find(|c| forbidden.contains(c)) {
+    match value
+        .chars()
+        .find(|c| forbidden.contains(c) || c.is_control())
+    {
         Some(character) => Err(CodegenError::UnsafeLabelValue {
             field,
             character,
@@ -435,6 +450,75 @@ mod tests {
             CodegenError::UnsafeLabelValue {
                 field: "expose.host",
                 character: ',',
+                ..
+            }
+        ));
+    }
+
+    /// #181: `host "a\nb"` used to be the two characters `\` and `n`,
+    /// caught by the `\` in [`LABEL_METACHARACTERS`]. Now that a string
+    /// literal decodes escapes, it's one real newline — a character no
+    /// hostname can contain, and one the metacharacter list alone
+    /// wouldn't have stopped.
+    #[test]
+    fn newline_in_host_is_rejected() {
+        let fields = expose_with_host("ok.example.com\nsecond.example.com");
+        let err = compute("s", &fields, None, &bindings()).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::UnsafeLabelValue {
+                field: "expose.host",
+                character: '\n',
+                ..
+            }
+        ));
+    }
+
+    /// The same for an entry point name, which reaches a label the
+    /// codegen joins with commas.
+    #[test]
+    fn newline_in_entrypoint_is_rejected() {
+        let mut fields = expose_with_host("ok.example.com");
+        fields.expose.as_mut().unwrap().entrypoint = refs(&["web\nsecure"]);
+        let err = compute("s", &fields, None, &bindings()).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::UnsafeLabelValue {
+                field: "expose.entrypoint",
+                character: '\n',
+                ..
+            }
+        ));
+    }
+
+    /// And for a middleware reference, whose own set is just the comma
+    /// that joins them — the control-character check is what covers it.
+    #[test]
+    fn newline_in_middleware_reference_is_rejected() {
+        let mut fields = expose_with_host("ok.example.com");
+        fields.middleware = refs(&["authentik\nsecond"]);
+        let err = compute("s", &fields, None, &bindings()).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::UnsafeLabelValue {
+                field: "middleware",
+                character: '\n',
+                ..
+            }
+        ));
+    }
+
+    /// A tab is no more a hostname character than a newline is, and a
+    /// literal one could always be typed straight into a string.
+    #[test]
+    fn tab_in_host_is_rejected() {
+        let fields = expose_with_host("ok.example.com\t");
+        let err = compute("s", &fields, None, &bindings()).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::UnsafeLabelValue {
+                field: "expose.host",
+                character: '\t',
                 ..
             }
         ));

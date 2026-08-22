@@ -1,0 +1,2 @@
+--- error ---
+issue_181_unknown_escape.hll: 8:24: unknown escape sequence `\u` — a string literal supports `\"`, `\\`, `\n`, `\t`, and `\r`

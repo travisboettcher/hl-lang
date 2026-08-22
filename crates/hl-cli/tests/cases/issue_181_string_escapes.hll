@@ -1,0 +1,19 @@
+# #181: a `STRING` literal has backslash escapes, so a value that needs a
+# literal `"` or a newline has a spelling at all. The `raw` entrypoint is
+# the reported case — a multi-line shell string wrapped in double quotes,
+# which previously forced a rewrite to Compose's exec/list form, and which
+# a JSON blob or a config file's contents can't be rewritten out of. Pins
+# that `\n` reaches the generated document as a real newline, `\"` as a
+# quote, and `\\` as one backslash, on both a built-in field and a `raw`
+# value. `{{name}}` interpolation runs over the decoded value, so a
+# literal can carry both, and no escape can spell `{{` to smuggle a
+# binding past it.
+service api {
+  image "nginx:latest"
+  env CONFIG_JSON = "{\"level\": \"debug\", \"quiet\": false}"
+  env BANNER = "{{name}} says:\nline two"
+  env WINDOWS_PATH = "C:\\logs\\api"
+  raw {
+    entrypoint: "sh -c \"echo starting\nexec nginx -g 'daemon off;'\""
+  }
+}

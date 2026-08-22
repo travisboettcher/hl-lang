@@ -1,0 +1,12 @@
+# Every backslash escape a STRING literal has (#181), in the shapes real
+# services ask for them: a quoted flag inside a shell command, a
+# multi-line value, and a Windows-style path. CI seeds the fuzz corpus
+# from this directory, so this file is also what gives the fuzzers an
+# escape sequence to mutate.
+service api {
+  image "nginx:latest"
+  command "sh -c \"exec nginx -g 'daemon off;'\""
+  env CONFIG = "{\"log\": \"debug\"}"
+  env BANNER = "first\nsecond\tthird\r"
+  env WINDOWS_PATH = "C:\\logs"
+}

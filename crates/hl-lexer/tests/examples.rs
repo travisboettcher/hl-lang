@@ -1,11 +1,12 @@
 //! Integration tests: lex the design doc's worked examples end-to-end and
 //! assert the exact token-kind sequence produced.
 
-use hl_lexer::{Lexer, TokenKind};
+use hl_lexer::{Lexer, TokenKind, unescape};
 
 const JELLYFIN: &str = include_str!("fixtures/jellyfin.hll");
 const SYNCTHING: &str = include_str!("fixtures/syncthing.hll");
 const COMBINED: &str = include_str!("fixtures/combined.hll");
+const ESCAPES: &str = include_str!("fixtures/escapes.hll");
 
 fn kinds(source: &str) -> Vec<TokenKind> {
     Lexer::tokenize(source)
@@ -87,5 +88,33 @@ fn syncthing_example_never_emits_template_as_plain_ident() {
         tokens
             .iter()
             .all(|t| !(t.kind == TokenKind::Ident && t.lexeme == "template"))
+    );
+}
+
+/// #181: the escapes fixture lexes cleanly, and each of its string
+/// literals decodes to the value it spells — including the multi-line
+/// one, which had no representation at all before.
+///
+/// The fixture doubles as a fuzz corpus seed: CI copies this directory
+/// into `fuzz/corpus/` before every smoke run (see
+/// `.github/workflows/ci.yml`), so the escape scanning added here starts
+/// from an input that already exercises it.
+#[test]
+fn escapes_fixture_lexes_and_decodes() {
+    let tokens = Lexer::tokenize(ESCAPES).expect("escapes fixture should lex cleanly");
+    let strings: Vec<String> = tokens
+        .iter()
+        .filter(|tok| tok.kind == TokenKind::Str)
+        .map(|tok| unescape(tok.lexeme, tok.span).unwrap().into_owned())
+        .collect();
+    assert_eq!(
+        strings,
+        vec![
+            "nginx:latest",
+            "sh -c \"exec nginx -g 'daemon off;'\"",
+            "{\"log\": \"debug\"}",
+            "first\nsecond\tthird\r",
+            "C:\\logs",
+        ]
     );
 }

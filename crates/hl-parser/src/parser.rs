@@ -66,6 +66,28 @@ pub fn parse_in_file(source: &str, file: FileId) -> Result<Program, ParseError> 
     Parser::new(tokens).parse_program()
 }
 
+/// Builds the [`Literal::Str`] a `STRING` token stands for, decoding its
+/// backslash escapes (#181).
+///
+/// The AST stores the *decoded* value — `\n` as a newline, `\"` as a
+/// quote — because that's what every later stage means by a string's
+/// content: interpolation scans it, codegen writes it into the Compose
+/// document. The token's own `lexeme` stays the undecoded source text,
+/// so the literal's [`Span`] keeps describing real source bytes even
+/// once the decoded value is shorter than what was written.
+///
+/// The `Err` arm is unreachable through the parser's own entry points,
+/// which tokenize first and never reach parsing with an invalid escape
+/// in hand (see [`hl_lexer::unescape`], which the lexer runs as it
+/// scans). It's mapped rather than unwrapped so that a `Parser` built
+/// from tokens some other way still reports the error instead of
+/// panicking.
+fn str_literal(tok: Token<'_>) -> Result<Literal, ParseError> {
+    let text =
+        hl_lexer::unescape(tok.lexeme, tok.span).map_err(|err| ParseError::Lex(vec![err]))?;
+    Ok(Literal::Str(text.into_owned(), tok.span))
+}
+
 /// One resolved field's accumulated value, keyed by field name inside a
 /// struct-kind body. This is the "FieldMap" the generic engine builds up
 /// before lowering it into a concrete AST struct once the body finishes.
@@ -228,7 +250,7 @@ impl<'src> Parser<'src> {
         match tok.kind {
             TokenKind::Str => {
                 self.bump();
-                Ok(Literal::Str(tok.lexeme.to_string(), tok.span))
+                str_literal(tok)
             }
             TokenKind::Ident => {
                 self.bump();
@@ -292,7 +314,7 @@ impl<'src> Parser<'src> {
         match tok.kind {
             TokenKind::Str => {
                 self.bump();
-                Ok(Literal::Str(tok.lexeme.to_string(), tok.span))
+                str_literal(tok)
             }
             TokenKind::Ident => {
                 self.bump();
@@ -1390,7 +1412,7 @@ impl<'src> Parser<'src> {
     fn parse_use_decl(&mut self) -> Result<UseDecl, ParseError> {
         let use_tok = self.expect(TokenKind::Ident)?; // lexeme == "use", already peeked
         let path_tok = self.expect(TokenKind::Str)?;
-        let path = Literal::Str(path_tok.lexeme.to_string(), path_tok.span);
+        let path = str_literal(path_tok)?;
         if self.peek().kind != TokenKind::Ident || self.peek().lexeme != "as" {
             return Err(self.unexpected(Expected::Description("`as`")));
         }

@@ -17,7 +17,9 @@ pub enum TokenKind {
     Ident,
     /// `[0-9]+` — integers only, no sign, decimal point, or exponent.
     Number,
-    /// `"..."` — no escape sequences; cannot contain `"` or a newline.
+    /// `"..."` — cannot contain a literal newline; a `"`, a newline, a
+    /// tab, a carriage return, or a `\` itself is written as a
+    /// backslash escape (see [`crate::unescape`]).
     Str,
     /// The reserved word `template`.
     Template,
@@ -79,10 +81,12 @@ impl fmt::Display for TokenKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Token<'src> {
     pub kind: TokenKind,
-    /// The token's text. For [`TokenKind::Str`] this is the *decoded*
-    /// content only, with the surrounding quotes stripped — see
-    /// [`Span`]'s docs for how that makes `lexeme.len()` differ from the
-    /// span's byte width for string tokens specifically.
+    /// The token's exact source text. For [`TokenKind::Str`] this is the
+    /// content with the surrounding quotes stripped and any backslash
+    /// escapes left as they were written — [`crate::unescape`] is what
+    /// turns those into the characters they stand for. See [`Span`]'s
+    /// docs for how stripping the quotes makes `lexeme.len()` differ
+    /// from the span's byte width for string tokens specifically.
     pub lexeme: &'src str,
     pub span: Span,
 }

@@ -1,4 +1,4 @@
-use hl_lexer::{LexError, Lexer, TokenKind};
+use hl_lexer::{LexError, Lexer, TokenKind, unescape};
 
 fn kinds(source: &str) -> Vec<TokenKind> {
     Lexer::tokenize(source)
@@ -135,9 +135,10 @@ fn unterminated_string_at_newline() {
 }
 
 #[test]
-fn string_cannot_contain_literal_quote() {
-    // No escapes: "a"b"" lexes as Str("a"), Ident("b"), then a second
-    // opening quote that immediately hits EOF unterminated.
+fn string_cannot_contain_an_unescaped_quote() {
+    // An unescaped `"` always closes the literal, so "a"b"" lexes as
+    // Str("a"), Ident("b"), then a second opening quote that immediately
+    // hits EOF unterminated.
     let mut lexer = Lexer::new(r#""a"b""#);
     let a = lexer.next_token().unwrap();
     assert_eq!(a.kind, TokenKind::Str);
@@ -147,6 +148,127 @@ fn string_cannot_contain_literal_quote() {
     assert_eq!(b.lexeme, "b");
     let err = lexer.next_token().unwrap_err();
     assert!(matches!(err, LexError::UnterminatedString { .. }));
+}
+
+// --- string escapes (#181) ---
+
+/// The lexeme is source text, so it still spells each escape the way it
+/// was written; `unescape` is what turns it into the character it stands
+/// for.
+#[test]
+fn every_escape_decodes_to_the_character_it_stands_for() {
+    for (source, decoded) in [
+        (r#""a\"b""#, "a\"b"),
+        (r#""a\\b""#, "a\\b"),
+        (r#""a\nb""#, "a\nb"),
+        (r#""a\tb""#, "a\tb"),
+        (r#""a\rb""#, "a\rb"),
+    ] {
+        let tok = single_token(source);
+        assert_eq!(tok.kind, TokenKind::Str, "{source}");
+        assert_eq!(tok.lexeme, &source[1..source.len() - 1], "{source}");
+        assert_eq!(unescape(tok.lexeme, tok.span).unwrap(), decoded, "{source}");
+    }
+}
+
+/// The whole point of `\"`: the escaped quote is content, so the literal
+/// runs past it to the next unescaped one.
+#[test]
+fn escaped_quote_does_not_close_the_string() {
+    let tok = single_token(r#""say \"hi\" now""#);
+    assert_eq!(tok.kind, TokenKind::Str);
+    assert_eq!(unescape(tok.lexeme, tok.span).unwrap(), r#"say "hi" now"#);
+}
+
+/// An escaped backslash is one character, and doesn't escape whatever
+/// follows it — `"C:\\"` is a trailing lone backslash, not an escaped
+/// quote running past the end of the literal.
+#[test]
+fn escaped_backslash_does_not_escape_the_next_character() {
+    let tok = single_token(r#""C:\\""#);
+    assert_eq!(unescape(tok.lexeme, tok.span).unwrap(), r"C:\");
+}
+
+/// A sequence outside the supported set is a lex error rather than
+/// content that quietly means something other than what it says (#181,
+/// the same silently-wrong-output failure #168 was about).
+#[test]
+fn unknown_escape_is_an_error() {
+    let mut lexer = Lexer::new(r#""a\qb""#);
+    let err = lexer.next_token().unwrap_err();
+    assert!(
+        matches!(err, LexError::UnknownEscape { ch: 'q', .. }),
+        "{err:?}"
+    );
+}
+
+/// The error points at the offending backslash, not at the literal it
+/// sits in — and its offsets stay measured in source bytes while its
+/// column stays measured in characters, which only a multi-byte
+/// character ahead of the escape can tell apart.
+#[test]
+fn unknown_escape_span_points_at_the_backslash() {
+    let source = "\n  \"caf\u{e9}\\qx\"";
+    let mut lexer = Lexer::new(source);
+    let err = lexer.next_token().unwrap_err();
+    let span = err.span();
+    assert_eq!(span.line, 2);
+    assert_eq!(span.col, 8);
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        r"\q",
+        "span {span:?} of {source:?}"
+    );
+}
+
+/// A `\` before the closing quote escapes that quote, so the literal
+/// runs on and hits the end of input unterminated. It is never silently
+/// dropped or passed through.
+#[test]
+fn backslash_before_the_closing_quote_leaves_the_string_unterminated() {
+    let mut lexer = Lexer::new(r#"image "C:\""#);
+    assert_eq!(lexer.next_token().unwrap().kind, TokenKind::Ident);
+    let err = lexer.next_token().unwrap_err();
+    assert!(
+        matches!(err, LexError::UnterminatedString { .. }),
+        "{err:?}"
+    );
+}
+
+/// There is no line-continuation escape: a `\` at the end of a line
+/// escapes nothing, and the literal ends there, unterminated.
+#[test]
+fn backslash_before_a_newline_does_not_continue_the_line() {
+    let mut lexer = Lexer::new("\"abc\\\ndef\"");
+    let err = lexer.next_token().unwrap_err();
+    assert!(
+        matches!(err, LexError::UnterminatedString { .. }),
+        "{err:?}"
+    );
+}
+
+/// Escapes don't disturb the span/lexeme relationship the rest of the
+/// pipeline relies on: the lexeme is still exactly the source bytes
+/// between the quotes, even though the decoded value is shorter.
+#[test]
+fn escaped_string_span_still_covers_its_source_text() {
+    let tok = single_token(r#""a\nb""#);
+    assert_eq!(tok.lexeme, r"a\nb");
+    assert_eq!(
+        (tok.span.end - tok.span.start) as usize,
+        tok.lexeme.len() + 2
+    );
+    assert_eq!(unescape(tok.lexeme, tok.span).unwrap().len(), 3);
+}
+
+/// Every lex error in a file is reported in one pass (#87), and an
+/// invalid escape is no exception.
+#[test]
+fn tokenize_collecting_errors_finds_every_bad_escape() {
+    let errors = Lexer::tokenize_collecting_errors("\"a\\q\"\n\"b\\z\"").unwrap_err();
+    assert_eq!(errors.len(), 2);
+    assert!(matches!(errors[0], LexError::UnknownEscape { ch: 'q', .. }));
+    assert!(matches!(errors[1], LexError::UnknownEscape { ch: 'z', .. }));
 }
 
 // --- punctuation ---

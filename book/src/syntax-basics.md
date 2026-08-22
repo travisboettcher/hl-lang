@@ -203,8 +203,45 @@ Applied inside `service syncthing { with internal_web { port: 8384 } }`,
 ## Numbers and strings
 
 Numbers are integers only—no sign, no decimal point, no exponent
-(`8096`, not `8096.0` or `-1`). Strings are double-quoted, with no escape
-sequences and no way to embed a literal `"` or a newline inside one.
+(`8096`, not `8096.0` or `-1`). Strings are double-quoted, and a
+backslash escapes the character after it:
+
+| Escape | Character |
+| ------ | --------- |
+| `\"`   | a double quote |
+| `\\`   | a backslash |
+| `\n`   | a newline |
+| `\t`   | a tab |
+| `\r`   | a carriage return |
+
+Those five are the whole set. A backslash followed by anything else, such
+as `"\q"`, is a compile error naming the backslash, so an escape the
+language doesn't have never turns into the two characters that spell it.
+
+Use them wherever a value needs a quote or a line break of its own—a
+shell command that quotes its own argument, a JSON blob in an
+environment variable, or the multi-line `entrypoint` a `raw` block passes
+straight through to Compose:
+
+```hll,fragment
+command "sh -c \"exec nginx -g 'daemon off;'\""
+env CONFIG = "{\"log\": \"debug\"}"
+raw {
+  entrypoint: "echo starting\nexec /app/server"
+}
+```
+
+A string still can't run past the end of its line: `\n` is how you write
+a newline, and a line that ends before its closing `"` is a compile
+error. So is a string ending in a backslash, such as `"C:\"`—that
+backslash escapes the closing quote, which leaves the string unfinished.
+Write a trailing backslash as `\\`.
+
+A value that lands in a Traefik label—`expose.host`, plus each
+`expose.entrypoint` entry—rejects a newline or a tab, on top of the
+metacharacter set it already rejects. Neither one belongs in a hostname
+or an entry point name, and either one changes what the generated label
+means.
 
 A `template`'s declared parameter can optionally have type `Number` or
 `String` (`template linuxserver_app(puid: Number, pgid: Number) { ... }`).
