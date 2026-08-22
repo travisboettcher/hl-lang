@@ -1323,6 +1323,153 @@ fn env_file_keeps_duplicates() {
     assert_eq!(entries, vec!["common.env", "common.env"]);
 }
 
+// --- privileged / devices (#157, map-kind since #167) ---
+
+/// `devices` merges exactly like `publish` (#167) — keyed on the
+/// container side, so non-colliding entries from different tiers
+/// concatenate rather than colliding. Compare
+/// `explicit_templates_publish_container_port_collision_is_error` for
+/// the collision case this field now shares too.
+#[test]
+fn devices_accumulates_across_tiers() {
+    let composed = compose_ok(
+        "template a {\n  devices \"/dev/kmsg\" -> \"/dev/kmsg\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n  devices \"/dev/fuse\" -> \"/dev/fuse\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries: Vec<(&str, &str)> = service
+        .fields
+        .devices
+        .entries
+        .iter()
+        .map(|e| (e.host.text(), e.container.text()))
+        .collect();
+    assert_eq!(
+        entries,
+        vec![("/dev/kmsg", "/dev/kmsg"), ("/dev/fuse", "/dev/fuse")]
+    );
+}
+
+/// The service's own body always wins over an inherited template entry
+/// for the same container path — `merge_map`'s ordinary Own-always-wins
+/// rule, which happens to look like deduplication when the two entries
+/// agree, exactly as it would for `publish`/`volume`.
+#[test]
+fn devices_own_body_overrides_template_for_same_container_path() {
+    let composed = compose_ok(
+        "template a {\n  devices \"/dev/kmsg\" -> \"/dev/kmsg\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n  devices \"/dev/kmsg\" -> \"/dev/kmsg\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(service.fields.devices.entries.len(), 1);
+}
+
+/// Two *explicit* templates mapping different hosts onto the same
+/// container path disagree about what that path should be — a compile
+/// error, matching `publish`'s own
+/// `explicit_templates_publish_container_port_collision_is_error`.
+#[test]
+fn explicit_templates_devices_container_path_collision_is_error() {
+    let err = compose_err(
+        "template a {\n  devices \"/dev/kmsg\" -> \"/dev/shared\"\n}\n\
+         template b {\n  devices \"/dev/fuse\" -> \"/dev/shared\"\n}\n\
+         service s {\n  with a, b\n}\n",
+    );
+    match err {
+        ComposeError::MapKeyCollision(details) => {
+            assert_eq!(details.field, "devices");
+            assert_eq!(details.side, MapSide::Value);
+            assert_eq!(details.key, "/dev/shared");
+        }
+        other => panic!("expected MapKeyCollision on devices, got {other:?}"),
+    }
+}
+
+/// Non-colliding entries accumulate across tiers, and a `$param` in
+/// either half of a mapping is substituted like any other literal
+/// slot — the same live bug class issue #168 covers, and the same test
+/// shape as `publish_accumulates_across_tiers_and_substitutes_params`.
+#[test]
+fn devices_accumulates_across_tiers_and_substitutes_params() {
+    let composed = compose_ok(
+        "template dev(d: String) {\n  devices $d -> $d\n}\n\
+         service s {\n  with dev { d: \"/dev/kmsg\" }\n  devices \"/dev/fuse\" -> \"/dev/fuse\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries: Vec<(&str, &str)> = service
+        .fields
+        .devices
+        .entries
+        .iter()
+        .map(|e| (e.host.text(), e.container.text()))
+        .collect();
+    assert_eq!(
+        entries,
+        vec![("/dev/kmsg", "/dev/kmsg"), ("/dev/fuse", "/dev/fuse")]
+    );
+}
+
+/// `privileged` is a bare-presence `ServiceFields` field merged via
+/// `merge_scalar_like`, exactly like `healthcheck.disable` — same
+/// Own-always-wins rule, exercised directly here rather than through
+/// `healthcheck`'s nested struct. `Tier::Own` overwrites rather than
+/// colliding, unlike two `Explicit` tiers setting the same field (see
+/// `explicit_templates_setting_privileged_still_collide` below) — so
+/// composing succeeds here specifically because the service's own body
+/// is the tier doing the re-asserting.
+#[test]
+fn service_own_privileged_does_not_collide_with_an_explicit_templates_privileged() {
+    let composed = compose_ok(
+        "template needs_host_access {\n  privileged\n}\n\
+         service cadvisor {\n  with needs_host_access\n  image \"x\"\n  privileged\n}\n",
+    );
+    let service = single_service(&composed);
+    assert!(service.fields.privileged.is_some());
+}
+
+/// A `defaults` template setting `privileged` is silently overridden by
+/// an explicit template's own `privileged` for the same field, mirroring
+/// `defaults_healthcheck_test_loses_to_an_explicit_templates_test`'s
+/// `(Tier::Defaults, _)` arm. `privileged`'s "value" is only ever
+/// presence, so unlike `healthcheck.test`'s distinct strings, the two
+/// tiers can't be told apart by content — only by which span composition
+/// kept, so this pins that down by source line instead: `defaults`'s own
+/// `privileged` sits on line 2, `real`'s on line 5, and it's `real`'s
+/// that must survive.
+#[test]
+fn defaults_privileged_span_loses_to_an_explicit_templates_privileged() {
+    let composed = compose_ok(
+        "template defaults {\n  privileged\n}\n\
+         template real {\n  privileged\n}\n\
+         service s {\n  with real\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let span = service.fields.privileged.expect("privileged set");
+    assert_eq!(span.line, 5);
+}
+
+/// Two explicit templates both setting `privileged` collide, the same
+/// collision rule `healthcheck.disable` gets — see
+/// `explicit_templates_setting_same_healthcheck_disable_still_collide`.
+#[test]
+fn explicit_templates_setting_privileged_still_collide() {
+    let err = compose_err(
+        "template a {\n  privileged\n}\n\
+         template b {\n  privileged\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    assert!(
+        matches!(
+            err,
+            ComposeError::FieldCollision {
+                field: "privileged",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
 // --- cycles ---
 
 #[test]

@@ -188,6 +188,13 @@ pub(crate) struct ComposeServiceDoc {
     /// distinguish here, since `command` has no sub-fields of its own.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<serde_yaml_ng::Value>,
+    /// Compose's own `privileged:` key (#157). Modeled on
+    /// [`NetworkDoc::external`]: bare-presence only, so this is always
+    /// emitted as `true` or omitted entirely, never `false` —
+    /// [`hl_parser::ServiceFields::privileged`] has no way to represent
+    /// an explicit `false` to begin with.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub privileged: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart: Option<String>,
     /// Compose's own `healthcheck:` key (#153). `None` both when
@@ -213,6 +220,16 @@ pub(crate) struct ComposeServiceDoc {
     pub networks: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dns: Vec<String>,
+    /// `devices "/dev/kmsg" -> "/dev/kmsg"` entries, Compose's own
+    /// `devices:` key (#157), rendered as `"host:container"`
+    /// Compose-short-syntax strings — the same shape [`Self::ports`]
+    /// gives `publish`'s entries, and for the same reason (#167): a
+    /// quoted container side is how an optional cgroup permissions
+    /// suffix rides along (`"/dev/xvda:rwm"`). `hllc` neither validates
+    /// nor rewrites a host device path beyond that, that's the deploy
+    /// target's concern.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<String>,
     /// `publish host -> container` entries, as Compose short-syntax
     /// `host:container` strings — one string per mapping, never a
     /// nested `{ target, published }` mapping.
@@ -238,8 +255,9 @@ pub(crate) struct ComposeServiceDoc {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
     /// `raw {}` entries — flattened so they land as sibling top-level
-    /// service keys (e.g. `privileged: true`), matching `raw`'s own
-    /// verbatim-passthrough design intent. `serde(flatten)` doesn't
+    /// service keys (e.g. `security_opt: [...]`), matching `raw`'s own
+    /// verbatim-passthrough design intent for the genuine long tail of
+    /// Compose keys `hll` has no dedicated field for. `serde(flatten)` doesn't
     /// support `skip_serializing_if`, but an empty map flattens to zero
     /// extra keys anyway, so nothing extra is needed here.
     ///
@@ -288,6 +306,7 @@ impl ComposeServiceDoc {
             image,
             container_name,
             command,
+            privileged,
             restart,
             healthcheck,
             environment,
@@ -295,6 +314,7 @@ impl ComposeServiceDoc {
             volumes,
             networks,
             dns,
+            devices,
             ports,
             expose,
             depends_on,
@@ -312,6 +332,9 @@ impl ComposeServiceDoc {
         }
         if raw.contains_key("command") {
             *command = None;
+        }
+        if raw.contains_key("privileged") {
+            *privileged = false;
         }
         if raw.contains_key("restart") {
             *restart = None;
@@ -333,6 +356,9 @@ impl ComposeServiceDoc {
         }
         if raw.contains_key("dns") {
             dns.clear();
+        }
+        if raw.contains_key("devices") {
+            devices.clear();
         }
         if raw.contains_key("ports") {
             ports.clear();

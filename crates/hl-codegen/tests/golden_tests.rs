@@ -79,16 +79,19 @@ fn syncthing_matches_real_deployed_service() {
     "#);
 }
 
-/// `raw`'s job: entries land as sibling top-level service keys, matching
-/// the real `cadvisor/docker-compose.yml`'s `privileged`/`devices`/
+/// `cadvisor`'s host-access knobs, matching the real
+/// `cadvisor/docker-compose.yml`'s `volumes`/`privileged`/`devices`/
 /// `security_opt` shape exactly (not asserting label parity — the real
 /// file's label has a typo, `traefiki.docker.network`, that's a bug in
-/// the source data, not a codegen target). Also covers #158 end-to-end:
-/// the same real service's five read-only bind mounts, each written as
-/// a plain `volume "<host>" -> "<container>" { read_only }` entry, come
-/// out as Compose short syntax with the `:ro` suffix appended —
-/// `/:/rootfs:ro`, matching the issue's own worked example exactly —
-/// with no need to route any of them through `raw`.
+/// the source data, not a codegen target). The five read-only bind
+/// mounts, each written as a plain `volume "<host>" -> "<container>" {
+/// read_only }` entry, come out as Compose short syntax with the `:ro`
+/// suffix appended — `/:/rootfs:ro`, matching #158's own worked example
+/// exactly. `privileged`/`devices` are dedicated fields (#157), and
+/// `security_opt` still goes through `raw`, landing as a sibling
+/// top-level service key — the genuine long tail `raw`'s job narrowed to
+/// once `privileged`/`devices` graduated out of it. None of the five
+/// needs `raw` any more.
 #[test]
 fn cadvisor_raw_passthrough_matches_real_service() {
     let yaml = generate_from(RAW_SERVICE);
@@ -96,15 +99,15 @@ fn cadvisor_raw_passthrough_matches_real_service() {
     services:
       cadvisor:
         image: "gcr.io/cadvisor/cadvisor:latest"
+        privileged: true
         volumes:
           - "/:/rootfs:ro"
           - "/var/run:/var/run:ro"
           - "/sys:/sys:ro"
           - "/var/lib/docker:/var/lib/docker:ro"
           - "/dev/disk/:/dev/disk:ro"
-        privileged: true
         devices:
-          - /dev/kmsg
+          - "/dev/kmsg:/dev/kmsg"
         security_opt:
           seccomp: unconfined
     "#);
@@ -269,6 +272,114 @@ fn raw_env_file_overrides_the_built_in_env_file() {
         image: "miniflux/miniflux:latest"
         env_file:
           - raw.env
+    "#);
+}
+
+// --- privileged / devices (#157) ---
+
+/// `privileged` is bare-presence, exactly like `network`'s `external` —
+/// setting it emits Compose's `privileged: true`.
+#[test]
+fn privileged_bare_flag_emits_true() {
+    let yaml = generate_from("service cadvisor {\n  image \"nginx\"\n  privileged\n}\n");
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      cadvisor:
+        image: nginx
+        privileged: true
+    ");
+}
+
+/// Leaving `privileged` unset emits no `privileged:` key at all —
+/// there's no `false` form to fall back to, since absence already means
+/// false.
+#[test]
+fn privileged_unset_emits_no_key() {
+    let yaml = generate_from("service cadvisor {\n  image \"nginx\"\n}\n");
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      cadvisor:
+        image: nginx
+    ");
+}
+
+/// `devices "/dev/kmsg" -> "/dev/kmsg"` — the arrow bare-entry sugar
+/// every map-kind field gets, mirroring `publish`'s own syntax per
+/// #167's review feedback — emits Compose's `devices:` as a one-element
+/// `"host:container"` list.
+#[test]
+fn devices_single_entry_emits_a_one_element_list() {
+    let yaml = generate_from(
+        "service cadvisor {\n  image \"nginx\"\n  devices \"/dev/kmsg\" -> \"/dev/kmsg\"\n}\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      cadvisor:
+        image: nginx
+        devices:
+          - "/dev/kmsg:/dev/kmsg"
+    "#);
+}
+
+/// The canonical multi-entry `{ }` body round-trips every mapping in
+/// order, exactly like `publish`'s own canonical body.
+#[test]
+fn devices_canonical_body_emits_every_mapping_in_order() {
+    let yaml = generate_from(
+        "service cadvisor {\n  \
+           image \"nginx\"\n  \
+           devices { \"/dev/kmsg\": \"/dev/kmsg\", \"/dev/fuse\": \"/dev/fuse\" }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      cadvisor:
+        image: nginx
+        devices:
+          - "/dev/kmsg:/dev/kmsg"
+          - "/dev/fuse:/dev/fuse"
+    "#);
+}
+
+/// A quoted container side carries Compose's optional cgroup
+/// permissions suffix through untouched, exactly like `publish`'s own
+/// protocol suffix.
+#[test]
+fn devices_container_side_permissions_suffix_rides_through() {
+    let yaml = generate_from(
+        "service cadvisor {\n  image \"nginx\"\n  devices \"/dev/sda\" -> \"/dev/xvda:rwm\"\n}\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      cadvisor:
+        image: nginx
+        devices:
+          - "/dev/sda:/dev/xvda:rwm"
+    "#);
+}
+
+/// `raw { privileged: ... }` / `raw { devices: ... }` override the
+/// built-in fields, the same way every other built-in field does.
+#[test]
+fn raw_privileged_and_devices_override_the_built_in_fields() {
+    let yaml = generate_from(
+        "service cadvisor {\n  \
+           image \"nginx\"\n  \
+           privileged\n  \
+           devices \"/dev/kmsg\" -> \"/dev/kmsg\"\n  \
+           raw {\n    \
+             privileged: false\n    \
+             devices: [\"/dev/raw:/dev/raw\"]\n  \
+           }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      cadvisor:
+        image: nginx
+        privileged: false
+        devices:
+          - "/dev/raw:/dev/raw"
     "#);
 }
 
@@ -1338,6 +1449,28 @@ fn publish_entries_from_a_template_are_fully_resolved() {
     "#);
 }
 
+/// `devices` (#167) resolves `$param` substitution on both sides of an
+/// inherited mapping exactly like `publish`'s own entries just above —
+/// the same live bug class issue #168 covers, guarding against a
+/// `$param` surviving composition unresolved.
+#[test]
+fn devices_entries_from_a_template_are_fully_resolved() {
+    let yaml = generate_from(
+        "template gpu(dev: String) {\n  devices $dev -> $dev\n}\n\
+         service jellyfin {\n  \
+           image \"jellyfin/jellyfin:latest\"\n  \
+           with gpu { dev: \"/dev/dri\" }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      jellyfin:
+        image: "jellyfin/jellyfin:latest"
+        devices:
+          - "/dev/dri:/dev/dri"
+    "#);
+}
+
 /// #84's `publish` and #60's top-level `volume` declaration are
 /// unrelated features that landed in the same release, so one service
 /// using both at once is the case neither one's own tests cover: the
@@ -1440,6 +1573,7 @@ fn every_built_in_field_is_overridable_by_raw() {
            image \"nginx\"\n  \
            container_name \"web-ctr\"\n  \
            command \"npm start\"\n  \
+           privileged\n  \
            restart unless-stopped\n  \
            healthcheck { test: \"curl -f http://localhost\" }\n  \
            env PUID = \"1000\"\n  \
@@ -1447,6 +1581,7 @@ fn every_built_in_field_is_overridable_by_raw() {
            volume web-data -> \"/data\"\n  \
            networks [traefik-net]\n  \
            dns [\"192.168.50.182\"]\n  \
+           devices \"/dev/original\" -> \"/dev/original\"\n  \
            publish 8080 -> 8080\n  \
            expose 8080 as \"web.example.com\"\n  \
            depends_on database\n  \
@@ -1454,6 +1589,7 @@ fn every_built_in_field_is_overridable_by_raw() {
              image: \"raw-image\"\n    \
              container_name: \"raw-name\"\n    \
              command: [\"raw-command\"]\n    \
+             privileged: false\n    \
              restart: \"always\"\n    \
              healthcheck: { test: \"raw-test\" }\n    \
              environment: [\"RAW=1\"]\n    \
@@ -1461,6 +1597,7 @@ fn every_built_in_field_is_overridable_by_raw() {
              volumes: [\"raw-vol:/raw\"]\n    \
              networks: [\"raw-net\"]\n    \
              dns: [\"1.1.1.1\"]\n    \
+             devices: [\"/dev/raw:/dev/raw\"]\n    \
              ports: [\"7777:7777\"]\n    \
              expose: [9999]\n    \
              depends_on: [\"raw-dep\"]\n    \
@@ -1475,6 +1612,7 @@ fn every_built_in_field_is_overridable_by_raw() {
     container_name: raw-name
     command:
       - raw-command
+    privileged: false
     restart: always
     healthcheck:
       test: raw-test
@@ -1488,6 +1626,8 @@ fn every_built_in_field_is_overridable_by_raw() {
       - raw-net
     dns:
       - 1.1.1.1
+    devices:
+      - "/dev/raw:/dev/raw"
     ports:
       - "7777:7777"
     expose:

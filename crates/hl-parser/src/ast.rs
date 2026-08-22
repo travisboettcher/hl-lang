@@ -567,6 +567,30 @@ pub struct PublishEntry {
     pub span: Span,
 }
 
+/// `devices`'s entries — host device path → container device path
+/// mappings, emitted as Compose's `devices:` list (#167, replacing
+/// #157's original pre-joined `"host:container"` string per review
+/// feedback). Uniqueness is checked on `container` (the value side of
+/// `host -> container`), exactly [`PublishMap`]'s own convention; see
+/// [`crate::schema::DEVICES`] for why that side rather than the host
+/// one.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DeviceMap {
+    pub entries: Vec<DeviceEntry>,
+}
+
+/// One `host -> container` device-mapping entry. Both sides are plain
+/// [`Literal`]s, mirroring [`PublishEntry`]: a quoted container side is
+/// how Compose's optional `rwm`-style cgroup permissions suffix is
+/// written (`devices "/dev/sda" -> "/dev/xvda:rwm"`), and a bare path is
+/// the ordinary case.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceEntry {
+    pub host: Literal,
+    pub container: Literal,
+    pub span: Span,
+}
+
 /// `env`'s entries. Uniqueness is checked on `key`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EnvMap {
@@ -721,6 +745,28 @@ pub struct ServiceFields {
     /// concern, not `hllc`'s, so a path is carried through verbatim
     /// either way and never needs a qualifier to mean anything.
     pub env_file: Vec<Reference>,
+    /// `privileged` — Compose's own `privileged:` key (#157), giving the
+    /// container extended host privileges (`cadvisor`'s classic use
+    /// case: reading host `/proc`/cgroups). A plain generic Compose key
+    /// like `dns`/`env_file`, not homelab-specific itself. Modeled
+    /// directly on [`Network::external`]: a bare-presence flag with no
+    /// `: value` form — there is no `privileged: false` to write, since
+    /// absence already means false, so a colon after it is a parse
+    /// error rather than an attempted value.
+    pub privileged: Option<Span>,
+    /// `devices "/dev/kmsg" -> "/dev/kmsg"` — host device paths mapped
+    /// onto container device paths, Compose's own `devices:` key (#157).
+    /// A plain generic Compose key, not homelab-specific itself even
+    /// though a real entry always is — but map-kind rather than
+    /// reference-list shaped, mirroring [`Self::publish`] field for
+    /// field rather than `dns`/`env_file`: #167's review feedback asked
+    /// for the same `host -> container` arrow spelling `publish`/
+    /// `volume` already use in place of the original pre-joined
+    /// `"host:container"` string, so this now merges key-by-key on the
+    /// container side through `compose.rs`'s `merge_map`, exactly like
+    /// `publish`, rather than concatenating through `LIST_FIELDS`. See
+    /// [`crate::schema::DEVICES`] for the uniqueness-side reasoning.
+    pub devices: DeviceMap,
     /// Docker's own `container_name:` key. `None` means "default to the
     /// service's own name" (via the same `{{name}}` interpolation
     /// binding `expose`'s `as`-sugar already uses) — codegen, not the

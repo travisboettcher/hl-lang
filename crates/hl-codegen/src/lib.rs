@@ -484,6 +484,18 @@ fn generate_service(
         publish_entries.push(format!("{host}:{container}"));
     }
 
+    // Compose short syntax, `"host:container"` — same shape as
+    // `publish` just above, and for the same reason: a cgroup
+    // permissions suffix (`devices "/dev/sda" -> "/dev/xvda:rwm"`)
+    // rides along on the container half untouched (#167, replacing
+    // #157's original pre-joined string field).
+    let mut devices = Vec::with_capacity(fields.devices.entries.len());
+    for d in &fields.devices.entries {
+        let host = interp::resolve(d.host.text(), &bindings, d.host.span())?;
+        let container = interp::resolve(d.container.text(), &bindings, d.container.span())?;
+        devices.push(format!("{host}:{container}"));
+    }
+
     let (compose_networks, network_docs, docker_network) = resolve_networks(
         &fields.networks,
         declared_networks,
@@ -512,6 +524,10 @@ fn generate_service(
     // compile time (#154).
     let env_file = fields.env_file.iter().map(|r| r.name.clone()).collect();
 
+    // Bare-presence only, exactly like `network`'s `external` — see
+    // `ast::ServiceFields::privileged`'s doc (#157).
+    let privileged = fields.privileged.is_some();
+
     let mut raw_map = IndexMap::new();
     for entry in &fields.raw.entries {
         let key = interp::resolve(entry.key.text(), &bindings, entry.key.span())?;
@@ -522,6 +538,7 @@ fn generate_service(
         image: Some(image),
         container_name,
         command,
+        privileged,
         restart,
         healthcheck,
         environment,
@@ -529,6 +546,7 @@ fn generate_service(
         volumes: volume_entries,
         networks: compose_networks,
         dns,
+        devices,
         ports: publish_entries,
         expose,
         depends_on,
@@ -548,7 +566,9 @@ fn generate_service(
 /// never `{{name}}`-interpolated, matching every other reference-list
 /// field (`middleware`/`networks`/`dns`/`env_file`): a `depends_on`
 /// entry names a same-file sibling service, not free text, so there is
-/// nothing in it a binding could ever apply to.
+/// nothing in it a binding could ever apply to. (`devices`, unlike
+/// those, *is* interpolated — see the `publish`-mirroring block above,
+/// #167 — but it was never a reference-list field to begin with.)
 ///
 /// Neither this function nor anything upstream of it warns when a
 /// `service_healthy` entry targets a service with no `hll`-level

@@ -72,6 +72,10 @@ Program {
                     networks: [],
                     dns: [],
                     env_file: [],
+                    privileged: None,
+                    devices: DeviceMap {
+                        entries: [],
+                    },
                     container_name: None,
                     command: None,
                     with: [],
