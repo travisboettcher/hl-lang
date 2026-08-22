@@ -164,6 +164,25 @@ pub enum ParseError {
     /// no later "resolve it, then check" stage this could be deferred
     /// to even if it wanted to be.
     InvalidDependsOnCondition { found: String, span: Span },
+    /// Two `router` blocks in one `service`/`template` body claim the
+    /// same router id (#184) — either the same name, or the unnamed
+    /// `router { }` form written twice.
+    ///
+    /// The id is what the generated label key is built from
+    /// (`traefik.http.routers.<service>-<name>`), so two blocks sharing
+    /// one are not two routers but one router described twice, with
+    /// whichever came last silently winning — exactly the shape
+    /// [`Self::DuplicateMapKey`] already refuses for two `volume`
+    /// entries at one container path.
+    ///
+    /// `name` is `None` for the unnamed form. Two *tiers* naming one
+    /// router — a template and the service using it — never reach this:
+    /// that's the per-sub-field merge `router` is built around.
+    DuplicateRouterName {
+        name: Option<String>,
+        first: Span,
+        second: Span,
+    },
 }
 
 impl ParseError {
@@ -190,7 +209,8 @@ impl ParseError {
             | ParseError::RawValueTooDeep { span, .. }
             | ParseError::AliasSugarCannotContinue { span, .. }
             | ParseError::MapEntryMissingSeparator { span, .. }
-            | ParseError::InvalidDependsOnCondition { span, .. } => *span,
+            | ParseError::InvalidDependsOnCondition { span, .. }
+            | ParseError::DuplicateRouterName { second: span, .. } => *span,
         }
     }
 }
@@ -351,6 +371,20 @@ impl fmt::Display for ParseError {
                  `service_started`, `service_healthy`, `service_completed_successfully`)",
                 span.line, span.col
             ),
+            ParseError::DuplicateRouterName { name, first, .. } => match name {
+                Some(name) => write!(
+                    f,
+                    "{}:{}: duplicate `router {name}` (first declared at {}:{}) — two routers \
+                     with one name are one router described twice",
+                    span.line, span.col, first.line, first.col
+                ),
+                None => write!(
+                    f,
+                    "{}:{}: duplicate unnamed `router` (first declared at {}:{}) — give each \
+                     extra router a name (`router api {{ ... }}`)",
+                    span.line, span.col, first.line, first.col
+                ),
+            },
         }
     }
 }
@@ -610,6 +644,38 @@ mod display_tests {
             err.to_string(),
             "6:20: unknown `depends_on` condition \"service_ok\" (expected one of \
              `service_started`, `service_healthy`, `service_completed_successfully`)"
+        );
+    }
+
+    /// #184: the named form quotes the router back, so the message says
+    /// which of a service's several routers was written twice.
+    #[test]
+    fn duplicate_router_name_display() {
+        let err = ParseError::DuplicateRouterName {
+            name: Some("api".to_string()),
+            first: span(4, 3),
+            second: span(9, 3),
+        };
+        assert_eq!(
+            err.to_string(),
+            "9:3: duplicate `router api` (first declared at 4:3) — two routers with one name \
+             are one router described twice"
+        );
+    }
+
+    /// The unnamed form has no name to quote, so it points at the fix
+    /// instead: give the extra router one.
+    #[test]
+    fn duplicate_unnamed_router_display() {
+        let err = ParseError::DuplicateRouterName {
+            name: None,
+            first: span(4, 3),
+            second: span(9, 3),
+        };
+        assert_eq!(
+            err.to_string(),
+            "9:3: duplicate unnamed `router` (first declared at 4:3) — give each extra router \
+             a name (`router api { ... }`)"
         );
     }
 }

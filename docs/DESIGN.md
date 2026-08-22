@@ -101,6 +101,8 @@ key            ::= IDENT | STRING
 sugar          ::= body
                   | value ( "->" | "=" ) value
                   | value ( "," value )* statement*
+                  | IDENT? body
+                  | IDENT ( "," statement )*
 
 value          ::= literal | list | statement
 
@@ -109,6 +111,18 @@ list           ::= "[" ( value ( "," value )* )? "]"
 literal        ::= STRING | NUMBER | IDENT | "$" IDENT
 ```
 
+- The last two `sugar` alternatives belong to a **name-keyed** field, of
+  which `router` is the only one—see the schema table below. The
+  identifier between the field name and the body names *this* instance
+  of the field rather than setting a sub-field, so `router api { host:
+  "..." }` and `router api, host: "..."` both declare a router called
+  `api`. The name is an `IDENT`, never a `STRING`, matching the spelling
+  of a top-level declaration's own name: it ends up in a Traefik
+  label *key*, and `IDENT`'s grammar can't hold the `.`, `=`, backtick,
+  or space that would forge a different key. Leaving the name off
+  requires the braced form, since a comma-list needs a first token to
+  continue from and `router host: "x"` can't say whether `host` names the
+  router or its own field.
 - The parser checks a parameter's optional `: param_type` annotation
   strictly, not coercively: a declared `Number` rejects a quoted string
   argument even if it's numeric-looking, and a declared `String` rejects
@@ -212,12 +226,16 @@ same two entries—see #81.
    reattaching elsewhere.
 4. **Repeatable-field accumulation**—semantic, not part of the
    Context-Free Grammar (CFG)—writing `volume`, `publish`, `env`,
-   `middleware`, or `depends_on` more than once in
+   `middleware`, `depends_on`, or `router` more than once in
    one body appends, since those fields are list/map-kinded—subject to
    the set-like lists' distinct-name rule under "Composition" below, which
    drops a repeat of a name already present (`depends_on` instead keeps
    only its own list's *last* entry for a repeated name, per the same
    keyed-merge rule its own paragraph under "Composition" describes—#155).
+   `router` appends only for *distinct* names: two blocks in one body
+   claiming the same router id is a compile error rather than an
+   append or an override, since that isn't two routers but one router
+   described twice—#184.
    Writing `image` or `restart` twice in the same body is a
    duplicate-scalar compile error.
 
@@ -230,6 +248,7 @@ same two entries—see #81.
 | `service` | struct |—|—|—| yes |
 | `image` | struct | `ref` |—|—| no |
 | `expose` | struct | `port` |—|—| no |
+| `router` | struct |—|—| the router name | optional |
 | `volume`—the `service`/`template` field | map |—| `->` | value—the container path | no |
 | `driver_opts`—inside a `volume` declaration | map |—| `:` | key | no |
 | `publish` | map |—| `->` | value—the container port | no |
@@ -361,8 +380,63 @@ codegen's to write rather than the user's—so no generated label value
 ever has to tolerate a user-written comma, and the metacharacter guard
 can reject `,` uniformly everywhere.
 
-Besides the three top-level types, `healthcheck` and `traefik` are the
-table's struct-kind rows with no primary field: unlike `image`'s `ref`
+`router` is the one row that's both repeatable *and* struct-kind, and
+the only one whose instances take a key from a name the user writes. It
+exists because `expose` models exactly one Traefik router—one `host`,
+one `Host()` rule, one `entrypoints=` label—and a real service often
+needs several off one container: a public host beside a local-network
+host, an API path prefix split off from a catch-all frontend. Before #184 the only
+way to say that was to abandon `expose` and hand-write the whole label
+list in `raw { labels: [...] }`, which gives up `expose`'s validation,
+its `{{name}}` interpolation, and its metacharacter guard for a service
+that's otherwise an ordinary Traefik-fronted container.
+
+`expose` is deliberately untouched by this. Making `expose` itself
+repeatable would have broken its documented per-sub-field merge, and it
+carries `port`, which is per Compose *service* rather than per router—a
+second `expose` would have had to either duplicate the port or leave it
+ambiguous. So `router` is a separate field, and a file that never writes
+one compiles to exactly the bytes it compiled to before the field
+existed.
+
+Each block emits `traefik.http.routers.<service>-<name>` for its labels,
+or `traefik.http.routers.<service>` for the unnamed `router { }` form—
+the very id `expose.host` produces, which is why setting both is a
+compile error rather than one silently overwriting the other. Two blocks
+in one body claiming the same id is likewise an error, the same rule two
+`volume` entries at one container path already follow: that isn't two
+routers, it's one router described twice.
+
+`host` is a plain scalar. `entrypoint` takes the same spelling and the
+same merge rule as `expose.entrypoint`—two fields producing the same
+`entrypoints=` label shouldn't be two different grammars. `path_prefix`
+holds plain literals rather than references, and it's the one list field
+that does:
+a prefix is free text a template legitimately fills in with a `$param`,
+and a reference has no `$param` form at all, since the grammar has no
+parameter in reference position. With prefixes set, the rule
+becomes ``Host(`h`) && (PathPrefix(`a`) || PathPrefix(`b`))``. The
+parentheses are load-bearing, not cosmetic: `&&` binds tighter than `||`
+in Traefik's rule grammar, so without them the rule would match *any*
+host under the last prefix. They're emitted for a single prefix too,
+where they change nothing, so the rule's shape doesn't depend on how many
+prefixes it happens to have.
+
+Two things a `router` deliberately doesn't carry. It has no `port`:
+Compose's `loadbalancer.server.port` label is per Compose service, not
+per router, so it stays derived from `expose.port` and several routers
+off one container all balance onto that one port. And it has no
+`middleware`: that stays a service-level field and applies to every
+router the service has, so a service with three routers and one
+`middleware` line gets the same middleware list on all three. Per-router
+middleware isn't expressible yet.
+
+Besides the three top-level types, `healthcheck`, `traefik`, and
+`router` are the table's struct-kind rows with no primary field.
+`router`'s reason is its own: the router's name already occupies the
+position right after the keyword, so there is nowhere for a bare
+primary value to go—write `router api { host: "..." }` or `router api,
+host: "..."` instead. For the other two, unlike `image`'s `ref`
 or `expose`'s `port`, no single sub-field of `healthcheck`'s
 `test`/`interval`/`timeout`/`retries`/`start_period`/`start_interval`/
 `disable`, nor of `traefik`'s own lone `disabled`, obviously stands in
@@ -539,6 +613,25 @@ that each depend on the same service—the same reasoning
 `hl-codegen`'s `AmbiguousExternalNetwork` check already applies to a
 network named `external` twice: naming one thing more than once isn't
 an ambiguity between it and itself, it's one answer given twice.
+
+`router` merges by router name, and then *per sub-field* within
+each name—the keyed form of the per-sub-field merge the next paragraph
+describes for `expose`, one level deeper because a router's sub-fields
+sit under a name rather than directly on the struct. Both levels are
+load-bearing. Keyed, so two tiers naming different routers give a
+service both rather than one. Per sub-field, so a service body writing
+`router api { host: "..." }` over a template's `router api { entrypoint:
+web-secure, path_prefix: [...] }` means "same router, different host"
+rather than "throw the rest away"—the full-entry replacement `merge_map`
+gives `volume`/`publish` would silently discard it, since a `volume`
+entry has nothing inside it to keep and a router does. Within one name,
+`host` is a scalar and collides between two explicit templates, while
+`entrypoint` and `path_prefix` concatenate—`entrypoint` by distinct name
+like `middleware`, `path_prefix` keeping duplicates like `dns`, since
+prefixes are `||` alternatives whose written order is observable in the
+emitted rule. A collision names the router as well as the field, through
+the same `MapKeyCollision` a colliding `env` key raises, since a message
+about `router.host` alone doesn't say *which* router—#184.
 
 `expose` and `healthcheck`, the built-in struct fields
 with more than one sub-field, both merge per sub-field (`expose`'s
@@ -927,7 +1020,37 @@ deploy that looks fine until Traefik never picks it up, and neither
 failure mode is one `hllc` should choose on the author's behalf.
 `expose.port` is exempt: it's Compose's own `expose:` key, plain
 container-network visibility with nothing to do with Traefik, so a
-service with Traefik off may still declare one.
+service with Traefik off may still declare one. That same flag conflict
+covers a `router` block too—a whole router declared on a service
+that just said it wants none is the same contradiction one step further
+along.
+
+`router` adds three more hard errors of its own, all of the same
+shape—something that can only be a Traefik router, either contradicted,
+or left incomplete—#184:
+
+- A `router` block with no `host` has no rule to emit, so there is
+  nothing it could have meant. This is stricter than `expose`, which
+  tolerates a host-less block because its `port` still does a second job
+  (Compose's own `expose:` key) that has nothing to do with Traefik. A
+  `router` has no second job.
+- A service that sets both `expose.host` and an *unnamed* `router { }`
+  has two blocks claiming the router id `traefik.http.routers.<service>`,
+  so one would silently overwrite the other's labels. Naming the block
+  gives it its own id.
+- A router name outside `[A-Za-z0-9_-]` draws a rejection. This is a
+  different check from the metacharacter guard that covers label
+  *values*, and deliberately a different character set: the name goes
+  into the label **key**, `traefik.http.routers.<name>.rule`, where a `.`
+  extends the dotted key and an `=` ends it outright, since Docker splits
+  a label string on its first `=`. A bad name doesn't corrupt one label's
+  meaning, it writes a different label. The grammar already refuses such
+  a name—a router name is an `IDENT`—and codegen checks it again anyway,
+  so its safety doesn't rest on the grammar staying as it stands.
+
+The parser catches two `router` blocks in one body claiming the same
+router id instead, alongside the other duplicate-key errors, since both
+spans are still in hand there.
 
 ## Future work
 

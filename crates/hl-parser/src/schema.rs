@@ -88,6 +88,46 @@ pub enum FieldKind {
     /// [`crate::ast::DependsOnEntry`]'s doc and
     /// [`crate::ParseError::InvalidDependsOnCondition`].
     DependsOnList,
+    /// A list of plain literals (`router`'s `path_prefix`, #184).
+    /// Accumulates across repeats and takes the same two spellings
+    /// [`Self::ReferenceList`] does — a bracketed list, the bare
+    /// comma-list sugar, or repeated statements — and is likewise never
+    /// duplicate-checked, since a list field can't collide.
+    ///
+    /// Not [`Self::ReferenceList`] itself, even though `dns` and
+    /// `env_file` already carry ordinary literal values in a
+    /// [`crate::ast::Reference`]: a [`Reference`](crate::ast::Reference)
+    /// is built from the parser's own `parse_key`, which accepts only
+    /// `IDENT`/`STRING`, so a `$param` can't be written into one at all.
+    /// A path prefix is exactly the kind of value a template
+    /// parameterizes, so its entries have to be [`crate::ast::Literal`]s
+    /// — the same reasoning that keeps `publish`/`devices`' own map
+    /// halves literals rather than references.
+    ///
+    /// Not [`Self::ScalarOrList`] either: that kind is
+    /// single-occurrence, with no bare comma-list sugar, because
+    /// `healthcheck.test`/`command` have to tell Compose's shell form
+    /// from its exec form by brackets alone. `path_prefix` has no such
+    /// pair of shapes — it is always a list — so it accumulates and
+    /// takes the sugar like every other list field.
+    LiteralList,
+    /// A repeatable, *name-keyed* nested struct field — `router
+    /// <name> { ... }` (#184), the only one today.
+    ///
+    /// [`Self::Nested`]'s struct-kind arm is single-occurrence: a second
+    /// `expose` in one body is a [`crate::ParseError::DuplicateField`].
+    /// Its map-kind arm accumulates, but a map entry is a `key ->
+    /// value` pair, not a body of named sub-fields. A `router` needs
+    /// both halves at once — several of them per body, each with its own
+    /// `host`/`entrypoint`/`path_prefix` body — so it gets its own kind
+    /// rather than bending either of those.
+    ///
+    /// The name is optional (`router { ... }` claims the same router id
+    /// `expose.host` does) and is an `IDENT`, never a `STRING`, matching
+    /// how a top-level declaration's own name is spelled — see
+    /// [`crate::ast::Router`]'s doc for why a label *key* can't take
+    /// arbitrary string content.
+    NamedNested(&'static TypeSchema),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -193,6 +233,56 @@ pub static EXPOSE: TypeSchema = TypeSchema {
     uniqueness: None,
     key_may_be_reference: false,
     bare_keyword_alias: Some(("as", "host")),
+    needs_name: false,
+    schema_free: false,
+};
+
+/// `router api { host: "...", entrypoint: web-secure, path_prefix: [...] }`
+/// — one Traefik router computed off this service (#184), repeatable and
+/// keyed by the optional name written right after the keyword.
+///
+/// [`EXPOSE`] models exactly one router and keeps doing so, byte for
+/// byte. This is the second way to ask for one, for the service that
+/// needs several: a public host beside a LAN host, an API path split off
+/// from a frontend. See [`crate::ast::Router`]'s doc for the whole
+/// rationale and for why the name is an `IDENT`.
+///
+/// No `primary_field`, for [`HEALTHCHECK`]'s reason rather than
+/// [`TRAEFIK`]'s: the position right after the keyword is already spoken
+/// for by the router's own name, so there is nowhere for a bare primary
+/// value to go. `host` would otherwise be the obvious candidate — write
+/// it as `router api { host: "..." }` or `router api, host: "..."`
+/// instead.
+///
+/// `entrypoint` is [`FieldKind::ReferenceList`], the same kind and the
+/// same spelling as [`EXPOSE`]'s own, deliberately: two fields that
+/// produce the same `entrypoints=` label should not be two different
+/// grammars. `path_prefix` is [`FieldKind::LiteralList`] rather than a
+/// reference list — see that kind's own doc for why a `$param` forces
+/// it. `router` carries no `port`: `loadbalancer.server.port` is per
+/// Compose service, not per router, so it stays [`EXPOSE`]'s.
+pub static ROUTER: TypeSchema = TypeSchema {
+    type_name: "router",
+    kind: SchemaKind::Struct,
+    fields: &[
+        FieldSchema {
+            name: "host",
+            kind: FieldKind::Scalar,
+        },
+        FieldSchema {
+            name: "entrypoint",
+            kind: FieldKind::ReferenceList,
+        },
+        FieldSchema {
+            name: "path_prefix",
+            kind: FieldKind::LiteralList,
+        },
+    ],
+    primary_field: None,
+    map_separator: None,
+    uniqueness: None,
+    key_may_be_reference: false,
+    bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
 };
@@ -615,6 +705,15 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
     FieldSchema {
         name: "expose",
         kind: FieldKind::Nested(&EXPOSE),
+    },
+    // `router name { ... }` (#184) sits next to `expose` for the same
+    // reason `traefik` does: the three jointly decide which Traefik
+    // routers a service gets, so `hl-codegen`'s `labels.rs` reads them
+    // as one related group. Repeatable and name-keyed, unlike `expose`,
+    // which stays exactly the single-router field it has always been.
+    FieldSchema {
+        name: "router",
+        kind: FieldKind::NamedNested(&ROUTER),
     },
     // `traefik { disabled }` (#159) sits next to `expose` on purpose:
     // the two jointly decide whether — and how — a service gets a

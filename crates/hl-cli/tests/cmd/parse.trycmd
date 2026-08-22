@@ -52,6 +52,7 @@ Program {
                         },
                     ),
                     expose: None,
+                    routers: [],
                     traefik: None,
                     restart: None,
                     healthcheck: None,

@@ -62,7 +62,7 @@ pub mod schema;
 pub use ast::{
     Command, DependsOnCondition, DependsOnEntry, DeviceEntry, DeviceMap, EnvEntry, EnvMap, Expose,
     Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Param, ParamType, Program,
-    PublishEntry, PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Service,
+    PublishEntry, PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Router, Service,
     ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
     VolumeDriverOpt, VolumeEntry, VolumeHost, VolumeMap,
 };

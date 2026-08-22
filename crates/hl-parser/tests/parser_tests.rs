@@ -2488,3 +2488,222 @@ fn qualified_middleware_reference_parses() {
     assert_eq!(r.qualifier.as_ref().unwrap().name, "common");
     assert_eq!(r.name, "forwardAuth");
 }
+
+// --- `router` blocks (#184) ---
+
+fn routers(service: &hl_parser::Service) -> &[hl_parser::Router] {
+    &service.fields.routers
+}
+
+fn router_entrypoints(router: &hl_parser::Router) -> Vec<&str> {
+    router.entrypoint.iter().map(|r| r.name.as_str()).collect()
+}
+
+fn router_prefixes(router: &hl_parser::Router) -> Vec<&str> {
+    router.path_prefix.iter().map(Literal::text).collect()
+}
+
+/// The canonical form: a name after the keyword, then a braced body
+/// whose fields are newline-separated like any other struct body.
+#[test]
+fn router_named_braced_body_parses() {
+    let program = parse_ok(
+        "service s {\n  image \"x\"\n  router api {\n    host: \"a.example.com\"\n    \
+         entrypoint: web-secure\n    path_prefix: [\"/api/v1\", \"/dav/\"]\n  }\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let routers = routers(service);
+    assert_eq!(routers.len(), 1);
+    assert_eq!(routers[0].key(), Some("api"));
+    assert_eq!(routers[0].host.as_ref().unwrap().text(), "a.example.com");
+    assert_eq!(router_entrypoints(&routers[0]), vec!["web-secure"]);
+    assert_eq!(router_prefixes(&routers[0]), vec!["/api/v1", "/dav/"]);
+}
+
+/// Leaving the name off is legal and means the router id `expose.host`
+/// would have produced — codegen is what refuses writing both.
+#[test]
+fn router_unnamed_braced_body_parses() {
+    let program = parse_ok("service s {\n  router { host: \"a.example.com\" }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(routers(service).len(), 1);
+    assert_eq!(routers(service)[0].key(), None);
+}
+
+/// The comma-continued spelling, the same production `expose 8096, host:
+/// "..."` already parses — continuing from the router's name instead of
+/// from a primary value.
+#[test]
+fn router_comma_shorthand_parses() {
+    let program = parse_ok(
+        "service s {\n  router api, host: \"a.example.com\", entrypoint: web-secure, \
+         path_prefix: [\"/api\"]\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let routers = routers(service);
+    assert_eq!(routers[0].key(), Some("api"));
+    assert_eq!(routers[0].host.as_ref().unwrap().text(), "a.example.com");
+    assert_eq!(router_entrypoints(&routers[0]), vec!["web-secure"]);
+    assert_eq!(router_prefixes(&routers[0]), vec!["/api"]);
+}
+
+/// Several blocks in one body accumulate in source order, which is what
+/// makes the emitted label order a function of the source.
+#[test]
+fn several_routers_accumulate_in_source_order() {
+    let program = parse_ok(
+        "service s {\n  router api, host: \"a.example.com\"\n  \
+         router web, host: \"b.example.com\"\n  router lan, host: \"c.example.com\"\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let names: Vec<Option<&str>> = routers(service).iter().map(|r| r.key()).collect();
+    assert_eq!(names, vec![Some("api"), Some("web"), Some("lan")]);
+}
+
+/// `path_prefix` takes the bare comma-list sugar every list field takes,
+/// and accumulates across repeats of the field.
+#[test]
+fn router_path_prefix_accepts_a_bare_list_and_accumulates() {
+    let program = parse_ok(
+        "service s {\n  router api {\n    host: \"a.example.com\"\n    \
+         path_prefix: \"/api\", \"/dav\"\n    path_prefix: \"/.well-known\"\n  }\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    assert_eq!(
+        router_prefixes(&routers(service)[0]),
+        vec!["/api", "/dav", "/.well-known"]
+    );
+}
+
+/// The same `KEY :` one-token lookahead that keeps `expose`'s own bare
+/// lists from swallowing a sibling field: the second comma here starts
+/// `entrypoint`, not a third prefix.
+#[test]
+fn router_bare_path_prefix_list_ends_at_the_next_field() {
+    let program = parse_ok(
+        "service s {\n  router api, host: \"a.example.com\", path_prefix: \"/api\", \
+         entrypoint: web-secure\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    assert_eq!(router_prefixes(&routers(service)[0]), vec!["/api"]);
+    assert_eq!(router_entrypoints(&routers(service)[0]), vec!["web-secure"]);
+}
+
+/// Two blocks claiming one router id are one router described twice,
+/// with the later silently winning — refused, exactly as two `volume`
+/// entries at one container path are.
+#[test]
+fn duplicate_router_name_is_rejected() {
+    let err = parse(
+        "service s {\n  router api, host: \"a.example.com\"\n  router api, host: \"b.example.com\"\n}\n",
+    )
+    .expect_err("expected a parse error");
+    assert!(
+        matches!(
+            err,
+            ParseError::DuplicateRouterName { ref name, .. } if name.as_deref() == Some("api")
+        ),
+        "got {err:?}"
+    );
+}
+
+/// Including two unnamed blocks, which share the service's own id.
+#[test]
+fn duplicate_unnamed_router_is_rejected() {
+    let err = parse(
+        "service s {\n  router { host: \"a.example.com\" }\n  router { host: \"b.example.com\" }\n}\n",
+    )
+    .expect_err("expected a parse error");
+    assert!(
+        matches!(err, ParseError::DuplicateRouterName { name: None, .. }),
+        "got {err:?}"
+    );
+}
+
+/// Two routers with *different* names are the whole point of the field
+/// and stay accepted.
+#[test]
+fn two_differently_named_routers_are_accepted() {
+    let program = parse_ok(
+        "service s {\n  router api, host: \"a.example.com\"\n  router web, host: \"b.example.com\"\n}\n",
+    );
+    assert_eq!(routers(as_service(&program.decls[0])).len(), 2);
+}
+
+/// A template body accepts `router` exactly as a service body does —
+/// the two share one field list.
+#[test]
+fn router_parses_in_a_template_body() {
+    let program = parse_ok("template t {\n  router api, host: \"a.example.com\"\n}\n");
+    let template = as_template(&program.decls[0]);
+    assert_eq!(template.fields.routers.len(), 1);
+}
+
+/// A `$param` is legal in a `router`'s `host` and in each
+/// `path_prefix` — which is why `path_prefix` holds literals rather than
+/// references, since a reference has no `$param` form at all.
+#[test]
+fn router_host_and_path_prefix_accept_a_param() {
+    let program = parse_ok(
+        "template t(h: String, p: String) {\n  router api { host: $h\n    path_prefix: [$p] }\n}\n",
+    );
+    let template = as_template(&program.decls[0]);
+    let router = &template.fields.routers[0];
+    assert!(matches!(
+        router.host.as_ref().unwrap(),
+        Literal::Param(name, _) if name == "h"
+    ));
+    assert!(matches!(&router.path_prefix[0], Literal::Param(name, _) if name == "p"));
+}
+
+/// An unknown sub-field is refused against `router`'s own field list,
+/// which is what keeps a typo from being silently dropped.
+#[test]
+fn unknown_router_field_is_rejected() {
+    let err = parse("service s {\n  router api { bogus: 1 }\n}\n").expect_err("expected an error");
+    assert!(
+        matches!(
+            err,
+            ParseError::UnknownField {
+                type_name: "router",
+                ref field,
+                ..
+            } if field == "bogus"
+        ),
+        "got {err:?}"
+    );
+}
+
+/// The unnamed form needs its braces: with no name and no `{`, there is
+/// no first token to continue a comma-list from, and `router host: "x"`
+/// would have to guess whether `host` names the router or its own field.
+#[test]
+fn unnamed_router_without_a_body_is_rejected() {
+    let err = parse("service s {\n  router\n}\n").expect_err("expected a parse error");
+    assert!(
+        matches!(err, ParseError::UnexpectedToken { .. }),
+        "got {err:?}"
+    );
+}
+
+/// Writing `host` twice in one router body is the ordinary duplicate
+/// scalar error, reported against `router` rather than the enclosing
+/// service.
+#[test]
+fn duplicate_router_host_is_rejected() {
+    let err = parse(
+        "service s {\n  router api {\n    host: \"a.example.com\"\n    host: \"b.example.com\"\n  }\n}\n",
+    )
+    .expect_err("expected a parse error");
+    assert!(
+        matches!(
+            err,
+            ParseError::DuplicateField {
+                type_name: "router",
+                field: "host",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
