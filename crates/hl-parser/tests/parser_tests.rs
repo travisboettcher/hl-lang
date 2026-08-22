@@ -1822,6 +1822,152 @@ fn env_file_repeats_accumulate() {
     assert_eq!(entries, vec!["miniflux.env", "common.env"]);
 }
 
+// --- privileged / devices (#157) ---
+
+/// `privileged` is bare-presence only, modeled directly on `network`'s
+/// `external` — see `bool_flag_rejects_explicit_value`/
+/// `bool_flag_duplicate_is_error` for the generic mechanism this
+/// exercises.
+#[test]
+fn privileged_bare_flag_on_service() {
+    let program = parse_ok("service s {\n  image \"x\"\n  privileged\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(service.fields.privileged.is_some());
+}
+
+#[test]
+fn service_without_privileged_defaults_unset() {
+    let program = parse_ok("service s {\n  image \"x\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(service.fields.privileged.is_none());
+}
+
+#[test]
+fn privileged_rejects_a_colon_value() {
+    let err = parse("service s {\n  image \"x\"\n  privileged: true\n}\n").unwrap_err();
+    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+}
+
+/// `devices` is map-kind since #167 (review feedback on #157's original
+/// pre-joined `"host:container"` string), spelled with `publish`'s own
+/// `->` bare-entry sugar — see `publish_arrow_sugar_bare_entry` for the
+/// mirrored test.
+#[test]
+fn devices_arrow_sugar_bare_entry() {
+    let program = parse_ok("service s {\n  devices \"/dev/kmsg\" -> \"/dev/kmsg\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.devices.entries.len(), 1);
+    assert_eq!(service.fields.devices.entries[0].host.text(), "/dev/kmsg");
+    assert_eq!(
+        service.fields.devices.entries[0].container.text(),
+        "/dev/kmsg"
+    );
+}
+
+#[test]
+fn devices_colon_canonical_body() {
+    let program = parse_ok(
+        "service s {\n  devices { \"/dev/kmsg\": \"/dev/kmsg\", \"/dev/fuse\": \"/dev/fuse\" }\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.devices.entries.len(), 2);
+    assert_eq!(service.fields.devices.entries[0].host.text(), "/dev/kmsg");
+    assert_eq!(
+        service.fields.devices.entries[1].container.text(),
+        "/dev/fuse"
+    );
+}
+
+/// Repeating the field accumulates rather than being a duplicate-scalar
+/// error, exactly like `publish_repeats_accumulate`.
+#[test]
+fn devices_repeats_accumulate() {
+    let program = parse_ok(
+        "service s {\n  devices \"/dev/kmsg\" -> \"/dev/kmsg\"\n  devices \"/dev/fuse\" -> \"/dev/fuse\"\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let entries: Vec<(&str, &str)> = service
+        .fields
+        .devices
+        .entries
+        .iter()
+        .map(|e| (e.host.text(), e.container.text()))
+        .collect();
+    assert_eq!(
+        entries,
+        vec![("/dev/kmsg", "/dev/kmsg"), ("/dev/fuse", "/dev/fuse")]
+    );
+}
+
+/// A quoted container side carries Compose's optional cgroup
+/// permissions suffix (`HOST:CONTAINER[:CGROUP_PERMISSIONS]`), the
+/// direct analogue of `publish`'s protocol suffix — see
+/// `publish_accepts_a_quoted_protocol_suffix_on_the_container_side`.
+#[test]
+fn devices_accepts_a_permissions_suffix_on_the_container_side() {
+    let program = parse_ok("service s {\n  devices \"/dev/sda\" -> \"/dev/xvda:rwm\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.devices.entries.len(), 1);
+    assert_eq!(service.fields.devices.entries[0].host.text(), "/dev/sda");
+    assert_eq!(
+        service.fields.devices.entries[0].container.text(),
+        "/dev/xvda:rwm"
+    );
+}
+
+/// Uniqueness is checked on the container side, matching `publish`'s own
+/// convention (see `schema::DEVICES`'s doc for why): two entries mapping
+/// different hosts onto the same container path collide.
+#[test]
+fn devices_duplicate_container_path_is_error() {
+    let err = parse(
+        "service s {\n  devices \"/dev/kmsg\" -> \"/dev/kmsg\"\n  devices \"/dev/fuse\" -> \"/dev/kmsg\"\n}\n",
+    )
+    .unwrap_err();
+    match err {
+        ParseError::DuplicateMapKey {
+            type_name: "devices",
+            side: MapSide::Value,
+            value,
+            ..
+        } => assert_eq!(value, "/dev/kmsg"),
+        other => panic!("expected DuplicateMapKey on devices container path, got {other:?}"),
+    }
+}
+
+/// The same host device mapped onto two different container paths is
+/// legitimate — a host-side check would have rejected it, which is why
+/// uniqueness lands on the container side instead.
+#[test]
+fn devices_same_host_different_container_paths_is_accepted() {
+    let program = parse_ok(
+        "service s {\n  devices \"/dev/sda\" -> \"/dev/xvda:r\"\n  devices \"/dev/sda\" -> \"/dev/xvdb:rwm\"\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.devices.entries.len(), 2);
+}
+
+#[test]
+fn devices_entry_missing_separator_is_an_error() {
+    let err = parse("service s {\n  devices \"/dev/kmsg\"\n}\n").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::MapEntryMissingSeparator {
+            type_name: "devices",
+            separator: TokenKind::Arrow,
+            ..
+        }
+    ));
+}
+
+/// A `template` body accepts exactly the same fields as a `service` one.
+#[test]
+fn devices_is_accepted_in_a_template_body() {
+    let program = parse_ok("template t {\n  devices \"/dev/kmsg\" -> \"/dev/kmsg\"\n}\n");
+    let template = as_template(&program.decls[0]);
+    assert_eq!(template.fields.devices.entries.len(), 1);
+}
+
 // --- template declarations ---
 
 #[test]

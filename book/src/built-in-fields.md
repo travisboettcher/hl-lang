@@ -349,6 +349,67 @@ There's no single-value shorthand. `publish 8096` is an error, not
 "8096 on both sides." `volume` requires both sides of its mapping too,
 and both fields follow the same rule.
 
+## `devices`
+
+Map-kind. Bare-entry separator: `->`, which points from the host device
+path to the container device path. `hllc` checks uniqueness on the
+**container path**, the value side—the same convention `publish` follows
+for its own `host -> container` mapping, and for the same reason.
+
+```hll,build
+service cadvisor {
+  image "gcr.io/cadvisor/cadvisor:latest"
+  devices "/dev/kmsg" -> "/dev/kmsg"
+  privileged
+}
+```
+
+```yaml
+services:
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+```
+
+`devices` is Compose's own `devices:` key, exposing a host device inside
+the container—`cadvisor`'s classic use case, reading host `/proc` and
+control-group device metrics. It's a plain generic Compose key like `dns`, not
+homelab-specific itself even though a real entry always is. `hllc`
+never validates or rewrites a device path—write it exactly as `docker
+compose` would expect it.
+
+Repeating `devices` accumulates entries rather than overwriting, exactly
+like `publish`.
+
+Write both sides exactly as you'd write them in Compose's short syntax,
+`HOST:CONTAINER[:CGROUP_PERMISSIONS]`. `hllc` passes both through to the
+generated `host:container` string unchanged. An optional control-group
+permissions suffix belongs on the container side, quoted so it lexes as
+one value: `devices "/dev/sda" -> "/dev/xvda:rwm"` yields
+`"/dev/sda:/dev/xvda:rwm"`.
+
+Checking uniqueness on the container side rather than the host one is
+deliberate, and the reasoning transfers directly from `publish`—Docker's
+real conflict is on the host side, but the optional permissions suffix
+rides on the container half of the mapping, so a host-side check would
+reject the legitimate case of one host device mapped to two container
+paths, each with its own permissions. The trade-off is the mirror image:
+`hllc` rejects one container path fed by two different host devices,
+`"/dev/sda" -> "/dev/xvda"` *and* `"/dev/sdb" -> "/dev/xvda"`, as a
+duplicate. Reach for [`raw`](#raw)'s `devices:` when you genuinely need
+that.
+
+There's no single-value shorthand, matching `publish`/`volume`:
+`devices "/dev/kmsg"` is an error, not "the same path on both sides."
+
+This field grew its arrow syntax from review feedback on the pull
+request that introduced it at #167—it originally shipped taking a
+single pre-joined `"host:container"` string, `devices
+["/dev/kmsg:/dev/kmsg"]`, before landing on the same shape `publish`/
+`volume` already use.
+
 ## `volume`
 
 Map-kind. Bare-entry separator: `->`, which points from the host path
@@ -699,6 +760,28 @@ same condition on both—are giving the same answer twice, not two
 different ones, so they still collapse to a single entry exactly as
 they always have.
 
+## `privileged`
+
+Another plain generic Compose key, directly on `service`/`template`:
+
+```hll,fragment
+privileged
+```
+
+| Field | Accepts | Default |
+|---|---|---|
+| `privileged` | bare flag, no value | unset, `false` |
+
+`privileged` gives the container extended host privileges—Compose's own
+`privileged:` key. Bare-presence only, matching `network`'s own
+`external` field: there's no `privileged: false` form to write, since
+absence already means false.
+
+`cadvisor` is the service that motivated this field and
+[`devices`](#devices) together: it needs `privileged` and a `devices`
+mount to read host `/proc`/cgroups, previously written through
+[`raw`](#raw) before these two fields existed.
+
 ## `container_name`
 
 A plain scalar field directly on `service`/`template`, not a nested
@@ -780,21 +863,23 @@ repeatable.
 
 Map-kind, schema-free: `hllc` accepts unknown keys as-is rather than
 checking them against a fixed field list, and their values pass
-straight through to the generated YAML. This is the escape hatch for
-any Compose key `hll` doesn't have a dedicated field for yet:
+straight through to the generated YAML. `raw`'s job has narrowed over
+time as more of its common uses graduated into dedicated fields—
+`privileged`/`devices` most recently—so what's left is the genuine long
+tail: real Compose keys that come up rarely enough, or are specific
+enough to one deployment, that a dedicated field isn't worth it. `cadvisor`'s
+`security_opt` is one:
 
 ```hll,fragment
 raw {
-  privileged: true,
-  cap_add: ["NET_ADMIN"]
+  security_opt: ["seccomp=unconfined"]
 }
 ```
 
 Each `raw` entry becomes a sibling top-level key on the generated
-Compose service block (`privileged: true`, `cap_add: [...]`), exactly as
-written—there's no validation, so `docker compose` itself is the first
-thing to reject a misspelled key or a value Compose doesn't
-understand.
+Compose service block (`security_opt: [...]`), exactly as written—there's
+no validation, so `docker compose` itself is the first thing to reject a
+misspelled key or a value Compose doesn't understand.
 
 A `raw` value's lists and maps may nest up to 128 levels deep. Past
 that, `hllc` reports an error rather than following the nesting
@@ -804,10 +889,11 @@ ever comes up for generated or pathological input.
 ### `raw` wins over a built-in field of the same name
 
 A `raw` key may name a field `hll` already has: `image`,
-`container_name`, `restart`, `healthcheck`, `environment`, `env_file`,
-`volumes`, `networks`, `dns`, `ports`, `expose`, `depends_on`, or
-`labels`. When it does, the `raw` value is what's emitted, and `hllc`
-drops the built-in one—the key appears exactly once:
+`container_name`, `command`, `privileged`, `restart`, `healthcheck`,
+`environment`, `env_file`, `volumes`, `networks`, `dns`, `devices`,
+`ports`, `expose`, `depends_on`, or `labels`. When it does, the `raw`
+value is what's emitted, and `hllc` drops the built-in one—the key
+appears exactly once:
 
 ```hll,fragment
 image "nginx"

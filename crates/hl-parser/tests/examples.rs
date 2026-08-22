@@ -152,6 +152,9 @@ fn network_fixture_parses_to_expected_ast() {
     assert!(internal.external.is_none());
 }
 
+/// `privileged`/`devices` are dedicated fields (#157), so only
+/// `security_opt` — the genuine long-tail Compose key with no dedicated
+/// field of its own — is left in `raw`.
 #[test]
 fn raw_service_fixture_parses_to_expected_ast() {
     let program = parse(RAW_SERVICE).expect("raw_service.hll should parse");
@@ -159,7 +162,17 @@ fn raw_service_fixture_parses_to_expected_ast() {
         panic!("expected a Service decl")
     };
     assert_eq!(service.name.name, "cadvisor");
-    assert_eq!(service.fields.raw.entries.len(), 3);
+    assert!(service.fields.privileged.is_some());
+    let devices: Vec<(&str, &str)> = service
+        .fields
+        .devices
+        .entries
+        .iter()
+        .map(|e| (e.host.text(), e.container.text()))
+        .collect();
+    assert_eq!(devices, vec![("/dev/kmsg", "/dev/kmsg")]);
+
+    assert_eq!(service.fields.raw.entries.len(), 1);
 
     // The five read-only bind mounts (#158) — every one of them a plain
     // `volume` entry with its `{ read_only }` flag set, none of them
@@ -183,13 +196,9 @@ fn raw_service_fixture_parses_to_expected_ast() {
         .iter()
         .map(|e| e.key.text())
         .collect();
-    assert_eq!(keys, vec!["privileged", "devices", "security_opt"]);
+    assert_eq!(keys, vec!["security_opt"]);
 
-    match &service.fields.raw.entries[1].value {
-        hl_parser::RawValue::List(items, _) => assert_eq!(items.len(), 1),
-        other => panic!("expected `devices` to be a raw list, got {other:?}"),
-    }
-    match &service.fields.raw.entries[2].value {
+    match &service.fields.raw.entries[0].value {
         hl_parser::RawValue::Map(entries, _) => assert_eq!(entries.len(), 1),
         other => panic!("expected `security_opt` to be a nested raw map, got {other:?}"),
     }

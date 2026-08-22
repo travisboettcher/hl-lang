@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
-    Command, DependsOnCondition, DependsOnEntry, EnvEntry, EnvMap, Expose, Healthcheck,
-    HealthcheckTest, Ident, Image, Literal, Network, Param, ParamType, Program, PublishEntry,
-    PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Service, ServiceFields,
-    TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume, VolumeDriverOpt,
-    VolumeEntry, VolumeHost, VolumeMap,
+    Command, DependsOnCondition, DependsOnEntry, DeviceEntry, DeviceMap, EnvEntry, EnvMap, Expose,
+    Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Param, ParamType, Program,
+    PublishEntry, PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Service,
+    ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
+    VolumeDriverOpt, VolumeEntry, VolumeHost, VolumeMap,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -1773,6 +1773,23 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         Some(FieldValue::RefList(v)) => v,
         _ => Vec::new(),
     };
+    let privileged = match fields.remove("privileged") {
+        Some(FieldValue::Flag(s)) => Some(s),
+        _ => None,
+    };
+    let devices = match fields.remove("devices") {
+        Some(FieldValue::LiteralMap(entries)) => DeviceMap {
+            entries: entries
+                .into_iter()
+                .map(|(host, container, span)| DeviceEntry {
+                    host,
+                    container,
+                    span,
+                })
+                .collect(),
+        },
+        _ => DeviceMap::default(),
+    };
     let with = match fields.remove("with") {
         Some(FieldValue::Struct(mut with_fields, _)) => match with_fields.remove("templates") {
             Some(FieldValue::TemplateInvocations(v)) => v,
@@ -1795,6 +1812,8 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         networks,
         dns,
         env_file,
+        privileged,
+        devices,
         container_name,
         command,
         with,
