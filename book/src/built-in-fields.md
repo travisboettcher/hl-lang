@@ -119,6 +119,12 @@ fields. To also set `entrypoint`, name `host` explicitly instead:
 expose 8096, host: "media.example.com", entrypoint: web-secure
 ```
 
+`expose`'s `entrypoint` sub-field has nothing to do with the
+service-level [`entrypoint` field](#entrypoint) further down, which
+overrides the image's `ENTRYPOINT`. This one names Traefik entry points,
+and it's only ever the one written inside an `expose` body or after an
+`expose` shorthand's comma. A service can set both.
+
 `entrypoint` is a **reference list**, spelled exactly like `middleware`
 below—a bare name, several comma-separated names, or a bracketed list:
 
@@ -859,6 +865,63 @@ Writing `command` more than once in the same body is a compile error,
 same as `image`/`restart`/`container_name`—it's single-occurrence, not
 repeatable.
 
+## `entrypoint`
+
+A plain scalar-or-list field directly on `service`/`template`, sharing
+its grammar with the preceding [`command`](#command)—a bare string,
+Compose's shell form, or a bracketed list, Compose's exec form:
+
+```hll,fragment
+entrypoint "/bin/sh -c 'do-a-thing'"
+```
+
+```hll,fragment
+entrypoint ["/bin/sh", "-c", "do-a-thing"]
+```
+
+| Accepts | Default |
+|---|---|
+| string or bracketed list | unset—the image's own `ENTRYPOINT` applies |
+
+`entrypoint` overrides the image's `ENTRYPOINT`, exactly like Compose's
+own `entrypoint:` key. `hllc` carries whichever form you write straight
+through to the generated `entrypoint:` key, rather than normalizing one
+into the other—the same rule [`command`](#command) follows, and for the
+same reason: the shell form runs through the container's own shell,
+while the exec form runs directly with no shell involved.
+
+### `entrypoint` and `command` are two different keys
+
+They're separate Compose keys and they override separate halves of what
+the image declares. `entrypoint` replaces the image's `ENTRYPOINT`, the
+program the container runs. `command` replaces its `CMD`, the arguments
+that program gets. Docker joins them: the container runs the
+`entrypoint` with the `command` appended. Set either one, both, or
+neither—setting one says nothing about the other:
+
+```hll,build
+service backup {
+  image "alpine:3"
+  entrypoint ["/usr/local/bin/backup.sh"]
+  command "--target=/data"
+}
+```
+
+```yaml
+services:
+  backup:
+    image: alpine:3
+    entrypoint:
+      - /usr/local/bin/backup.sh
+    command: --target=/data
+```
+
+Writing `entrypoint` more than once in the same body is a compile error,
+same as `command`—it's single-occurrence, not repeatable. And a service
+that overrides `entrypoint` from a `with`-listed template replaces the
+inherited value outright rather than appending to it, since the value is
+one whole argument vector.
+
 ## `raw`
 
 Map-kind, schema-free: `hllc` accepts unknown keys as-is rather than
@@ -889,9 +952,9 @@ ever comes up for generated or pathological input.
 ### `raw` wins over a built-in field of the same name
 
 A `raw` key may name a field `hll` already has: `image`,
-`container_name`, `command`, `privileged`, `restart`, `healthcheck`,
-`environment`, `env_file`, `volumes`, `networks`, `dns`, `devices`,
-`ports`, `expose`, `depends_on`, or `labels`. When it does, the `raw`
+`container_name`, `command`, `entrypoint`, `privileged`, `restart`,
+`healthcheck`, `environment`, `env_file`, `volumes`, `networks`, `dns`,
+`devices`, `ports`, `expose`, `depends_on`, or `labels`. When it does, the `raw`
 value is what's emitted, and `hllc` drops the built-in one—the key
 appears exactly once:
 
