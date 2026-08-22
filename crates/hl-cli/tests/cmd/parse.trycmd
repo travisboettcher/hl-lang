@@ -52,6 +52,7 @@ Program {
                         },
                     ),
                     expose: None,
+                    traefik: None,
                     restart: None,
                     healthcheck: None,
                     publish: PublishMap {

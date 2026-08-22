@@ -1380,9 +1380,9 @@ fn publish_and_a_declared_named_volume_compose_together() {
 /// `yaml.safe_load` silently reads last-wins. `raw` now wins outright
 /// and the built-in is suppressed.
 ///
-/// Note this test would fail on the old behavior at `assert_yaml_eq`'s
-/// own parse step, not at the comparison: `serde_yaml_ng` rejects a
-/// duplicate mapping key.
+/// Note this test would fail on the old behavior at `yaml_value`'s own
+/// parse step, not at the snapshot comparison: `serde_yaml_ng` rejects
+/// a duplicate mapping key.
 #[test]
 fn raw_key_shadowing_a_built_in_field_overrides_it() {
     let yaml = generate_from(
@@ -1873,30 +1873,26 @@ fn miniflux_db_disables_traefik_end_to_end() {
            traefik {\n    disabled\n  }\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  miniflux:
-    image: miniflux/miniflux:latest
-    networks:
-      - default
-    expose:
-      - 8080
-    depends_on:
-      - db
-    labels:
-      - "traefik.http.routers.miniflux.rule=Host(`miniflux.example.com`)"
-      - "traefik.http.services.miniflux.loadbalancer.server.port=8080"
-
-  db:
-    image: postgres:15
-    networks:
-      - default
-    labels:
-      - "traefik.enable=false"
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      miniflux:
+        image: "miniflux/miniflux:latest"
+        networks:
+          - default
+        expose:
+          - 8080
+        depends_on:
+          - db
+        labels:
+          - "traefik.http.routers.miniflux.rule=Host(`miniflux.example.com`)"
+          - traefik.http.services.miniflux.loadbalancer.server.port=8080
+      db:
+        image: "postgres:15"
+        networks:
+          - default
+        labels:
+          - traefik.enable=false
+    "#);
 }
 
 /// Without `docker_network`/`expose.host`/`middleware` in the way, a
@@ -1923,38 +1919,33 @@ fn disabled_service_emits_exactly_one_label() {
 #[test]
 fn a_service_without_traefik_field_is_unaffected() {
     let yaml = generate_from(SYNCTHING);
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  syncthing:
-    image: lscr.io/linuxserver/syncthing:latest
-    restart: unless-stopped
-    environment:
-      - PUID=1000
-      - PGID=100
-    volumes:
-      - syncthing-config:/config
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      syncthing:
+        image: "lscr.io/linuxserver/syncthing:latest"
+        restart: unless-stopped
+        environment:
+          - PUID=1000
+          - PGID=100
+        volumes:
+          - "syncthing-config:/config"
+        networks:
+          - traefik-net
+        expose:
+          - 8384
+        labels:
+          - traefik.docker.network=docker_default
+          - "traefik.http.routers.syncthing.rule=Host(`syncthing.internal.techdebtor.io`)"
+          - traefik.http.routers.syncthing.entrypoints=web-secure
+          - "traefik.http.routers.syncthing.middlewares=local-ipwhitelist@file,forwardAuth-authentik@file"
+          - traefik.http.services.syncthing.loadbalancer.server.port=8384
     networks:
-      - traefik-net
-    expose:
-      - 8384
-    labels:
-      - "traefik.docker.network=docker_default"
-      - "traefik.http.routers.syncthing.rule=Host(`syncthing.internal.techdebtor.io`)"
-      - "traefik.http.routers.syncthing.entrypoints=web-secure"
-      - "traefik.http.routers.syncthing.middlewares=local-ipwhitelist@file,forwardAuth-authentik@file"
-      - "traefik.http.services.syncthing.loadbalancer.server.port=8384"
-
-networks:
-  traefik-net:
-    name: docker_default
-    external: true
-
-volumes:
-  syncthing-config:
-"#,
-    );
+      traefik-net:
+        name: docker_default
+        external: true
+    volumes:
+      syncthing-config: ~
+    "#);
 }
 
 /// `expose.port` alone doesn't conflict with `disabled` — it's Compose's
@@ -1965,18 +1956,15 @@ fn disabled_service_may_still_declare_expose_port() {
     let yaml = generate_from(
         "service db {\n  image \"postgres:15\"\n  expose 5432\n  traefik { disabled }\n}\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  db:
-    image: postgres:15
-    expose:
-      - 5432
-    labels:
-      - "traefik.enable=false"
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      db:
+        image: "postgres:15"
+        expose:
+          - 5432
+        labels:
+          - traefik.enable=false
+    "#);
 }
 
 #[test]
@@ -2052,16 +2040,13 @@ fn raw_labels_override_a_disabled_services_label_too() {
            raw {\n    labels: [\"only.this=1\"]\n  }\n\
          }\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  db:
-    image: postgres:15
-    labels:
-      - only.this=1
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      db:
+        image: "postgres:15"
+        labels:
+          - only.this=1
+    "#);
 }
 
 /// `traefik { disabled }` composes through `with` just like any other
@@ -2073,14 +2058,11 @@ fn traefik_disabled_composes_through_a_template() {
         "template backend_only {\n  traefik { disabled }\n}\n\
          service db {\n  with backend_only\n  image \"postgres:15\"\n}\n",
     );
-    assert_yaml_eq(
-        &yaml,
-        r#"
-services:
-  db:
-    image: postgres:15
-    labels:
-      - "traefik.enable=false"
-"#,
-    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      db:
+        image: "postgres:15"
+        labels:
+          - traefik.enable=false
+    "#);
 }
