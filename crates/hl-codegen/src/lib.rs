@@ -40,8 +40,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use hl_parser::{
-    Command, ComposedProgram, DependsOnEntry, Healthcheck, HealthcheckTest, Network, Reference,
-    Service, SourceMap, Span, Volume, VolumeHost, VolumeMap,
+    Command, ComposedProgram, DependsOnEntry, Entrypoint, Healthcheck, HealthcheckTest, Network,
+    Reference, Service, SourceMap, Span, Volume, VolumeHost, VolumeMap,
 };
 use indexmap::IndexMap;
 
@@ -539,6 +539,7 @@ fn generate_service(
         .transpose()?;
 
     let command = generate_command(fields.command.as_ref(), &bindings)?;
+    let entrypoint = generate_entrypoint(fields.entrypoint.as_ref(), &bindings)?;
 
     let restart = fields
         .restart
@@ -624,6 +625,7 @@ fn generate_service(
     let mut service_doc = doc::ComposeServiceDoc {
         image: Some(image),
         container_name,
+        entrypoint,
         command,
         privileged,
         restart,
@@ -708,6 +710,41 @@ fn generate_command(
             lit.span(),
         )?))),
         Some(Command::Exec(items, _)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(serde_yaml_ng::Value::String(interp::resolve(
+                    item.text(),
+                    bindings,
+                    item.span(),
+                )?));
+            }
+            Ok(Some(serde_yaml_ng::Value::Sequence(out)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Builds a service's `entrypoint:` value from its parsed [`Entrypoint`]
+/// field (#183), the direct counterpart of [`generate_command`] just
+/// above: Compose's `entrypoint:` key overrides the image's own
+/// `ENTRYPOINT`, where `command:` overrides its `CMD`, and the two keys
+/// take the identical shell-string-or-exec-list pair of shapes. Written
+/// out separately rather than sharing a generic helper with
+/// `generate_command`, matching how that one already mirrors
+/// [`generate_healthcheck`]'s `test` arm instead of factoring one out
+/// across so few call sites. Returns `None` when `.hll` sets no
+/// `entrypoint` field at all.
+fn generate_entrypoint(
+    entrypoint: Option<&Entrypoint>,
+    bindings: &HashMap<&str, &str>,
+) -> Result<Option<serde_yaml_ng::Value>, CodegenError> {
+    match entrypoint {
+        Some(Entrypoint::Shell(lit)) => Ok(Some(serde_yaml_ng::Value::String(interp::resolve(
+            lit.text(),
+            bindings,
+            lit.span(),
+        )?))),
+        Some(Entrypoint::Exec(items, _)) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
                 out.push(serde_yaml_ng::Value::String(interp::resolve(

@@ -57,7 +57,8 @@ pub enum FieldKind {
     /// duplicate-checked) except each item can carry an argument body.
     TemplateInvocationList,
     /// Either a single literal or a bracketed list of literals —
-    /// `healthcheck`'s `test` (#153) and `command` (#156), which each
+    /// `healthcheck`'s `test` (#153), `command` (#156), and
+    /// `entrypoint` (#183), which each
     /// carry Compose's own matching pair of shapes: a bare string (shell
     /// form, `test: "curl -f http://localhost"` /
     /// `command: "npm start"`) or a list (exec form, `test: ["CMD",
@@ -700,6 +701,28 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
     // `test` sits inside `healthcheck`.
     FieldSchema {
         name: "command",
+        kind: FieldKind::ScalarOrList,
+    },
+    // `entrypoint "/bin/sh -c 'do-a-thing'"` (shell form) /
+    // `entrypoint ["/bin/sh", "-c", "do-a-thing"]` (exec form) —
+    // Compose's own generic `entrypoint:` key (#183), overriding the
+    // image's `ENTRYPOINT` where `command` just above overrides its
+    // `CMD`. Same `FieldKind::ScalarOrList` shape as `command` for the
+    // same reason: Compose gives both keys the identical
+    // shell-string-or-exec-list pair of forms.
+    //
+    // The name is shared with [`EXPOSE`]'s own `entrypoint` sub-field,
+    // which is an unrelated reference list of Traefik entry-point
+    // names. That's the same two-roles-one-identifier situation
+    // `volume` is already in (see [`top_level_type`]'s doc), and it
+    // stays unambiguous for the same reason: a field name is only ever
+    // resolved through [`resolve_field`] against the enclosing type's
+    // own field list, so `entrypoint` written in a `service`/`template`
+    // body resolves here and `entrypoint` written inside an `expose`
+    // body or after an `expose` shorthand's comma resolves against
+    // [`EXPOSE`]. Neither table is consulted in the other's position.
+    FieldSchema {
+        name: "entrypoint",
         kind: FieldKind::ScalarOrList,
     },
     FieldSchema {

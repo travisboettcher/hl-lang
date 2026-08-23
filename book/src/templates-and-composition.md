@@ -192,6 +192,12 @@ Different field kinds merge differently:
   than inside a struct field of its own, so there's no sub-field
   independence to it—setting `command` at all is the whole collision,
   the same as setting `container_name` is.
+- **`entrypoint`**, added in #183, merges exactly the way `command`
+  does, and for the same reasons—a service's own value replaces an
+  inherited one, and two explicit templates that each set it collide.
+  The two are separate Compose keys, though, so they don't collide with
+  *each other*: a template that sets `entrypoint` and a template that
+  sets `command` merge cleanly, and the service gets both.
 
 - **`router`** merges keyed by router name, and then per sub-field
   within each name—both halves of the two preceding rules, one nested

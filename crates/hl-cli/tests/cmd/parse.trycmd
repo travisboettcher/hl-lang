@@ -79,6 +79,7 @@ Program {
                     },
                     container_name: None,
                     command: None,
+                    entrypoint: None,
                     with: [],
                 },
                 span: Span {

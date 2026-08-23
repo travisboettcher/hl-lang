@@ -503,6 +503,38 @@ impl Command {
     }
 }
 
+/// `entrypoint`'s own value (#183): either a bare literal (Compose's
+/// shell form — a bare string, `entrypoint "/bin/sh -c 'do-a-thing'"`,
+/// is run through the container's own shell) or a bracketed list of
+/// literals (Compose's exec form, `entrypoint ["/bin/sh", "-c",
+/// "do-a-thing"]`, run directly with no shell involved). Structurally
+/// identical to [`Command`], because Compose's `entrypoint:` key takes
+/// exactly the shapes its `command:` key does — and kept as its own
+/// type for the same reason [`Command`] isn't reused for `command` and
+/// `healthcheck.test` both. Here the separate name earns even more:
+/// `entrypoint` and `command` are two *different* Compose keys,
+/// overriding the image's `ENTRYPOINT` and its `CMD` respectively, and
+/// naming both of them `Command` would suggest they're one setting
+/// written two ways. Carried through to codegen in whichever shape it
+/// was written rather than normalizing one into the other, exactly like
+/// [`Command`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Entrypoint {
+    Shell(Literal),
+    /// The list's own span (covering the brackets), since a `Vec` has
+    /// nowhere else to carry one.
+    Exec(Vec<Literal>, Span),
+}
+
+impl Entrypoint {
+    pub fn span(&self) -> Span {
+        match self {
+            Entrypoint::Shell(lit) => lit.span(),
+            Entrypoint::Exec(_, span) => *span,
+        }
+    }
+}
+
 /// `volume`'s entries. Uniqueness is checked on `container` (the value
 /// side of `host -> container`), matching Docker's own constraint that
 /// two mounts can't target the same container path even though the same
@@ -868,6 +900,15 @@ pub struct ServiceFields {
     /// `healthcheck.test`, is either one bare string or a bracketed
     /// list, never a bare comma-separated sequence.
     pub command: Option<Command>,
+    /// Compose's own generic `entrypoint:` key (#183), overriding the
+    /// image's own `ENTRYPOINT`. A separate Compose key from
+    /// [`Self::command`] just above, which overrides the image's `CMD`
+    /// instead — the two are set independently, and a service may set
+    /// either, both, or neither. Shaped exactly like [`Self::command`]
+    /// otherwise: a plain scalar-or-list field directly on
+    /// `service`/`template` with no secondary fields of its own. See
+    /// [`Entrypoint`]'s own doc for the shell-vs-exec shape it carries.
+    pub entrypoint: Option<Entrypoint>,
     /// Unresolved template invocations pulled in via `with`. Always
     /// empty after [`crate::compose::compose`] runs — composition's job
     /// is precisely to merge each of these away.

@@ -5,8 +5,8 @@
 
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    Command, ComposeError, ComposedProgram, Expose, Healthcheck, HealthcheckTest, Literal,
-    RawValue, Service, VolumeHost, compose, parse,
+    Command, ComposeError, ComposedProgram, Entrypoint, Expose, Healthcheck, HealthcheckTest,
+    Literal, RawValue, Service, VolumeHost, compose, parse,
 };
 
 fn compose_ok(source: &str) -> ComposedProgram {
@@ -1045,6 +1045,76 @@ fn command_exec_form_with_embedded_comma_survives_composition() {
     }
 }
 
+// --- entrypoint merge (#183) ---
+//
+// `entrypoint` merges exactly like `command` above — its own
+// `merge_scalar_like` slot, because `Entrypoint` isn't a `Literal`
+// either. The last test here is the one that isn't just `command`'s
+// tests renamed: `entrypoint` and `command` are independent Compose
+// keys, so two templates each setting one of them compose rather than
+// collide.
+
+fn entrypoint_shell_text(entrypoint: &Entrypoint) -> &str {
+    match entrypoint {
+        Entrypoint::Shell(lit) => lit.text(),
+        other => panic!("expected Entrypoint::Shell, got {other:?}"),
+    }
+}
+
+/// The service's own body wins over a `with`-listed template's, the
+/// same "own always beats a template" rule every other field follows.
+#[test]
+fn service_own_entrypoint_overrides_template() {
+    let composed = compose_ok(
+        "template a {\n  entrypoint \"from-template\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n  entrypoint \"own\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        entrypoint_shell_text(service.fields.entrypoint.as_ref().unwrap()),
+        "own"
+    );
+}
+
+/// Two explicit templates setting different `entrypoint` values
+/// collide, exactly as two setting different `command` values do —
+/// `entrypoint` has no sub-fields to merge independently.
+#[test]
+fn explicit_templates_entrypoint_collision_is_error() {
+    let err = compose_err(
+        "template a {\n  entrypoint \"a-ep\"\n}\n\
+         template b {\n  entrypoint \"b-ep\"\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::FieldCollision { field, .. } => {
+            assert_eq!(field, "entrypoint");
+        }
+        other => panic!("expected FieldCollision on entrypoint, got {other:?}"),
+    }
+}
+
+/// `entrypoint` and `command` are two different Compose keys, so two
+/// explicit templates each setting one of them don't collide — the
+/// composed service carries both.
+#[test]
+fn entrypoint_and_command_from_two_templates_do_not_collide() {
+    let composed = compose_ok(
+        "template ep {\n  entrypoint \"/entrypoint.sh\"\n}\n\
+         template cmd {\n  command \"--flag\"\n}\n\
+         service s {\n  with ep, cmd\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        entrypoint_shell_text(service.fields.entrypoint.as_ref().unwrap()),
+        "/entrypoint.sh"
+    );
+    assert_eq!(
+        command_shell_text(service.fields.command.as_ref().unwrap()),
+        "--flag"
+    );
+}
+
 // --- non-colliding merges ---
 
 #[test]
@@ -1904,6 +1974,42 @@ fn healthcheck_test_params_are_substituted_in_exec_form() {
     assert_no_params(service);
 }
 
+/// `entrypoint`'s literals (#183) get substituted through the same
+/// `substitute_params` walk `command`'s do, in the shell form.
+#[test]
+fn entrypoint_param_is_substituted_in_shell_form() {
+    let composed = compose_ok(
+        "template t(ep: String) {\n  entrypoint $ep\n}\n\
+         service s {\n  with t { ep: \"/entrypoint.sh\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        entrypoint_shell_text(service.fields.entrypoint.as_ref().unwrap()),
+        "/entrypoint.sh"
+    );
+    assert_no_params(service);
+}
+
+/// A `$param` reference names a whole literal slot, so an exec-form
+/// `entrypoint` substitutes one list item at a time — the same shape as
+/// `command_param_is_substituted_in_exec_form`.
+#[test]
+fn entrypoint_param_is_substituted_in_exec_form() {
+    let composed = compose_ok(
+        "template t(arg: String) {\n  entrypoint [\"/bin/sh\", \"-c\", $arg]\n}\n\
+         service s {\n  with t { arg: \"do-a-thing\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    match service.fields.entrypoint.as_ref().unwrap() {
+        Entrypoint::Exec(items, _) => {
+            let texts: Vec<&str> = items.iter().map(Literal::text).collect();
+            assert_eq!(texts, vec!["/bin/sh", "-c", "do-a-thing"]);
+        }
+        other => panic!("expected Entrypoint::Exec, got {other:?}"),
+    }
+    assert_no_params(service);
+}
+
 fn assert_no_params(service: &Service) {
     let fields = &service.fields;
     assert!(fields.with.is_empty(), "with should be fully resolved");
@@ -1941,6 +2047,15 @@ fn assert_no_params(service: &Service) {
     match &fields.command {
         Some(Command::Shell(lit)) => assert_not_param(lit),
         Some(Command::Exec(items, _)) => {
+            for item in items {
+                assert_not_param(item);
+            }
+        }
+        None => {}
+    }
+    match &fields.entrypoint {
+        Some(Entrypoint::Shell(lit)) => assert_not_param(lit),
+        Some(Entrypoint::Exec(items, _)) => {
             for item in items {
                 assert_not_param(item);
             }

@@ -1,0 +1,46 @@
+--- compose ---
+services:
+  shell-form:
+    image: alpine:3
+    entrypoint: /bin/sh -c 'do-a-thing'
+    networks:
+    - default
+  exec-form:
+    image: alpine:3
+    entrypoint:
+    - /bin/sh
+    - -c
+    - do-a-thing
+    networks:
+    - default
+  both-keys:
+    image: alpine:3
+    entrypoint:
+    - /docker-entrypoint.sh
+    command: --flag
+    networks:
+    - default
+  from-shell-param:
+    image: alpine:3
+    entrypoint: /entrypoint.sh --verbose
+    networks:
+    - default
+  from-exec-param:
+    image: alpine:3
+    entrypoint:
+    - /bin/sh
+    - -c
+    - do-a-thing
+    networks:
+    - default
+  router:
+    image: alpine:3
+    entrypoint: /docker-entrypoint.sh
+    networks:
+    - default
+    expose:
+    - 8080
+    labels:
+    - traefik.http.routers.router.rule=Host(`router.example.com`)
+    - traefik.http.routers.router.entrypoints=web,web-secure
+    - traefik.http.services.router.loadbalancer.server.port=8080
