@@ -46,9 +46,9 @@ Punctuation: { } [ ] ( ) : = -> , . $
   else that looks like a keyword (`service`, `network`, `image`, `volume`,
   `publish`, `env`, `env_file`, `restart`, `expose`, `healthcheck`,
   `middleware`, `depends_on`, `networks`, `dns`, `devices`,
-  `container_name`, `command`, `privileged`, `with`, `as`, `external`,
-  `use`, `raw`, `defaults`, and more) is an
-  ordinary `IDENT`, resolved against a schema table at parse time—not a
+  `container_name`, `command`, `entrypoint`, `privileged`, `with`, `as`,
+  `external`, `use`, `raw`, `defaults`, and more) is an ordinary
+  `IDENT`, resolved against a schema table at parse time—not a
   lexer-level keyword. `with`, `as`, `external`, and `use` are
   *contextual* keywords, meaningful only in the grammar position expected
   (the same technique as C#'s `var`/`async`/`await`/`yield`), not
@@ -470,6 +470,34 @@ health check—so `command` follows `test`'s own model everywhere but its
 position directly on `ServiceFields`, unlike `container_name`. Unset,
 it's simply omitted, leaving the image's own `CMD`/entrypoint in effect,
 the same "omit rather than default" rule `container_name` follows.
+`entrypoint`, added in #183, isn't a row either, and is `command`'s
+direct counterpart: the same `FieldKind::ScalarOrList` field directly on
+`service`/`template` (`entrypoint "/bin/sh -c 'do-a-thing'"` /
+`entrypoint ["/bin/sh", "-c", "do-a-thing"]`), because Compose gives its
+`entrypoint:` key exactly the two forms it gives `command:`. The two are
+separate Compose keys, not two spellings of one: `entrypoint` overrides
+the image's `ENTRYPOINT` and `command` overrides its `CMD`, so a service
+may set either, both, or neither, and setting one says nothing about the
+other. Unset, `entrypoint` is simply omitted, leaving the image's own
+`ENTRYPOINT` in effect.
+
+The identifier `entrypoint` now names two unrelated things, the way
+`volume` already does. `expose`'s own `entrypoint` sub-field is a
+reference list of Traefik entry-point names, and the new one is a
+service-level command override. The grammar stays unambiguous for
+exactly the reason `volume`'s two roles do: the parser resolves a field
+name only through `schema::resolve_field` against the enclosing type's
+own field list, so `entrypoint` written in a `service`/`template` body
+reaches `SERVICE_FIELDS`'s row and `entrypoint` written inside an
+`expose { }` body—or after an `expose` shorthand's comma, where rule 3's
+one-token lookahead consults `EXPOSE`'s field list and nothing else—
+reaches `EXPOSE`'s. The parser consults neither table in the other's
+position, and neither role involves a lexer-level keyword. The layout
+rules keep the two apart at the statement level too: a struct-kind body
+separates fields with a newline, so a service's own `entrypoint`
+statement always begins a new statement rather than continuing the
+preceding `expose` shorthand, which only ever continues past a comma.
+
 `privileged` isn't a row either, for the same
 reason `NETWORK`'s `external` isn't: a bare-presence `FieldKind::BoolFlag`
 directly on `service`/`template`, matching Compose's own `privileged:`
@@ -585,6 +613,17 @@ third dedicated `MergeAcc` slot of its own—see #156. It's the direct
 way `container_name`'s row in `SCALAR_FIELDS` sets its own field
 directly, rather than reaching through a `get_or_insert` on an enclosing
 struct the way `healthcheck.test` reaches into `Healthcheck` first.
+
+`entrypoint`'s own type, `Entrypoint`, merges the same way `command`
+does, in a fourth dedicated `MergeAcc` slot—see #183. It's a scalar-like
+field, not a list field: a service's own `entrypoint` replaces an
+inherited one outright rather than concatenating with it, and two
+explicit templates that each set `entrypoint` collide. Replacing is the
+only defensible rule here, since the value is one whole argument vector:
+concatenating two exec lists would build a command line neither template
+asked for. `entrypoint` and `command` hold separate slots, so a template
+setting one and a template setting the other merge cleanly rather than
+collide.
 
 ```
 template internal_web(port: Number) {

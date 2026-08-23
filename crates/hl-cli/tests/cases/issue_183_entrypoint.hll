@@ -1,0 +1,48 @@
+# #183: `entrypoint` is a service-level field of its own, taking
+# Compose's shell-string-or-exec-list forms and overriding the image's
+# `ENTRYPOINT` — distinct from `command`, which overrides its `CMD`. It
+# used to be reachable only through `raw`. Both forms are covered, plus
+# a `$param` written into each (which composition has to substitute, per
+# #168), and the coexistence that makes this issue's name confusing: the
+# service-level `entrypoint` field and `expose`'s unrelated `entrypoint`
+# sub-field, a list of Traefik entry points, both appear in `router`
+# below and reach different parts of the output.
+template shell_entrypoint(ep: String) {
+  entrypoint $ep
+}
+
+template exec_entrypoint(arg: String) {
+  entrypoint ["/bin/sh", "-c", $arg]
+}
+
+service shell-form {
+  image "alpine:3"
+  entrypoint "/bin/sh -c 'do-a-thing'"
+}
+
+service exec-form {
+  image "alpine:3"
+  entrypoint ["/bin/sh", "-c", "do-a-thing"]
+}
+
+service both-keys {
+  image "alpine:3"
+  entrypoint ["/docker-entrypoint.sh"]
+  command "--flag"
+}
+
+service from-shell-param {
+  image "alpine:3"
+  with shell_entrypoint { ep: "/entrypoint.sh --verbose" }
+}
+
+service from-exec-param {
+  image "alpine:3"
+  with exec_entrypoint { arg: "do-a-thing" }
+}
+
+service router {
+  image "alpine:3"
+  entrypoint "/docker-entrypoint.sh"
+  expose 8080, host: "router.example.com", entrypoint: web, web-secure
+}

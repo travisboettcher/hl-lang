@@ -1,8 +1,8 @@
 use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    Command, DependsOnCondition, Expected, Expose, HealthcheckTest, Literal, ParamType, ParseError,
-    TemplateDecl, TopDecl, UseDecl, VolumeHost, parse,
+    Command, DependsOnCondition, Entrypoint, Expected, Expose, HealthcheckTest, Literal, ParamType,
+    ParseError, TemplateDecl, TopDecl, UseDecl, VolumeHost, parse,
 };
 
 fn parse_ok(source: &str) -> hl_parser::Program {
@@ -608,6 +608,157 @@ fn command_duplicate_is_error() {
 #[test]
 fn command_bare_comma_list_is_rejected() {
     assert!(parse("service s {\n  command \"a\", \"b\"\n}\n").is_err());
+}
+
+// --- entrypoint (#183) ---
+//
+// Compose's `entrypoint:` key, overriding the image's `ENTRYPOINT`
+// where `command` above overrides its `CMD`. Same
+// `FieldKind::ScalarOrList` grammar as `command`, so these tests mirror
+// that field's own directly. The identifier is shared with `expose`'s
+// unrelated `entrypoint` sub-field, so the last two tests here pin down
+// that the two roles stay apart.
+
+/// The shell form: a bare string, exactly as the issue writes it.
+#[test]
+fn entrypoint_shell_form() {
+    let program = parse_ok("service s {\n  entrypoint \"/bin/sh -c 'do-a-thing'\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    match service.fields.entrypoint.as_ref().unwrap() {
+        Entrypoint::Shell(lit) => assert_eq!(lit.text(), "/bin/sh -c 'do-a-thing'"),
+        other => panic!("expected Entrypoint::Shell, got {other:?}"),
+    }
+}
+
+/// The explicit `key: value` spelling of the shell form also parses,
+/// mirroring `command: "..."`.
+#[test]
+fn entrypoint_shell_form_with_colon() {
+    let program = parse_ok("service s {\n  entrypoint: \"/entrypoint.sh\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    match service.fields.entrypoint.as_ref().unwrap() {
+        Entrypoint::Shell(lit) => assert_eq!(lit.text(), "/entrypoint.sh"),
+        other => panic!("expected Entrypoint::Shell, got {other:?}"),
+    }
+}
+
+/// The exec form: a bracketed list of strings, the issue's second
+/// spelling (#183).
+#[test]
+fn entrypoint_exec_form() {
+    let program = parse_ok(
+        "service s {\n  \
+           entrypoint [\"/bin/sh\", \"-c\", \"do-a-thing\"]\n\
+         }\n",
+    );
+    let service = as_service(&program.decls[0]);
+    match service.fields.entrypoint.as_ref().unwrap() {
+        Entrypoint::Exec(items, _) => {
+            let texts: Vec<&str> = items.iter().map(Literal::text).collect();
+            assert_eq!(texts, vec!["/bin/sh", "-c", "do-a-thing"]);
+        }
+        other => panic!("expected Entrypoint::Exec, got {other:?}"),
+    }
+}
+
+/// A comma inside one quoted item is data, not a list separator — the
+/// same rule `command`'s own exec form follows.
+#[test]
+fn entrypoint_exec_form_item_with_embedded_comma_round_trips() {
+    let program = parse_ok("service s {\n  entrypoint [\"/bin/sh -c a,b\"]\n}\n");
+    let service = as_service(&program.decls[0]);
+    match service.fields.entrypoint.as_ref().unwrap() {
+        Entrypoint::Exec(items, _) => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].text(), "/bin/sh -c a,b");
+        }
+        other => panic!("expected Entrypoint::Exec, got {other:?}"),
+    }
+}
+
+/// No `entrypoint` field at all leaves it unset — never defaulted or
+/// inferred from the image.
+#[test]
+fn entrypoint_unset_by_default() {
+    let program = parse_ok("service s {\n  image \"nginx\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(service.fields.entrypoint.is_none());
+}
+
+/// Writing `entrypoint` twice in one service body is a duplicate-scalar
+/// compile error, same as `command`.
+#[test]
+fn entrypoint_duplicate_is_error() {
+    let err = parse("service s {\n  entrypoint \"a\"\n  entrypoint \"b\"\n}\n").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::DuplicateField {
+                type_name: "service",
+                field: "entrypoint",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// Deliberately no bare comma-list sugar, matching `command` — and
+/// worth pinning separately here, since `expose`'s own `entrypoint`
+/// *does* take exactly that sugar. The two fields share a name, not a
+/// grammar.
+#[test]
+fn entrypoint_bare_comma_list_is_rejected() {
+    assert!(parse("service s {\n  entrypoint \"a\", \"b\"\n}\n").is_err());
+}
+
+/// The service-level field and `expose`'s reference-list sub-field
+/// coexist in one body, each resolved against its own enclosing type's
+/// field list: the bare `entrypoint` statement sets `ServiceFields`'s
+/// scalar-or-list field, while the one after `expose`'s comma sets
+/// `Expose::entrypoint`.
+#[test]
+fn service_entrypoint_and_expose_entrypoint_coexist() {
+    let program = parse_ok(
+        "service s {\n  \
+           image \"nginx\"\n  \
+           entrypoint [\"/bin/sh\", \"-c\", \"do-a-thing\"]\n  \
+           expose 8080, host: \"s.example.com\", entrypoint: web, web-secure\n\
+         }\n",
+    );
+    let service = as_service(&program.decls[0]);
+    match service.fields.entrypoint.as_ref().unwrap() {
+        Entrypoint::Exec(items, _) => {
+            let texts: Vec<&str> = items.iter().map(Literal::text).collect();
+            assert_eq!(texts, vec!["/bin/sh", "-c", "do-a-thing"]);
+        }
+        other => panic!("expected Entrypoint::Exec, got {other:?}"),
+    }
+    let expose = service.fields.expose.as_ref().unwrap();
+    let names: Vec<&str> = expose.entrypoint.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, vec!["web", "web-secure"]);
+}
+
+/// The `expose { }` braced body reaches the same place, and its
+/// `entrypoint` still resolves against `EXPOSE`'s field list rather
+/// than the service's — a bracketed list there is a list of
+/// *references*, not an exec-form command.
+#[test]
+fn expose_body_entrypoint_is_still_a_reference_list() {
+    let program = parse_ok(
+        "service s {\n  \
+           entrypoint \"/entrypoint.sh\"\n  \
+           expose {\n    port: 8080\n    entrypoint: [web-secure]\n  }\n\
+         }\n",
+    );
+    let service = as_service(&program.decls[0]);
+    match service.fields.entrypoint.as_ref().unwrap() {
+        Entrypoint::Shell(lit) => assert_eq!(lit.text(), "/entrypoint.sh"),
+        other => panic!("expected Entrypoint::Shell, got {other:?}"),
+    }
+    let expose = service.fields.expose.as_ref().unwrap();
+    let names: Vec<&str> = expose.entrypoint.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, vec!["web-secure"]);
 }
 
 // --- bool flag ---

@@ -615,6 +615,155 @@ fn raw_command_overrides_the_built_in_command() {
     "#);
 }
 
+// --- entrypoint (#183) ---
+//
+// Compose's `entrypoint:` key, which overrides the image's own
+// `ENTRYPOINT` where `command` above overrides its `CMD`. Previously
+// only reachable through `raw { entrypoint: ... }`.
+
+/// The shell form: a bare string emits Compose's own shell-form
+/// `entrypoint:` — a plain scalar, not a sequence.
+#[test]
+fn entrypoint_shell_form_emits_a_plain_string() {
+    let yaml = generate_from(
+        "service web {\n  image \"nginx\"\n  entrypoint \"/bin/sh -c 'do-a-thing'\"\n}\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      web:
+        image: nginx
+        entrypoint: "/bin/sh -c 'do-a-thing'"
+    "#);
+}
+
+/// The exec form: a bracketed list emits a YAML sequence, the issue's
+/// second spelling (#183).
+#[test]
+fn entrypoint_exec_form_emits_a_yaml_sequence() {
+    let yaml = generate_from(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           entrypoint [\"/bin/sh\", \"-c\", \"do-a-thing\"]\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      web:
+        image: nginx
+        entrypoint:
+          - /bin/sh
+          - "-c"
+          - do-a-thing
+    "#);
+}
+
+/// No `entrypoint` field at all emits no `entrypoint:` key — never
+/// inferred or defaulted from the image.
+#[test]
+fn entrypoint_unset_emits_no_key() {
+    let yaml = generate_from("service web {\n  image \"nginx\"\n  command \"npm start\"\n}\n");
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      web:
+        image: nginx
+        command: npm start
+    ");
+}
+
+/// `entrypoint` and `command` are two different Compose keys, so a
+/// service setting both emits both — `entrypoint:` first, the order the
+/// two halves take in the container's own argument vector.
+#[test]
+fn entrypoint_and_command_are_emitted_as_separate_keys() {
+    let yaml = generate_from(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           entrypoint [\"/bin/sh\", \"-c\"]\n  \
+           command \"do-a-thing\"\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      web:
+        image: nginx
+        entrypoint:
+          - /bin/sh
+          - "-c"
+        command: do-a-thing
+    "#);
+}
+
+/// `entrypoint` merges like `command` — the service's own body wins
+/// unconditionally over an inherited template value, with no
+/// per-sub-field merge to consider since `entrypoint` has no
+/// sub-fields.
+#[test]
+fn entrypoint_merges_through_a_with_template() {
+    let yaml = generate_from(
+        "template base_entrypoint {\n  entrypoint \"/from-template.sh\"\n}\n\
+         service web {\n  \
+           image \"nginx\"\n  \
+           with base_entrypoint\n  \
+           entrypoint \"/own.sh\"\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      web:
+        image: nginx
+        entrypoint: /own.sh
+    ");
+}
+
+/// `raw { entrypoint: ... }` overrides the built-in `entrypoint` field,
+/// the same way it overrides every other built-in field — this is the
+/// escape hatch the issue reports having to use before the field
+/// existed.
+#[test]
+fn raw_entrypoint_overrides_the_built_in_entrypoint() {
+    let yaml = generate_from(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           entrypoint \"/built-in.sh\"\n  \
+           raw {\n    entrypoint: [\"/raw-override.sh\"]\n  }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      web:
+        image: nginx
+        entrypoint:
+          - /raw-override.sh
+    ");
+}
+
+/// The service-level `entrypoint` field and `expose`'s own `entrypoint`
+/// sub-field name two unrelated things, and a service setting both
+/// emits both: a Compose `entrypoint:` key for the first and a Traefik
+/// `entrypoints=` label for the second.
+#[test]
+fn service_entrypoint_and_expose_entrypoint_reach_different_output() {
+    let yaml = generate_from(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           entrypoint \"/bin/sh -c 'do-a-thing'\"\n  \
+           expose 8080, host: \"web.example.com\", entrypoint: web-secure\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      web:
+        image: nginx
+        entrypoint: "/bin/sh -c 'do-a-thing'"
+        expose:
+          - 8080
+        labels:
+          - "traefik.http.routers.web.rule=Host(`web.example.com`)"
+          - traefik.http.routers.web.entrypoints=web-secure
+          - traefik.http.services.web.loadbalancer.server.port=8080
+    "#);
+}
+
 // --- depends_on (#155) ---
 //
 // Every fixture below declares at least two services, since a

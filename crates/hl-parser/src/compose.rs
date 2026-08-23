@@ -23,10 +23,10 @@ use std::fmt;
 use hl_lexer::{SourceMap, Span};
 
 use crate::ast::{
-    Command, DependsOnEntry, DeviceEntry, DeviceMap, EnvEntry, EnvMap, Expose, Healthcheck,
-    HealthcheckTest, Ident, Image, Literal, Network, ParamType, Program, PublishEntry, PublishMap,
-    RawMap, RawValue, Reference, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation,
-    TopDecl, Traefik, Volume, VolumeEntry, VolumeHost, VolumeMap,
+    Command, DependsOnEntry, DeviceEntry, DeviceMap, Entrypoint, EnvEntry, EnvMap, Expose,
+    Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, ParamType, Program, PublishEntry,
+    PublishMap, RawMap, RawValue, Reference, Restart, Service, ServiceFields, TemplateDecl,
+    TemplateInvocation, TopDecl, Traefik, Volume, VolumeEntry, VolumeHost, VolumeMap,
 };
 use crate::schema::MapSide;
 
@@ -1560,6 +1560,21 @@ fn substitute_params(
         }
         None => {}
     }
+    // `entrypoint`'s literals (#183) walk exactly like `command`'s just
+    // above, and for the same reason: it's the same shell/exec pair of
+    // shapes, so the exec form's items each get substituted
+    // individually. A `$param` left behind here would reach codegen as
+    // the parameter's own name — issue #168's bug class, which is why
+    // every new literal-carrying field gets an arm in this walk.
+    match &mut fields.entrypoint {
+        Some(Entrypoint::Shell(lit)) => substitute_literal(lit, args, template_name)?,
+        Some(Entrypoint::Exec(items, _)) => {
+            for item in items {
+                substitute_literal(item, args, template_name)?;
+            }
+        }
+        None => {}
+    }
     // `healthcheck`'s literal-valued sub-fields (#153) walk exactly like
     // `command`'s just above (#168): every one of them is a plain
     // `Literal` slot a `$param` can be written into, and `test` carries
@@ -1889,6 +1904,14 @@ struct MergeAcc {
     /// `healthcheck.test`'s merge behavior rather than on
     /// `container_name`'s.
     command: Option<(Command, Tier)>,
+    /// `entrypoint`'s own collision point (#183) — a second slot beside
+    /// [`Self::command`], for the same reason that one exists:
+    /// [`Entrypoint`] isn't a [`Literal`], so it can't ride
+    /// [`SCALAR_FIELDS`]'s table and goes through `merge_scalar_like`
+    /// instead. Separate from `command` because they're two independent
+    /// Compose keys — a template setting `entrypoint` and one setting
+    /// `command` don't collide with each other, they compose.
+    entrypoint: Option<(Entrypoint, Tier)>,
     /// `privileged`'s own collision point (#157) — a bare
     /// `ServiceFields` field rather than one nested inside a struct, but
     /// merged exactly like `healthcheck_disable` for the same reason:
@@ -1962,6 +1985,9 @@ impl MergeAcc {
         }
         if let Some((command, _)) = self.command {
             fields.command = Some(command);
+        }
+        if let Some((entrypoint, _)) = self.entrypoint {
+            fields.entrypoint = Some(entrypoint);
         }
         if let Some((privileged_span, _)) = self.privileged {
             fields.privileged = Some(privileged_span);
@@ -2315,6 +2341,17 @@ fn merge_tier(
     // `SCALAR_FIELDS` and doesn't need a nested struct's `get_or_insert`.
     if let Some(command) = incoming.command.take() {
         merge_scalar_like(&mut acc.command, "command", command, tier, Command::span)?;
+    }
+    // `entrypoint` (#183) merges exactly like `command` just above, in
+    // its own slot — see `MergeAcc::entrypoint`'s doc.
+    if let Some(entrypoint) = incoming.entrypoint.take() {
+        merge_scalar_like(
+            &mut acc.entrypoint,
+            "entrypoint",
+            entrypoint,
+            tier,
+            Entrypoint::span,
+        )?;
     }
     // `privileged` (#157) is a bare `ServiceFields` field, not nested,
     // but it's the same `FieldKind::BoolFlag` shape as
