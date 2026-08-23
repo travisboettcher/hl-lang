@@ -237,13 +237,47 @@ fn backslash_before_the_closing_quote_leaves_the_string_unterminated() {
 
 /// There is no line-continuation escape: a `\` at the end of a line
 /// escapes nothing, and the literal ends there, unterminated.
+///
+/// The span runs *through* the trailing backslash, because the literal
+/// consumed it. Asserting that rather than just the error variant is
+/// what pins the offset the unterminated arm reports: the backslash is
+/// the last thing the scan takes, and nothing after it ever overwrites
+/// the running end offset the way an escaped character would.
 #[test]
 fn backslash_before_a_newline_does_not_continue_the_line() {
-    let mut lexer = Lexer::new("\"abc\\\ndef\"");
+    let source = "\"abc\\\ndef\"";
+    let mut lexer = Lexer::new(source);
     let err = lexer.next_token().unwrap_err();
     assert!(
         matches!(err, LexError::UnterminatedString { .. }),
         "{err:?}"
+    );
+    let span = err.span();
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        "\"abc\\",
+        "span {span:?} of {source:?}"
+    );
+}
+
+/// The same at end of input, where there is no newline to stop at
+/// either. A trailing `\` escapes nothing and there is no character
+/// after it to join the content, so the literal ends unterminated with
+/// the backslash inside its span.
+#[test]
+fn backslash_at_end_of_input_leaves_the_string_unterminated() {
+    let source = r#""abc\"#;
+    let mut lexer = Lexer::new(source);
+    let err = lexer.next_token().unwrap_err();
+    assert!(
+        matches!(err, LexError::UnterminatedString { .. }),
+        "{err:?}"
+    );
+    let span = err.span();
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        r#""abc\"#,
+        "span {span:?} of {source:?}"
     );
 }
 
