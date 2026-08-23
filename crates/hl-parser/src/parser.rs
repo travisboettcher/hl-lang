@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
-    Command, DependsOnCondition, DependsOnEntry, DeviceEntry, DeviceMap, EnvEntry, EnvMap, Expose,
-    Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Param, ParamType, Program,
-    PublishEntry, PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Service,
+    Command, DependsOnCondition, DependsOnEntry, DeviceEntry, DeviceMap, Entrypoint, EnvEntry,
+    EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Param, ParamType,
+    Program, PublishEntry, PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Service,
     ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
     VolumeDriverOpt, VolumeEntry, VolumeHost, VolumeMap,
 };
@@ -1713,6 +1713,19 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         }
         _ => None,
     };
+    // `entrypoint` (#183) lowers exactly like `command` just above —
+    // the same `FieldKind::ScalarOrList` shape, into its own AST type.
+    // Reached only for `entrypoint` written directly in a
+    // `service`/`template` body: `expose`'s own `entrypoint` sub-field
+    // is a reference list lowered by `lower_expose` instead, from a
+    // `StructFields` map the `expose` schema built.
+    let entrypoint = match fields.remove("entrypoint") {
+        Some(FieldValue::ScalarOrList(ScalarOrList::Scalar(lit))) => Some(Entrypoint::Shell(lit)),
+        Some(FieldValue::ScalarOrList(ScalarOrList::List(items, list_span))) => {
+            Some(Entrypoint::Exec(items, list_span))
+        }
+        _ => None,
+    };
     let publish = match fields.remove("publish") {
         Some(FieldValue::LiteralMap(entries)) => PublishMap {
             entries: entries
@@ -1816,6 +1829,7 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         devices,
         container_name,
         command,
+        entrypoint,
         with,
     }
 }

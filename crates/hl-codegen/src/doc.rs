@@ -178,6 +178,17 @@ pub(crate) struct ComposeServiceDoc {
     /// Compose refuses to start the second container with the same name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container_name: Option<String>,
+    /// Compose's own `entrypoint:` key (#183) — a separate key from
+    /// [`Self::command`] just below, overriding the image's own
+    /// `ENTRYPOINT` where `command` overrides its `CMD`. Emitted first
+    /// of the two because that's the order the two halves appear in the
+    /// container's own argument vector. Same shape as `command`
+    /// otherwise: a plain YAML string for Compose's shell form or a
+    /// YAML sequence for its exec form, carried through in whichever
+    /// shape `.hll` wrote it. `None` when `.hll` sets no `entrypoint`
+    /// field at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<serde_yaml_ng::Value>,
     /// Compose's own `command:` key (#156) — either a plain YAML string
     /// (Compose's shell form) or a YAML sequence (Compose's exec form),
     /// carried through in whichever shape `.hll` wrote it, exactly
@@ -305,6 +316,7 @@ impl ComposeServiceDoc {
         let Self {
             image,
             container_name,
+            entrypoint,
             command,
             privileged,
             restart,
@@ -329,6 +341,9 @@ impl ComposeServiceDoc {
         }
         if raw.contains_key("container_name") {
             *container_name = None;
+        }
+        if raw.contains_key("entrypoint") {
+            *entrypoint = None;
         }
         if raw.contains_key("command") {
             *command = None;
