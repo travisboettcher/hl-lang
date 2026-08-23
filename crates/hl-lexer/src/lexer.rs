@@ -108,7 +108,16 @@ impl<'src> Lexer<'src> {
         loop {
             match lexer.next_token() {
                 Ok(tok) => {
-                    let is_eof = tok.kind == crate::token::TokenKind::Eof;
+                    // Reaching `Eof` is this loop's *only* exit: an error
+                    // doesn't end it, because the whole point is to keep
+                    // scanning and report every one in a single pass (#87).
+                    // That makes the test a load-bearing terminator, so it's
+                    // written as a variant match rather than an equality —
+                    // an inverted `==` would leave the compiler spinning on
+                    // any input that lexes to errors and nothing else, which
+                    // `tokenize_collecting_errors_finds_every_bad_escape` is
+                    // the first input in the suite to produce.
+                    let is_eof = matches!(tok.kind, crate::token::TokenKind::Eof);
                     tokens.push(tok);
                     if is_eof {
                         break;
