@@ -2547,6 +2547,36 @@ fn router_comma_shorthand_parses() {
     assert_eq!(router_prefixes(&routers[0]), vec!["/api"]);
 }
 
+/// The shorthand form has no closing brace to end its span, so the
+/// parser stretches it to the last token the secondary-field loop
+/// consumed. Without that, the block's span would stop at the `router`
+/// keyword and every diagnostic about the router would underline the
+/// keyword alone rather than the fields that caused it.
+#[test]
+fn router_comma_shorthand_span_reaches_its_last_field() {
+    let program =
+        parse_ok("service s {\n  router api, host: \"a.example.com\", entrypoint: web-secure\n}\n");
+    let service = as_service(&program.decls[0]);
+    let router = &routers(service)[0];
+    // The span starts at the `router` keyword, before the name...
+    assert!(router.span.start < router.name.as_ref().unwrap().span.start);
+    // ...and reaches past the host, out to the final `entrypoint` entry.
+    assert!(router.span.end > router.host.as_ref().unwrap().span().end);
+    assert_eq!(router.span.end, router.entrypoint.last().unwrap().span.end);
+}
+
+/// The braced form ends at its own closing brace, so its span reaches
+/// past the last field for a different reason. Pinned alongside the
+/// shorthand so the two paths can't drift apart.
+#[test]
+fn router_braced_body_span_reaches_past_its_last_field() {
+    let program = parse_ok("service s {\n  router api {\n    host: \"a.example.com\"\n  }\n}\n");
+    let service = as_service(&program.decls[0]);
+    let router = &routers(service)[0];
+    assert!(router.span.start < router.name.as_ref().unwrap().span.start);
+    assert!(router.span.end > router.host.as_ref().unwrap().span().end);
+}
+
 /// Several blocks in one body accumulate in source order, which is what
 /// makes the emitted label order a function of the source.
 #[test]
