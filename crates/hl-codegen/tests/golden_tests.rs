@@ -1041,6 +1041,112 @@ fn unknown_network_reference_is_error() {
     ));
 }
 
+// --- #196: `$param` reaches every reference-shaped position ---
+
+/// The reproduction #196 set out to fix: `networks` was `Reference`-typed
+/// before the `Literal`/`Reference` unification, and a `Reference` had
+/// nowhere to put a `$param` — `networks [$net]` was a parse error with
+/// no way to fix it. This is the positive case: a real declared network
+/// resolves correctly once the parameter is bound.
+#[test]
+fn parameterized_network_resolves_to_the_bound_argument() {
+    let yaml = generate_from(
+        "network proxy {\n  name: \"real_proxy\"\n}\n\
+         template web(net: String) {\n  networks [$net]\n}\n\
+         service app {\n  image \"nginx\"\n  with web { net: \"proxy\" }\n}\n",
+    );
+    let value = yaml_value(&yaml);
+    assert_eq!(
+        value["services"]["app"]["networks"],
+        serde_yaml_ng::Value::from(vec!["proxy"])
+    );
+    assert_eq!(value["networks"]["proxy"]["name"], "real_proxy");
+}
+
+/// Hard constraint (#196): a `$param` substituted into `networks` must
+/// still resolve by name at codegen — the parser accepting `$net`
+/// syntactically must never let a name that resolves to nothing declared
+/// bypass `UnknownNetwork`. This is the single most likely way to get
+/// the unification wrong (a `Literal::Param` slot skipping the same
+/// by-name check every other `networks` entry goes through), so it gets
+/// its own hand-written assertion on the exact error variant, not just
+/// the rendered diagnostic text `tests/cases/` pins.
+#[test]
+fn parameterized_network_naming_something_undeclared_is_still_unknown_network() {
+    let err = generate_err(
+        "template web(net: String) {\n  networks [$net]\n}\n\
+         service app {\n  image \"nginx\"\n  with web { net: \"ghost\" }\n}\n",
+    );
+    assert!(matches!(
+        err,
+        CodegenError::UnknownNetwork { service, network, .. }
+            if service == "app" && network == "ghost"
+    ));
+}
+
+/// The same gap #196 closed for `networks`, checked for `middleware`:
+/// before the unification a `Reference`-typed `middleware` entry could
+/// never carry a `$param` either. The substituted argument must reach
+/// the generated `middlewares=` label as itself, not as the parameter's
+/// own name (#168's bug class, reproduced in a new position if this
+/// regressed).
+#[test]
+fn parameterized_middleware_reaches_the_middlewares_label() {
+    let yaml = generate_from(
+        "template protected(mw: String) {\n  middleware $mw\n  expose 80 as \"a.example.com\"\n}\n\
+         service app {\n  image \"nginx\"\n  with protected { mw: \"forwardAuth-authentik\" }\n}\n",
+    );
+    let value = yaml_value(&yaml);
+    let labels = value["services"]["app"]["labels"]
+        .as_sequence()
+        .expect("labels should be a sequence");
+    let labels: Vec<&str> = labels.iter().map(|l| l.as_str().unwrap()).collect();
+    assert!(
+        labels.contains(&"traefik.http.routers.app.middlewares=forwardAuth-authentik@file"),
+        "expected the substituted middleware name in the label, got {labels:?}"
+    );
+}
+
+/// Hard constraint (#196): the Traefik metacharacter guard has to keep
+/// applying to exactly the values it applied to before — including a
+/// `$param` substituted into `expose.host`, which already went through
+/// the guard pre-#196 (`expose.host` was always `Literal`-typed), and a
+/// `$param` substituted into `middleware`, which is new since #196 gave
+/// that position a `Literal` slot for the first time. Both must still be
+/// rejected.
+#[test]
+fn traefik_guard_still_applies_to_a_substituted_param() {
+    let host_err = generate_err(
+        "template site(host: String) {\n  expose 80 as $host\n}\n\
+         service app {\n  image \"nginx\"\n  with site { host: \"ok`) || HostRegexp(`{any:.+}\" }\n}\n",
+    );
+    assert!(
+        matches!(
+            host_err,
+            CodegenError::UnsafeLabelValue {
+                field: "expose.host",
+                ..
+            }
+        ),
+        "expected UnsafeLabelValue for expose.host, got {host_err:?}"
+    );
+
+    let middleware_err = generate_err(
+        "template protected(mw: String) {\n  middleware $mw\n  expose 80 as \"a.example.com\"\n}\n\
+         service app {\n  image \"nginx\"\n  with protected { mw: \"a,b\" }\n}\n",
+    );
+    assert!(
+        matches!(
+            middleware_err,
+            CodegenError::UnsafeLabelValue {
+                field: "middleware",
+                ..
+            }
+        ),
+        "expected UnsafeLabelValue for middleware, got {middleware_err:?}"
+    );
+}
+
 /// #70: the error used to carry the enclosing service's span, so an
 /// undeclared network on line 4 was reported at `1:1`. It now points at
 /// the offending reference itself.

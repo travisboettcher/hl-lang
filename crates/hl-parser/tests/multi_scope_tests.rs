@@ -377,8 +377,8 @@ fn template_qualified_reference_resolves_in_its_own_declaring_scope_not_the_invo
     );
 
     let network_ref = &composed.services[0].fields.networks[0];
-    assert!(network_ref.qualifier.is_none());
-    assert_eq!(network_ref.name, "traefik-net");
+    assert!(network_ref.qualifier().is_none());
+    assert_eq!(network_ref.text(), "traefik-net");
 }
 
 // --- imported-network name collisions (#71) ---

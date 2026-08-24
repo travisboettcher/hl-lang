@@ -1,0 +1,10 @@
+--- compose ---
+services:
+  app:
+    image: nginx:alpine
+    expose:
+    - 80
+    labels:
+    - traefik.http.routers.app.rule=Host(`app.example.com`)
+    - traefik.http.routers.app.middlewares=forwardAuth-authentik@file
+    - traefik.http.services.app.loadbalancer.server.port=80

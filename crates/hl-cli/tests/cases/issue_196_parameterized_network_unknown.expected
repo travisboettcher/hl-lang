@@ -1,0 +1,2 @@
+--- error ---
+issue_196_parameterized_network_unknown.hll:13:19: service `app` references undeclared network `ghost`

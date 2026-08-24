@@ -735,7 +735,7 @@ fn service_entrypoint_and_expose_entrypoint_coexist() {
         other => panic!("expected Entrypoint::Exec, got {other:?}"),
     }
     let expose = service.fields.expose.as_ref().unwrap();
-    let names: Vec<&str> = expose.entrypoint.iter().map(|r| r.name.as_str()).collect();
+    let names: Vec<&str> = expose.entrypoint.iter().map(|r| r.text()).collect();
     assert_eq!(names, vec!["web", "web-secure"]);
 }
 
@@ -757,7 +757,7 @@ fn expose_body_entrypoint_is_still_a_reference_list() {
         other => panic!("expected Entrypoint::Shell, got {other:?}"),
     }
     let expose = service.fields.expose.as_ref().unwrap();
-    let names: Vec<&str> = expose.entrypoint.iter().map(|r| r.name.as_str()).collect();
+    let names: Vec<&str> = expose.entrypoint.iter().map(|r| r.text()).collect();
     assert_eq!(names, vec!["web-secure"]);
 }
 
@@ -903,7 +903,7 @@ fn volume_host_is_a_reference_when_unquoted_and_a_path_when_quoted() {
     let entries = &as_service(&program.decls[0]).fields.volumes.entries;
     assert!(matches!(
         &entries[0].host,
-        ArrowMapHost::Named(r) if r.name == "media" && r.qualifier.is_none()
+        ArrowMapHost::Named(r) if r.text() == "media" && r.qualifier().is_none()
     ));
     assert!(matches!(&entries[1].host, ArrowMapHost::BindMount(lit) if lit.text() == "media"));
     assert!(matches!(&entries[2].host, ArrowMapHost::BindMount(lit) if lit.text() == "/mnt/x"));
@@ -934,8 +934,8 @@ fn volume_host_can_be_alias_qualified() {
     let ArrowMapHost::Named(r) = &entries[0].host else {
         panic!("expected a named-volume host, got {:?}", entries[0].host);
     };
-    assert_eq!(r.qualifier.as_ref().unwrap().name, "common");
-    assert_eq!(r.name, "media");
+    assert_eq!(r.qualifier().unwrap().name, "common");
+    assert_eq!(r.text(), "media");
 }
 
 /// The canonical map-body form takes both host kinds too, since it goes
@@ -945,7 +945,7 @@ fn volume_map_body_takes_both_host_kinds() {
     let program =
         parse_ok("service s {\n  volume {\n    media: \"/data\"\n    \"/mnt/x\": \"/x\"\n  }\n}\n");
     let entries = &as_service(&program.decls[0]).fields.volumes.entries;
-    assert!(matches!(&entries[0].host, ArrowMapHost::Named(r) if r.name == "media"));
+    assert!(matches!(&entries[0].host, ArrowMapHost::Named(r) if r.text() == "media"));
     assert!(matches!(&entries[1].host, ArrowMapHost::BindMount(_)));
 }
 
@@ -992,7 +992,7 @@ fn map_entry_in_a_top_level_volume_body_is_error() {
 }
 
 fn entrypoints(expose: &Expose) -> Vec<&str> {
-    expose.entrypoint.iter().map(|r| r.name.as_str()).collect()
+    expose.entrypoint.iter().map(|r| r.text()).collect()
 }
 
 #[test]
@@ -1079,12 +1079,7 @@ fn bare_entrypoint_list_stops_at_the_next_field_key() {
 fn bare_middleware_list_still_continues_past_a_comma() {
     let program = parse_ok("service s {\n  middleware auth, cors\n}\n");
     let service = as_service(&program.decls[0]);
-    let names: Vec<&str> = service
-        .fields
-        .middleware
-        .iter()
-        .map(|r| r.name.as_str())
-        .collect();
+    let names: Vec<&str> = service.fields.middleware.iter().map(|r| r.text()).collect();
     assert_eq!(names, vec!["auth", "cors"]);
 }
 
@@ -1462,7 +1457,7 @@ fn volume_named_volume_with_read_only_flag() {
     assert_eq!(service.fields.volumes.entries.len(), 1);
     assert!(matches!(
         &service.fields.volumes.entries[0].host,
-        ArrowMapHost::Named(r) if r.name == "media"
+        ArrowMapHost::Named(r) if r.text() == "media"
     ));
     assert!(service.fields.volumes.entries[0].read_only);
 }
@@ -1788,12 +1783,7 @@ fn raw_body_keeps_compact_comma_style() {
 fn middleware_repeats_accumulate() {
     let program = parse_ok("service s {\n  middleware a\n  middleware b\n}\n");
     let service = as_service(&program.decls[0]);
-    let names: Vec<&str> = service
-        .fields
-        .middleware
-        .iter()
-        .map(|r| r.name.as_str())
-        .collect();
+    let names: Vec<&str> = service.fields.middleware.iter().map(|r| r.text()).collect();
     assert_eq!(names, vec!["a", "b"]);
 }
 
@@ -1805,7 +1795,7 @@ fn depends_on_bracket_list_form() {
         .fields
         .depends_on
         .iter()
-        .map(|e| e.reference.name.as_str())
+        .map(|e| e.reference.text())
         .collect();
     assert_eq!(names, vec!["a", "b"]);
     assert!(
@@ -1834,7 +1824,7 @@ fn depends_on_bare_comma_list_form() {
         .fields
         .depends_on
         .iter()
-        .map(|e| e.reference.name.as_str())
+        .map(|e| e.reference.text())
         .collect();
     assert_eq!(names, vec!["db", "cache"]);
 }
@@ -1846,7 +1836,7 @@ fn depends_on_extended_form_parses_the_condition() {
     let program = parse_ok("service s {\n  depends_on [db { condition: service_healthy }]\n}\n");
     let service = as_service(&program.decls[0]);
     let entry = &service.fields.depends_on[0];
-    assert_eq!(entry.reference.name, "db");
+    assert_eq!(entry.reference.text(), "db");
     assert_eq!(
         entry.condition.map(|(c, _)| c),
         Some(DependsOnCondition::ServiceHealthy)
@@ -1874,9 +1864,9 @@ fn depends_on_mixed_bare_and_conditioned_entries_parse() {
         parse_ok("service s {\n  depends_on [cache, db { condition: service_healthy }]\n}\n");
     let service = as_service(&program.decls[0]);
     assert_eq!(service.fields.depends_on.len(), 2);
-    assert_eq!(service.fields.depends_on[0].reference.name, "cache");
+    assert_eq!(service.fields.depends_on[0].reference.text(), "cache");
     assert!(service.fields.depends_on[0].condition.is_none());
-    assert_eq!(service.fields.depends_on[1].reference.name, "db");
+    assert_eq!(service.fields.depends_on[1].reference.text(), "db");
     assert_eq!(
         service.fields.depends_on[1].condition.map(|(c, _)| c),
         Some(DependsOnCondition::ServiceHealthy)
@@ -1961,12 +1951,7 @@ fn depends_on_entry_unknown_key_is_error() {
 fn networks_comma_sugar_form() {
     let program = parse_ok("service s {\n  networks a, b\n}\n");
     let service = as_service(&program.decls[0]);
-    let names: Vec<&str> = service
-        .fields
-        .networks
-        .iter()
-        .map(|r| r.name.as_str())
-        .collect();
+    let names: Vec<&str> = service.fields.networks.iter().map(|r| r.text()).collect();
     assert_eq!(names, vec!["a", "b"]);
 }
 
@@ -1974,7 +1959,7 @@ fn networks_comma_sugar_form() {
 fn dns_bracket_list_form() {
     let program = parse_ok("service s {\n  dns [\"192.168.50.182\"]\n}\n");
     let service = as_service(&program.decls[0]);
-    let entries: Vec<&str> = service.fields.dns.iter().map(|r| r.name.as_str()).collect();
+    let entries: Vec<&str> = service.fields.dns.iter().map(|r| r.text()).collect();
     assert_eq!(entries, vec!["192.168.50.182"]);
 }
 
@@ -1982,7 +1967,7 @@ fn dns_bracket_list_form() {
 fn dns_repeats_accumulate() {
     let program = parse_ok("service s {\n  dns \"192.168.50.182\"\n  dns \"192.168.50.183\"\n}\n");
     let service = as_service(&program.decls[0]);
-    let entries: Vec<&str> = service.fields.dns.iter().map(|r| r.name.as_str()).collect();
+    let entries: Vec<&str> = service.fields.dns.iter().map(|r| r.text()).collect();
     assert_eq!(entries, vec!["192.168.50.182", "192.168.50.183"]);
 }
 
@@ -1992,12 +1977,7 @@ fn dns_repeats_accumulate() {
 fn env_file_bare_single_form() {
     let program = parse_ok("service s {\n  env_file \"miniflux.env\"\n}\n");
     let service = as_service(&program.decls[0]);
-    let entries: Vec<&str> = service
-        .fields
-        .env_file
-        .iter()
-        .map(|r| r.name.as_str())
-        .collect();
+    let entries: Vec<&str> = service.fields.env_file.iter().map(|r| r.text()).collect();
     assert_eq!(entries, vec!["miniflux.env"]);
 }
 
@@ -2005,12 +1985,7 @@ fn env_file_bare_single_form() {
 fn env_file_bracket_list_form() {
     let program = parse_ok("service s {\n  env_file [\"miniflux.env\", \"common.env\"]\n}\n");
     let service = as_service(&program.decls[0]);
-    let entries: Vec<&str> = service
-        .fields
-        .env_file
-        .iter()
-        .map(|r| r.name.as_str())
-        .collect();
+    let entries: Vec<&str> = service.fields.env_file.iter().map(|r| r.text()).collect();
     assert_eq!(entries, vec!["miniflux.env", "common.env"]);
 }
 
@@ -2019,12 +1994,7 @@ fn env_file_repeats_accumulate() {
     let program =
         parse_ok("service s {\n  env_file \"miniflux.env\"\n  env_file \"common.env\"\n}\n");
     let service = as_service(&program.decls[0]);
-    let entries: Vec<&str> = service
-        .fields
-        .env_file
-        .iter()
-        .map(|r| r.name.as_str())
-        .collect();
+    let entries: Vec<&str> = service.fields.env_file.iter().map(|r| r.text()).collect();
     assert_eq!(entries, vec!["miniflux.env", "common.env"]);
 }
 
@@ -2564,8 +2534,8 @@ fn qualified_reference_in_networks_field() {
     let program = parse_ok("service s {\n  image \"x\"\n  networks [traefik.traefik-net]\n}\n");
     let service = as_service(&program.decls[0]);
     let r = &service.fields.networks[0];
-    assert_eq!(r.qualifier.as_ref().unwrap().name, "traefik");
-    assert_eq!(r.name, "traefik-net");
+    assert_eq!(r.qualifier().unwrap().name, "traefik");
+    assert_eq!(r.text(), "traefik-net");
 }
 
 #[test]
@@ -2573,8 +2543,8 @@ fn unqualified_reference_has_no_qualifier() {
     let program = parse_ok("service s {\n  image \"x\"\n  networks [traefik-net]\n}\n");
     let service = as_service(&program.decls[0]);
     let r = &service.fields.networks[0];
-    assert!(r.qualifier.is_none());
-    assert_eq!(r.name, "traefik-net");
+    assert!(r.qualifier().is_none());
+    assert_eq!(r.text(), "traefik-net");
 }
 
 #[test]
@@ -2582,8 +2552,8 @@ fn qualified_reference_bare_comma_form() {
     let program = parse_ok("service s {\n  image \"x\"\n  networks common.traefik-net\n}\n");
     let service = as_service(&program.decls[0]);
     let r = &service.fields.networks[0];
-    assert_eq!(r.qualifier.as_ref().unwrap().name, "common");
-    assert_eq!(r.name, "traefik-net");
+    assert_eq!(r.qualifier().unwrap().name, "common");
+    assert_eq!(r.text(), "traefik-net");
 }
 
 #[test]
@@ -2684,8 +2654,8 @@ fn qualified_middleware_reference_parses() {
     let program = parse_ok("service s {\n  image \"x\"\n  middleware common.forwardAuth\n}\n");
     let service = as_service(&program.decls[0]);
     let r = &service.fields.middleware[0];
-    assert_eq!(r.qualifier.as_ref().unwrap().name, "common");
-    assert_eq!(r.name, "forwardAuth");
+    assert_eq!(r.qualifier().unwrap().name, "common");
+    assert_eq!(r.text(), "forwardAuth");
 }
 
 // --- `router` blocks (#184) ---
@@ -2695,7 +2665,7 @@ fn routers(service: &hl_parser::Service) -> &[hl_parser::Router] {
 }
 
 fn router_entrypoints(router: &hl_parser::Router) -> Vec<&str> {
-    router.entrypoint.iter().map(|r| r.name.as_str()).collect()
+    router.entrypoint.iter().map(Literal::text).collect()
 }
 
 fn router_prefixes(router: &hl_parser::Router) -> Vec<&str> {
@@ -2761,7 +2731,10 @@ fn router_comma_shorthand_span_reaches_its_last_field() {
     assert!(router.span.start < router.name.as_ref().unwrap().span.start);
     // ...and reaches past the host, out to the final `entrypoint` entry.
     assert!(router.span.end > router.host.as_ref().unwrap().span().end);
-    assert_eq!(router.span.end, router.entrypoint.last().unwrap().span.end);
+    assert_eq!(
+        router.span.end,
+        router.entrypoint.last().unwrap().span().end
+    );
 }
 
 /// The braced form ends at its own closing brace, so its span reaches

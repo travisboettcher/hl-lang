@@ -236,7 +236,7 @@ fn explicit_templates_depends_on_identical_bare_entries_compose_to_one_entry() {
         .find(|s| s.name.name == "s")
         .expect("service s");
     assert_eq!(service.fields.depends_on.len(), 1);
-    assert_eq!(service.fields.depends_on[0].reference.name, "db");
+    assert_eq!(service.fields.depends_on[0].reference.text(), "db");
     assert!(service.fields.depends_on[0].condition.is_none());
 }
 
@@ -303,7 +303,7 @@ fn depends_on_own_body_overrides_a_templates_condition() {
     let service = single_service(&composed);
     assert_eq!(service.fields.depends_on.len(), 1);
     let entry = &service.fields.depends_on[0];
-    assert_eq!(entry.reference.name, "db");
+    assert_eq!(entry.reference.text(), "db");
     assert_eq!(
         entry.condition.map(|(c, _)| c),
         Some(hl_parser::DependsOnCondition::ServiceHealthy)
@@ -404,7 +404,7 @@ fn explicit_templates_container_name_collision_is_error() {
 // --- expose sub-field merge (#10) ---
 
 fn entrypoints(expose: &Expose) -> Vec<&str> {
-    expose.entrypoint.iter().map(|r| r.name.as_str()).collect()
+    expose.entrypoint.iter().map(|r| r.text()).collect()
 }
 
 /// The exact scenario from the issue report: a service overriding just
@@ -1295,12 +1295,7 @@ fn list_fields_concatenate_in_priority_order() {
          service s {\n  with a, b\n  middleware own1\n}\n",
     );
     let service = single_service(&composed);
-    let names: Vec<&str> = service
-        .fields
-        .middleware
-        .iter()
-        .map(|r| r.name.as_str())
-        .collect();
+    let names: Vec<&str> = service.fields.middleware.iter().map(|r| r.text()).collect();
     assert_eq!(names, vec!["d1", "a1", "b1", "own1"]);
 }
 
@@ -1330,8 +1325,8 @@ fn set_like_list_fields_dedupe_across_tiers() {
          service s {\n  image \"x\"\n  with a, b\n  networks [proxy]\n  middleware auth\n}\n",
     );
     let service = single_service(&composed);
-    let names = |refs: &[hl_parser::Reference]| -> Vec<String> {
-        refs.iter().map(|r| r.name.clone()).collect()
+    let names = |refs: &[hl_parser::Literal]| -> Vec<String> {
+        refs.iter().map(|r| r.text().to_string()).collect()
     };
     assert_eq!(names(&service.fields.networks), vec!["proxy"]);
     assert_eq!(names(&service.fields.middleware), vec!["auth"]);
@@ -1348,12 +1343,7 @@ fn deduped_list_keeps_first_occurrence_order() {
          service s {\n  image \"x\"\n  with a\n  middleware own1\n  middleware a1\n}\n",
     );
     let service = single_service(&composed);
-    let names: Vec<&str> = service
-        .fields
-        .middleware
-        .iter()
-        .map(|r| r.name.as_str())
-        .collect();
+    let names: Vec<&str> = service.fields.middleware.iter().map(|r| r.text()).collect();
     assert_eq!(names, vec!["d1", "a1", "own1"]);
 }
 
@@ -1397,7 +1387,7 @@ fn nested_with_chain_does_not_expand_exponentially() {
     let composed = compose_ok(&source);
     let service = single_service(&composed);
     assert_eq!(service.fields.middleware.len(), 1);
-    assert_eq!(service.fields.middleware[0].name, "m");
+    assert_eq!(service.fields.middleware[0].text(), "m");
 }
 
 /// `dns` is list-typed just like `middleware`/`networks` — it
@@ -1411,7 +1401,7 @@ fn dns_concatenates_across_tiers() {
          service s {\n  with a\n  image \"x\"\n  dns \"192.168.50.183\"\n}\n",
     );
     let service = single_service(&composed);
-    let entries: Vec<&str> = service.fields.dns.iter().map(|r| r.name.as_str()).collect();
+    let entries: Vec<&str> = service.fields.dns.iter().map(|r| r.text()).collect();
     assert_eq!(entries, vec!["192.168.50.182", "192.168.50.183"]);
 }
 
@@ -1426,7 +1416,7 @@ fn dns_keeps_duplicates() {
          service s {\n  with a\n  image \"x\"\n  dns \"192.168.50.182\"\n}\n",
     );
     let service = single_service(&composed);
-    let entries: Vec<&str> = service.fields.dns.iter().map(|r| r.name.as_str()).collect();
+    let entries: Vec<&str> = service.fields.dns.iter().map(|r| r.text()).collect();
     assert_eq!(entries, vec!["192.168.50.182", "192.168.50.182"]);
 }
 
@@ -1439,12 +1429,7 @@ fn env_file_concatenates_across_tiers() {
          service s {\n  with a\n  image \"x\"\n  env_file \"miniflux.env\"\n}\n",
     );
     let service = single_service(&composed);
-    let entries: Vec<&str> = service
-        .fields
-        .env_file
-        .iter()
-        .map(|r| r.name.as_str())
-        .collect();
+    let entries: Vec<&str> = service.fields.env_file.iter().map(|r| r.text()).collect();
     assert_eq!(entries, vec!["common.env", "miniflux.env"]);
 }
 
@@ -1459,12 +1444,7 @@ fn env_file_keeps_duplicates() {
          service s {\n  with a\n  image \"x\"\n  env_file \"common.env\"\n}\n",
     );
     let service = single_service(&composed);
-    let entries: Vec<&str> = service
-        .fields
-        .env_file
-        .iter()
-        .map(|r| r.name.as_str())
-        .collect();
+    let entries: Vec<&str> = service.fields.env_file.iter().map(|r| r.text()).collect();
     assert_eq!(entries, vec!["common.env", "common.env"]);
 }
 
@@ -2107,9 +2087,10 @@ fn assert_no_params(service: &Service) {
         assert_not_param(p);
     }
     for v in &fields.volumes.entries {
-        // Only a bind-mount host holds a literal; a named-volume host is
-        // a `Reference`, which can never be a `$param` in the first
-        // place (the grammar has no parameter in reference position).
+        // Only a bind-mount host can ever hold a `$param`: the parser
+        // routes a `$` token to `BindMount`, never `Named` — see
+        // `compose::substitute_params`'s own comment on this same walk
+        // for why a named-volume host is unreachable here even post-#196.
         if let ArrowMapHost::BindMount(host) = &v.host {
             assert_not_param(host);
         }
@@ -2164,8 +2145,8 @@ fn assert_no_params(service: &Service) {
         assert_not_param(&entry.key);
         assert_raw_value_no_param(&entry.value);
     }
-    // `router`'s two literal-holding sub-fields (#184). Adding a field
-    // without extending this walk is exactly what #168 was: the
+    // `router`'s three literal-holding sub-fields (#184/#196). Adding a
+    // field without extending this walk is exactly what #168 was: the
     // `Literal::Param` survives composition and codegen emits the
     // parameter's own name into the generated document, silently and
     // with exit 0.
@@ -2173,9 +2154,35 @@ fn assert_no_params(service: &Service) {
         if let Some(host) = &router.host {
             assert_not_param(host);
         }
+        for entry in &router.entrypoint {
+            assert_not_param(entry);
+        }
         for prefix in &router.path_prefix {
             assert_not_param(prefix);
         }
+    }
+    // The reference-shaped list fields #196 opened to `$param` for the
+    // first time — see `compose::substitute_params`'s own comment on
+    // this same set of fields.
+    for r in &fields.middleware {
+        assert_not_param(r);
+    }
+    for r in &fields.networks {
+        assert_not_param(r);
+    }
+    for r in &fields.dns {
+        assert_not_param(r);
+    }
+    for r in &fields.env_file {
+        assert_not_param(r);
+    }
+    if let Some(e) = &fields.expose {
+        for r in &e.entrypoint {
+            assert_not_param(r);
+        }
+    }
+    for entry in &fields.depends_on {
+        assert_not_param(&entry.reference);
     }
 }
 
@@ -2400,8 +2407,8 @@ fn bare_volume_reference_survives_composition_untouched() {
     let ArrowMapHost::Named(r) = host else {
         panic!("expected a named-volume host, got {host:?}");
     };
-    assert!(r.qualifier.is_none());
-    assert_eq!(r.name, "media");
+    assert!(r.qualifier().is_none());
+    assert_eq!(r.text(), "media");
 }
 
 #[test]
@@ -2482,7 +2489,7 @@ fn router_named<'a>(service: &'a Service, name: &str) -> &'a hl_parser::Router {
 }
 
 fn router_entrypoints(router: &hl_parser::Router) -> Vec<&str> {
-    router.entrypoint.iter().map(|r| r.name.as_str()).collect()
+    router.entrypoint.iter().map(|r| r.text()).collect()
 }
 
 fn router_prefixes(router: &hl_parser::Router) -> Vec<&str> {

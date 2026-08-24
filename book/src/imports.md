@@ -16,12 +16,17 @@ use "docker.hll" as traefik
   the directory you invoked `hllc` from.
 - `alias.name` then qualifies any reference that would otherwise be a
   bare identifier: a `networks [...]` entry (`networks
-  [traefik.traefik-net]`) or a `with` invocation's target (`with
-  common.internal_web { ... }`).
-- `middleware` and `depends_on` don't support a qualified form. Neither
-  has a coherent cross-file meaning: `depends_on` names a same-file
-  sibling service, and `middleware` isn't resolved against anything at
-  all—it's just a Traefik middleware name passed through verbatim.
+  [traefik.traefik-net]`), a named-volume mount's host side, or a `with`
+  invocation's target (`with common.internal_web { ... }`).
+- `middleware`, `dns`, `env_file`, `depends_on`, and an `entrypoint` list
+  don't support a qualified form. None has a coherent cross-file
+  meaning: `depends_on` names a same-file sibling service, `dns` and
+  `env_file` name an IP address and a path on disk, an entry point
+  belongs to the deployment's own `traefik.yml`, and `middleware` isn't
+  resolved against anything at all—each is just text passed through
+  verbatim. Only `networks` and a named-volume mount's host side resolve
+  a qualifier, since only they name something another `.hll` file
+  actually declares.
 
 ## Splitting a homelab across files
 

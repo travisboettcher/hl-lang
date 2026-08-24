@@ -1,0 +1,14 @@
+# #196: a template can now parameterize a `middleware` entry with a
+# `$param`, the same unification that lets `networks` take one — before
+# it, `middleware` was `Reference`-typed and a `Reference` had nowhere
+# to put a `$param`. Pins that the substituted argument reaches the
+# generated `middlewares=` label, not the parameter's own name.
+template protected(mw: String) {
+  middleware $mw
+  expose 80 as "app.example.com"
+}
+
+service app {
+  image "nginx:alpine"
+  with protected { mw: "forwardAuth-authentik" }
+}

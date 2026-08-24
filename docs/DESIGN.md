@@ -116,7 +116,7 @@ value          ::= literal | list | statement
 
 list           ::= "[" ( value ( "," value )* )? "]"
 
-literal        ::= STRING | NUMBER | IDENT | "$" IDENT
+literal        ::= STRING | NUMBER | IDENT | IDENT "." IDENT | "$" IDENT
 ```
 
 - The last two `sugar` alternatives belong to a **name-keyed** field, of
@@ -148,7 +148,20 @@ literal        ::= STRING | NUMBER | IDENT | "$" IDENT
   compile error: only a template body has a declared parameter list to
   resolve `$name` against. This is, like the preceding newline/comma
   layout rules, a context-sensitive constraint the plain grammar can't
-  express.
+  express. The check is uniform across every position `literal` appears
+  in, `networks`/`middleware`/`dns`/`env_file`/an `entrypoint` list/a
+  `depends_on` entry included—a template can write `networks [$net]` or
+  `middleware $mw` exactly as freely as `restart $policy`, since there is
+  only the one grammar production for a value everywhere it's expected.
+- The `IDENT "." IDENT` form of `literal`—`alias.name`, produced only
+  from a bare `IDENT` token followed by `.` `IDENT`, never from a
+  `STRING`—is what qualifies a reference against a `use`-imported file's
+  local alias—see the following Imports section. Every position `literal` appears in
+  parses it the same way, but whether it's *semantically* legal there is
+  a separate, per-field question: `networks` and a named-volume mount's
+  host side resolve it against the aliased file's own declarations,
+  while every other position rejects it outright, since none of them
+  names something an `.hll` file declares in the first place.
 
 `statement` is the whole language: a `named_decl` is one particular shape
 of it with a mandatory second name and mandatory body. Every field
@@ -443,11 +456,15 @@ routers, it's one router described twice.
 `host` is a plain scalar. `entrypoint` takes the same spelling and the
 same merge rule as `expose.entrypoint`—two fields producing the same
 `entrypoints=` label shouldn't be two different grammars. `path_prefix`
-holds plain literals rather than references, and it's the one list field
-that does:
-a prefix is free text a template legitimately fills in with a `$param`,
-and a reference has no `$param` form at all, since the grammar has no
-parameter in reference position. With prefixes set, the rule
+uses that same reference-list grammar too: a prefix is free text a
+template legitimately fills in with a `$param`, which every
+reference-list field accepts—`entrypoint` included—since `literal` now
+carries `$param` itself rather than needing a separate grammar to hold
+it. The qualified `alias.name` form still doesn't reach `path_prefix`'s
+generated output, though: it parses there like anywhere else, but
+`path_prefix` rejects it, the same as
+`middleware`/`dns`/`env_file`/`entrypoint`/`depends_on`—see the
+following Imports section. With prefixes set, the rule
 becomes ``Host(`h`) && (PathPrefix(`a`) || PathPrefix(`b`))``. The
 parentheses are load-bearing, not cosmetic: `&&` binds tighter than `||`
 in Traefik's rule grammar, so without them the rule would match *any*
@@ -773,20 +790,26 @@ use "docker.hll" as traefik
   path isn't lexable. It's resolved relative to the *importing file's
   own location*, never the entry file's location or the directory the
   compiler ran from.
-- `alias.name` qualifies any reference that would otherwise be a bare
-  `IDENT`: a `networks [...]` entry (`networks [traefik.traefik-net]`),
-  a named-volume mount's host side (`volume storage.media -> "/data"`),
-  or a `with` invocation's target (`with common.internal_web { ... }`).
-  `middleware`/`depends_on`/`dns`/`env_file` don't support a qualified
-  form. None has a coherent cross-file meaning: `depends_on` names a
-  same-file sibling service, and `middleware`/`dns`/`env_file` aren't
-  resolved against anything an `.hll` file declares at all—an
-  `env_file` entry names a path on disk next to the generated Compose
-  file. `devices` isn't in this list any more either, but for a
-  different reason—#167 made its entries plain literals now, like
-  `publish`'s and `env`'s, which were never reference-list fields to
-  begin with and so were never candidates for a qualified form in the
-  first place.
+- `alias.name` qualifies any reference: a `networks [...]` entry
+  (`networks [traefik.traefik-net]`), a named-volume mount's host side
+  (`volume storage.media -> "/data"`), a `with` invocation's target
+  (`with common.internal_web { ... }`)—and, syntactically, every other
+  reference-shaped position too (`middleware`, `dns`, `env_file`, an
+  `entrypoint` list, `depends_on`, `router.path_prefix`), since `alias.`
+  and `$param` are the same `literal` production wherever it's
+  written—see the preceding Syntactic grammar section. Only `networks` and a
+  named-volume host actually *resolve* one, though: they're the two
+  positions with a real cross-file declaration to resolve a qualifier
+  against. Every other reference-shaped position rejects one outright,
+  with `UnsupportedQualifiedReference`, exactly as it always has—none of
+  them has a coherent cross-file meaning: `depends_on` names a same-file
+  sibling service, and `middleware`/`dns`/`env_file`/an `entrypoint`
+  list/`path_prefix` aren't resolved against anything an `.hll` file
+  declares at all—an `env_file` entry names a path on disk next to the
+  generated Compose file. `devices` was never a candidate for a
+  qualified form in the first place—#167 made its entries plain
+  literals, like `publish`'s and `env`'s, neither of which is
+  reference-shaped either.
 - **Templates are lexically scoped, not dynamically scoped.** If a
   template declared in `templates.hll` writes
   `networks [traefik.traefik-net]`, that `traefik` resolves against

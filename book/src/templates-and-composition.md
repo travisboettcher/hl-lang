@@ -80,6 +80,34 @@ template linuxserver_web(puid: Number, pgid: Number, port: Number) {
 }
 ```
 
+## Parameterizing references
+
+`$param` isn't limited to plain values like the preceding `$port`—you
+can write it anywhere you write a reference too, so a template can
+parameterize which network it attaches to, which middleware it names, or
+which entry point it routes through, not just the values on its other
+fields:
+
+```hll,build
+network proxy {
+  name: "real-proxy"
+}
+
+template attached_to(net: String) {
+  networks [$net]
+}
+
+service app {
+  image "nginx:alpine"
+  with attached_to { net: "proxy" }
+}
+```
+
+The substituted argument still has to name something real: `with
+attached_to { net: "ghost" }` fails with the same `UnknownNetwork` error
+`networks [ghost]` written directly would, since resolving a network by
+name happens after composition binds the parameter, not before.
+
 ## The implicit `defaults` template
 
 A template named exactly `defaults` is special-cased: if a file declares

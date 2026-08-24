@@ -61,6 +61,18 @@ fn literal_to_yaml(
             let resolved = interp::resolve(lit.text(), bindings, *span)?;
             Ok(serde_yaml_ng::Value::String(resolved))
         }
+        // Unreachable in practice — `raw`'s values are parsed via
+        // `parse_raw_value`, which builds every literal through
+        // `parse_literal`, never the reference-shaped parser that can
+        // produce this variant (see `Literal::Qualified`'s own doc) — but
+        // handled the same as a plain string/ident rather than matched
+        // away with a wildcard, so a future change that does reach one
+        // here degrades to a sensible string instead of an unreachable
+        // panic.
+        Literal::Qualified(q) => {
+            let resolved = interp::resolve(lit.text(), bindings, q.span)?;
+            Ok(serde_yaml_ng::Value::String(resolved))
+        }
         // Composition is supposed to have substituted this away already,
         // so reaching here means a hole in that invariant rather than
         // anything the user wrote wrong — but a compiler bug should

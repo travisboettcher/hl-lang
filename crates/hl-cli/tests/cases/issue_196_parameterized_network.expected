@@ -1,0 +1,9 @@
+--- compose ---
+services:
+  app:
+    image: nginx:alpine
+    networks:
+    - proxy
+networks:
+  proxy:
+    name: real_proxy

@@ -5,7 +5,7 @@ use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 use crate::ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Command, DependsOnCondition, DependsOnEntry, Entrypoint,
     EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Param,
-    ParamType, Program, RawEntry, RawMap, RawValue, Reference, Restart, Router, Service,
+    ParamType, Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart, Router, Service,
     ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
     VolumeDriverOpt,
 };
@@ -117,9 +117,11 @@ enum FieldValue {
     MountMap(Vec<(ArrowMapHost, Literal, bool, Span)>),
     /// An accumulating nested schema-free map-kind field (raw).
     Raw(RawMap),
-    /// An accumulating reference-list field
-    /// (middleware/networks/dns/env_file).
-    RefList(Vec<Reference>),
+    /// An accumulating reference-list field (middleware/networks/dns/
+    /// env_file/expose.entrypoint/router.entrypoint/router.path_prefix).
+    /// See [`schema::FieldKind::ReferenceList`]'s doc for why one `Vec`
+    /// of [`Literal`]s now covers every row, `path_prefix` included.
+    RefList(Vec<Literal>),
     /// An accumulating template-invocation-list field (`with`'s `templates`).
     TemplateInvocations(Vec<TemplateInvocation>),
     /// A single-occurrence field whose value is either a bare literal or
@@ -129,11 +131,6 @@ enum FieldValue {
     /// An accumulating `depends_on`-list field. See
     /// [`schema::FieldKind::DependsOnList`]'s doc.
     DependsOnEntries(Vec<DependsOnEntry>),
-    /// An accumulating list-of-literals field (`router`'s `path_prefix`,
-    /// #184). [`Self::RefList`]'s twin for the one list field whose
-    /// entries have to be [`Literal`]s — see
-    /// [`schema::FieldKind::LiteralList`]'s doc.
-    LiteralList(Vec<Literal>),
     /// An accumulating, name-keyed nested struct-kind field (`router`,
     /// #184): one `(optional name, its own field bag, its span)` per
     /// block written, in source order. See
@@ -177,7 +174,6 @@ impl FieldValue {
             | FieldValue::RefList(_)
             | FieldValue::TemplateInvocations(_)
             | FieldValue::DependsOnEntries(_)
-            | FieldValue::LiteralList(_)
             | FieldValue::NamedStructs(_) => {
                 unreachable!("map/list-kind fields accumulate and are never duplicate-checked")
             }
@@ -340,11 +336,40 @@ impl<'src> Parser<'src> {
         }
     }
 
-    /// `reference ::= key ( "." IDENT )?` — the trailing `.IDENT` names an
-    /// import alias's declaration (`traefik.traefik-net`). Only a plain
-    /// `IDENT` key can be qualified this way — a `STRING` key's content
-    /// is just string content, never followed by a structural `.`.
-    fn parse_reference(&mut self) -> Result<Reference, ParseError> {
+    /// `reference ::= ( key ( "." IDENT )? ) | "$" IDENT` — every
+    /// reference-shaped position's own value grammar (#196):
+    /// `middleware`/`networks`/`dns`/`env_file`/`expose.entrypoint`/
+    /// `router.entrypoint`/`router.path_prefix`, a `depends_on` entry,
+    /// and a named-volume mount's host side. The trailing `.IDENT` names
+    /// an import alias's declaration (`traefik.traefik-net`); only a
+    /// plain `IDENT` key can be qualified this way — a `STRING` key's
+    /// content is just string content, never followed by a structural
+    /// `.`. `NUMBER` is deliberately not part of this grammar (unlike
+    /// [`Self::parse_literal`]'s): [`Self::parse_key`] underlies it just
+    /// as it always has, since a number was never a legal
+    /// network/middleware/service/entry-point name and nothing about
+    /// unifying [`Literal`] and the old `Reference` type changes that.
+    ///
+    /// The `$` arm is what #196 actually adds: before it, this function
+    /// (then named `parse_reference`) built a `Reference`, which had
+    /// nowhere to put a `Param`, so `networks [$net]` was a parse error
+    /// with no way to fix it short of a second grammar for this position.
+    /// Whether `$param` is legal at all is [`Self::parse_param_reference`]'s
+    /// own concern (a template body or not), asked here exactly as it's
+    /// asked from [`Self::parse_literal`] — this function doesn't ask a
+    /// second question of its own.
+    ///
+    /// Whether the *qualified* form parsed here is legal at the calling
+    /// position is likewise not this function's concern: every
+    /// reference-shaped position parses it uniformly, and
+    /// `compose::reject_qualified` (driven by
+    /// [`schema::allows_qualified_reference`]) rejects it afterward,
+    /// post-parse, everywhere but `networks` and a named-volume host.
+    fn parse_literal_reference(&mut self) -> Result<Literal, ParseError> {
+        if self.peek().kind == TokenKind::Dollar {
+            let dollar = *self.peek();
+            return self.parse_param_reference(dollar);
+        }
         let key = self.parse_key()?;
         if matches!(key, Literal::Ident(_, _)) && self.peek().kind == TokenKind::Dot {
             self.bump();
@@ -360,27 +385,22 @@ impl<'src> Parser<'src> {
                 col: qualifier.span.col,
                 file: qualifier.span.file,
             };
-            return Ok(Reference {
-                qualifier: Some(qualifier),
+            return Ok(Literal::Qualified(Box::new(QualifiedRef {
+                qualifier,
                 name: name_tok.lexeme.to_string(),
                 name_span: name_tok.span,
                 span,
-            });
+            })));
         }
-        Ok(Reference {
-            qualifier: None,
-            name: key.text().to_string(),
-            name_span: key.span(),
-            span: key.span(),
-        })
+        Ok(key)
     }
 
-    fn parse_bracket_reference_list(&mut self) -> Result<Vec<Reference>, ParseError> {
+    fn parse_bracket_reference_list(&mut self) -> Result<Vec<Literal>, ParseError> {
         self.expect(TokenKind::LBracket)?;
         let mut refs = Vec::new();
         if self.peek().kind != TokenKind::RBracket {
             loop {
-                refs.push(self.parse_reference()?);
+                refs.push(self.parse_literal_reference()?);
                 if self.peek().kind == TokenKind::Comma {
                     self.bump();
                 } else {
@@ -404,13 +424,14 @@ impl<'src> Parser<'src> {
     /// its `:` with an error pointing nowhere near the real problem.
     ///
     /// `KEY :` is the whole tell: a list item is a bare reference
-    /// (optionally `alias.name`), never a `key: value` pair, so a colon
-    /// one token past the comma can only mean a new field has begun.
-    fn parse_bare_reference_list(&mut self) -> Result<Vec<Reference>, ParseError> {
-        let mut refs = vec![self.parse_reference()?];
+    /// (optionally `alias.name`, optionally `$param`), never a `key:
+    /// value` pair, so a colon one token past the comma can only mean a
+    /// new field has begun.
+    fn parse_bare_reference_list(&mut self) -> Result<Vec<Literal>, ParseError> {
+        let mut refs = vec![self.parse_literal_reference()?];
         while self.peek().kind == TokenKind::Comma && !self.comma_starts_a_new_field() {
             self.bump();
-            refs.push(self.parse_reference()?);
+            refs.push(self.parse_literal_reference()?);
         }
         Ok(refs)
     }
@@ -429,7 +450,11 @@ impl<'src> Parser<'src> {
             .is_some_and(|t| t.kind == TokenKind::Colon)
     }
 
-    fn parse_reference_list_value(&mut self) -> Result<Vec<Reference>, ParseError> {
+    /// A [`schema::FieldKind::ReferenceList`] value: an optional leading
+    /// `:`, then either a bracketed list of references or the bare
+    /// comma-list sugar. Covers every row that kind drives — see that
+    /// kind's own doc.
+    fn parse_reference_list_value(&mut self) -> Result<Vec<Literal>, ParseError> {
         if self.peek().kind == TokenKind::Colon {
             self.bump();
         }
@@ -442,49 +467,15 @@ impl<'src> Parser<'src> {
         }
     }
 
-    /// The unbracketed `"/a", "/b"` form of a
-    /// [`schema::FieldKind::LiteralList`] value — [`Self::parse_bare_reference_list`]'s
-    /// twin for the one list field whose entries are [`Literal`]s rather
-    /// than [`Reference`]s (`router`'s `path_prefix`, #184). The same
-    /// `KEY :` one-token lookahead decides whether a comma continues
-    /// this list or starts a sibling field, and for the same reason: in
-    /// `router api, path_prefix: "/api", entrypoint: web`, the second
-    /// comma begins `entrypoint`, not a second prefix.
-    fn parse_bare_literal_list(&mut self) -> Result<Vec<Literal>, ParseError> {
-        let mut items = vec![self.parse_literal()?];
-        while self.peek().kind == TokenKind::Comma && !self.comma_starts_a_new_field() {
-            self.bump();
-            items.push(self.parse_literal()?);
-        }
-        Ok(items)
-    }
-
-    /// A [`schema::FieldKind::LiteralList`] value: an optional leading
-    /// `:`, then either a bracketed list of literals or the bare
-    /// comma-list sugar. Exactly [`Self::parse_reference_list_value`]'s
-    /// shape, over literals.
-    fn parse_literal_list_value(&mut self) -> Result<Vec<Literal>, ParseError> {
-        if self.peek().kind == TokenKind::Colon {
-            self.bump();
-        }
-        if self.peek().kind == TokenKind::LBracket {
-            let (items, _) = self.parse_bracket_literal_list()?;
-            Ok(items)
-        } else if self.at_value_start() {
-            self.parse_bare_literal_list()
-        } else {
-            Err(self.unexpected(Expected::Description("a value or a list of values")))
-        }
-    }
-
     /// `"[" ( literal ( "," literal )* )? "]"` — the bracketed-list half
     /// of a [`schema::FieldKind::ScalarOrList`] value (`healthcheck`'s
     /// `test`'s exec form, `["CMD", "pg_isready", "-U", "miniflux"]`, or
-    /// `command`'s own exec form, `["npm", "start"]`, #156). Items are
-    /// ordinary literals, not [`Reference`]s — unlike
-    /// [`Self::parse_bracket_reference_list`], an entry here never
-    /// resolves against anything an `.hll` file declares, so it never
-    /// carries an `alias.` qualifier either.
+    /// `command`'s own exec form, `["npm", "start"]`, #156). Items go
+    /// through [`Self::parse_literal`], not
+    /// [`Self::parse_literal_reference`]: an entry here never resolves
+    /// against anything an `.hll` file declares, so — unlike
+    /// [`Self::parse_bracket_reference_list`] — it never carries an
+    /// `alias.` qualifier either.
     fn parse_bracket_literal_list(&mut self) -> Result<(Vec<Literal>, Span), ParseError> {
         let start = self.expect(TokenKind::LBracket)?.span;
         let mut items = Vec::new();
@@ -568,8 +559,9 @@ impl<'src> Parser<'src> {
     /// that resolves an arbitrary key the way template-argument binding
     /// does.
     fn parse_depends_on_entry(&mut self) -> Result<DependsOnEntry, ParseError> {
-        let reference = self.parse_reference()?;
-        let mut end = reference.span.end;
+        let reference = self.parse_literal_reference()?;
+        let reference_span = reference.span();
+        let mut end = reference_span.end;
         let condition = if self.peek().kind == TokenKind::LBrace {
             self.bump();
             let key_tok = self.expect(TokenKind::Ident)?;
@@ -590,11 +582,11 @@ impl<'src> Parser<'src> {
             None
         };
         let span = Span {
-            start: reference.span.start,
+            start: reference_span.start,
             end,
-            line: reference.span.line,
-            col: reference.span.col,
-            file: reference.span.file,
+            line: reference_span.line,
+            col: reference_span.col,
+            file: reference_span.file,
         };
         Ok(DependsOnEntry {
             reference,
@@ -1052,17 +1044,6 @@ impl<'src> Parser<'src> {
                 }
                 Ok(())
             }
-            FieldKind::LiteralList => {
-                let items = self.parse_literal_list_value()?;
-                match fields
-                    .entry(field.name)
-                    .or_insert_with(|| FieldValue::LiteralList(Vec::new()))
-                {
-                    FieldValue::LiteralList(v) => v.extend(items),
-                    _ => unreachable!("field kind is stable for a given field name"),
-                }
-                Ok(())
-            }
             FieldKind::NamedNested(nested) => {
                 self.parse_named_nested_into(field, nested, key_span, fields)
             }
@@ -1353,7 +1334,7 @@ impl<'src> Parser<'src> {
         schema: &'static TypeSchema,
     ) -> Result<(ArrowMapHost, Literal, bool, Span), ParseError> {
         let host = if self.peek().kind == TokenKind::Ident {
-            ArrowMapHost::Named(self.parse_reference()?)
+            ArrowMapHost::Named(self.parse_literal_reference()?)
         } else {
             ArrowMapHost::BindMount(self.parse_literal()?)
         };
@@ -2074,7 +2055,7 @@ fn lower_router(name: Option<Ident>, mut fields: StructFields, span: Span) -> Ro
         _ => Vec::new(),
     };
     let path_prefix = match fields.remove("path_prefix") {
-        Some(FieldValue::LiteralList(v)) => v,
+        Some(FieldValue::RefList(v)) => v,
         _ => Vec::new(),
     };
     Router {

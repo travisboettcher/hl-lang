@@ -22,7 +22,7 @@ pub enum TopDecl {
 
 /// `use "path/to/file.hll" as alias` — imports another file's top-level
 /// `network`/`template` declarations under a local alias, referenced
-/// elsewhere as `alias.name` (see [`Reference::qualifier`] and
+/// elsewhere as `alias.name` (see [`Literal::qualifier`] and
 /// [`TemplateInvocation::qualifier`]). Purely syntactic: `parse()` never
 /// touches the filesystem or validates that `path` resolves to anything
 /// real — resolving the path and loading the target file is a later
@@ -36,14 +36,40 @@ pub struct UseDecl {
     pub span: Span,
 }
 
-/// A literal value as written in source. The kind (string/number/bare
-/// identifier) is preserved rather than normalized to a plain string,
-/// since the grammar allows any of the three (`literal ::= STRING |
-/// NUMBER | IDENT`) wherever a value is expected — e.g. `restart
-/// unless-stopped` (bare `Ident`) and `restart "unless-stopped"` (`Str`)
-/// are both legal and mean the same thing downstream, but keeping the
-/// distinction costs nothing and supports future provenance/pretty-
-/// printing needs.
+/// The one value grammar the whole language shares (#196): `value ::=
+/// STRING | NUMBER | IDENT | IDENT "." IDENT | "$" IDENT`. Before #196
+/// this was two separate types — `Literal` (`STRING | NUMBER | IDENT |
+/// "$" IDENT`, no qualifier) and a `Reference` struct (`IDENT ( "."
+/// IDENT )?`, no `$param`) — purely because neither could represent the
+/// other's extra bit. That split meant a `Reference`-typed position
+/// (`networks`, `middleware`, `dns`, `env_file`, `expose.entrypoint`,
+/// `router.entrypoint`, a `depends_on` entry, a named-volume mount's
+/// host side) could never accept a `$param`: `template web(net: String)
+/// { networks [$net] }` was a parse error with no way to fix it short of
+/// giving `networks` a second grammar. Folding the qualifier into this
+/// type is what closes that gap — a `Reference` is now just this type's
+/// [`Self::Qualified`] variant, so every position that used to parse one
+/// gets `$param` for free.
+///
+/// Whether the *qualified* form is legal at a given position is a
+/// semantic question, not a syntactic one any more: the parser always
+/// attempts it wherever it attempts a reference at all, and
+/// `compose::reject_qualified` (driven by
+/// [`crate::schema::allows_qualified_reference`]) rejects it
+/// post-parse, with [`crate::compose::ComposeError::UnsupportedQualifiedReference`],
+/// everywhere but `networks` and a named-volume mount's host side — the
+/// two positions with a real cross-file declaration to resolve one
+/// against. Whether `$param` is legal is likewise not this type's
+/// concern: that's [`crate::ParseError::ParamReferenceOutsideTemplate`],
+/// checked the moment the `$` is seen, uniformly across every position
+/// this type appears in.
+///
+/// The kind (string/number/bare identifier) is preserved rather than
+/// normalized to a plain string, since the grammar allows any of the
+/// three wherever a value is expected — e.g. `restart unless-stopped`
+/// (bare `Ident`) and `restart "unless-stopped"` (`Str`) are both legal
+/// and mean the same thing downstream, but keeping the distinction costs
+/// nothing and supports future provenance/pretty-printing needs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
     Str(String, Span),
@@ -58,6 +84,30 @@ pub enum Literal {
         span: Span,
     },
     Ident(String, Span),
+    /// `alias.name` — a reference qualified by a `use`-imported file's
+    /// local alias (see [`UseDecl`]). Only ever produced from a bare
+    /// `IDENT` token followed by `.` `IDENT`; a `STRING` key's content is
+    /// just string content, never followed by a structural `.`, so this
+    /// variant's `qualifier`/`name` are always themselves plain
+    /// identifiers, never string-derived.
+    ///
+    /// Boxed for the same reason [`TopDecl::Service`]/[`TopDecl::Template`]
+    /// are: an `Ident` plus a second `String` plus two `Span`s makes this
+    /// the largest payload any `Literal` variant carries by a wide margin
+    /// (more than double [`Self::Number`]'s, the next largest), and since
+    /// an enum's size is its largest variant's, an unboxed `Qualified`
+    /// would inflate every `Literal`/`Option<Literal>` slot in the AST —
+    /// which is most of it — to pay for a variant the overwhelming
+    /// majority of literals never use. That inflation is exactly what
+    /// reproduced #72's stack-overflow bug class in a new place: template
+    /// composition is mutually recursive over `ServiceFields`-shaped
+    /// values (see `compose::MAX_TEMPLATE_DEPTH`'s own doc), so a bigger
+    /// `Literal` means a bigger stack frame at *every* recursion level,
+    /// not a one-time cost — enough, unboxed, to overflow a debug build's
+    /// default thread stack barely a third of the way to
+    /// `MAX_TEMPLATE_DEPTH`, well short of the margin that constant's own
+    /// doc promises.
+    Qualified(Box<QualifiedRef>),
     /// A `$name` parameter reference inside a `template`'s own body,
     /// naming one of that *same* template's own declared parameters,
     /// e.g. `$puid` in `template linuxserver_app(puid: Number, pgid:
@@ -72,21 +122,53 @@ pub enum Literal {
 }
 
 impl Literal {
-    /// The literal's text content, regardless of which kind it is.
+    /// The literal's text content, regardless of which kind it is. For
+    /// [`Self::Qualified`], this is the unqualified `name` half alone —
+    /// the qualifier names the file the declaration lives in, not the
+    /// declaration itself, exactly as [`ArrowMapHost::text`] already
+    /// documented before the two types merged.
     pub fn text(&self) -> &str {
         match self {
             Literal::Str(s, _) | Literal::Ident(s, _) | Literal::Param(s, _) => s,
             Literal::Number { text, .. } => text,
+            Literal::Qualified(q) => &q.name,
         }
     }
 
-    /// The literal's location in source.
+    /// The literal's location in source. For [`Self::Qualified`], this
+    /// covers the whole `alias.name`, not just the trailing name — see
+    /// [`QualifiedRef::name_span`] for the narrower span.
     pub fn span(&self) -> Span {
         match self {
             Literal::Str(_, span) | Literal::Ident(_, span) | Literal::Param(_, span) => *span,
             Literal::Number { span, .. } => *span,
+            Literal::Qualified(q) => q.span,
         }
     }
+
+    /// The `alias` in an `alias.name` reference, or `None` for every
+    /// other kind. The single question
+    /// `compose::reject_qualified`/`resolve_qualified_references`
+    /// ask of every reference-shaped position — see [`Self`]'s own doc.
+    pub fn qualifier(&self) -> Option<&Ident> {
+        match self {
+            Literal::Qualified(q) => Some(&q.qualifier),
+            _ => None,
+        }
+    }
+}
+
+/// [`Literal::Qualified`]'s boxed-out payload — see that variant's own
+/// doc for why it's boxed rather than inline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QualifiedRef {
+    pub qualifier: Ident,
+    pub name: String,
+    /// The span of just the trailing `name` segment, after the `.`.
+    /// [`Literal::span`] covers the whole reference including the
+    /// qualifier.
+    pub name_span: Span,
+    pub span: Span,
 }
 
 /// A declared template parameter's type. Deliberately small — `Number`
@@ -125,24 +207,6 @@ impl fmt::Display for ParamType {
 pub struct Param {
     pub name: Ident,
     pub ty: Option<ParamType>,
-}
-
-/// A bare-identifier reference, e.g. an entry in `middleware`/
-/// `depends_on`/`networks`, the host side of a named-volume mount (see
-/// [`ArrowMapHost::Named`]), or a `network` name referenced from a
-/// `service`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Reference {
-    /// The `alias` in `alias.name`, from a `use`-imported file; `None`
-    /// for a bare, same-file reference — the overwhelmingly common case,
-    /// and the only kind that existed before imports.
-    pub qualifier: Option<Ident>,
-    pub name: String,
-    /// The span of just the trailing `name` segment (after the `.`, if
-    /// any). `span` below covers the whole reference including the
-    /// qualifier.
-    pub name_span: Span,
-    pub span: Span,
 }
 
 /// One of Compose's own three `depends_on` readiness conditions (#155):
@@ -207,7 +271,7 @@ impl DependsOnCondition {
 /// is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DependsOnEntry {
-    pub reference: Reference,
+    pub reference: Literal,
     pub condition: Option<(DependsOnCondition, Span)>,
     pub span: Span,
 }
@@ -325,7 +389,7 @@ pub struct Expose {
     /// why this is a plain `Vec` and not an `Option<Vec<_>>`: "unset"
     /// and "set to nothing" have to mean the same thing here, and
     /// `middleware` on [`ServiceFields`] already spells that shape.
-    pub entrypoint: Vec<Reference>,
+    pub entrypoint: Vec<Literal>,
     pub span: Span,
 }
 
@@ -375,14 +439,18 @@ pub struct Router {
     /// The Traefik entry points this router attaches to — spelled and
     /// merged exactly like [`Expose::entrypoint`], including the empty
     /// case meaning "emit no `entrypoints=` label at all."
-    pub entrypoint: Vec<Reference>,
+    pub entrypoint: Vec<Literal>,
     /// Path prefixes to `&&` onto the `Host()` rule, `||`-joined inside
     /// one parenthesized group: `path_prefix: ["/api/v1", "/dav/"]`
     /// yields ``Host(`h`) && (PathPrefix(`/api/v1`) ||
-    /// PathPrefix(`/dav/`))``. A list of plain [`Literal`]s rather than
-    /// [`Reference`]s (unlike `entrypoint`) because a prefix is free text
-    /// a template legitimately parameterizes with `$param`, and the
-    /// grammar has no parameter in reference position.
+    /// PathPrefix(`/dav/`))``. `Vec<Literal>`, the same type
+    /// `entrypoint` above carries since #196 unified the two — a prefix
+    /// is free text a template legitimately parameterizes with `$param`,
+    /// which is exactly what that unification made reachable here too
+    /// (previously it wasn't, since the pre-#196 `FieldKind::LiteralList`
+    /// this field carried existed for that one reason — see
+    /// [`crate::schema::allows_qualified_reference`]'s doc for why the
+    /// qualified form stays rejected here all the same).
     ///
     /// Order is observable — it's the order the `||` alternatives are
     /// written in — so this concatenates on merge without the
@@ -649,30 +717,31 @@ pub enum ArrowMapHost {
     /// a host path. The only variant `publish`/`devices` ever produce.
     BindMount(Literal),
     /// A bare `IDENT`, optionally `alias.`-qualified, naming a top-level
-    /// [`Volume`] declaration. Resolved exactly like a `networks [x]`
-    /// entry: a bare name against the entry file's own declarations, a
-    /// qualified one against the aliased module's. `volume`-only — see
-    /// this type's own doc.
-    Named(Reference),
+    /// [`Volume`] declaration — a [`Literal::Ident`] or
+    /// [`Literal::Qualified`], never any other kind (see this type's own
+    /// doc for why the parser never builds one from any other token).
+    /// Resolved exactly like a `networks [x]` entry: a bare name against
+    /// the entry file's own declarations, a qualified one against the
+    /// aliased module's. `volume`-only — see this type's own doc.
+    Named(Literal),
 }
 
 impl ArrowMapHost {
     /// The host's location in source.
     pub fn span(&self) -> Span {
         match self {
-            ArrowMapHost::BindMount(lit) => lit.span(),
-            ArrowMapHost::Named(r) => r.span,
+            ArrowMapHost::BindMount(lit) | ArrowMapHost::Named(lit) => lit.span(),
         }
     }
 
     /// The host's text as written: the literal's content for a bind
     /// mount, the referenced declaration's name for a named volume
     /// (without any `alias.` qualifier, which names the file the
-    /// declaration lives in rather than the volume).
+    /// declaration lives in rather than the volume — see
+    /// [`Literal::text`]).
     pub fn text(&self) -> &str {
         match self {
-            ArrowMapHost::BindMount(lit) => lit.text(),
-            ArrowMapHost::Named(r) => &r.name,
+            ArrowMapHost::BindMount(lit) | ArrowMapHost::Named(lit) => lit.text(),
         }
     }
 }
@@ -790,12 +859,12 @@ pub struct ServiceFields {
     pub volumes: ArrowMap,
     pub env: EnvMap,
     pub raw: RawMap,
-    pub middleware: Vec<Reference>,
+    pub middleware: Vec<Literal>,
     /// `depends_on [db]` / `depends_on [db { condition: service_healthy }]`
     /// (#155) — each entry is a same-file service reference, optionally
     /// carrying an explicit Compose readiness condition. Unlike
     /// `middleware`/`networks`/`dns`/`env_file`, this isn't a plain
-    /// [`Reference`] list: a `Reference` has nowhere to hang the
+    /// [`Literal`] list: a bare reference has nowhere to hang the
     /// optional `{ condition: ... }` body, so it's its own
     /// [`DependsOnEntry`] type instead — see that type's own doc for why
     /// it isn't shaped as a [`TemplateInvocation`] either, despite the
@@ -816,7 +885,16 @@ pub struct ServiceFields {
     /// [`crate::compose::ComposeError::MapKeyCollision`] — see
     /// `compose.rs`'s `merge_depends_on` for the exact rule.
     pub depends_on: Vec<DependsOnEntry>,
-    pub networks: Vec<Reference>,
+    /// `networks [proxy, alias.other]` — the one reference-list field
+    /// whose qualified form composition actually resolves, rather than
+    /// rejecting: see [`crate::schema::allows_qualified_reference`].
+    /// `$param` is legal here since #196 unified this field's entries
+    /// onto [`Literal`] — `template web(net: String) { networks [$net] }`
+    /// — a network name is exactly the kind of value a template
+    /// legitimately parameterizes, and composition's own
+    /// `resolve_networks`-style by-name lookup at codegen still catches a
+    /// substituted `$net` that names nothing declared.
+    pub networks: Vec<Literal>,
     /// A per-service DNS resolver override (Compose's own `dns:` key,
     /// e.g. a LAN resolver IP) — a plain generic Compose key like
     /// `volume`/`env`/`expose`, not homelab-specific itself even though
@@ -824,11 +902,13 @@ pub struct ServiceFields {
     /// shaped like `middleware`/`depends_on`/`networks` (accumulates
     /// across repeats, never duplicate-checked), even though its entries
     /// are ordinary literal values (IP addresses) rather than references
-    /// to another declaration — reusing [`Reference`] costs nothing here
-    /// since a `STRING` entry (the only realistic way to write an IP,
-    /// `IDENT`'s grammar can't contain a `.`) can never carry a
-    /// qualifier anyway.
-    pub dns: Vec<Reference>,
+    /// to another declaration — reusing [`Literal`] costs nothing here:
+    /// an entry can syntactically carry an `alias.` qualifier like any
+    /// other reference-shaped position, but
+    /// `compose::reject_qualified` rejects it, since a DNS
+    /// server address is never something an `.hll` file declares for a
+    /// qualifier to resolve against.
+    pub dns: Vec<Literal>,
     /// `env_file "one.env"` / `env_file ["one.env", "two.env"]` — paths
     /// to load environment variables from, Compose's own `env_file:`
     /// key (#154). Same reasoning as [`Self::dns`] just above: a plain
@@ -839,12 +919,13 @@ pub struct ServiceFields {
     /// repeats, never duplicate-checked, and a bare `env_file "one.env"`
     /// is sugar for a one-element list), even though its entries are
     /// ordinary path strings rather than references to another
-    /// declaration. Reusing [`Reference`] costs nothing here for the
-    /// same reason it costs nothing for `dns`: Compose's paths are
-    /// resolved relative to the compose file, which is the user's
-    /// concern, not `hllc`'s, so a path is carried through verbatim
-    /// either way and never needs a qualifier to mean anything.
-    pub env_file: Vec<Reference>,
+    /// declaration. Reusing [`Literal`] costs nothing here for the same
+    /// reason it costs nothing for `dns`: Compose's paths are resolved
+    /// relative to the compose file, which is the user's concern, not
+    /// `hllc`'s, so a path is carried through verbatim either way and a
+    /// qualifier — syntactically legal, semantically rejected, exactly
+    /// like `dns`'s — never resolves to anything.
+    pub env_file: Vec<Literal>,
     /// `privileged` — Compose's own `privileged:` key (#157), giving the
     /// container extended host privileges (`cadvisor`'s classic use
     /// case: reading host `/proc`/cgroups). A plain generic Compose key
@@ -882,7 +963,7 @@ pub struct ServiceFields {
     /// shell-vs-exec shape it carries, structurally identical to
     /// [`Healthcheck::test`]'s [`HealthcheckTest`] (#153) — `command` is
     /// modeled on that field rather than on `dns`/`env_file`'s plain
-    /// [`Reference`] lists, since Compose's `command:` key, like
+    /// [`Literal`] lists, since Compose's `command:` key, like
     /// `healthcheck.test`, is either one bare string or a bracketed
     /// list, never a bare comma-separated sequence.
     pub command: Option<Command>,

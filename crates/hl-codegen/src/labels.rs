@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use hl_parser::{Reference, Router, ServiceFields, Span};
+use hl_parser::{Literal, Router, ServiceFields, Span};
 
 use crate::{CodegenError, interp};
 
@@ -139,15 +139,12 @@ fn router_field_needing_host(fields: &ServiceFields) -> Option<(&'static str, Sp
         .expose
         .as_ref()
         .and_then(|e| e.entrypoint.first())
-        .map(|r| ("expose.entrypoint", r.name_span))
+        .map(|r| ("expose.entrypoint", r.span()))
         .or_else(|| {
             if !fields.routers.is_empty() {
                 return None;
             }
-            fields
-                .middleware
-                .first()
-                .map(|r| ("middleware", r.name_span))
+            fields.middleware.first().map(|r| ("middleware", r.span()))
         })
 }
 
@@ -188,15 +185,10 @@ fn traefik_conflict_field(fields: &ServiceFields) -> Option<(&'static str, Span)
                 .expose
                 .as_ref()
                 .and_then(|e| e.entrypoint.first())
-                .map(|r| ("expose.entrypoint", r.name_span))
+                .map(|r| ("expose.entrypoint", r.span()))
         })
         .or_else(|| fields.routers.first().map(|r| ("router", r.span)))
-        .or_else(|| {
-            fields
-                .middleware
-                .first()
-                .map(|r| ("middleware", r.name_span))
-        })
+        .or_else(|| fields.middleware.first().map(|r| ("middleware", r.span())))
 }
 
 /// The router id a `router` block's labels are keyed under: the
@@ -242,7 +234,7 @@ fn rule_value(host: &str, path_prefixes: &[String]) -> String {
 fn entrypoints_label(
     id: &str,
     field: &'static str,
-    entrypoint: &[Reference],
+    entrypoint: &[Literal],
     bindings: &HashMap<&str, &str>,
 ) -> Result<Option<String>, CodegenError> {
     if entrypoint.is_empty() {
@@ -250,8 +242,8 @@ fn entrypoints_label(
     }
     let mut eps = Vec::with_capacity(entrypoint.len());
     for r in entrypoint {
-        let resolved = interp::resolve(&r.name, bindings, r.name_span)?;
-        reject_metacharacters(&resolved, field, LABEL_METACHARACTERS, r.name_span)?;
+        let resolved = interp::resolve(r.text(), bindings, r.span())?;
+        reject_metacharacters(&resolved, field, LABEL_METACHARACTERS, r.span())?;
         eps.push(resolved);
     }
     Ok(Some(format!(
@@ -273,19 +265,14 @@ fn entrypoints_label(
 /// in *emission* order — the convention every other diagnostic here
 /// follows. The work is a handful of string comparisons and the result
 /// is identical each time.
-fn middlewares_label(id: &str, middleware: &[Reference]) -> Result<Option<String>, CodegenError> {
+fn middlewares_label(id: &str, middleware: &[Literal]) -> Result<Option<String>, CodegenError> {
     if middleware.is_empty() {
         return Ok(None);
     }
     let mut mws = Vec::with_capacity(middleware.len());
     for r in middleware {
-        reject_metacharacters(
-            &r.name,
-            "middleware",
-            MIDDLEWARE_METACHARACTERS,
-            r.name_span,
-        )?;
-        mws.push(format!("{}@file", r.name));
+        reject_metacharacters(r.text(), "middleware", MIDDLEWARE_METACHARACTERS, r.span())?;
+        mws.push(format!("{}@file", r.text()));
     }
     Ok(Some(format!(
         "traefik.http.routers.{id}.middlewares={}",
@@ -300,7 +287,7 @@ fn push_router_labels(
     labels: &mut Vec<String>,
     service_name: &str,
     router: &Router,
-    middleware: &[Reference],
+    middleware: &[Literal],
     bindings: &HashMap<&str, &str>,
 ) -> Result<(), CodegenError> {
     if let Some(name) = router.key() {
@@ -505,7 +492,7 @@ pub fn compute(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hl_parser::{Expose, Ident, Literal, Reference, Traefik};
+    use hl_parser::{Expose, Ident, Literal, Traefik};
     use hl_parser::{FileId, Span};
 
     fn span() -> Span {
@@ -526,15 +513,10 @@ mod tests {
         HashMap::from([("name", "syncthing")])
     }
 
-    fn refs(names: &[&str]) -> Vec<Reference> {
+    fn refs(names: &[&str]) -> Vec<Literal> {
         names
             .iter()
-            .map(|n| Reference {
-                qualifier: None,
-                name: (*n).to_string(),
-                name_span: span(),
-                span: span(),
-            })
+            .map(|n| Literal::Ident((*n).to_string(), span()))
             .collect()
     }
 
@@ -925,18 +907,8 @@ mod tests {
                 span: span(),
             }),
             middleware: vec![
-                Reference {
-                    qualifier: None,
-                    name: "local-ipwhitelist".to_string(),
-                    name_span: span(),
-                    span: span(),
-                },
-                Reference {
-                    qualifier: None,
-                    name: "forwardAuth-authentik".to_string(),
-                    name_span: span(),
-                    span: span(),
-                },
+                Literal::Ident("local-ipwhitelist".to_string(), span()),
+                Literal::Ident("forwardAuth-authentik".to_string(), span()),
             ],
             ..Default::default()
         };

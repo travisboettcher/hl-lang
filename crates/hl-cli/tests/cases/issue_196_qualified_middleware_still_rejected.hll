@@ -1,0 +1,14 @@
+# #196: unifying `Literal`/`Reference` made every reference-shaped
+# position parse an `alias.name` qualifier the same way, uniformly —
+# but whether one is *legal* there stayed a per-field question.
+# `middleware` has no cross-file declaration to resolve a qualifier
+# against (see `schema::allows_qualified_reference`'s doc), so it must
+# keep rejecting one exactly as it did before the unification, with the
+# same `UnsupportedQualifiedReference` diagnostic. No real `use` import
+# is needed for this: the rejection fires on the qualifier's own shape,
+# before anything would resolve the alias `shared` against.
+service app {
+  image "nginx:alpine"
+  middleware shared.forwardAuth
+  expose 80 as "app.example.com"
+}
