@@ -2225,6 +2225,18 @@ fn template_decl_with_typed_params() {
 }
 
 #[test]
+fn template_decl_without_a_body_is_error() {
+    // `template t = <statement>` parsed until #194 removed it, so this
+    // pins the removal rather than the general "no body" case: nothing
+    // else fails if the `=` arm comes back.
+    let err = parse("template t = restart unless-stopped\n").unwrap_err();
+    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+
+    let err = parse("template t\n").unwrap_err();
+    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+}
+
+#[test]
 fn param_list_unknown_type_is_error() {
     let err = parse("template t(a: Boolean) {\n}\n").unwrap_err();
     assert!(matches!(

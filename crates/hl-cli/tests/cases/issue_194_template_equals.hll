@@ -1,0 +1,9 @@
+# `template <name> = <statement>` parsed and composed until #194
+# removed it, leaving the braced body as the one declaration form. This
+# pins what a user now reads instead, since the parser test can only
+# assert the variant.
+template pinned = image "nginx:1.25"
+
+service web {
+  with pinned
+}
