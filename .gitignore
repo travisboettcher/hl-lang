@@ -25,3 +25,9 @@
 # from that job.
 /mutants.out/
 /mutants.out.old/
+
+# Transient git worktrees created when a Claude Code subagent runs with
+# worktree isolation, so parallel agents don't collide in one checkout.
+# Scratch state for one session, same as the entries above; the worktree
+# is removed once the agent finishes and CI never produces one.
+/.claude/worktrees/
