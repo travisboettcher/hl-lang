@@ -1187,8 +1187,12 @@ impl<'src> Parser<'src> {
                 // called on a type with no primary field, so this is
                 // what keeps that call genuinely unreachable rather than
                 // merely untested.
-                let took_primary_shorthand =
-                    self.peek().kind != TokenKind::LBrace && self.at_value_start();
+                //
+                // No `!= LBrace` guard here: `at_value_start` already
+                // excludes `{`, so pairing the two produced a mutant no
+                // input could kill — the two spellings agree on every
+                // reachable path.
+                let took_primary_shorthand = self.at_value_start();
                 let (nested_fields, span) = if self.peek().kind == TokenKind::LBrace {
                     self.parse_struct_body(nested)?
                 } else if nested.primary_field.is_some() && self.at_value_start() {

@@ -1001,6 +1001,21 @@ fn router_entrypoint_accepts_a_bare_comma_list() {
     assert_eq!(router_entrypoints_of(router), vec!["web", "web-secure"]);
 }
 
+#[test]
+fn expose_as_sugar_router_span_covers_through_the_host() {
+    // The desugared router's span runs from the `as` keyword through the
+    // closing quote of the host, so a diagnostic about it points at the
+    // whole sugar rather than at the keyword alone.
+    let source = "service s {\n  expose 80 as \"h.example.com\"\n}\n";
+    let program = parse_ok(source);
+    let service = as_service(&program.decls[0]);
+    let span = service.fields.routers[0].span;
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        "as \"h.example.com\""
+    );
+}
+
 /// `host`/`entrypoint` together on the unnamed router, via the braced
 /// body — the shape `docs/DESIGN.md`'s `internal_web` template uses (the
 /// unnamed form has no name to continue a comma-list from, so the
