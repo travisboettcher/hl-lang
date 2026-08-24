@@ -29,6 +29,31 @@ compiler itself. The test to apply when considering a new built-in:
 "would this make sense on a homelab with completely different
 infrastructure?" If not, it's a template, not a grammar feature.
 
+That test alone doesn't screen for whether a candidate needs to be a
+schema row at all, only for whether it's homelab-generic. A second test
+governs that: **a Compose key earns a schema row only when the compiler
+does something to it**—validates it, interpolates into it, reshapes it,
+or merges it non-trivially. Otherwise it belongs in `raw`. A new
+built-in has to pass both tests, not just the first.
+
+`depends_on` passes both. It's homelab-generic, and the compiler checks
+each entry's `condition` against Compose's own fixed set of three
+values, reshapes the whole field into whichever of Compose's two
+mutually exclusive `depends_on:` shapes the entries call for, and merges
+entries keyed on the service name, catching a condition conflict across
+templates that a plain accumulate never would. `dns` passes only the
+first. It's homelab-generic too, but the compiler does nothing to its
+entries beyond passing them through—no validation on the resolver
+strings, no interpolation, and a merge that's the same accumulation any
+plain list field already gives for free. `raw` would have served it
+exactly as well.
+
+The bar governs future additions, not the fields already shipped. `dns`,
+`env_file`, `container_name`, and `driver_opts` stay exactly as they
+are—the point is to stop the drift, not revisit a shipped decision.
+And `raw` is only a safe destination once composing two templates can't
+silently drop a value there, which is issue #193.
+
 ## Lexical grammar
 
 ```

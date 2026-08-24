@@ -208,6 +208,11 @@ Keep PRs focused on one issue's worth of change. Unrelated formatting or
 refactoring makes review harder and can hide the actual fix—open a
 separate issue/PR for cleanup that isn't required by the change at hand.
 
+A PR proposing a new built-in field should check it against both
+promotion tests in `docs/DESIGN.md`'s "Design principle: generic core,
+specific templates" section before opening—passing the first test alone
+no longer earns a field its schema row.
+
 ## Design background
 
 `docs/DESIGN.md` covers the language's motivation, grammar, and worked
