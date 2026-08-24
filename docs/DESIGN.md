@@ -266,7 +266,7 @@ same two entries—see #81.
 | `healthcheck` | struct |—|—|—| no |
 | `traefik` | struct |—|—|—| no |
 | `with` | struct | `templates`—list of nested instantiations |—|—| no |
-| `raw` | map |—| `:` | none—schema-free, passthrough | no |
+| `raw` | map |—| `:` | key | no |
 
 `volume` has two rows because the identifier plays two roles: at the top
 level it *declares* a named Docker volume, as in `volume
@@ -342,15 +342,25 @@ field by field, so an overriding entry that writes no flag drops an
 inherited one, and an overriding entry that writes the flag never loses
 it. This field needed no merge-path change.
 
-`raw`'s "no uniqueness checking" is a *parser*-level statement: the
-parser never checks its own entries against each other or against any
-other field. Codegen does have one rule about them, because YAML forces
-the issue—two keys spelled the same in one mapping is invalid—and a
-`raw` key may well name a field that has a preceding row. Where it does,
-codegen emits the `raw` value and drops the built-in one, which keeps
-adding a row to this table from breaking files that were already
-reaching for `raw` in that row's absence (see the `raw` section of the
-book's Built-in Fields page).
+`raw`'s key-side uniqueness follows `env`'s rule as of #193: two
+*explicit* `with`-listed templates setting the same `raw` key raise the
+same `MapKeyCollision` a repeated `env` key does, rather than the second
+template's value silently overwriting the first's. Before #193, `raw`
+was the one field the merge concatenated outright at every tier, with no
+uniqueness check at all—the escape hatch was, ironically, the one place
+composing two templates could lose a value in silence. This check is a
+*composition*-level statement, not a parser one: the parser still never
+checks a `raw` body's own entries against each other, so a key repeated
+within one body—one `raw { }` block or two in the same `service`/
+`template`—stays unchecked, exactly as before #193.
+
+Codegen has a separate rule about `raw` keys, unaffected by #193, because
+YAML forces the issue—two keys spelled the same in one mapping is
+invalid—and a `raw` key may well name a field that has a preceding row.
+Where it does, codegen emits the `raw` value and drops the built-in one,
+which keeps adding a row to this table from breaking files that were
+already reaching for `raw` in that row's absence (see the `raw` section
+of the book's Built-in Fields page).
 
 `raw`'s own job has narrowed as the preceding schema table has grown.
 Early on, before this table had more than a handful of rows, `raw` stood

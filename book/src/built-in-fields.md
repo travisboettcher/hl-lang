@@ -1070,6 +1070,18 @@ that, `hllc` reports an error rather than following the nesting
 further. Real Compose structures nest a handful of levels, so this only
 ever comes up for generated or pathological input.
 
+`hllc` checks uniqueness on the **key**, the same convention `env` uses:
+two *explicit* `with`-listed templates setting the same `raw` key is a
+compile error, not a silent override. That's new as of #193—before it,
+`raw` was the one field the merge concatenated outright at every tier,
+with no uniqueness check at all, so two templates both writing `raw {
+user: "..." }` compiled with whichever template's `with` position came
+last quietly winning. A key repeated *within one body*—one `raw { }`
+block, or two—still isn't checked, matching `raw`'s own schema-free
+design: `hllc` extends the accumulated entries rather than rejecting the
+repeat, and the generated document keeps only the last value for that
+key, the same as any duplicate key inserted into a Rust map twice.
+
 ### `raw` wins over a built-in field of the same name
 
 A `raw` key may name a field `hll` already has: `image`,

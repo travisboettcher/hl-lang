@@ -1,0 +1,2 @@
+--- error ---
+issue_193_raw_template_collision.hll:15:5: `raw` key "user" set by both template `a` (at issue_193_raw_template_collision.hll:9:5) and template `b`—explicit templates must not conflict

@@ -1,0 +1,22 @@
+# #193: two explicit templates setting the same `raw` key is a compile
+# error, the same `MapKeyCollision` a repeated `env` key already raises,
+# instead of the second template's value silently overwriting the
+# first's. Before this fix, `hllc` accepted this file and emitted
+# `user: '2000'` with no diagnostic at all — `raw` was the one map field
+# the merge concatenated outright, with no uniqueness check at any tier.
+template a {
+  raw {
+    user: "1000"
+  }
+}
+
+template b {
+  raw {
+    user: "2000"
+  }
+}
+
+service s {
+  with a, b
+  image "nginx"
+}
