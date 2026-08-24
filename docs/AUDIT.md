@@ -5,11 +5,33 @@ constructs to **combine**, **generalize**, or **drop**—both to shrink
 what a new user has to learn and to shrink the number of places a change
 has to reach.
 
-This document identifies and ranks. It changes nothing. Every proposal
-preserves the supported feature set and the generated Compose output
-unless its own "Compose output" line says otherwise.
+This document identifies and ranks. Every proposal preserves the
+supported feature set and the generated Compose output unless its own
+"Compose output" line says otherwise.
 
-Baseline: `v0.22.0`.
+This audit measured `v0.22.0`. Most findings have since shipped, so the
+table below carries each one's status—read a landed finding as a record
+of why the code looks the way it does, and an open one as a live
+proposal. Counts elsewhere still describe `v0.22.0`.
+
+## Status
+
+| Finding | What it does | Status |
+|---|---|---|
+| F4 | one arrow-map type for `volume`, `publish`, and `devices` | landed, #208 |
+| F2 | one value type, so `$param` works everywhere | landed, #209 |
+| F3 | six bespoke merge slots collapse onto `SCALAR_FIELDS` | landed, #211 |
+| F1, F6 | `expose` keeps the port, `router` owns Traefik | landed, #213 |
+| F7 | `raw` collides instead of silently dropping a value | landed, #207 |
+| F10 | the undocumented `template <name> = <statement>` form goes | landed, #205 |
+| F11 | parameter annotations give way to field-shape checks | landed, #212 |
+| F9 | a value-added bar for new built-in fields | rejected, #204 |
+| F8 | rename the colliding `entrypoint` and `disabled` | open, #199 |
+| F5 | one separator rule: a comma, or a newline, anywhere | open, #200 |
+
+Two follow-ups the work turned up: #206, a `raw` key repeated inside one
+body still escapes checking, and #210, both required CI gates misbehave
+when GitHub moves a stacked pull request onto a new base.
 
 ## Where the complexity sits
 
@@ -469,8 +491,10 @@ Leave these alone. Each does real work.
 
 ## Suggested sequencing
 
-Each step lands on the one before it, and the risky, user-visible change
-sits in the middle rather than first.
+The order the work actually ran in, kept because the reasoning behind it
+held up: each step lands on the one before it, and the risky,
+user-visible change sits in the middle rather than first. Only F8 and F5
+remain.
 
 | # | Change | Risk | Language change |
 |---|---|---|---|
