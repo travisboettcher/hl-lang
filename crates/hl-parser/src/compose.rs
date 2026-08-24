@@ -1917,7 +1917,8 @@ impl Spanned for RawEntry {
 ///
 /// `scalars` holds every single-value collision point in the language —
 /// `image.ref`, `expose.port`/`expose.host`, `restart.policy`,
-/// `container_name`, and any future one — keyed
+/// `container_name`, `healthcheck`'s five plain-`Literal` sub-fields,
+/// and any future one — keyed
 /// generically by name, always the fully-dotted canonical path down to
 /// the concrete sub-field (`expose`'s two scalar sub-fields; `image`/
 /// `restart`'s one apiece), never a struct's own bare name, so a field's
@@ -1927,10 +1928,21 @@ impl Spanned for RawEntry {
 /// change out from under `image.ref`/`restart.policy` the moment either
 /// struct grew a second field). A bare field with no enclosing struct at
 /// all, like `container_name`, is keyed under its own name — there's no
-/// sub-field path to be dotted onto. Which canonical keys exist, and how
-/// each one's `Literal` slot is read out of/written back into
-/// `ServiceFields`, is entirely described by the [`SCALAR_FIELDS`] table
-/// below — see its doc for why that's what makes a new scalar collision
+/// sub-field path to be dotted onto.
+///
+/// The value each key maps to is a [`ScalarValue`], not a bare
+/// [`Literal`]: most rows are `ScalarValue::Literal`, but
+/// `healthcheck.test`/`command`/`entrypoint` (whose own AST types,
+/// [`HealthcheckTest`]/[`Command`]/[`Entrypoint`], carry Compose's
+/// shell-string-or-exec-list shape rather than a plain literal) and
+/// `healthcheck.disable`/`traefik.disabled`/`privileged` (bare-presence
+/// [`FieldKind::BoolFlag`]s, whose only "value" is the span they were
+/// set at — see [`crate::schema::FieldKind::BoolFlag`]) ride the same
+/// map by going through `ScalarValue`'s other two arms instead (#197).
+/// Which canonical keys exist, and how each one's value is read out of/
+/// written back into `ServiceFields`, is entirely described by the
+/// [`SCALAR_FIELDS`] table below — see its doc, and [`ScalarValue`]'s
+/// own, for why that's what makes a new scalar-or-scalar-like collision
 /// point a one-line addition rather than a new `MergeAcc` field plus new
 /// hand-written merge/rebuild logic.
 ///
@@ -1963,7 +1975,7 @@ impl Spanned for RawEntry {
 /// service.
 #[derive(Default)]
 struct MergeAcc {
-    scalars: HashMap<&'static str, (Literal, Tier)>,
+    scalars: HashMap<&'static str, (ScalarValue, Tier)>,
     lists: HashMap<&'static str, Vec<Literal>>,
     /// `volume`/`publish`/`devices`'s shared merge point (#192): one
     /// [`crate::ast::ArrowMapEntry`] bucket per field, keyed the same way
@@ -1999,50 +2011,6 @@ struct MergeAcc {
     /// with [`ComposeError::MapKeyCollision`] instead of the second one
     /// silently overwriting the first.
     raw: Vec<(RawEntry, Tier)>,
-    /// `healthcheck.test`'s own collision point — not part of `scalars`
-    /// above because [`HealthcheckTest`] isn't a [`Literal`]. Merged by
-    /// `merge_scalar_like`, which is [`merge_scalar`] generalized over
-    /// the value type since only this field and `healthcheck_disable`/
-    /// `command`/`privileged` need it — not worth a second name-keyed
-    /// table for four rows.
-    healthcheck_test: Option<(HealthcheckTest, Tier)>,
-    /// `healthcheck.disable`'s own collision point. A `FieldKind::BoolFlag`
-    /// carries no value beyond bare presence, so the "value" merged here
-    /// is just the span it was set at — mirroring how [`Literal::span`]
-    /// is all `merge_scalar` ever needs from a `Literal` too.
-    healthcheck_disable: Option<(Span, Tier)>,
-    /// `traefik.disabled`'s own collision point (#159) — same shape as
-    /// [`Self::healthcheck_disable`] and for the same reason: a bare
-    /// `FieldKind::BoolFlag` merged via `merge_scalar_like`, one slot
-    /// rather than a name-keyed table since `traefik` has exactly this
-    /// one sub-field today.
-    traefik_disabled: Option<(Span, Tier)>,
-    /// `command`'s own collision point (#156) — not part of `scalars`
-    /// above for the same reason `healthcheck_test` isn't: [`Command`]
-    /// isn't a [`Literal`], so it can't ride [`SCALAR_FIELDS`]'s table
-    /// and goes through `merge_scalar_like` instead. Unlike
-    /// `healthcheck_test`, `command` lives directly on `ServiceFields`
-    /// rather than inside a nested struct, so
-    /// [`MergeAcc::into_service_fields`] writes it straight into
-    /// `fields.command` with no `get_or_insert` needed — see
-    /// [`ast::ServiceFields::command`]'s doc for why it's modeled on
-    /// `healthcheck.test`'s merge behavior rather than on
-    /// `container_name`'s.
-    command: Option<(Command, Tier)>,
-    /// `entrypoint`'s own collision point (#183) — a second slot beside
-    /// [`Self::command`], for the same reason that one exists:
-    /// [`Entrypoint`] isn't a [`Literal`], so it can't ride
-    /// [`SCALAR_FIELDS`]'s table and goes through `merge_scalar_like`
-    /// instead. Separate from `command` because they're two independent
-    /// Compose keys — a template setting `entrypoint` and one setting
-    /// `command` don't collide with each other, they compose.
-    entrypoint: Option<(Entrypoint, Tier)>,
-    /// `privileged`'s own collision point (#157) — a bare
-    /// `ServiceFields` field rather than one nested inside a struct, but
-    /// merged exactly like `healthcheck_disable` for the same reason:
-    /// it's a `FieldKind::BoolFlag`, not a [`Literal`], so it can't ride
-    /// [`Self::scalars`]/[`SCALAR_FIELDS`] either.
-    privileged: Option<(Span, Tier)>,
     /// `router`'s own merge point (#184), keyed by router name and
     /// merged *per sub-field* within each key — see [`merge_routers`].
     ///
@@ -2112,6 +2080,13 @@ impl MergeAcc {
                 );
             }
         }
+        // Order within this loop is span-preference order, not just table
+        // order — see [`SCALAR_FIELDS`]'s own doc. `healthcheck.test` and
+        // `.disable` sort after the rest of `healthcheck`'s sub-fields (and
+        // `.disable` after `.test`) so a `get_or_insert` that has to
+        // materialize `Healthcheck` from scratch always stamps its span
+        // from the most specific sub-field present, exactly as before this
+        // table absorbed the two rows (#197).
         for field in SCALAR_FIELDS {
             if let Some((value, _)) = self.scalars.remove(field.key) {
                 (field.set)(&mut fields, value);
@@ -2128,42 +2103,6 @@ impl MergeAcc {
             if let Some(values) = self.lists.remove(field.key) {
                 (field.set)(&mut fields, values);
             }
-        }
-        // Same "after the rest of `healthcheck`'s sub-fields" span
-        // preference as `expose.entrypoint` above, for the same reason:
-        // `get_or_insert` only stamps a freshly created `Healthcheck`'s
-        // span when nothing already materialized it.
-        if let Some((test, _)) = self.healthcheck_test {
-            let span = test.span();
-            fields
-                .healthcheck
-                .get_or_insert(empty_healthcheck(span))
-                .test = Some(test);
-        }
-        if let Some((disable_span, _)) = self.healthcheck_disable {
-            fields
-                .healthcheck
-                .get_or_insert(empty_healthcheck(disable_span))
-                .disable = Some(disable_span);
-        }
-        // Same "no other `traefik` sub-field exists to run first" span
-        // reasoning as the two blocks above — there's nothing else in
-        // `TRAEFIK` yet for a freshly materialized `Traefik`'s span to
-        // prefer over this one (#159).
-        if let Some((disabled_span, _)) = self.traefik_disabled {
-            fields
-                .traefik
-                .get_or_insert(empty_traefik(disabled_span))
-                .disabled = Some(disabled_span);
-        }
-        if let Some((command, _)) = self.command {
-            fields.command = Some(command);
-        }
-        if let Some((entrypoint, _)) = self.entrypoint {
-            fields.entrypoint = Some(entrypoint);
-        }
-        if let Some((privileged_span, _)) = self.privileged {
-            fields.privileged = Some(privileged_span);
         }
         // In accumulated order, which is tier order: `defaults`' routers
         // first, then each `with` target's left to right, then the
@@ -2185,11 +2124,51 @@ impl MergeAcc {
     }
 }
 
-/// One scalar collision point in `ServiceFields` — a `Literal` slot that
-/// lives either directly on `ServiceFields` (`container_name`) or inside
-/// one of its `Nested` struct fields (`image.ref`,
-/// `expose.port`/`.host`, `restart.policy`) — described
-/// generically by `key` (the identity-stable, fully-dotted name
+/// The value one [`SCALAR_FIELDS`] row carries (#197). Most rows are
+/// [`Self::Literal`] — a plain scalar collision point, same as before this
+/// type existed. The other two arms generalize the table over the two
+/// shapes a scalar-*like* collision point can take, so a field whose slot
+/// isn't a bare [`Literal`] can still ride this one table instead of a
+/// bespoke `MergeAcc` field:
+///
+/// - [`Self::List`] is Compose's own shell-string-or-exec-list shape —
+///   the shell form rides [`Self::Literal`] instead, so this arm only
+///   ever holds the *exec* form's item list plus its brackets' span.
+///   [`HealthcheckTest`], [`Command`], and [`Entrypoint`] each convert to
+///   and from this pair of arms in their row's own `take`/`set` — they
+///   stay separate AST types (see each one's own doc for why: they're
+///   three different Compose keys, and collapsing them would blur that),
+///   but they share one merge-time shape, so one pair of arms serves all
+///   three.
+/// - [`Self::Flag`] is a bare-presence [`crate::schema::FieldKind::BoolFlag`]
+///   field's "value": there is nothing to carry but the span it was set
+///   at, mirroring how [`Literal::span`] is all [`merge_scalar`] ever
+///   needs from a [`Self::Literal`] too.
+///
+/// [`Self::span`] is what [`merge_scalar`] calls to report a collision,
+/// exactly as it once called [`Literal::span`] directly.
+#[derive(Debug, Clone, PartialEq)]
+enum ScalarValue {
+    Literal(Literal),
+    List(Vec<Literal>, Span),
+    Flag(Span),
+}
+
+impl ScalarValue {
+    fn span(&self) -> Span {
+        match self {
+            ScalarValue::Literal(lit) => lit.span(),
+            ScalarValue::List(_, span) | ScalarValue::Flag(span) => *span,
+        }
+    }
+}
+
+/// One scalar (or scalar-*like*, see [`ScalarValue`]) collision point in
+/// `ServiceFields` — a slot that lives either directly on `ServiceFields`
+/// (`container_name`, `command`, `entrypoint`, `privileged`) or inside one
+/// of its `Nested` struct fields (`image.ref`, `expose.port`/`.host`,
+/// `restart.policy`, every `healthcheck` sub-field, `traefik.disabled`) —
+/// described generically by `key` (the identity-stable, fully-dotted name
 /// [`merge_scalar`]/`ComposeError` key collisions by — see #27) plus a
 /// pair of function pointers for reading the slot out of a tier's
 /// `ServiceFields` (`take`) and writing a merged value back into a
@@ -2197,10 +2176,12 @@ impl MergeAcc {
 /// and [`MergeAcc::into_service_fields`] each be one generic loop
 /// instead of the two bespoke, hand-enumerated functions they used to
 /// be (see hl-lang#28) — the only place left that needs to know
-/// `ServiceFields`'s concrete struct shape. Adding a future scalar
-/// collision point (a new struct sub-field, or a new bare scalar field)
-/// means adding one `ScalarField` entry here, not touching either
-/// generic function.
+/// `ServiceFields`'s concrete struct shape. Adding a future scalar-or-
+/// scalar-like collision point means adding one `ScalarField` entry here,
+/// not touching either generic function or `MergeAcc` itself (#197) —
+/// `take`/`set` are exactly where a row's own AST type (if it isn't a
+/// bare [`Literal`]) converts to and from [`ScalarValue`], so that
+/// knowledge stays local to the one row that needs it.
 ///
 /// `expose`'s entries are listed `port` then `host` in that order
 /// deliberately: `set`'s `get_or_insert` only stamps a freshly created
@@ -2212,18 +2193,46 @@ impl MergeAcc {
 /// both of these for span purposes, because
 /// [`MergeAcc::into_service_fields`] runs this whole table before that
 /// one (the span itself stays cosmetic — see [`Expose`]'s doc —
-/// nothing downstream reads it for anything but existence).
+/// nothing downstream reads it for anything but existence). The same
+/// preference holds one struct over: `healthcheck.test` sorts after
+/// `healthcheck`'s five plain-`Literal` sub-fields, and `.disable` after
+/// `.test`, so a `get_or_insert` that has to materialize `Healthcheck`
+/// from scratch always stamps its span from the most specific sub-field
+/// actually present — the same rule this table already applied to
+/// `expose`, now covering the two rows that joined it from their own
+/// dedicated `MergeAcc` slots (#197).
 struct ScalarField {
     key: &'static str,
-    take: fn(&mut ServiceFields) -> Option<Literal>,
-    set: fn(&mut ServiceFields, Literal),
+    take: fn(&mut ServiceFields) -> Option<ScalarValue>,
+    set: fn(&mut ServiceFields, ScalarValue),
+}
+
+/// Unwraps a [`ScalarValue`] a `set` closure knows — by construction, since
+/// it's paired one-to-one with a `take` closure that only ever produces
+/// this same arm for this same [`ScalarField::key`] — can only be
+/// [`ScalarValue::Literal`]. Shared by every plain-`Literal` row below so
+/// the panic message names the row that would have to break this
+/// invariant, rather than repeating a bespoke `unreachable!()` per row.
+fn expect_literal(value: ScalarValue, key: &'static str) -> Literal {
+    match value {
+        ScalarValue::Literal(lit) => lit,
+        ScalarValue::List(..) | ScalarValue::Flag(_) => {
+            unreachable!("`{key}`'s own `take` only ever produces `ScalarValue::Literal`")
+        }
+    }
 }
 
 static SCALAR_FIELDS: &[ScalarField] = &[
     ScalarField {
         key: "image.ref",
-        take: |f| f.image.take().and_then(|i| i.reference),
+        take: |f| {
+            f.image
+                .take()
+                .and_then(|i| i.reference)
+                .map(ScalarValue::Literal)
+        },
         set: |f, v| {
+            let v = expect_literal(v, "image.ref");
             f.image = Some(Image {
                 span: v.span(),
                 reference: Some(v),
@@ -2232,8 +2241,14 @@ static SCALAR_FIELDS: &[ScalarField] = &[
     },
     ScalarField {
         key: "expose.port",
-        take: |f| f.expose.as_mut().and_then(|e| e.port.take()),
+        take: |f| {
+            f.expose
+                .as_mut()
+                .and_then(|e| e.port.take())
+                .map(ScalarValue::Literal)
+        },
         set: |f, v| {
+            let v = expect_literal(v, "expose.port");
             let span = v.span();
             f.expose
                 .get_or_insert(Expose {
@@ -2247,8 +2262,14 @@ static SCALAR_FIELDS: &[ScalarField] = &[
     },
     ScalarField {
         key: "expose.host",
-        take: |f| f.expose.as_mut().and_then(|e| e.host.take()),
+        take: |f| {
+            f.expose
+                .as_mut()
+                .and_then(|e| e.host.take())
+                .map(ScalarValue::Literal)
+        },
         set: |f, v| {
+            let v = expect_literal(v, "expose.host");
             let span = v.span();
             f.expose
                 .get_or_insert(Expose {
@@ -2262,8 +2283,14 @@ static SCALAR_FIELDS: &[ScalarField] = &[
     },
     ScalarField {
         key: "restart.policy",
-        take: |f| f.restart.take().and_then(|r| r.policy),
+        take: |f| {
+            f.restart
+                .take()
+                .and_then(|r| r.policy)
+                .map(ScalarValue::Literal)
+        },
         set: |f, v| {
+            let v = expect_literal(v, "restart.policy");
             f.restart = Some(Restart {
                 span: v.span(),
                 policy: Some(v),
@@ -2272,19 +2299,19 @@ static SCALAR_FIELDS: &[ScalarField] = &[
     },
     ScalarField {
         key: "container_name",
-        take: |f| f.container_name.take(),
-        set: |f, v| f.container_name = Some(v),
+        take: |f| f.container_name.take().map(ScalarValue::Literal),
+        set: |f, v| f.container_name = Some(expect_literal(v, "container_name")),
     },
-    // `healthcheck`'s five plain-`Literal` sub-fields — `test` and
-    // `disable` aren't `Literal`-valued (see [`HealthcheckTest`]/
-    // [`Network::external`]'s shape), so they can't live in this table
-    // and are merged separately via `merge_scalar_like` and
-    // [`MergeAcc::healthcheck_test`]/[`MergeAcc::healthcheck_disable`]
-    // instead — see those fields' doc.
     ScalarField {
         key: "healthcheck.interval",
-        take: |f| f.healthcheck.as_mut().and_then(|h| h.interval.take()),
+        take: |f| {
+            f.healthcheck
+                .as_mut()
+                .and_then(|h| h.interval.take())
+                .map(ScalarValue::Literal)
+        },
         set: |f, v| {
+            let v = expect_literal(v, "healthcheck.interval");
             let span = v.span();
             f.healthcheck
                 .get_or_insert(empty_healthcheck(span))
@@ -2293,24 +2320,42 @@ static SCALAR_FIELDS: &[ScalarField] = &[
     },
     ScalarField {
         key: "healthcheck.timeout",
-        take: |f| f.healthcheck.as_mut().and_then(|h| h.timeout.take()),
+        take: |f| {
+            f.healthcheck
+                .as_mut()
+                .and_then(|h| h.timeout.take())
+                .map(ScalarValue::Literal)
+        },
         set: |f, v| {
+            let v = expect_literal(v, "healthcheck.timeout");
             let span = v.span();
             f.healthcheck.get_or_insert(empty_healthcheck(span)).timeout = Some(v);
         },
     },
     ScalarField {
         key: "healthcheck.retries",
-        take: |f| f.healthcheck.as_mut().and_then(|h| h.retries.take()),
+        take: |f| {
+            f.healthcheck
+                .as_mut()
+                .and_then(|h| h.retries.take())
+                .map(ScalarValue::Literal)
+        },
         set: |f, v| {
+            let v = expect_literal(v, "healthcheck.retries");
             let span = v.span();
             f.healthcheck.get_or_insert(empty_healthcheck(span)).retries = Some(v);
         },
     },
     ScalarField {
         key: "healthcheck.start_period",
-        take: |f| f.healthcheck.as_mut().and_then(|h| h.start_period.take()),
+        take: |f| {
+            f.healthcheck
+                .as_mut()
+                .and_then(|h| h.start_period.take())
+                .map(ScalarValue::Literal)
+        },
         set: |f, v| {
+            let v = expect_literal(v, "healthcheck.start_period");
             let span = v.span();
             f.healthcheck
                 .get_or_insert(empty_healthcheck(span))
@@ -2319,21 +2364,163 @@ static SCALAR_FIELDS: &[ScalarField] = &[
     },
     ScalarField {
         key: "healthcheck.start_interval",
-        take: |f| f.healthcheck.as_mut().and_then(|h| h.start_interval.take()),
+        take: |f| {
+            f.healthcheck
+                .as_mut()
+                .and_then(|h| h.start_interval.take())
+                .map(ScalarValue::Literal)
+        },
         set: |f, v| {
+            let v = expect_literal(v, "healthcheck.start_interval");
             let span = v.span();
             f.healthcheck
                 .get_or_insert(empty_healthcheck(span))
                 .start_interval = Some(v);
         },
     },
+    // `healthcheck.test`'s own collision point (#153) — not a plain
+    // `Literal`, since [`HealthcheckTest`] carries Compose's own
+    // shell-string-or-exec-list shape, so it goes through
+    // [`ScalarValue::List`] for the exec form (the shell form still rides
+    // [`ScalarValue::Literal`]). Sorted after every plain-`Literal`
+    // `healthcheck.*` row above, and before `.disable` below, for the
+    // span-preference reasons [`ScalarField`]'s own doc explains.
+    ScalarField {
+        key: "healthcheck.test",
+        take: |f| {
+            f.healthcheck
+                .as_mut()
+                .and_then(|h| h.test.take())
+                .map(|test| match test {
+                    HealthcheckTest::Shell(lit) => ScalarValue::Literal(lit),
+                    HealthcheckTest::Exec(items, span) => ScalarValue::List(items, span),
+                })
+        },
+        set: |f, v| {
+            let test = match v {
+                ScalarValue::Literal(lit) => HealthcheckTest::Shell(lit),
+                ScalarValue::List(items, span) => HealthcheckTest::Exec(items, span),
+                ScalarValue::Flag(_) => {
+                    unreachable!(
+                        "`healthcheck.test`'s own `take` never produces `ScalarValue::Flag`"
+                    )
+                }
+            };
+            let span = test.span();
+            f.healthcheck.get_or_insert(empty_healthcheck(span)).test = Some(test);
+        },
+    },
+    // `healthcheck.disable`'s own collision point. A
+    // `FieldKind::BoolFlag` carries no value beyond bare presence, so this
+    // row's `take`/`set` round-trip through [`ScalarValue::Flag`] instead
+    // of `Literal`/`List`.
+    ScalarField {
+        key: "healthcheck.disable",
+        take: |f| {
+            f.healthcheck
+                .as_mut()
+                .and_then(|h| h.disable.take())
+                .map(ScalarValue::Flag)
+        },
+        set: |f, v| {
+            let ScalarValue::Flag(span) = v else {
+                unreachable!(
+                    "`healthcheck.disable`'s own `take` only ever produces `ScalarValue::Flag`"
+                )
+            };
+            f.healthcheck.get_or_insert(empty_healthcheck(span)).disable = Some(span);
+        },
+    },
+    // `traefik.disabled`'s own collision point (#159) — same
+    // `ScalarValue::Flag` shape as `healthcheck.disable` just above, and
+    // for the same reason. Nothing else lives in `Traefik` yet, so there's
+    // no sibling sub-field for a freshly materialized one's span to
+    // prefer over this one.
+    ScalarField {
+        key: "traefik.disabled",
+        take: |f| {
+            f.traefik
+                .as_mut()
+                .and_then(|t| t.disabled.take())
+                .map(ScalarValue::Flag)
+        },
+        set: |f, v| {
+            let ScalarValue::Flag(span) = v else {
+                unreachable!(
+                    "`traefik.disabled`'s own `take` only ever produces `ScalarValue::Flag`"
+                )
+            };
+            f.traefik.get_or_insert(empty_traefik(span)).disabled = Some(span);
+        },
+    },
+    // `command`'s own collision point (#156) — the same
+    // shell-string-or-exec-list shape `healthcheck.test` carries, so it
+    // shares that row's `ScalarValue::List` conversion, just written into
+    // `ServiceFields::command` directly rather than reached through a
+    // nested struct's `get_or_insert` — the same direct-field shape
+    // `container_name`'s row already has.
+    ScalarField {
+        key: "command",
+        take: |f| {
+            f.command.take().map(|command| match command {
+                Command::Shell(lit) => ScalarValue::Literal(lit),
+                Command::Exec(items, span) => ScalarValue::List(items, span),
+            })
+        },
+        set: |f, v| {
+            f.command = Some(match v {
+                ScalarValue::Literal(lit) => Command::Shell(lit),
+                ScalarValue::List(items, span) => Command::Exec(items, span),
+                ScalarValue::Flag(_) => {
+                    unreachable!("`command`'s own `take` never produces `ScalarValue::Flag`")
+                }
+            });
+        },
+    },
+    // `entrypoint`'s own collision point (#183) — merges exactly like
+    // `command` just above, in its own row: two independent Compose keys,
+    // so a template setting one and a template setting the other don't
+    // collide with each other, they compose (each keyed separately here,
+    // same as every other row in this table).
+    ScalarField {
+        key: "entrypoint",
+        take: |f| {
+            f.entrypoint.take().map(|entrypoint| match entrypoint {
+                Entrypoint::Shell(lit) => ScalarValue::Literal(lit),
+                Entrypoint::Exec(items, span) => ScalarValue::List(items, span),
+            })
+        },
+        set: |f, v| {
+            f.entrypoint = Some(match v {
+                ScalarValue::Literal(lit) => Entrypoint::Shell(lit),
+                ScalarValue::List(items, span) => Entrypoint::Exec(items, span),
+                ScalarValue::Flag(_) => {
+                    unreachable!("`entrypoint`'s own `take` never produces `ScalarValue::Flag`")
+                }
+            });
+        },
+    },
+    // `privileged`'s own collision point (#157) — a bare `ServiceFields`
+    // field rather than one nested inside a struct, but merged exactly
+    // like `healthcheck.disable`/`traefik.disabled` above: a
+    // `FieldKind::BoolFlag`, so its row round-trips through
+    // `ScalarValue::Flag`.
+    ScalarField {
+        key: "privileged",
+        take: |f| f.privileged.take().map(ScalarValue::Flag),
+        set: |f, v| {
+            let ScalarValue::Flag(span) = v else {
+                unreachable!("`privileged`'s own `take` only ever produces `ScalarValue::Flag`")
+            };
+            f.privileged = Some(span);
+        },
+    },
 ];
 
 /// A freshly materialized [`Healthcheck`] with every sub-field unset,
 /// for the `get_or_insert` calls [`SCALAR_FIELDS`]'s `healthcheck.*`
-/// rows and `merge_scalar_like`'s two `healthcheck` call sites share —
-/// factored out once so a future `Healthcheck` sub-field doesn't have
-/// to be added to seven near-identical struct literals.
+/// rows share — factored out once so a future `Healthcheck` sub-field
+/// doesn't have to be added to seven near-identical struct literals.
 fn empty_healthcheck(span: Span) -> Healthcheck {
     Healthcheck {
         test: None,
@@ -2349,10 +2536,10 @@ fn empty_healthcheck(span: Span) -> Healthcheck {
 
 /// A freshly materialized [`Traefik`] with `disabled` unset, mirroring
 /// [`empty_healthcheck`] for the same reason (#159): the one call site
-/// today (`traefik_disabled`'s `get_or_insert`) doesn't need the
-/// indirection yet, but a second `Traefik` sub-field would otherwise
-/// force every existing call site to be revisited instead of just
-/// gaining a new one.
+/// today (`"traefik.disabled"`'s own `get_or_insert`, in [`SCALAR_FIELDS`])
+/// doesn't need the indirection yet, but a second `Traefik` sub-field
+/// would otherwise force every existing call site to be revisited
+/// instead of just gaining a new one.
 fn empty_traefik(span: Span) -> Traefik {
     Traefik {
         disabled: None,
@@ -2527,76 +2714,15 @@ fn merge_tier(
             merge_scalar(&mut acc.scalars, field.key, value, tier)?;
         }
     }
-    // `healthcheck.test`/`healthcheck.disable` aren't `Literal`-valued,
-    // so they can't ride `SCALAR_FIELDS`'s table — see
-    // `MergeAcc::healthcheck_test`'s doc for why they get their own
-    // `Option` slots and `merge_scalar_like` calls instead.
-    if let Some(hc) = incoming.healthcheck.as_mut() {
-        if let Some(test) = hc.test.take() {
-            merge_scalar_like(
-                &mut acc.healthcheck_test,
-                "healthcheck.test",
-                test,
-                tier,
-                HealthcheckTest::span,
-            )?;
-        }
-        if let Some(disable_span) = hc.disable.take() {
-            merge_scalar_like(
-                &mut acc.healthcheck_disable,
-                "healthcheck.disable",
-                disable_span,
-                tier,
-                |span| *span,
-            )?;
-        }
-    }
-    // `traefik.disabled` (#159) isn't `Literal`-valued either, for the
-    // same reason `healthcheck.disable` isn't — see `MergeAcc::traefik_disabled`'s
-    // doc.
-    if let Some(traefik) = incoming.traefik.as_mut()
-        && let Some(disabled_span) = traefik.disabled.take()
-    {
-        merge_scalar_like(
-            &mut acc.traefik_disabled,
-            "traefik.disabled",
-            disabled_span,
-            tier,
-            |span| *span,
-        )?;
-    }
-    // `command` (#156) isn't `Literal`-valued either, so it goes through
-    // `merge_scalar_like` exactly like `healthcheck.test` just above —
-    // see `MergeAcc::command`'s doc for why it isn't part of
-    // `SCALAR_FIELDS` and doesn't need a nested struct's `get_or_insert`.
-    if let Some(command) = incoming.command.take() {
-        merge_scalar_like(&mut acc.command, "command", command, tier, Command::span)?;
-    }
-    // `entrypoint` (#183) merges exactly like `command` just above, in
-    // its own slot — see `MergeAcc::entrypoint`'s doc.
-    if let Some(entrypoint) = incoming.entrypoint.take() {
-        merge_scalar_like(
-            &mut acc.entrypoint,
-            "entrypoint",
-            entrypoint,
-            tier,
-            Entrypoint::span,
-        )?;
-    }
-    // `privileged` (#157) is a bare `ServiceFields` field, not nested,
-    // but it's the same `FieldKind::BoolFlag` shape as
-    // `healthcheck.disable` just above — not `Literal`-valued, so it
-    // gets the same `merge_scalar_like` treatment via its own
-    // `MergeAcc::privileged` slot.
-    if let Some(privileged_span) = incoming.privileged.take() {
-        merge_scalar_like(
-            &mut acc.privileged,
-            "privileged",
-            privileged_span,
-            tier,
-            |span| *span,
-        )?;
-    }
+    // `healthcheck.test`/`.disable`, `traefik.disabled`, `command`,
+    // `entrypoint`, and `privileged` all rode their own dedicated
+    // `MergeAcc` slot through a second generic function,
+    // `merge_scalar_like`, before #197 — none of them are `Literal`-valued,
+    // so none could ride `SCALAR_FIELDS`'s table as it stood. They're
+    // ordinary rows in that same table now (see [`ScalarValue`]'s doc for
+    // how), so the loop just above already merges all six; there is
+    // nothing left to do for them here.
+    //
     // Before the `merge_map` calls below only because those consume
     // `incoming`'s map entries by value, and `take` needs `incoming`
     // whole; the merge itself is order-independent.
@@ -2876,17 +3002,22 @@ fn merge_depends_on(
     Ok(())
 }
 
-/// Merges one scalar collision point, keyed by `field` (e.g.
-/// `"expose.host"`), into `acc`. `Own` always wins unconditionally;
+/// Merges one scalar (or scalar-*like*, see [`ScalarValue`]) collision
+/// point, keyed by `field` (e.g. `"expose.host"`, `"healthcheck.test"`,
+/// `"privileged"`), into `acc`. `Own` always wins unconditionally;
 /// `Defaults` is silently overridden by anything; two `Explicit` tiers
 /// setting the same key is a compile error. The single merge routine
-/// every scalar field in the language goes through — see [`MergeAcc`]'s
-/// own doc for why this replaced the old `Spanned`-generic, one-slot-
-/// per-field `merge_single`.
+/// every scalar-shaped field in the language goes through — see
+/// [`MergeAcc`]'s own doc for why this replaced the old
+/// `Spanned`-generic, one-slot-per-field `merge_single`, and
+/// [`ScalarValue`]'s for why a second generic function
+/// (`merge_scalar_like`, folded into this one at #197) isn't needed any
+/// more to cover the collision points whose slot isn't a plain
+/// [`Literal`].
 fn merge_scalar(
-    acc: &mut HashMap<&'static str, (Literal, Tier)>,
+    acc: &mut HashMap<&'static str, (ScalarValue, Tier)>,
     field: &'static str,
-    value: Literal,
+    value: ScalarValue,
     tier: &Tier,
 ) -> Result<(), ComposeError> {
     match acc.remove(field) {
@@ -2907,43 +3038,6 @@ fn merge_scalar(
                     second_template: second.clone(),
                     first: existing.span(),
                     second: value.span(),
-                });
-            }
-            _ => unreachable!("Own is always merged last; Defaults is always merged first"),
-        },
-    }
-    Ok(())
-}
-
-/// [`merge_scalar`] generalized over the value type via `span_of`, for
-/// the collision points whose slot isn't a [`Literal`] — `healthcheck.test`
-/// ([`HealthcheckTest`]) and the two bare-presence flags,
-/// `healthcheck.disable` and `privileged` (#157), whose "value" is just
-/// the span each was set at. Same Own-always-wins / Defaults-always-loses
-/// / two-`Explicit`-tiers-collide rule; each caller passes its own single
-/// `Option` slot rather than sharing a `HashMap` keyed by field name
-/// because there are only ever these three callers — see
-/// [`MergeAcc::healthcheck_test`]'s doc for why that didn't earn a
-/// second name-keyed table of its own.
-fn merge_scalar_like<T>(
-    acc: &mut Option<(T, Tier)>,
-    field: &'static str,
-    value: T,
-    tier: &Tier,
-    span_of: impl Fn(&T) -> Span,
-) -> Result<(), ComposeError> {
-    match acc.take() {
-        None => *acc = Some((value, tier.clone())),
-        Some((existing, existing_tier)) => match (&existing_tier, tier) {
-            (_, Tier::Own) => *acc = Some((value, Tier::Own)),
-            (Tier::Defaults, _) => *acc = Some((value, tier.clone())),
-            (Tier::Explicit(first), Tier::Explicit(second)) => {
-                return Err(ComposeError::FieldCollision {
-                    field,
-                    first_template: first.clone(),
-                    second_template: second.clone(),
-                    first: span_of(&existing),
-                    second: span_of(&value),
                 });
             }
             _ => unreachable!("Own is always merged last; Defaults is always merged first"),
