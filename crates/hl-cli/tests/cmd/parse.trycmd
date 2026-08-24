@@ -56,10 +56,10 @@ Program {
                     traefik: None,
                     restart: None,
                     healthcheck: None,
-                    publish: PublishMap {
+                    publish: ArrowMap {
                         entries: [],
                     },
-                    volumes: VolumeMap {
+                    volumes: ArrowMap {
                         entries: [],
                     },
                     env: EnvMap {
@@ -74,7 +74,7 @@ Program {
                     dns: [],
                     env_file: [],
                     privileged: None,
-                    devices: DeviceMap {
+                    devices: ArrowMap {
                         entries: [],
                     },
                     container_name: None,

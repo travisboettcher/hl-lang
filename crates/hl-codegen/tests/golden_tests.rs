@@ -2119,7 +2119,7 @@ fn a_referenced_network_produces_no_warning() {
 
 /// #158's `{ read_only }` flag on a *named* Docker volume, not just a
 /// bind mount — the cadvisor fixture above only exercises the
-/// bind-mount side, and the two go through different `VolumeHost` arms
+/// bind-mount side, and the two go through different `ArrowMapHost` arms
 /// in `resolve_volumes`, so this is the named-volume half of "must work
 /// for both." Mixes a flagged entry with an unflagged one in the same
 /// service, which is what actually exercises both of `resolve_volumes`'s

@@ -1,8 +1,8 @@
 use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    Command, DependsOnCondition, Entrypoint, Expected, Expose, HealthcheckTest, Literal, ParamType,
-    ParseError, TemplateDecl, TopDecl, UseDecl, VolumeHost, parse,
+    ArrowMapHost, Command, DependsOnCondition, Entrypoint, Expected, Expose, HealthcheckTest,
+    Literal, ParamType, ParseError, TemplateDecl, TopDecl, UseDecl, parse,
 };
 
 fn parse_ok(source: &str) -> hl_parser::Program {
@@ -903,11 +903,11 @@ fn volume_host_is_a_reference_when_unquoted_and_a_path_when_quoted() {
     let entries = &as_service(&program.decls[0]).fields.volumes.entries;
     assert!(matches!(
         &entries[0].host,
-        VolumeHost::Named(r) if r.name == "media" && r.qualifier.is_none()
+        ArrowMapHost::Named(r) if r.name == "media" && r.qualifier.is_none()
     ));
-    assert!(matches!(&entries[1].host, VolumeHost::BindMount(lit) if lit.text() == "media"));
-    assert!(matches!(&entries[2].host, VolumeHost::BindMount(lit) if lit.text() == "/mnt/x"));
-    // `VolumeHost`'s own accessors read through either arm, and each
+    assert!(matches!(&entries[1].host, ArrowMapHost::BindMount(lit) if lit.text() == "media"));
+    assert!(matches!(&entries[2].host, ArrowMapHost::BindMount(lit) if lit.text() == "/mnt/x"));
+    // `ArrowMapHost`'s own accessors read through either arm, and each
     // host's span covers just that host — the entry span (which reaches
     // past the `->` to the container side) is a different, wider thing.
     let texts: Vec<&str> = entries.iter().map(|e| e.host.text()).collect();
@@ -931,7 +931,7 @@ fn volume_host_can_be_alias_qualified() {
          service s {\n  volume common.media -> \"/data\"\n}\n",
     );
     let entries = &as_service(&program.decls[1]).fields.volumes.entries;
-    let VolumeHost::Named(r) = &entries[0].host else {
+    let ArrowMapHost::Named(r) = &entries[0].host else {
         panic!("expected a named-volume host, got {:?}", entries[0].host);
     };
     assert_eq!(r.qualifier.as_ref().unwrap().name, "common");
@@ -945,8 +945,8 @@ fn volume_map_body_takes_both_host_kinds() {
     let program =
         parse_ok("service s {\n  volume {\n    media: \"/data\"\n    \"/mnt/x\": \"/x\"\n  }\n}\n");
     let entries = &as_service(&program.decls[0]).fields.volumes.entries;
-    assert!(matches!(&entries[0].host, VolumeHost::Named(r) if r.name == "media"));
-    assert!(matches!(&entries[1].host, VolumeHost::BindMount(_)));
+    assert!(matches!(&entries[0].host, ArrowMapHost::Named(r) if r.name == "media"));
+    assert!(matches!(&entries[1].host, ArrowMapHost::BindMount(_)));
 }
 
 /// A `publish` entry's key side stays a plain literal — the
@@ -1450,7 +1450,7 @@ fn volume_bind_mount_with_read_only_flag() {
 }
 
 /// And the named-volume case — the flag must work identically whether
-/// the host side is [`VolumeHost::BindMount`] or [`VolumeHost::Named`],
+/// the host side is [`ArrowMapHost::BindMount`] or [`ArrowMapHost::Named`],
 /// since Compose's own `read_only` mount option applies to both alike.
 #[test]
 fn volume_named_volume_with_read_only_flag() {
@@ -1462,7 +1462,7 @@ fn volume_named_volume_with_read_only_flag() {
     assert_eq!(service.fields.volumes.entries.len(), 1);
     assert!(matches!(
         &service.fields.volumes.entries[0].host,
-        VolumeHost::Named(r) if r.name == "media"
+        ArrowMapHost::Named(r) if r.name == "media"
     ));
     assert!(service.fields.volumes.entries[0].read_only);
 }
@@ -1481,7 +1481,7 @@ fn volume_entry_without_body_leaves_read_only_unset() {
 /// The flag works the same way inside `volume`'s canonical multi-entry
 /// body, entry by entry — one flagged, one not, in the same body — which
 /// is also the shape that rules out the trailing-comma sugar the issue
-/// itself first suggested: see [`hl_parser::VolumeEntry`]'s doc for why.
+/// itself first suggested: see [`hl_parser::ArrowMapEntry`]'s doc for why.
 #[test]
 fn volume_read_only_flag_in_canonical_multi_entry_body() {
     let program = parse_ok(

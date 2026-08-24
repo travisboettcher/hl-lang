@@ -162,7 +162,7 @@ pub struct TypeSchema {
     pub uniqueness: Option<MapSide>,
     /// Map-kind types only: whether a bare `IDENT` on the *key* side of
     /// an entry is a reference to a top-level declaration
-    /// ([`crate::ast::VolumeHost::Named`]) rather than an ordinary
+    /// ([`crate::ast::ArrowMapHost::Named`]) rather than an ordinary
     /// literal — which also lets it carry an `alias.` qualifier.
     ///
     /// True for [`VOLUME`] alone. `env`/`publish`/`driver_opts`/`raw`
@@ -425,17 +425,23 @@ pub static TRAEFIK: TypeSchema = TypeSchema {
     schema_free: false,
 };
 
+/// `volume`, `publish`, and `devices` (#192) are three schema rows over
+/// one shared shape: a `->`-separated `host -> container` arrow map,
+/// uniqueness on the container (value) side, parsed and merged into one
+/// [`crate::ast::ArrowMap`] of [`crate::ast::ArrowMapEntry`]s — see that
+/// type's own doc for the full rationale, including the two ways `volume`
+/// alone still differs from its two siblings. Each `static` below is only
+/// what actually varies row to row.
+///
 /// The `volume` *field* on a `service`/`template`: `volume "/host/path"
 /// -> "/container"` / `volume { "/host/path": "/container" }` for a bind
 /// mount, `volume named-volume -> "/container"` for a named one.
-/// Uniqueness on the value (container path) side, matching Docker's own
-/// same-container-path constraint.
 ///
 /// The one map-kind type with [`TypeSchema::key_may_be_reference`] set:
 /// a bare `IDENT` on the host side is a reference to a top-level
 /// `volume` declaration rather than a literal, so it can be
 /// `alias.`-qualified like any other cross-file reference. See
-/// [`crate::ast::VolumeHost`].
+/// [`crate::ast::ArrowMapHost`].
 ///
 /// Not to be confused with [`VOLUME_DECL`], the top-level `volume name
 /// { ... }` declaration this field's named-volume entries resolve
@@ -457,22 +463,20 @@ pub static VOLUME: TypeSchema = TypeSchema {
 };
 
 /// `publish 8096 -> 8096` / `publish { 8096: 8096 }` — a host-port →
-/// container-port mapping, emitted as Compose's `ports:` list. Spelled
-/// with the same `->` separator as [`VOLUME`] because it's the same
-/// shape: a host-side resource mapped onto a container-side one. Kept
-/// entirely separate from [`EXPOSE`], which keeps its own meaning
+/// container-port mapping, emitted as Compose's `ports:` list. See
+/// [`VOLUME`]'s own doc for the shape all three arrow-map rows share.
+/// Kept entirely separate from [`EXPOSE`], which keeps its own meaning
 /// (Compose's `expose:` — container-network visibility only, plus the
 /// Traefik router labels) unchanged.
 ///
-/// Uniqueness on the value (container port) side, matching [`VOLUME`]'s
-/// own `host -> container` convention rather than the host side. Docker's
-/// real conflict is on the host side, but a protocol suffix rides on the
-/// container half of a Compose short-syntax mapping (`53:53/udp`), so a
-/// host-side check would reject the very configuration this field exists
-/// to make expressible — Pi-hole publishing both `53 -> "53/tcp"` and
-/// `53 -> "53/udp"`. Checking the container side still catches the
-/// copy-paste case (the same target port written twice) and leaves the
-/// legitimate one alone.
+/// Uniqueness lands on the container port rather than the host one:
+/// Docker's real conflict is on the host side, but a protocol suffix
+/// rides on the container half of a Compose short-syntax mapping
+/// (`53:53/udp`), so a host-side check would reject the very
+/// configuration this field exists to make expressible — Pi-hole
+/// publishing both `53 -> "53/tcp"` and `53 -> "53/udp"`. Checking the
+/// container side still catches the copy-paste case (the same target
+/// port written twice) and leaves the legitimate one alone.
 pub static PUBLISH: TypeSchema = TypeSchema {
     type_name: "publish",
     kind: SchemaKind::Map,
@@ -488,25 +492,23 @@ pub static PUBLISH: TypeSchema = TypeSchema {
 
 /// `devices "/dev/kmsg" -> "/dev/kmsg"` / `devices { "/dev/kmsg":
 /// "/dev/kmsg" }` — a host device path → container device path mapping,
-/// emitted as Compose's `devices:` list. Spelled with the same `->`
-/// separator as [`VOLUME`]/[`PUBLISH`] because it's the same shape once
-/// more: a host-side resource mapped onto a container-side one. Grew
-/// this arrow spelling in place of a pre-joined `"host:container"`
-/// string per review feedback on #167, after #157 originally shipped it
-/// as a [`FieldKind::ReferenceList`].
+/// emitted as Compose's `devices:` list. See [`VOLUME`]'s own doc for the
+/// shape all three arrow-map rows share. Grew this arrow spelling in
+/// place of a pre-joined `"host:container"` string per review feedback on
+/// #167, after #157 originally shipped it as a [`FieldKind::ReferenceList`].
 ///
-/// Uniqueness on the value (container path) side — exactly [`PUBLISH`]'s
-/// own reasoning, and it transfers over unchanged. Docker's real
-/// conflict on a `devices` short-syntax entry is on the host side, but
-/// Compose's short syntax is `HOST:CONTAINER[:CGROUP_PERMISSIONS]`, so
-/// an optional `rwm`-style permissions suffix rides the *container*
-/// half (`"/dev/sda" -> "/dev/xvda:rwm"`) — the direct analogue of
-/// `publish`'s protocol suffix riding its own container half (`53 ->
-/// "53/udp"`). A host-side uniqueness check would reject the legitimate
-/// case this makes expressible: the same host device mapped to two
-/// different container paths, each with its own permissions. Checking
-/// the container side still catches the copy-paste case (the same
-/// target path written twice) and leaves the legitimate one alone.
+/// Uniqueness on the container side — exactly [`PUBLISH`]'s own
+/// reasoning, and it transfers over unchanged. Docker's real conflict on
+/// a `devices` short-syntax entry is on the host side, but Compose's
+/// short syntax is `HOST:CONTAINER[:CGROUP_PERMISSIONS]`, so an optional
+/// `rwm`-style permissions suffix rides the *container* half
+/// (`"/dev/sda" -> "/dev/xvda:rwm"`) — the direct analogue of `publish`'s
+/// protocol suffix riding its own container half (`53 -> "53/udp"`). A
+/// host-side uniqueness check would reject the legitimate case this
+/// makes expressible: the same host device mapped to two different
+/// container paths, each with its own permissions. Checking the
+/// container side still catches the copy-paste case (the same target
+/// path written twice) and leaves the legitimate one alone.
 pub static DEVICES: TypeSchema = TypeSchema {
     type_name: "devices",
     kind: SchemaKind::Map,

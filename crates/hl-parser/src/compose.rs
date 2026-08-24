@@ -23,10 +23,10 @@ use std::fmt;
 use hl_lexer::{SourceMap, Span};
 
 use crate::ast::{
-    Command, DependsOnEntry, DeviceEntry, DeviceMap, Entrypoint, EnvEntry, EnvMap, Expose,
-    Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, ParamType, Program, PublishEntry,
-    PublishMap, RawMap, RawValue, Reference, Restart, Router, Service, ServiceFields, TemplateDecl,
-    TemplateInvocation, TopDecl, Traefik, Volume, VolumeEntry, VolumeHost, VolumeMap,
+    ArrowMap, ArrowMapEntry, ArrowMapHost, Command, DependsOnEntry, Entrypoint, EnvEntry, EnvMap,
+    Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, ParamType, Program,
+    RawMap, RawValue, Reference, Restart, Router, Service, ServiceFields, TemplateDecl,
+    TemplateInvocation, TopDecl, Traefik, Volume,
 };
 use crate::schema::MapSide;
 
@@ -1464,7 +1464,7 @@ fn resolve_qualified_references<R: SymbolResolver>(
         }
     }
     for entry in &mut fields.volumes.entries {
-        let VolumeHost::Named(r) = &mut entry.host else {
+        let ArrowMapHost::Named(r) = &mut entry.host else {
             continue;
         };
         if let Some(qualifier) = r.qualifier.take() {
@@ -1629,28 +1629,36 @@ fn substitute_params(
             substitute_literal(lit, args, template_name)?;
         }
     }
-    for v in &mut fields.volumes.entries {
-        // Only a bind-mount host has a literal to substitute into. A
-        // named-volume host is a `Reference`, exactly like a `networks
-        // [x]` entry, and references are never parameterized — the
-        // grammar has no `$param` in reference position anywhere.
-        if let VolumeHost::BindMount(host) = &mut v.host {
-            substitute_literal(host, args, template_name)?;
+    // `volume`, `publish`, and `devices` share one entry type since
+    // #192, so they share one walk rather than three near-identical
+    // ones. Only a bind-mount host holds a literal to substitute into:
+    // a named-volume host is a `Reference`, exactly like a `networks
+    // [x]` entry, and references are never parameterized, since the
+    // grammar has no `$param` in reference position anywhere. Skipping
+    // that arm is therefore correct for `volume` and unreachable for
+    // the other two, whose schemas never set `key_may_be_reference` —
+    // and `debug_assert` says so out loud rather than leaving a
+    // `$param` to survive composition unresolved if that ever changes
+    // (#168's bug class, which nothing downstream would catch: codegen
+    // raises `UnsubstitutedParameter` for `raw` values only).
+    for (field_name, entries) in [
+        ("volume", &mut fields.volumes.entries),
+        ("publish", &mut fields.publish.entries),
+        ("devices", &mut fields.devices.entries),
+    ] {
+        for entry in entries.iter_mut() {
+            match &mut entry.host {
+                ArrowMapHost::BindMount(host) => {
+                    substitute_literal(host, args, template_name)?;
+                }
+                ArrowMapHost::Named(_) => debug_assert_eq!(
+                    field_name, "volume",
+                    "only `volume` sets key_may_be_reference, so only its \
+                     entries can carry a named host"
+                ),
+            }
+            substitute_literal(&mut entry.container, args, template_name)?;
         }
-        substitute_literal(&mut v.container, args, template_name)?;
-    }
-    for p in &mut fields.publish.entries {
-        substitute_literal(&mut p.host, args, template_name)?;
-        substitute_literal(&mut p.container, args, template_name)?;
-    }
-    // `devices` (#167) walks the same way `publish` just above does —
-    // both sides are plain `Literal`s now, so a `$param` in either half
-    // of a `devices` mapping needs the same substitution `publish`'s
-    // own entries get, or it would survive composition unresolved (see
-    // issue #168's live bug class this guards against).
-    for d in &mut fields.devices.entries {
-        substitute_literal(&mut d.host, args, template_name)?;
-        substitute_literal(&mut d.container, args, template_name)?;
     }
     for e in &mut fields.env.entries {
         substitute_literal(&mut e.key, args, template_name)?;
@@ -1808,22 +1816,14 @@ enum Tier {
 trait Spanned {
     fn span(&self) -> Span;
 }
-impl Spanned for VolumeEntry {
+/// Shared by `volume`, `publish`, and `devices` (#192) — one impl where
+/// there used to be three, one per now-merged entry type.
+impl Spanned for ArrowMapEntry {
     fn span(&self) -> Span {
         self.span
     }
 }
 impl Spanned for EnvEntry {
-    fn span(&self) -> Span {
-        self.span
-    }
-}
-impl Spanned for PublishEntry {
-    fn span(&self) -> Span {
-        self.span
-    }
-}
-impl Spanned for DeviceEntry {
     fn span(&self) -> Span {
         self.span
     }
@@ -1859,7 +1859,7 @@ impl Spanned for DeviceEntry {
 /// others once were. They carry no `Tier`: list fields concatenate
 /// unconditionally, so there is no collision to attribute to a tier.
 /// See [`LIST_FIELDS`]. `devices` isn't among them any more either — see
-/// [`Self::devices`]'s own doc for why it moved onto the same
+/// [`Self::arrow_maps`]'s own doc for why it moved onto the same
 /// `merge_map` path as `env`/`volume`/`publish` (#167).
 ///
 /// `depends_on` isn't one of the four — it moved into its own
@@ -1883,16 +1883,26 @@ impl Spanned for DeviceEntry {
 struct MergeAcc {
     scalars: HashMap<&'static str, (Literal, Tier)>,
     lists: HashMap<&'static str, Vec<Reference>>,
-    volumes: Vec<(VolumeEntry, Tier)>,
-    env: Vec<(EnvEntry, Tier)>,
-    publish: Vec<(PublishEntry, Tier)>,
-    /// `devices`'s own merge point (#167) — moved here from
-    /// [`Self::lists`] once its entries stopped being plain
+    /// `volume`/`publish`/`devices`'s shared merge point (#192): one
+    /// [`crate::ast::ArrowMapEntry`] bucket per field, keyed the same way
+    /// [`Self::scalars`]/[`Self::lists`] are — by the field's own schema
+    /// name — rather than three separate `Vec` fields, now that all three
+    /// merge through the same [`merge_map`] on the same
+    /// [`crate::schema::MapSide::Value`] convention (see
+    /// [`ARROW_MAP_FIELDS`]). `devices` joined this path at #167, moved
+    /// here from [`Self::lists`] once its entries stopped being plain
     /// [`Reference`]s and gained the same `host -> container` shape
-    /// `publish`'s entries have. Merged key-by-key on the container
-    /// side through the same [`merge_map`] `publish` uses, not
-    /// `LIST_FIELDS`'s distinct-name concatenation.
-    devices: Vec<(DeviceEntry, Tier)>,
+    /// `publish`'s entries already had; #192 then folded its bucket
+    /// together with `volume`'s and `publish`'s own, since by that point
+    /// all three were already identical `merge_map` calls differing only
+    /// in which field name and which `ServiceFields` slot they read.
+    /// `env` stays its own [`Self::env`] field below rather than joining
+    /// this map: it keys on [`crate::schema::MapSide::Key`] instead of
+    /// `Value`, and its entries are [`EnvEntry`], not
+    /// [`crate::ast::ArrowMapEntry`], so it shares `merge_map` itself but
+    /// not this table-driven grouping.
+    arrow_maps: HashMap<&'static str, Vec<(ArrowMapEntry, Tier)>>,
+    env: Vec<(EnvEntry, Tier)>,
     /// `depends_on`'s own merge point — see this struct's own doc for
     /// why it's merged like a map field (keyed by the referenced
     /// service's name) rather than riding [`Self::lists`].
@@ -1988,22 +1998,27 @@ fn router_key_display(key: Option<&str>) -> String {
 impl MergeAcc {
     fn into_service_fields(mut self) -> ServiceFields {
         let mut fields = ServiceFields {
-            volumes: VolumeMap {
-                entries: self.volumes.into_iter().map(|(v, _)| v).collect(),
-            },
             env: EnvMap {
                 entries: self.env.into_iter().map(|(v, _)| v).collect(),
-            },
-            publish: PublishMap {
-                entries: self.publish.into_iter().map(|(v, _)| v).collect(),
-            },
-            devices: DeviceMap {
-                entries: self.devices.into_iter().map(|(v, _)| v).collect(),
             },
             depends_on: self.depends_on.into_iter().map(|(v, _)| v).collect(),
             raw: self.raw,
             ..Default::default()
         };
+        // `volume`/`publish`/`devices` (#192) — see [`Self::arrow_maps`]'s
+        // own doc. A field this loop never touches (nothing set it in any
+        // tier) simply keeps the empty `ArrowMap` `Default::default()`
+        // already gave it above.
+        for field in ARROW_MAP_FIELDS {
+            if let Some(entries) = self.arrow_maps.remove(field.key) {
+                (field.set)(
+                    &mut fields,
+                    ArrowMap {
+                        entries: entries.into_iter().map(|(v, _)| v).collect(),
+                    },
+                );
+            }
+        }
         for field in SCALAR_FIELDS {
             if let Some((value, _)) = self.scalars.remove(field.key) {
                 (field.set)(&mut fields, value);
@@ -2359,6 +2374,44 @@ static LIST_FIELDS: &[ListField] = &[
     },
 ];
 
+/// [`ScalarField`]/[`ListField`]'s counterpart for `volume`/`publish`/
+/// `devices` (#192) — the same `key`/`take`/`set` triple, driving
+/// [`Self::arrow_maps`]'s single [`HashMap`] bucket the way
+/// [`SCALAR_FIELDS`]/[`LIST_FIELDS`] already drive [`Self::scalars`]/
+/// [`Self::lists`]. All three fields merge through the identical
+/// [`merge_map`] call — same [`crate::schema::MapSide::Value`]
+/// uniqueness side, same `|e| e.container.text().to_string()` key — so
+/// [`merge_tier`] and [`MergeAcc::into_service_fields`] each need only
+/// loop over this table instead of repeating that call three times by
+/// hand. `env` isn't a row here even though it also merges through
+/// [`merge_map`]: it keys on [`crate::schema::MapSide::Key`] instead, and
+/// its entries are [`EnvEntry`] rather than [`crate::ast::ArrowMapEntry`]
+/// — it stays its own [`MergeAcc::env`] field and its own direct
+/// `merge_map` call in [`merge_tier`].
+struct ArrowMapField {
+    key: &'static str,
+    take: fn(&mut ServiceFields) -> ArrowMap,
+    set: fn(&mut ServiceFields, ArrowMap),
+}
+
+static ARROW_MAP_FIELDS: &[ArrowMapField] = &[
+    ArrowMapField {
+        key: "volume",
+        take: |f| std::mem::take(&mut f.volumes),
+        set: |f, v| f.volumes = v,
+    },
+    ArrowMapField {
+        key: "publish",
+        take: |f| std::mem::take(&mut f.publish),
+        set: |f, v| f.publish = v,
+    },
+    ArrowMapField {
+        key: "devices",
+        take: |f| std::mem::take(&mut f.devices),
+        set: |f, v| f.devices = v,
+    },
+];
+
 /// Merges one tier's [`ServiceFields`] into `acc`. List fields (`raw`,
 /// plus every [`LIST_FIELDS`] entry) concatenate rather than collide —
 /// see [`ComposeError::MapKeyCollision`]'s doc for why `raw` in
@@ -2492,14 +2545,24 @@ fn merge_tier(
             }
         }
     }
-    merge_map(
-        &mut acc.volumes,
-        "volume",
-        MapSide::Value,
-        incoming.volumes.entries,
-        tier,
-        |e| e.container.text().to_string(),
-    )?;
+    // `volume`/`publish`/`devices` (#192): all three key on the container
+    // side and merge identically, so one loop over [`ARROW_MAP_FIELDS`]
+    // replaces what used to be three hand-written `merge_map` calls —
+    // see that table's own doc, and `schema::DEVICES`'s for why `devices`
+    // shares `publish`'s container-side uniqueness convention.
+    for field in ARROW_MAP_FIELDS {
+        let entries = (field.take)(&mut incoming).entries;
+        if !entries.is_empty() {
+            merge_map(
+                acc.arrow_maps.entry(field.key).or_default(),
+                field.key,
+                MapSide::Value,
+                entries,
+                tier,
+                |e| e.container.text().to_string(),
+            )?;
+        }
+    }
     merge_map(
         &mut acc.env,
         "env",
@@ -2507,25 +2570,6 @@ fn merge_tier(
         incoming.env.entries,
         tier,
         |e| e.key.text().to_string(),
-    )?;
-    merge_map(
-        &mut acc.publish,
-        "publish",
-        MapSide::Value,
-        incoming.publish.entries,
-        tier,
-        |e| e.container.text().to_string(),
-    )?;
-    // `devices` (#167) merges exactly like `publish` just above — keyed
-    // on the container side, same [`MapSide::Value`] uniqueness
-    // convention, same reasoning (see `schema::DEVICES`'s doc).
-    merge_map(
-        &mut acc.devices,
-        "devices",
-        MapSide::Value,
-        incoming.devices.entries,
-        tier,
-        |e| e.container.text().to_string(),
     )?;
     // Keyed by the referenced service's own name, like `env`'s key
     // side — not concatenated through `LIST_FIELDS` above, even though
