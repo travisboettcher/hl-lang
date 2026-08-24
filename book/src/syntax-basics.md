@@ -14,7 +14,7 @@ kinds:
   a type and a name, followed by a body: `service jellyfin { ... }`.
 - A **template declaration** starts with the word `template`, the *one*
   reserved word in the whole language (see [Reserved words](#reserved-words)
-  below): `template internal_web(port: Number) { ... }`.
+  below): `template internal_web(port) { ... }`.
 - A **`use` declaration** imports another file: `use "docker.hll" as
   traefik`. See [Imports](./imports.md).
 
@@ -191,7 +191,7 @@ service's own name at compile time. This is how a template can generate a
 per-service hostname without knowing the service's name in advance:
 
 ```hll
-template internal_web(port: Number) {
+template internal_web(port) {
   expose $port, host: "{{name}}.internal.example.com"
 }
 ```
@@ -243,8 +243,13 @@ metacharacter set it already rejects. Neither one belongs in a hostname
 or an entry point name, and either one changes what the generated label
 means.
 
-A `template`'s declared parameter can optionally have type `Number` or
-`String` (`template linuxserver_app(puid: Number, pgid: Number) { ... }`).
-The check is strict, not coercive—a `Number` parameter rejects a quoted
-string argument even if it looks numeric, and vice versa. An untyped
-parameter accepts any literal.
+A `template`'s declared parameter carries no type annotation—just a bare
+name (`template linuxserver_app(puid, pgid) { ... }`). Instead,
+composition checks a substituted argument against the field it lands in:
+a reference-shaped position such as `networks` or `middleware` rejects a
+bare number, since that position's own grammar can never hold one
+directly, and a `number`-typed position such as `expose.port` rejects
+anything that isn't one, whether the value arrives through a `$param` or
+you write it directly—so `expose "eight-thousand"` fails the same way
+`with a_template { port: "eight-thousand" }` would. Every other
+position accepts any literal kind, exactly as writing it directly would.

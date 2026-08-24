@@ -105,9 +105,6 @@ pub enum ParseError {
         first: Span,
         second: Span,
     },
-    /// A parameter's `: TYPE` annotation named something other than
-    /// `Number`/`String` — the only two types this milestone supports.
-    UnknownParamType { name: String, span: Span },
     /// A `$name` parameter reference appeared outside a `template`'s own
     /// body (e.g. in a plain `service`), where there's no declared
     /// parameter list to resolve it against.
@@ -156,13 +153,10 @@ pub enum ParseError {
     },
     /// A `depends_on` entry's `condition: ...` value wasn't one of
     /// Compose's own three (#155). Checked immediately at the point the
-    /// value is written, mirroring [`Self::UnknownParamType`]'s own
-    /// precedent for validating a literal's *value* (not just its
-    /// syntactic kind) in the parser — the earliest point with the best
-    /// span, and, like a parameter's type annotation, a position that
-    /// can never legally hold a `$param` reference either, so there is
-    /// no later "resolve it, then check" stage this could be deferred
-    /// to even if it wanted to be.
+    /// value is written — the earliest point with the best span, and a
+    /// position that can never legally hold a `$param` reference either,
+    /// so there is no later "resolve it, then check" stage this could be
+    /// deferred to even if it wanted to be.
     InvalidDependsOnCondition { found: String, span: Span },
     /// Two `router` blocks in one `service`/`template` body claim the
     /// same router id (#184) — either the same name, or the unnamed
@@ -203,7 +197,6 @@ impl ParseError {
             | ParseError::DuplicateMapKey { second: span, .. }
             | ParseError::NumberOutOfRange { span, .. }
             | ParseError::DuplicateTemplateParam { second: span, .. }
-            | ParseError::UnknownParamType { span, .. }
             | ParseError::ParamReferenceOutsideTemplate { span, .. }
             | ParseError::UnknownTemplateParam { span, .. }
             | ParseError::RawValueTooDeep { span, .. }
@@ -322,11 +315,6 @@ impl fmt::Display for ParseError {
                 f,
                 "{}:{}: duplicate parameter `{param}` (first declared at {}:{})",
                 span.line, span.col, first.line, first.col
-            ),
-            ParseError::UnknownParamType { name, .. } => write!(
-                f,
-                "{}:{}: unknown parameter type `{name}` (expected `Number` or `String`)",
-                span.line, span.col
             ),
             ParseError::ParamReferenceOutsideTemplate { name, .. } => write!(
                 f,
@@ -584,18 +572,6 @@ mod display_tests {
     }
 
     #[test]
-    fn unknown_param_type_display() {
-        let err = ParseError::UnknownParamType {
-            name: "Boolean".to_string(),
-            span: span(1, 20),
-        };
-        assert_eq!(
-            err.to_string(),
-            "1:20: unknown parameter type `Boolean` (expected `Number` or `String`)"
-        );
-    }
-
-    #[test]
     fn param_reference_outside_template_display() {
         let err = ParseError::ParamReferenceOutsideTemplate {
             name: "port".to_string(),
@@ -631,9 +607,8 @@ mod display_tests {
         );
     }
 
-    /// Names all three legal spellings, mirroring
-    /// `unknown_param_type_display`'s own precedent for a fixed-set
-    /// value error (#155).
+    /// Names all three legal spellings for this fixed-set value error
+    /// (#155).
     #[test]
     fn invalid_depends_on_condition_display() {
         let err = ParseError::InvalidDependsOnCondition {

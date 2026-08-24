@@ -5,9 +5,8 @@ use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 use crate::ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Command, DependsOnCondition, DependsOnEntry, Entrypoint,
     EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Param,
-    ParamType, Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart, Router, Service,
-    ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
-    VolumeDriverOpt,
+    Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart, Router, Service, ServiceFields,
+    TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume, VolumeDriverOpt,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -1625,8 +1624,13 @@ impl<'src> Parser<'src> {
     }
 
     /// `param_list ::= "(" ( param ( "," param )* )? ")"`,
-    /// `param ::= IDENT ( ":" param_type )?`,
-    /// `param_type ::= "Number" | "String"`.
+    /// `param ::= IDENT`. #201 dropped the `: Number|String` annotation a
+    /// `param` used to optionally carry — see [`crate::ast::Param`]'s own
+    /// doc for why — so a `:` right after a parameter name is no longer
+    /// the start of anything this parser recognizes: the loop below falls
+    /// through to `self.expect(TokenKind::RParen)` and reports the `:` as
+    /// the unexpected token, the same generic diagnostic any other
+    /// unrecognized token in this position would get.
     fn parse_param_list(&mut self) -> Result<Vec<Param>, ParseError> {
         self.expect(TokenKind::LParen)?;
         let mut params: Vec<Param> = Vec::new();
@@ -1644,13 +1648,7 @@ impl<'src> Parser<'src> {
                         second: name.span,
                     });
                 }
-                let ty = if self.peek().kind == TokenKind::Colon {
-                    self.bump();
-                    Some(self.parse_param_type()?)
-                } else {
-                    None
-                };
-                params.push(Param { name, ty });
+                params.push(Param { name });
                 if self.peek().kind == TokenKind::Comma {
                     self.bump();
                 } else {
@@ -1660,20 +1658,6 @@ impl<'src> Parser<'src> {
         }
         self.expect(TokenKind::RParen)?;
         Ok(params)
-    }
-
-    /// `param_type ::= "Number" | "String"` — the only two type names a
-    /// parameter's `:` annotation may name this milestone.
-    fn parse_param_type(&mut self) -> Result<ParamType, ParseError> {
-        let tok = self.expect(TokenKind::Ident)?;
-        match tok.lexeme {
-            "Number" => Ok(ParamType::Number),
-            "String" => Ok(ParamType::String),
-            _ => Err(ParseError::UnknownParamType {
-                name: tok.lexeme.to_string(),
-                span: tok.span,
-            }),
-        }
     }
 }
 

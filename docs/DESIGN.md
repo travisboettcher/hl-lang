@@ -95,9 +95,7 @@ use_decl       ::= "use" STRING "as" IDENT
 
 param_list     ::= "(" ( param ( "," param )* )? ")"
 
-param          ::= IDENT ( ":" param_type )?
-
-param_type     ::= "Number" | "String"
+param          ::= IDENT
 
 body           ::= "{" statement* "}"
 
@@ -131,14 +129,57 @@ literal        ::= STRING | NUMBER | IDENT | IDENT "." IDENT | "$" IDENT
   requires the braced form, since a comma-list needs a first token to
   continue from and `router host: "x"` can't say whether `host` names the
   router or its own field.
-- The parser checks a parameter's optional `: param_type` annotation
-  strictly, not coercively: a declared `Number` rejects a quoted string
-  argument even if it's numeric-looking, and a declared `String` rejects
-  a bare number—no implicit coercion between kinds. An untyped parameter,
-  with no `:` at all, accepts an argument of any literal kind, with no
-  Compose-time check. `Number`/`String` are the only two types this
-  milestone supports—a bare-`IDENT`-typed or list-typed parameter isn't
-  expressible yet.
+- A parameter carries no type annotation at all, per #201: `param` is
+  just `IDENT`. Earlier milestones let it optionally declare `Number` or
+  `String`, checked strictly against the argument's own literal kind at
+  the call site. That system had a ceiling this doc used to name here: a
+  bare-`IDENT`-typed or list-typed parameter wasn't expressible, so
+  `networks [$net]`'s `net` got typed `String` for lack of anything
+  closer, even though a network name can just as legally take the form
+  of a bare identifier. #196 made the gap impossible to ignore: once
+  `$param` could reach every reference and list position a plain literal
+  could, `Number`/`String` covered less and less of what a parameter's
+  declaration site could actually receive. The fix wasn't a third and
+  fourth type name—a reference type, a list type—grafted onto the
+  annotation grammar. That would have made the annotation duplicate
+  information the field's own schema already carries structurally
+  (`schema::FieldKind::ReferenceList` versus a plain `Scalar`, and the
+  handful of fields `book/src/built-in-fields.md`'s "Accepts" column
+  documents as `number`), and kept duplicating it every time a new field
+  kind arrived, with nothing forcing the two descriptions to agree.
+  Dropping the annotation and checking a substituted argument against
+  the field it lands in instead needs no such vocabulary. A
+  reference-shaped position (`networks`, `middleware`, `dns`,
+  `env_file`, a `depends_on` entry's own reference, `expose.entrypoint`,
+  `router.entrypoint`, `router.path_prefix`) rejects a substituted
+  `Literal::Number`—the one literal kind that position's own grammar
+  (`parse_literal_reference`) can never produce directly. A
+  `number`-typed position—`expose.port` and `healthcheck.retries`, the
+  book's own two `number` rows—rejects a substituted argument that isn't
+  one, the same way. Every other position accepts any literal kind,
+  exactly as writing it there directly already does. Both checks name
+  the offending argument at its own call site, not the `$param`
+  reference inside the template body, for the same reason: substitution
+  overwrites the whole `Literal` slot, span included, with the caller's
+  own literal, so that span is what a mismatch reports (see
+  `compose::ComposeError::ArgumentNotReferenceShaped`/
+  `ArgumentNotNumeric`).
+  The numeric check goes one step further than a substitution-time check
+  alone could: `expose.port`/`healthcheck.retries` written directly—by a
+  plain service, or inside a template's own body with no `$param` in
+  sight—get the same rejection from a second, backstop check
+  (`ComposeError::FieldNotNumeric`) run once on each service's fully
+  merged fields, since a hand-written mismatch never passes through
+  substitution at all for the first check to see. That makes this
+  strictly stronger than the annotation it replaced: `: Number` was a
+  per-template opt-in a plain service's own `expose "eight-thousand"`
+  could never reach, while the backstop checks every service, whether it
+  uses a template or not. The one thing dropping the annotation gives up
+  is a check at
+  the parameter's declaration site regardless of where the argument ends
+  up: a parameter that never lands in a reference-shaped or
+  `number`-typed position goes unchecked, the same as an untyped one
+  always did, since there's no field-shape left to check it against.
 - The `"$" IDENT` form of `literal`, a parameter reference such as
   `$port`, is only legal inside a `template`'s own body—including a
   nested `with`-invocation argument body written inside that template,
@@ -779,7 +820,7 @@ setting one and a template setting the other merge cleanly rather than
 collide.
 
 ```
-template internal_web(port: Number) {
+template internal_web(port) {
   expose $port, entrypoint: web-secure
 }
 
@@ -885,7 +926,7 @@ network traefik-net {
 
 volume syncthing-config {}
 
-template internal_web(port: Number) {
+template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
   expose $port, host: "{{name}}.internal.techdebtor.io", entrypoint: web-secure
@@ -896,7 +937,7 @@ template authenticated {
   middleware forwardAuth-authentik
 }
 
-template linuxserver_app(puid: Number, pgid: Number) {
+template linuxserver_app(puid, pgid) {
   env PUID = $puid
   env PGID = $pgid
 }
@@ -922,7 +963,7 @@ network traefik-net {
 # templates.hll
 use "network.hll" as net
 
-template internal_web(port: Number) {
+template internal_web(port) {
   networks [net.traefik-net]
   restart unless-stopped
   expose $port, host: "{{name}}.internal.techdebtor.io", entrypoint: web-secure
@@ -933,7 +974,7 @@ template authenticated {
   middleware forwardAuth-authentik
 }
 
-template linuxserver_app(puid: Number, pgid: Number) {
+template linuxserver_app(puid, pgid) {
   env PUID = $puid
   env PGID = $pgid
 }

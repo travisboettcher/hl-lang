@@ -1,0 +1,2 @@
+--- error ---
+issue_201_reference_shaped_param.hll:14:19: argument `net` for template `web` must be reference-shaped (a bare identifier, a quoted string, or `alias.name`) — found a number

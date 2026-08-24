@@ -11,7 +11,7 @@ network traefik-net {
 # *reference* to this, not a declaration of its own.
 volume syncthing-config {}
 
-template internal_web(port: Number) {
+template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
   expose $port, host: "{{name}}.internal.techdebtor.io", entrypoint: web-secure
@@ -22,7 +22,7 @@ template authenticated {
   middleware forwardAuth-authentik
 }
 
-template linuxserver_app(puid: Number, pgid: Number) {
+template linuxserver_app(puid, pgid) {
   env PUID = $puid
   env PGID = $pgid
 }

@@ -333,7 +333,7 @@ fn depends_on_defaults_tier_loses_to_an_explicit_template() {
 #[test]
 fn publish_accumulates_across_tiers_and_substitutes_params() {
     let composed = compose_ok(
-        "template ports(p: Number) {\n  publish $p -> $p\n}\n\
+        "template ports(p) {\n  publish $p -> $p\n}\n\
          service s {\n  with ports { p: 8384 }\n  publish 22000 -> 22000\n}\n",
     );
     let service = single_service(&composed);
@@ -1517,7 +1517,7 @@ fn explicit_templates_devices_container_path_collision_is_error() {
 #[test]
 fn devices_accumulates_across_tiers_and_substitutes_params() {
     let composed = compose_ok(
-        "template dev(d: String) {\n  devices $d -> $d\n}\n\
+        "template dev(d) {\n  devices $d -> $d\n}\n\
          service s {\n  with dev { d: \"/dev/kmsg\" }\n  devices \"/dev/fuse\" -> \"/dev/fuse\"\n}\n",
     );
     let service = single_service(&composed);
@@ -1774,69 +1774,77 @@ fn template_argument_not_scalar_is_error() {
     }
 }
 
-// --- typed parameters ---
+// --- parameter substitution and shape checking (#201) ---
+//
+// #201 dropped `: Number`/`: String` annotations in favor of checking a
+// substituted argument against the *field's own* schema shape: a
+// reference-shaped position (`networks`, `middleware`, `dns`,
+// `env_file`, `depends_on`, `expose.entrypoint`, `router.entrypoint`,
+// `router.path_prefix`) rejects a substituted `Literal::Number` — the
+// one literal kind `parse_literal_reference` can never produce directly,
+// so a `Number` reaching one of these fields can only mean a template
+// caller passed a bare number where a reference belongs — while a
+// `number`-typed position (`expose.port`, `healthcheck.retries`, per
+// `book/src/built-in-fields.md`'s own "Accepts" column) rejects anything
+// that isn't one, both when substituted and when written by hand. Every
+// other scalar position (`container_name`, `restart.policy`, ...) takes
+// any literal kind, exactly like writing it there directly would.
 
 #[test]
-fn number_typed_param_rejects_string_argument() {
+fn reference_shaped_field_rejects_number_argument() {
     let err = compose_err(
-        "template t(port: Number) {\n  expose $port\n}\n\
-         service s {\n  with t { port: \"8080\" }\n}\n",
+        "template t(net) {\n  networks [$net]\n}\n\
+         service s {\n  with t { net: 1000 }\n  image \"x\"\n}\n",
     );
     match err {
-        ComposeError::ArgumentTypeMismatch {
-            template,
-            param,
-            expected,
-            ..
+        ComposeError::ArgumentNotReferenceShaped {
+            template, param, ..
         } => {
             assert_eq!(template, "t");
-            assert_eq!(param, "port");
-            assert_eq!(expected, hl_parser::ParamType::Number);
+            assert_eq!(param, "net");
         }
-        other => panic!("expected ArgumentTypeMismatch, got {other:?}"),
+        other => panic!("expected ArgumentNotReferenceShaped, got {other:?}"),
     }
 }
 
+/// The rejected diagnostic points at the argument written at the `with`
+/// call site, not at the `$net` reference inside the template body —
+/// substitution overwrites the literal slot wholesale, span included, so
+/// the span left behind is always the caller's own.
 #[test]
-fn string_typed_param_rejects_number_argument() {
+fn reference_shaped_field_rejection_points_at_the_argument() {
+    // Line 2 is the `$net` use site inside the template body; line 6 is
+    // the `net: 1000` argument at the `with` call site. The diagnostic
+    // must point at line 6, not line 2.
     let err = compose_err(
-        "template t(policy: String) {\n  restart $policy\n}\n\
-         service s {\n  with t { policy: 1000 }\n  image \"x\"\n}\n",
+        "template t(net) {\n  networks [$net]\n}\n\
+         service s {\n  with t {\n    net: 1000\n  }\n  image \"x\"\n}\n",
     );
     match err {
-        ComposeError::ArgumentTypeMismatch {
-            template,
-            param,
-            expected,
-            ..
-        } => {
-            assert_eq!(template, "t");
-            assert_eq!(param, "policy");
-            assert_eq!(expected, hl_parser::ParamType::String);
+        ComposeError::ArgumentNotReferenceShaped { span, .. } => {
+            assert_eq!(span.line, 6, "should point at the `1000` argument");
         }
-        other => panic!("expected ArgumentTypeMismatch, got {other:?}"),
+        other => panic!("expected ArgumentNotReferenceShaped, got {other:?}"),
     }
 }
 
+/// An ordinary (non-numeric, non-reference-shaped) scalar field takes
+/// whatever literal kind its argument happens to be, exactly like
+/// writing it there directly would — `container_name`/`restart.policy`
+/// aren't among `book/src/built-in-fields.md`'s `number`-typed rows, so
+/// neither `numeric_mismatch` nor a reference-shape check ever runs
+/// against them.
 #[test]
-fn typed_param_accepts_matching_argument_kind() {
+fn scalar_field_accepts_any_literal_kind_via_param() {
     let composed = compose_ok(
-        "template t(port: Number, policy: String) {\n  \
-           expose $port\n  restart $policy\n\
+        "template t(name, policy) {\n  \
+           container_name $name\n  restart $policy\n\
          }\n\
-         service s {\n  with t { port: 8080, policy: \"always\" }\n  image \"x\"\n}\n",
+         service s {\n  with t { name: 8080, policy: \"always\" }\n  image \"x\"\n}\n",
     );
     let service = single_service(&composed);
     assert_eq!(
-        service
-            .fields
-            .expose
-            .as_ref()
-            .unwrap()
-            .port
-            .as_ref()
-            .unwrap()
-            .text(),
+        service.fields.container_name.as_ref().unwrap().text(),
         "8080"
     );
     assert_eq!(
@@ -1850,6 +1858,155 @@ fn typed_param_accepts_matching_argument_kind() {
             .unwrap()
             .text(),
         "always"
+    );
+}
+
+// --- numeric-field shape checking (#201's companion to the
+// reference-shaped check above): `expose.port` and
+// `healthcheck.retries` are `book/src/built-in-fields.md`'s two
+// `number`-typed fields, so they get the same substitution-time
+// replacement for the `: Number` annotation this issue dropped — plus a
+// backstop that also catches a non-numeric literal written by hand, with
+// no `$param`/template involved at all, which the substitution-time
+// check alone can never see.
+
+#[test]
+fn numeric_field_rejects_non_numeric_argument() {
+    let err = compose_err(
+        "template t(port) {\n  expose $port\n}\n\
+         service s {\n  with t { port: \"not-a-number\" }\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentNotNumeric {
+            template,
+            param,
+            found,
+            ..
+        } => {
+            assert_eq!(template, "t");
+            assert_eq!(param, "port");
+            assert_eq!(found, "a quoted string");
+        }
+        other => panic!("expected ArgumentNotNumeric, got {other:?}"),
+    }
+}
+
+/// Same span guarantee as the reference-shaped check: the diagnostic
+/// points at the argument written at the `with` call site (line 6), not
+/// the `$port` use site inside the template body (line 2).
+#[test]
+fn numeric_field_rejection_points_at_the_argument() {
+    let err = compose_err(
+        "template t(port) {\n  expose $port\n}\n\
+         service s {\n  with t {\n    port: \"bad\"\n  }\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentNotNumeric { span, .. } => {
+            assert_eq!(span.line, 6, "should point at the `\"bad\"` argument");
+        }
+        other => panic!("expected ArgumentNotNumeric, got {other:?}"),
+    }
+}
+
+#[test]
+fn healthcheck_retries_rejects_non_numeric_argument() {
+    let err = compose_err(
+        "template t(tries) {\n  healthcheck { test: \"ok\"\n    retries: $tries }\n}\n\
+         service s {\n  with t { tries: \"three\" }\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentNotNumeric {
+            template, param, ..
+        } => {
+            assert_eq!(template, "t");
+            assert_eq!(param, "tries");
+        }
+        other => panic!("expected ArgumentNotNumeric, got {other:?}"),
+    }
+}
+
+/// The backstop: a non-numeric `expose.port` written directly, with no
+/// template and no `$param` in sight, is rejected the same way a
+/// substituted one is — the check that closes the gap a purely
+/// substitution-time check would leave, since `substitute_numeric_literal`
+/// only ever runs against a `Literal::Param` slot.
+#[test]
+fn hand_written_expose_port_rejects_a_non_numeric_literal() {
+    let err = compose_err("service s {\n  image \"x\"\n  expose \"not-a-number\"\n}\n");
+    match err {
+        ComposeError::FieldNotNumeric { field, found, .. } => {
+            assert_eq!(field, "expose.port");
+            assert_eq!(found, "a quoted string");
+        }
+        other => panic!("expected FieldNotNumeric, got {other:?}"),
+    }
+}
+
+/// Same backstop, for a template's own body rather than a plain
+/// service's — no `$param` here either, just a mistake written directly
+/// where a service using this template would otherwise never trigger
+/// `substitute_numeric_literal` at all.
+#[test]
+fn hand_written_literal_inside_a_template_body_rejects_a_non_numeric_healthcheck_retries() {
+    let err = compose_err(
+        "template t {\n  healthcheck { test: \"ok\"\n    retries: \"three\" }\n}\n\
+         service s {\n  with t\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::FieldNotNumeric { field, .. } => {
+            assert_eq!(field, "healthcheck.retries");
+        }
+        other => panic!("expected FieldNotNumeric, got {other:?}"),
+    }
+}
+
+/// Regression for the forwarding case `numeric_mismatch` has to defer
+/// on: `outer`'s own `$x` isn't bound yet while `inner` is being
+/// resolved as part of `outer`'s definition, so the literal substituted
+/// into `expose.port` at that point is itself still `Literal::Param`,
+/// not a concrete kind to judge — checking too early would have to
+/// either wrongly accept a bad forwarded argument or wrongly reject a
+/// good one. The mismatch still surfaces, correctly, once `outer` is
+/// actually invoked with the bad argument.
+#[test]
+fn forwarded_numeric_param_is_checked_once_actually_bound() {
+    let err = compose_err(
+        "template inner(y) {\n  expose $y\n}\n\
+         template outer(x) {\n  with inner { y: $x }\n}\n\
+         service s {\n  with outer { x: \"bad\" }\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentNotNumeric {
+            template, param, ..
+        } => {
+            assert_eq!(template, "outer");
+            assert_eq!(param, "x");
+        }
+        other => panic!("expected ArgumentNotNumeric, got {other:?}"),
+    }
+}
+
+/// The mirror image of the regression above: a forwarded argument that
+/// *is* a good number still composes cleanly all the way through.
+#[test]
+fn forwarded_numeric_param_composes_when_the_argument_is_a_number() {
+    let composed = compose_ok(
+        "template inner(y) {\n  expose $y\n}\n\
+         template outer(x) {\n  with inner { y: $x }\n}\n\
+         service s {\n  with outer { x: 8080 }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        service
+            .fields
+            .expose
+            .as_ref()
+            .unwrap()
+            .port
+            .as_ref()
+            .unwrap()
+            .text(),
+        "8080"
     );
 }
 
@@ -1933,7 +2090,7 @@ fn composed_service_never_contains_unsubstituted_param() {
 #[test]
 fn command_param_is_substituted_in_shell_form() {
     let composed = compose_ok(
-        "template t(cmd: String) {\n  command $cmd\n}\n\
+        "template t(cmd) {\n  command $cmd\n}\n\
          service s {\n  with t { cmd: \"npm start\" }\n  image \"x\"\n}\n",
     );
     let service = single_service(&composed);
@@ -1950,7 +2107,7 @@ fn command_param_is_substituted_in_shell_form() {
 #[test]
 fn command_param_is_substituted_in_exec_form() {
     let composed = compose_ok(
-        "template t(arg: String) {\n  command [\"exec\", $arg]\n}\n\
+        "template t(arg) {\n  command [\"exec\", $arg]\n}\n\
          service s {\n  with t { arg: \"--user=miniflux\" }\n  image \"x\"\n}\n",
     );
     let service = single_service(&composed);
@@ -1970,8 +2127,8 @@ fn command_param_is_substituted_in_exec_form() {
 #[test]
 fn healthcheck_params_are_substituted_in_every_literal_subfield() {
     let composed = compose_ok(
-        "template checked(cmd: String, every: String, wait: String, tries: Number, \
-         grace: String, probe: String) {\n  \
+        "template checked(cmd, every, wait, tries, \
+         grace, probe) {\n  \
            healthcheck {\n    \
              test: $cmd\n    \
              interval: $every\n    \
@@ -2007,7 +2164,7 @@ fn healthcheck_params_are_substituted_in_every_literal_subfield() {
 #[test]
 fn healthcheck_test_params_are_substituted_in_exec_form() {
     let composed = compose_ok(
-        "template checked(bin: String, user: String) {\n  \
+        "template checked(bin, user) {\n  \
            healthcheck { test: [\"CMD\", $bin, \"-U\", $user] }\n\
          }\n\
          service db {\n  image \"postgres:15\"\n  \
@@ -2034,7 +2191,7 @@ fn healthcheck_test_params_are_substituted_in_exec_form() {
 #[test]
 fn entrypoint_param_is_substituted_in_shell_form() {
     let composed = compose_ok(
-        "template t(ep: String) {\n  entrypoint $ep\n}\n\
+        "template t(ep) {\n  entrypoint $ep\n}\n\
          service s {\n  with t { ep: \"/entrypoint.sh\" }\n  image \"x\"\n}\n",
     );
     let service = single_service(&composed);
@@ -2051,7 +2208,7 @@ fn entrypoint_param_is_substituted_in_shell_form() {
 #[test]
 fn entrypoint_param_is_substituted_in_exec_form() {
     let composed = compose_ok(
-        "template t(arg: String) {\n  entrypoint [\"/bin/sh\", \"-c\", $arg]\n}\n\
+        "template t(arg) {\n  entrypoint [\"/bin/sh\", \"-c\", $arg]\n}\n\
          service s {\n  with t { arg: \"do-a-thing\" }\n  image \"x\"\n}\n",
     );
     let service = single_service(&composed);
@@ -2230,7 +2387,7 @@ fn duplicate_top_level_template_name_is_error() {
 #[test]
 fn parameterized_defaults_template_is_error() {
     let err = compose_err(
-        "template defaults(x: String) {\n  restart $x\n}\n\
+        "template defaults(x) {\n  restart $x\n}\n\
          service s {\n  image \"nginx\"\n}\n",
     );
     assert!(matches!(
@@ -2244,7 +2401,7 @@ fn parameterized_defaults_template_is_error() {
 #[test]
 fn parameterized_defaults_template_with_raw_param_is_error() {
     let err = compose_err(
-        "template defaults(x: Number) {\n  raw { k: $x }\n}\n\
+        "template defaults(x) {\n  raw { k: $x }\n}\n\
          service s {\n  image \"nginx\"\n}\n",
     );
     assert!(matches!(
@@ -2281,7 +2438,7 @@ fn parameterless_defaults_template_is_still_accepted() {
 #[test]
 fn parameterized_non_defaults_template_is_unaffected() {
     let composed = compose_ok(
-        "template based(policy: String) {\n  restart $policy\n}\n\
+        "template based(policy) {\n  restart $policy\n}\n\
          service s {\n  with based { policy: \"always\" }\n  image \"nginx\"\n}\n",
     );
     let service = single_service(&composed);
@@ -2631,7 +2788,7 @@ fn defaults_router_host_is_overridden_silently() {
 #[test]
 fn router_host_param_is_substituted() {
     let composed = compose_ok(
-        "template routed(h: String) {\n  router api { host: $h }\n}\n\
+        "template routed(h) {\n  router api { host: $h }\n}\n\
          service s {\n  with routed { h: \"a.example.com\" }\n  image \"x\"\n}\n",
     );
     let service = single_service(&composed);
@@ -2648,7 +2805,7 @@ fn router_host_param_is_substituted() {
 #[test]
 fn router_path_prefix_params_are_substituted() {
     let composed = compose_ok(
-        "template routed(h: String, api: String, dav: String) {\n  \
+        "template routed(h, api, dav) {\n  \
            router api { host: $h\n    path_prefix: [$api, $dav] }\n\
          }\n\
          service s {\n  \

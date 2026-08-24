@@ -6,7 +6,7 @@
 
 use "network.hll" as net
 
-template internal_web(port: Number) {
+template internal_web(port) {
   networks [net.traefik-net]
   restart unless-stopped
   expose $port, host: "{{name}}.internal.techdebtor.io", entrypoint: web-secure
@@ -17,7 +17,7 @@ template authenticated {
   middleware forwardAuth-authentik
 }
 
-template linuxserver_app(puid: Number, pgid: Number) {
+template linuxserver_app(puid, pgid) {
   env PUID = $puid
   env PGID = $pgid
 }

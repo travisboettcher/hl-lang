@@ -62,9 +62,8 @@ pub mod schema;
 pub use ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Command, DependsOnCondition, DependsOnEntry, Entrypoint,
     EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Param,
-    ParamType, Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart, Router, Service,
-    ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
-    VolumeDriverOpt,
+    Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart, Router, Service, ServiceFields,
+    TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume, VolumeDriverOpt,
 };
 pub use compose::{
     ComposeError, ComposedProgram, MAX_TEMPLATE_DEPTH, MapKeyCollision, SymbolResolver, compose,

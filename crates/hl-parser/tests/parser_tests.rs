@@ -2,7 +2,7 @@ use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
 use hl_parser::{
     ArrowMapHost, Command, DependsOnCondition, Entrypoint, Expected, Expose, HealthcheckTest,
-    Literal, ParamType, ParseError, TemplateDecl, TopDecl, UseDecl, parse,
+    Literal, ParseError, TemplateDecl, TopDecl, UseDecl, parse,
 };
 
 fn parse_ok(source: &str) -> hl_parser::Program {
@@ -1043,7 +1043,7 @@ fn expose_entrypoint_accepts_a_quoted_name() {
 #[test]
 fn expose_host_and_entrypoint_fields_in_template_body() {
     let program = parse_ok(
-        "template internal_web(port: Number) {\n  \
+        "template internal_web(port) {\n  \
            expose $port, host: \"{{name}}.internal.techdebtor.io\", entrypoint: \"web-secure\"\n  \
            middleware local-ipwhitelist\n\
          }\n",
@@ -2183,15 +2183,6 @@ fn template_decl_with_params() {
         .map(|p| p.name.name.as_str())
         .collect();
     assert_eq!(names, vec!["a", "b"]);
-    assert!(template.params.iter().all(|p| p.ty.is_none()));
-}
-
-#[test]
-fn template_decl_with_typed_params() {
-    let program = parse_ok("template t(a: Number, b: String) {\n  image \"x\"\n}\n");
-    let template = as_template(&program.decls[0]);
-    assert_eq!(template.params[0].ty, Some(ParamType::Number));
-    assert_eq!(template.params[1].ty, Some(ParamType::String));
 }
 
 #[test]
@@ -2206,12 +2197,19 @@ fn template_decl_without_a_body_is_error() {
     assert!(matches!(err, ParseError::UnexpectedToken { .. }));
 }
 
+/// #201 dropped the `: Number`/`: String` annotation the grammar used to
+/// allow here — a parameter is just a bare name now, and a `:` right
+/// after one is a parse error rather than the start of a type.
 #[test]
-fn param_list_unknown_type_is_error() {
-    let err = parse("template t(a: Boolean) {\n}\n").unwrap_err();
+fn param_list_type_annotation_is_parse_error() {
+    let err = parse("template t(a: Number) {\n}\n").unwrap_err();
     assert!(matches!(
         err,
-        ParseError::UnknownParamType { name, .. } if name == "Boolean"
+        ParseError::UnexpectedToken {
+            expected: Expected::Token(TokenKind::RParen),
+            found_kind: TokenKind::Colon,
+            ..
+        }
     ));
 }
 
@@ -2846,9 +2844,8 @@ fn router_parses_in_a_template_body() {
 /// references, since a reference has no `$param` form at all.
 #[test]
 fn router_host_and_path_prefix_accept_a_param() {
-    let program = parse_ok(
-        "template t(h: String, p: String) {\n  router api { host: $h\n    path_prefix: [$p] }\n}\n",
-    );
+    let program =
+        parse_ok("template t(h, p) {\n  router api { host: $h\n    path_prefix: [$p] }\n}\n");
     let template = as_template(&program.decls[0]);
     let router = &template.fields.routers[0];
     assert!(matches!(

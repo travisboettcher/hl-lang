@@ -6,12 +6,12 @@
 # Both `test` forms are covered: the shell string below, and the exec
 # list, where each item substitutes on its own.
 template checked(
-  cmd: String,
-  every: String,
-  wait: String,
-  tries: Number,
-  grace: String,
-  probe: String
+  cmd,
+  every,
+  wait,
+  tries,
+  grace,
+  probe
 ) {
   healthcheck {
     test: $cmd
@@ -23,7 +23,7 @@ template checked(
   }
 }
 
-template exec_checked(bin: String, user: String, every: String) {
+template exec_checked(bin, user, every) {
   healthcheck {
     test: ["CMD", $bin, "-U", $user]
     interval: $every

@@ -13,7 +13,7 @@ A template accepts exactly the same fields as a `service` body (see
 [Built-in Fields](./built-in-fields.md)):
 
 ```hll
-template internal_web(port: Number) {
+template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
   expose $port, host: "{{name}}.internal.example.com", entrypoint: web-secure
@@ -21,10 +21,17 @@ template internal_web(port: Number) {
 }
 ```
 
-- `(port: Number)` declares the template's parameter list. A parameter
-  can optionally declare a `Number` or `String` type, checked strictly
-  (a `Number` parameter rejects a quoted string, even a numeric-looking
-  one). An untyped parameter accepts any literal.
+- `(port)` declares the template's parameter list—just bare names, with
+  no type annotation to write. Composition checks a substituted argument
+  against the field it lands in instead: `$port` in the preceding
+  example reaches `expose.port`, one of the fields
+  [Built-in Fields](./built-in-fields.md) documents as taking a
+  `number`, so `with internal_web { port: "8384" }` is a compile error
+  even though nothing here declared `port: Number`. A reference-shaped
+  field like `networks` rejects a bare number the same way—see
+  [Parameterizing references](#parameterizing-references) below—while
+  every other field takes whatever literal kind its argument happens to
+  be.
 - `$port` inside the body refers to that declared parameter—the `$`
   sigil serves exactly this purpose, and works only inside a
   template's own body.
@@ -69,12 +76,12 @@ A template may also forward its own parameters into the templates it
 applies:
 
 ```hll
-template linuxserver_app(puid: Number, pgid: Number) {
+template linuxserver_app(puid, pgid) {
   env PUID = $puid
   env PGID = $pgid
 }
 
-template linuxserver_web(puid: Number, pgid: Number, port: Number) {
+template linuxserver_web(puid, pgid, port) {
   with linuxserver_app { puid: $puid, pgid: $pgid }
   expose $port, entrypoint: web-secure
 }
@@ -93,7 +100,7 @@ network proxy {
   name: "real-proxy"
 }
 
-template attached_to(net: String) {
+template attached_to(net) {
   networks [$net]
 }
 
@@ -103,10 +110,14 @@ service app {
 }
 ```
 
-The substituted argument still has to name something real: `with
-attached_to { net: "ghost" }` fails with the same `UnknownNetwork` error
-`networks [ghost]` written directly would, since resolving a network by
-name happens after composition binds the parameter, not before.
+Composition checks the substituted argument against `networks`' own
+grammar before it goes anywhere near name resolution: `with attached_to
+{ net: 1000 }` is a compile error, since a bare number can never appear
+in a reference-shaped position even written directly. Past that, the
+argument still has to name something real: `with attached_to { net:
+"ghost" }` fails with the same `UnknownNetwork` error `networks [ghost]`
+written directly would, since resolving a network by name happens after
+composition binds the parameter, not before.
 
 ## The implicit `defaults` template
 
@@ -273,7 +284,7 @@ network traefik-net {
 
 volume syncthing-config {}
 
-template internal_web(port: Number) {
+template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
   expose $port, host: "{{name}}.internal.example.com", entrypoint: web-secure
@@ -284,7 +295,7 @@ template authenticated {
   middleware forwardAuth-authentik
 }
 
-template linuxserver_app(puid: Number, pgid: Number) {
+template linuxserver_app(puid, pgid) {
   env PUID = $puid
   env PGID = $pgid
 }

@@ -24,9 +24,9 @@ use hl_lexer::{SourceMap, Span};
 
 use crate::ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Command, DependsOnEntry, Entrypoint, EnvEntry, EnvMap,
-    Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, ParamType, Program,
-    RawEntry, RawMap, RawValue, Restart, Router, Service, ServiceFields, TemplateDecl,
-    TemplateInvocation, TopDecl, Traefik, Volume,
+    Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Program, RawEntry,
+    RawMap, RawValue, Restart, Router, Service, ServiceFields, TemplateDecl, TemplateInvocation,
+    TopDecl, Traefik, Volume,
 };
 use crate::schema::{self, MapSide};
 
@@ -180,15 +180,63 @@ pub enum ComposeError {
         param: String,
         span: Span,
     },
-    /// A typed parameter (`port: Number`) was invoked with a scalar
-    /// argument whose own literal kind doesn't match — strict, not
-    /// coercive: `Number` rejects a quoted string even if it's
-    /// numeric-looking, `String` rejects a bare number. Per
-    /// docs/DESIGN.md: no implicit coercion between kinds.
-    ArgumentTypeMismatch {
+    /// A `$param` substituted into a reference-shaped position
+    /// (`networks`, `middleware`, `dns`, `env_file`, a `depends_on`
+    /// entry's own reference, `expose.entrypoint`, `router.entrypoint`,
+    /// `router.path_prefix`) resolved to a bare number. #201 dropped
+    /// `: Number`/`: String` parameter annotations in favor of checking a
+    /// substituted argument against the field it actually lands in —
+    /// see docs/DESIGN.md's Syntactic grammar section for the full
+    /// reasoning. This is the one shape check that survives: a
+    /// reference-shaped position's own grammar
+    /// (`parser::Parser::parse_literal_reference`) can never produce
+    /// [`Literal::Number`] directly, so one reaching here can only mean a
+    /// template caller passed a bare number where a reference belongs.
+    /// `span` names the *argument*, not the `$param` use site — see
+    /// `substitute_reference_literal`'s own doc for why substitution
+    /// leaves that span behind for free.
+    ArgumentNotReferenceShaped {
         template: String,
         param: String,
-        expected: ParamType,
+        span: Span,
+    },
+    /// A `$param` substituted into one of the handful of positions
+    /// `book/src/built-in-fields.md` documents as taking `number` —
+    /// `expose.port`, `healthcheck.retries` — resolved to something
+    /// other than a bare number. The companion check to
+    /// [`Self::ArgumentNotReferenceShaped`]: dropping `: Number`/`:
+    /// String` annotations (#201) meant a numeric field lost its
+    /// declaration-site check exactly the way a reference-shaped one
+    /// did, and gets the same substitution-time replacement here, for
+    /// the same reason — see `substitute_numeric_literal`'s own doc.
+    /// `span` names the argument, not the `$param` use site, for the
+    /// same reason [`Self::ArgumentNotReferenceShaped`]'s does.
+    ///
+    /// [`Self::FieldNotNumeric`] is this check's backstop for a
+    /// non-numeric literal that never passed through a `$param` at all —
+    /// see that variant's own doc for why one check alone can't cover
+    /// both paths.
+    ArgumentNotNumeric {
+        template: String,
+        param: String,
+        found: &'static str,
+        span: Span,
+    },
+    /// The same mismatch [`Self::ArgumentNotNumeric`] rejects, caught
+    /// the other way it can happen: a non-numeric `expose.port` or
+    /// `healthcheck.retries` written directly — by a plain service, or
+    /// inside a template's own body with no `$param` in sight — rather
+    /// than arriving through a substituted argument.
+    /// `substitute_numeric_literal` only ever looks at a
+    /// [`crate::ast::Literal::Param`] slot, so a hand-written mismatch
+    /// passes through it untouched; this is the check that still catches
+    /// it, run once on each service's fully merged fields so it sees
+    /// exactly what codegen would have. Since it runs after every
+    /// `$param` in scope has already resolved, there's no template or
+    /// parameter left to name — only the field, which is what it names
+    /// instead.
+    FieldNotNumeric {
+        field: &'static str,
         found: &'static str,
         span: Span,
     },
@@ -342,7 +390,9 @@ impl ComposeError {
             | ComposeError::MissingTemplateArgument { span, .. }
             | ComposeError::DuplicateTemplateArgument { second: span, .. }
             | ComposeError::TemplateArgumentNotScalar { span, .. }
-            | ComposeError::ArgumentTypeMismatch { span, .. }
+            | ComposeError::ArgumentNotReferenceShaped { span, .. }
+            | ComposeError::ArgumentNotNumeric { span, .. }
+            | ComposeError::FieldNotNumeric { span, .. }
             | ComposeError::FieldCollision { second: span, .. }
             | ComposeError::UnknownAlias { span, .. }
             | ComposeError::UnsupportedQualifiedReference { span, .. }
@@ -437,16 +487,24 @@ impl ComposeError {
                 f,
                 "{at}: argument `{param}` for template `{template}` must be a scalar value (a list/map can't fill a single-value field)"
             ),
-            ComposeError::ArgumentTypeMismatch {
+            ComposeError::ArgumentNotReferenceShaped {
+                template, param, ..
+            } => write!(
+                f,
+                "{at}: argument `{param}` for template `{template}` must be reference-shaped (a bare identifier, a quoted string, or `alias.name`) — found a number"
+            ),
+            ComposeError::ArgumentNotNumeric {
                 template,
                 param,
-                expected,
                 found,
                 ..
             } => write!(
                 f,
-                "{at}: argument `{param}` for template `{template}` must be a {expected} (found {found})"
+                "{at}: argument `{param}` for template `{template}` must be a number (found {found})"
             ),
+            ComposeError::FieldNotNumeric { field, found, .. } => {
+                write!(f, "{at}: `{field}` must be a number (found {found})")
+            }
             ComposeError::FieldCollision {
                 field,
                 first_template,
@@ -740,17 +798,42 @@ mod error_display_tests {
     }
 
     #[test]
-    fn argument_type_mismatch_display() {
-        let err = ComposeError::ArgumentTypeMismatch {
+    fn argument_not_reference_shaped_display() {
+        let err = ComposeError::ArgumentNotReferenceShaped {
+            template: "t".to_string(),
+            param: "net".to_string(),
+            span: span(2, 2),
+        };
+        assert_eq!(
+            err.to_string(),
+            "2:2: argument `net` for template `t` must be reference-shaped (a bare identifier, a quoted string, or `alias.name`) — found a number"
+        );
+    }
+
+    #[test]
+    fn argument_not_numeric_display() {
+        let err = ComposeError::ArgumentNotNumeric {
             template: "t".to_string(),
             param: "port".to_string(),
-            expected: ParamType::Number,
             found: "a quoted string",
             span: span(2, 2),
         };
         assert_eq!(
             err.to_string(),
-            "2:2: argument `port` for template `t` must be a Number (found a quoted string)"
+            "2:2: argument `port` for template `t` must be a number (found a quoted string)"
+        );
+    }
+
+    #[test]
+    fn field_not_numeric_display() {
+        let err = ComposeError::FieldNotNumeric {
+            field: "expose.port",
+            found: "a quoted string",
+            span: span(3, 3),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:3: `expose.port` must be a number (found a quoted string)"
         );
     }
 
@@ -1288,9 +1371,11 @@ fn compose_service<R: SymbolResolver>(
     resolve_qualified_references(&mut own, scope, resolver, imports)?;
     merge_tier(&mut acc, own, &Tier::Own)?;
 
+    let fields = acc.into_service_fields();
+    check_numeric_fields(&fields)?;
     Ok(Service {
         name: service.name,
-        fields: acc.into_service_fields(),
+        fields,
         span: service.span,
     })
 }
@@ -1411,19 +1496,12 @@ fn resolve_invocation<R: SymbolResolver>(
         args.insert(key, &entry.value);
     }
     for param in &decl.params {
-        match args.get(param.name.name.as_str()) {
-            None => {
-                return Err(ComposeError::MissingTemplateArgument {
-                    template: decl.name.name.clone(),
-                    param: param.name.name.clone(),
-                    span: inv.span,
-                });
-            }
-            Some(value) => {
-                if let Some(expected) = param.ty {
-                    check_argument_type(value, expected, &decl.name.name, &param.name.name)?;
-                }
-            }
+        if !args.contains_key(param.name.name.as_str()) {
+            return Err(ComposeError::MissingTemplateArgument {
+                template: decl.name.name.clone(),
+                param: param.name.name.clone(),
+                span: inv.span,
+            });
         }
     }
 
@@ -1571,7 +1649,7 @@ fn substitute_params(
     }
     if let Some(e) = &mut fields.expose {
         if let Some(p) = &mut e.port {
-            substitute_literal(p, args, template_name)?;
+            substitute_numeric_literal(p, args, template_name)?;
         }
         if let Some(h) = &mut e.host {
             substitute_literal(h, args, template_name)?;
@@ -1589,10 +1667,10 @@ fn substitute_params(
             substitute_literal(h, args, template_name)?;
         }
         for entry in &mut router.entrypoint {
-            substitute_literal(entry, args, template_name)?;
+            substitute_reference_literal(entry, args, template_name)?;
         }
         for prefix in &mut router.path_prefix {
-            substitute_literal(prefix, args, template_name)?;
+            substitute_reference_literal(prefix, args, template_name)?;
         }
     }
     if let Some(r) = &mut fields.restart
@@ -1649,10 +1727,16 @@ fn substitute_params(
             }
             None => {}
         }
+        // `retries` is `book/src/built-in-fields.md`'s other `number`-typed
+        // field alongside `expose.port`, so it takes the numeric-checked
+        // substitution rather than riding the loop below with its four
+        // string-typed siblings.
+        if let Some(retries) = &mut hc.retries {
+            substitute_numeric_literal(retries, args, template_name)?;
+        }
         for lit in [
             hc.interval.as_mut(),
             hc.timeout.as_mut(),
-            hc.retries.as_mut(),
             hc.start_period.as_mut(),
             hc.start_interval.as_mut(),
         ]
@@ -1715,87 +1799,38 @@ fn substitute_params(
     // and a `depends_on` entry's own reference (`router.entrypoint` and
     // `router.path_prefix` are the same kind of field but already got
     // substituted in the router loop above) — walk through
-    // `substitute_literal` exactly like every other `Literal` slot in
-    // this function. Before #196 none of these could hold a
-    // `Literal::Param` at all (they were `Reference`-typed, and a
-    // `Reference` had nowhere to put one), so this walk simply didn't
-    // exist; missing any one of these rows now would reproduce #168's
-    // bug class in a new position — a `$net` that survives composition
-    // unresolved and reaches codegen as the literal text `net`.
+    // `substitute_reference_literal` rather than plain
+    // `substitute_literal`: #201 dropped `: Number`/`: String` parameter
+    // annotations, so this is the one place left that still rejects a
+    // substituted bare number, since these positions' own grammar could
+    // never hold one directly even written by hand. Before #196 none of
+    // these could hold a `Literal::Param` at all (they were
+    // `Reference`-typed, and a `Reference` had nowhere to put one), so
+    // this walk simply didn't exist; missing any one of these rows now
+    // would reproduce #168's bug class in a new position — a `$net` that
+    // survives composition unresolved and reaches codegen as the literal
+    // text `net`.
     for lit in &mut fields.middleware {
-        substitute_literal(lit, args, template_name)?;
+        substitute_reference_literal(lit, args, template_name)?;
     }
     for lit in &mut fields.networks {
-        substitute_literal(lit, args, template_name)?;
+        substitute_reference_literal(lit, args, template_name)?;
     }
     for lit in &mut fields.dns {
-        substitute_literal(lit, args, template_name)?;
+        substitute_reference_literal(lit, args, template_name)?;
     }
     for lit in &mut fields.env_file {
-        substitute_literal(lit, args, template_name)?;
+        substitute_reference_literal(lit, args, template_name)?;
     }
     if let Some(e) = &mut fields.expose {
         for lit in &mut e.entrypoint {
-            substitute_literal(lit, args, template_name)?;
+            substitute_reference_literal(lit, args, template_name)?;
         }
     }
     for entry in &mut fields.depends_on {
-        substitute_literal(&mut entry.reference, args, template_name)?;
+        substitute_reference_literal(&mut entry.reference, args, template_name)?;
     }
     Ok(())
-}
-
-/// Checks a typed parameter's bound argument against its declared type —
-/// strict, not coercive (see [`ComposeError::ArgumentTypeMismatch`]'s
-/// doc): the argument's own literal kind must match `expected` exactly.
-/// A list/map argument is left alone here — that's
-/// [`ComposeError::TemplateArgumentNotScalar`]'s job, raised only if the
-/// parameter is actually substituted into a scalar `Literal` slot,
-/// independent of whether it's typed at all.
-///
-/// A still-unresolved `Literal::Param` (an outer template forwarding its
-/// *own* parameter into this argument, e.g. `with inner { y: $x }` inside
-/// `template outer(x) { ... }`) is also left unchecked: its concrete
-/// literal kind isn't known until `$x` itself is substituted, which
-/// happens only once `outer` is invoked with a real argument — and *that*
-/// call site is where `x`'s own declared type (if any) gets checked
-/// instead. A mismatch between `inner`'s declared type for `y` and
-/// `outer`'s declared type for `x` (if the two disagree) isn't caught by
-/// this pass — full type propagation through forwarding chains is beyond
-/// this milestone's scope.
-fn check_argument_type(
-    value: &RawValue,
-    expected: ParamType,
-    template_name: &str,
-    param_name: &str,
-) -> Result<(), ComposeError> {
-    let RawValue::Literal(lit) = value else {
-        return Ok(());
-    };
-    let found = match lit {
-        Literal::Number { .. } if expected == ParamType::Number => return Ok(()),
-        Literal::Str(_, _) if expected == ParamType::String => return Ok(()),
-        Literal::Param(_, _) => return Ok(()),
-        Literal::Str(_, _) => "a quoted string",
-        Literal::Number { .. } => "a number",
-        Literal::Ident(_, _) => "a bare identifier",
-        // Unreachable in practice: a template-invocation argument's
-        // value is parsed via `parse_raw_value`, which builds every
-        // literal through `parse_literal`, never
-        // `parse_literal_reference` — the one path that can ever produce
-        // `Literal::Qualified`. Handled rather than matched away with a
-        // wildcard so a future change that *does* reach a qualified
-        // argument gets a real (if generic) diagnostic instead of a
-        // silently-wrong type check.
-        Literal::Qualified(_) => "a qualified reference",
-    };
-    Err(ComposeError::ArgumentTypeMismatch {
-        template: template_name.to_string(),
-        param: param_name.to_string(),
-        expected,
-        found,
-        span: lit.span(),
-    })
 }
 
 /// Substitutes a single `Literal` slot in place if it's a `Param`. A
@@ -1833,6 +1868,156 @@ fn substitute_literal(
             })
         }
     }
+}
+
+/// [`substitute_literal`], plus a check that the substituted argument is
+/// actually reference-shaped — the substitution-time replacement #201
+/// gave `substitute_params`' reference-list rows (`middleware`,
+/// `networks`, `dns`, `env_file`, a `depends_on` entry's own reference,
+/// `expose.entrypoint`, `router.entrypoint`, `router.path_prefix`) once
+/// `: Number`/`: String` annotations stopped existing to check at the
+/// call site.
+///
+/// The check itself: a reference-shaped position's own grammar
+/// (`parser::Parser::parse_literal_reference`) can never parse a bare
+/// number directly, only `IDENT`, `STRING`, `alias.name`, or `$param` —
+/// so if `substitute_literal` leaves a [`Literal::Number`] sitting in one
+/// of these slots, the only way it could have gotten there is a template
+/// caller passing a bare number as the argument. `param_name` is
+/// captured *before* calling `substitute_literal`, since a successful
+/// substitution overwrites `lit` (and therefore loses `Literal::Param`'s
+/// own name) with the caller's literal.
+///
+/// That overwrite is also why [`ComposeError::ArgumentNotReferenceShaped`]'s
+/// span still names the offending argument rather than the `$param`
+/// reference inside the template body: substitution replaces the whole
+/// `Literal`, span included, so `lit.span()` after the call is always the
+/// caller's own span, not the use site's — the same span
+/// `resolve_invocation`'s old call-site check
+/// used, before #201 moved the check here.
+///
+/// A slot that was never a `Literal::Param` to begin with (an ordinary
+/// `networks [foo]` entry, written directly) needs no check at all:
+/// `parse_literal_reference` already guarantees it can't be a number.
+fn substitute_reference_literal(
+    lit: &mut Literal,
+    args: &HashMap<&str, &RawValue>,
+    template_name: &str,
+) -> Result<(), ComposeError> {
+    let param_name = match lit {
+        Literal::Param(name, _) => Some(name.clone()),
+        _ => None,
+    };
+    substitute_literal(lit, args, template_name)?;
+    if let (Some(param), Literal::Number { span, .. }) = (param_name, &*lit) {
+        return Err(ComposeError::ArgumentNotReferenceShaped {
+            template: template_name.to_string(),
+            param,
+            span: *span,
+        });
+    }
+    Ok(())
+}
+
+/// The `found` text for a numeric-field mismatch — `None` if `lit` is
+/// already the [`Literal::Number`] `expose.port`/`healthcheck.retries`
+/// need, per `book/src/built-in-fields.md`'s own `number`-typed rows for
+/// each. Shared by [`substitute_numeric_literal`] (the substituted-
+/// argument path) and [`check_numeric_fields`] (the hand-written
+/// backstop) so both diagnostics describe the same mismatch the same
+/// way.
+///
+/// `Literal::Param` also answers `None` — not because it's numeric, but
+/// because it isn't resolved *yet*: a template forwarding its own
+/// parameter into a nested `with` invocation (`template outer(x) { with
+/// inner { y: $x } }`) leaves `substitute_literal` replacing one
+/// `Literal::Param` with another here, since `outer`'s own `$x` isn't
+/// bound to a concrete value until `outer` itself is invoked. Checking
+/// now would either false-positive on a perfectly good forwarded number
+/// or miss a genuinely bad one, since this literal's real kind isn't
+/// decided yet; the eventual concrete substitution, at whichever call
+/// site finally binds `x`, is what this function runs against instead.
+fn numeric_mismatch(lit: &Literal) -> Option<&'static str> {
+    match lit {
+        Literal::Number { .. } | Literal::Param(_, _) => None,
+        Literal::Str(_, _) => Some("a quoted string"),
+        Literal::Ident(_, _) => Some("a bare identifier"),
+        Literal::Qualified(_) => Some("a qualified reference"),
+    }
+}
+
+/// [`substitute_literal`], plus a check that the substituted argument is
+/// a bare number — the companion to [`substitute_reference_literal`] for
+/// `expose.port`/`healthcheck.retries`, the two positions
+/// `book/src/built-in-fields.md` documents as `number`-typed. Dropping
+/// `: Number`/`: String` annotations (#201) took away these fields'
+/// declaration-site check exactly as it did the reference-shaped ones,
+/// so they get the same substitution-time replacement, for the same
+/// reason and via the same span trick: substitution overwrites the whole
+/// `Literal`, span included, so the span this leaves behind on a
+/// mismatch is always the caller's own argument, not the `$param` use
+/// site.
+///
+/// [`ComposeError::FieldNotNumeric`] is the backstop for the mismatch
+/// this can't see: a non-numeric `expose.port`/`healthcheck.retries`
+/// written directly, with no `$param` — and therefore no
+/// `Literal::Param` for this function to ever be called on in the first
+/// place, since [`substitute_params`] only routes a slot through here
+/// when substitution actually finds one.
+fn substitute_numeric_literal(
+    lit: &mut Literal,
+    args: &HashMap<&str, &RawValue>,
+    template_name: &str,
+) -> Result<(), ComposeError> {
+    let param_name = match lit {
+        Literal::Param(name, _) => Some(name.clone()),
+        _ => None,
+    };
+    substitute_literal(lit, args, template_name)?;
+    let Some(param) = param_name else {
+        return Ok(());
+    };
+    if let Some(found) = numeric_mismatch(lit) {
+        return Err(ComposeError::ArgumentNotNumeric {
+            template: template_name.to_string(),
+            param,
+            found,
+            span: lit.span(),
+        });
+    }
+    Ok(())
+}
+
+/// The backstop [`substitute_numeric_literal`]'s own doc points to: a
+/// non-numeric `expose.port`/`healthcheck.retries` that never passed
+/// through a `$param` at all, whether written directly by a plain
+/// service or inside a template's own body. Runs once per finished
+/// service, on its fully merged [`ServiceFields`] — after every tier has
+/// merged and every `$param` in scope has resolved — so it sees exactly
+/// the literal codegen would have, and names the field rather than a
+/// template/parameter pair, since by this point there's no longer one to
+/// name: `service`/`healthcheck` don't record which tier a merged
+/// field's final value came from.
+fn check_numeric_fields(fields: &ServiceFields) -> Result<(), ComposeError> {
+    if let Some(port) = fields.expose.as_ref().and_then(|e| e.port.as_ref())
+        && let Some(found) = numeric_mismatch(port)
+    {
+        return Err(ComposeError::FieldNotNumeric {
+            field: "expose.port",
+            found,
+            span: port.span(),
+        });
+    }
+    if let Some(retries) = fields.healthcheck.as_ref().and_then(|h| h.retries.as_ref())
+        && let Some(found) = numeric_mismatch(retries)
+    {
+        return Err(ComposeError::FieldNotNumeric {
+            field: "healthcheck.retries",
+            found,
+            span: retries.span(),
+        });
+    }
+    Ok(())
 }
 
 /// Substitutes every `Param` reachable inside a schema-free
