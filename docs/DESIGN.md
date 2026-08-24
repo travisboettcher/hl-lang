@@ -1101,6 +1101,12 @@ spans are still in hand there.
 
 ## Future work
 
+[`docs/AUDIT.md`](AUDIT.md) is the standing simplification backlog: a
+ranked audit of the preceding constructs that could combine, generalize,
+or go away, with the effect each one has on generated Compose. Read it
+before adding a field, a `FieldKind`, or a merge slot—several of its
+findings exist because the last few features each added one.
+
 - **`bootstrap` scaffold**—generate a brand-new homelab's starting
   `.hll` files from a template: a `docker.hll` declaring the shared
   network plus a `traefik` service (HTTPS termination, a
