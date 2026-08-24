@@ -1,0 +1,2 @@
+--- error ---
+issue_194_template_equals.hll: 5:17: expected `{`, found `=`
