@@ -190,8 +190,15 @@ strategies, since both remain as *parse* conveniences only, and the
 `get_or_insert` span-ordering comments that document a hazard the
 table's own ordering creates.
 
-**Result.** `FieldKind` drops from 9 to roughly 5: `Scalar`, `List`,
-`Map`, `Nested`, and `NamedNested`. Bespoke merge slots drop from 6 to 0.
+**Result.** Bespoke merge slots drop from 6 to 0, and one `merge_scalar`
+serves every scalar-like field.
+
+`FieldKind` itself barely moves, and an earlier draft of this audit
+overstated that. `ScalarOrList` and `DependsOnList` look like merge
+strategies, but the merge engine never branches on them—they're purely
+*parse* descriptors, so they stay. Removing `LiteralList` under F2 takes
+the count from 9 to 8, and F3 takes it no further. The win here is the
+six slots and the duplicate generic, not the variant count.
 
 **Compose output.** Unchanged.
 
@@ -462,7 +469,7 @@ either half is today.
 
 Expected end state:
 
-- `FieldKind` from 9 to 5
+- `FieldKind` from 9 to 8, through F2 alone
 - Bespoke `MergeAcc` slots from 6 to 0
 - Arrow-map tree types from 4 to 2
 - Two fewer `ParseError` variants, two fewer `CodegenError` variants
