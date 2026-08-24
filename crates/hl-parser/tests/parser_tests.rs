@@ -985,6 +985,22 @@ fn router_entrypoint_accepts_a_bracketed_list_and_a_quoted_name() {
     );
 }
 
+#[test]
+fn router_entrypoint_accepts_a_bare_comma_list() {
+    // The book documents this spelling for `router`'s reference list,
+    // the same one `middleware` takes. #198 moved `entrypoint` off
+    // `expose`, and the deleted `expose_entrypoint_accepts_a_bare_list`
+    // was the only test covering it — the replacement covers the
+    // bracketed and quoted forms but not this one.
+    let program = parse_ok(
+        "service s {\n  router {\n    host: \"a.example.com\"\n    \
+         entrypoint: web, web-secure\n  }\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let router = &service.fields.routers[0];
+    assert_eq!(router_entrypoints_of(router), vec!["web", "web-secure"]);
+}
+
 /// `host`/`entrypoint` together on the unnamed router, via the braced
 /// body — the shape `docs/DESIGN.md`'s `internal_web` template uses (the
 /// unnamed form has no name to continue a comma-list from, so the
