@@ -1,5 +1,3 @@
-use std::fmt;
-
 use hl_lexer::Span;
 
 /// A parsed hl-lang source file: a sequence of top-level declarations.
@@ -44,7 +42,7 @@ pub struct UseDecl {
 /// other's extra bit. That split meant a `Reference`-typed position
 /// (`networks`, `middleware`, `dns`, `env_file`, `expose.entrypoint`,
 /// `router.entrypoint`, a `depends_on` entry, a named-volume mount's
-/// host side) could never accept a `$param`: `template web(net: String)
+/// host side) could never accept a `$param`: `template web(net)
 /// { networks [$net] }` was a parse error with no way to fix it short of
 /// giving `networks` a second grammar. Folding the qualifier into this
 /// type is what closes that gap — a `Reference` is now just this type's
@@ -110,8 +108,8 @@ pub enum Literal {
     Qualified(Box<QualifiedRef>),
     /// A `$name` parameter reference inside a `template`'s own body,
     /// naming one of that *same* template's own declared parameters,
-    /// e.g. `$puid` in `template linuxserver_app(puid: Number, pgid:
-    /// Number) { env PUID = $puid }`. Produced directly by the parser
+    /// e.g. `$puid` in `template linuxserver_app(puid, pgid) { env PUID =
+    /// $puid }`. Produced directly by the parser
     /// when it sees the `$` sigil — never by ordinary literal parsing,
     /// and never legal (a parse error) outside a template body, since a
     /// plain `service` isn't parameterized. Composition
@@ -171,42 +169,19 @@ pub struct QualifiedRef {
     pub span: Span,
 }
 
-/// A declared template parameter's type. Deliberately small — `Number`
-/// and `String` are the only two kinds a signature can declare this
-/// milestone; bare-`Ident`-typed and list-typed parameters are out of
-/// scope (see docs/DESIGN.md's Composition section).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParamType {
-    Number,
-    String,
-}
-
-impl ParamType {
-    /// The type's own name, as written in source (`Number`/`String`) and
-    /// as shown in diagnostics.
-    pub fn name(self) -> &'static str {
-        match self {
-            ParamType::Number => "Number",
-            ParamType::String => "String",
-        }
-    }
-}
-
-impl fmt::Display for ParamType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
-    }
-}
-
-/// One declared template parameter: its name, plus an optional `:
-/// Number|String` type annotation. An untyped parameter (`ty: None`)
-/// accepts any literal kind at the call site with no compose-time check —
-/// see [`crate::compose::ComposeError::ArgumentTypeMismatch`] for what a
-/// typed parameter enforces.
+/// One declared template parameter: just its name. Parameters carried an
+/// optional `: Number|String` type annotation before #201, checked
+/// strictly against the argument's own literal kind at the call site —
+/// dropped once #196 let `$param` reach reference and list positions the
+/// two-type vocabulary had no way to describe (see docs/DESIGN.md's
+/// Syntactic grammar section for why growing the annotation vocabulary
+/// to match lost out to checking the argument against the field it
+/// substitutes into instead). A parameter now accepts any literal kind
+/// at the call site; [`crate::compose::ComposeError::ArgumentNotReferenceShaped`]
+/// is what a reference-shaped field enforces once the argument lands.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: Ident,
-    pub ty: Option<ParamType>,
 }
 
 /// One of Compose's own three `depends_on` readiness conditions (#155):

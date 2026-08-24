@@ -8,7 +8,7 @@ network proxy {
   name: "real_proxy"
 }
 
-template web(net: String) {
+template web(net) {
   networks [$net]
 }
 

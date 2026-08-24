@@ -1052,7 +1052,7 @@ fn unknown_network_reference_is_error() {
 fn parameterized_network_resolves_to_the_bound_argument() {
     let yaml = generate_from(
         "network proxy {\n  name: \"real_proxy\"\n}\n\
-         template web(net: String) {\n  networks [$net]\n}\n\
+         template web(net) {\n  networks [$net]\n}\n\
          service app {\n  image \"nginx\"\n  with web { net: \"proxy\" }\n}\n",
     );
     let value = yaml_value(&yaml);
@@ -1074,7 +1074,7 @@ fn parameterized_network_resolves_to_the_bound_argument() {
 #[test]
 fn parameterized_network_naming_something_undeclared_is_still_unknown_network() {
     let err = generate_err(
-        "template web(net: String) {\n  networks [$net]\n}\n\
+        "template web(net) {\n  networks [$net]\n}\n\
          service app {\n  image \"nginx\"\n  with web { net: \"ghost\" }\n}\n",
     );
     assert!(matches!(
@@ -1093,7 +1093,7 @@ fn parameterized_network_naming_something_undeclared_is_still_unknown_network() 
 #[test]
 fn parameterized_middleware_reaches_the_middlewares_label() {
     let yaml = generate_from(
-        "template protected(mw: String) {\n  middleware $mw\n  expose 80 as \"a.example.com\"\n}\n\
+        "template protected(mw) {\n  middleware $mw\n  expose 80 as \"a.example.com\"\n}\n\
          service app {\n  image \"nginx\"\n  with protected { mw: \"forwardAuth-authentik\" }\n}\n",
     );
     let value = yaml_value(&yaml);
@@ -1117,7 +1117,7 @@ fn parameterized_middleware_reaches_the_middlewares_label() {
 #[test]
 fn traefik_guard_still_applies_to_a_substituted_param() {
     let host_err = generate_err(
-        "template site(host: String) {\n  expose 80 as $host\n}\n\
+        "template site(host) {\n  expose 80 as $host\n}\n\
          service app {\n  image \"nginx\"\n  with site { host: \"ok`) || HostRegexp(`{any:.+}\" }\n}\n",
     );
     assert!(
@@ -1132,7 +1132,7 @@ fn traefik_guard_still_applies_to_a_substituted_param() {
     );
 
     let middleware_err = generate_err(
-        "template protected(mw: String) {\n  middleware $mw\n  expose 80 as \"a.example.com\"\n}\n\
+        "template protected(mw) {\n  middleware $mw\n  expose 80 as \"a.example.com\"\n}\n\
          service app {\n  image \"nginx\"\n  with protected { mw: \"a,b\" }\n}\n",
     );
     assert!(
@@ -1692,7 +1692,7 @@ fn publish_becomes_the_compose_ports_list() {
 #[test]
 fn publish_entries_from_a_template_are_fully_resolved() {
     let yaml = generate_from(
-        "template published(port: Number) {\n  publish $port -> $port\n}\n\
+        "template published(port) {\n  publish $port -> $port\n}\n\
          service jellyfin {\n  \
            image \"jellyfin/jellyfin:latest\"\n  \
            with published { port: 8096 }\n\
@@ -1714,7 +1714,7 @@ fn publish_entries_from_a_template_are_fully_resolved() {
 #[test]
 fn devices_entries_from_a_template_are_fully_resolved() {
     let yaml = generate_from(
-        "template gpu(dev: String) {\n  devices $dev -> $dev\n}\n\
+        "template gpu(dev) {\n  devices $dev -> $dev\n}\n\
          service jellyfin {\n  \
            image \"jellyfin/jellyfin:latest\"\n  \
            with gpu { dev: \"/dev/dri\" }\n\

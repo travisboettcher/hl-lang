@@ -1,0 +1,15 @@
+# #201: `expose.port`/`healthcheck.retries` are `book/src/built-in-fields.md`'s
+# two `number`-typed fields, so a substituted argument that isn't a bare
+# number is still rejected, with no `: Number` annotation to opt in with
+# — the numeric-field companion to
+# issue_201_reference_shaped_param.hll's reference-shaped check. The
+# diagnostic points at the `"not-a-number"` argument itself, not the
+# `$port` reference inside the template body.
+template web(port) {
+  expose $port
+}
+
+service app {
+  image "nginx:alpine"
+  with web { port: "not-a-number" }
+}

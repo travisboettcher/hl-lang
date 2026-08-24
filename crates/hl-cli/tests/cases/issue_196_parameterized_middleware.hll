@@ -3,7 +3,7 @@
 # it, `middleware` was `Reference`-typed and a `Reference` had nowhere
 # to put a `$param`. Pins that the substituted argument reaches the
 # generated `middlewares=` label, not the parameter's own name.
-template protected(mw: String) {
+template protected(mw) {
   middleware $mw
   expose 80 as "app.example.com"
 }

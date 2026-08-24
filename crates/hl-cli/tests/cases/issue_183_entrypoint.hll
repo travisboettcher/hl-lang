@@ -7,11 +7,11 @@
 # service-level `entrypoint` field and `expose`'s unrelated `entrypoint`
 # sub-field, a list of Traefik entry points, both appear in `router`
 # below and reach different parts of the output.
-template shell_entrypoint(ep: String) {
+template shell_entrypoint(ep) {
   entrypoint $ep
 }
 
-template exec_entrypoint(arg: String) {
+template exec_entrypoint(arg) {
   entrypoint ["/bin/sh", "-c", $arg]
 }
 

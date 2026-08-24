@@ -46,7 +46,7 @@ network traefik-net {
 # templates.hll
 use "network.hll" as net
 
-template internal_web(port: Number) {
+template internal_web(port) {
   networks [net.traefik-net]
   restart unless-stopped
   expose $port, host: "{{name}}.internal.example.com", entrypoint: web-secure
@@ -57,7 +57,7 @@ template authenticated {
   middleware forwardAuth-authentik
 }
 
-template linuxserver_app(puid: Number, pgid: Number) {
+template linuxserver_app(puid, pgid) {
   env PUID = $puid
   env PGID = $pgid
 }

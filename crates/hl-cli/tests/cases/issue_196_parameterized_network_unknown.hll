@@ -4,7 +4,7 @@
 # argument instead of being written directly. `web`'s `net` argument
 # below names no declared network at all, so this must still fail
 # exactly as `networks [ghost]` written directly would.
-template web(net: String) {
+template web(net) {
   networks [$net]
 }
 

@@ -16,7 +16,7 @@
 #
 # `lan` shows the same three tiers stacking rather than colliding: the
 # template contributes the entry point, the service the host.
-template public_api(prefix: String) {
+template public_api(prefix) {
   router api-docs {
     host: "placeholder.example.com"
     entrypoint: web-secure

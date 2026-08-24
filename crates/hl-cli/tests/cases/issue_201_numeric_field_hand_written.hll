@@ -1,0 +1,11 @@
+# #201: `expose.port` must be a bare number even written directly, with
+# no template and no `$param` involved at all — the backstop that closes
+# the gap a purely substitution-time check would leave (see
+# issue_201_numeric_field_param.hll for the substituted-argument case).
+# `expose "not-a-number"` was never checked before #201 either, since
+# the old `: Number` annotation was a per-template opt-in that a plain
+# service body had no way to reach.
+service app {
+  image "nginx:alpine"
+  expose "not-a-number"
+}

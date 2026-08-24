@@ -1,0 +1,15 @@
+# #201: dropped `: Number`/`: String` parameter annotations in favor of
+# checking a substituted argument against the field it lands in.
+# `networks [$net]` is reference-shaped — its own grammar
+# (`parse_literal_reference`) can never hold a bare number even written
+# directly — so a caller passing one is still a compile error, not a
+# silently-wrong `networks:` entry. The diagnostic points at the `1000`
+# argument itself, not at the `$net` reference inside the template body.
+template web(net) {
+  networks [$net]
+}
+
+service app {
+  image "nginx:alpine"
+  with web { net: 1000 }
+}
