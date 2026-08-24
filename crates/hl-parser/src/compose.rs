@@ -1629,38 +1629,36 @@ fn substitute_params(
             substitute_literal(lit, args, template_name)?;
         }
     }
-    for v in &mut fields.volumes.entries {
-        // Only a bind-mount host has a literal to substitute into. A
-        // named-volume host is a `Reference`, exactly like a `networks
-        // [x]` entry, and references are never parameterized — the
-        // grammar has no `$param` in reference position anywhere.
-        if let ArrowMapHost::BindMount(host) = &mut v.host {
-            substitute_literal(host, args, template_name)?;
+    // `volume`, `publish`, and `devices` share one entry type since
+    // #192, so they share one walk rather than three near-identical
+    // ones. Only a bind-mount host holds a literal to substitute into:
+    // a named-volume host is a `Reference`, exactly like a `networks
+    // [x]` entry, and references are never parameterized, since the
+    // grammar has no `$param` in reference position anywhere. Skipping
+    // that arm is therefore correct for `volume` and unreachable for
+    // the other two, whose schemas never set `key_may_be_reference` —
+    // and `debug_assert` says so out loud rather than leaving a
+    // `$param` to survive composition unresolved if that ever changes
+    // (#168's bug class, which nothing downstream would catch: codegen
+    // raises `UnsubstitutedParameter` for `raw` values only).
+    for (field_name, entries) in [
+        ("volume", &mut fields.volumes.entries),
+        ("publish", &mut fields.publish.entries),
+        ("devices", &mut fields.devices.entries),
+    ] {
+        for entry in entries.iter_mut() {
+            match &mut entry.host {
+                ArrowMapHost::BindMount(host) => {
+                    substitute_literal(host, args, template_name)?;
+                }
+                ArrowMapHost::Named(_) => debug_assert_eq!(
+                    field_name, "volume",
+                    "only `volume` sets key_may_be_reference, so only its \
+                     entries can carry a named host"
+                ),
+            }
+            substitute_literal(&mut entry.container, args, template_name)?;
         }
-        substitute_literal(&mut v.container, args, template_name)?;
-    }
-    for p in &mut fields.publish.entries {
-        // `publish`'s host is always `ArrowMapHost::BindMount` — its
-        // schema never sets `key_may_be_reference`, so the parser never
-        // produces the `Named` arm here — but this still matches on it,
-        // the same as `volumes` just above, rather than assuming the
-        // shape, so the two fields' entries stay interchangeable through
-        // this one walk.
-        if let ArrowMapHost::BindMount(host) = &mut p.host {
-            substitute_literal(host, args, template_name)?;
-        }
-        substitute_literal(&mut p.container, args, template_name)?;
-    }
-    // `devices` (#167) walks the same way `publish` just above does —
-    // both sides are plain literals under the hood now, so a `$param` in
-    // either half of a `devices` mapping needs the same substitution
-    // `publish`'s own entries get, or it would survive composition
-    // unresolved (see issue #168's live bug class this guards against).
-    for d in &mut fields.devices.entries {
-        if let ArrowMapHost::BindMount(host) = &mut d.host {
-            substitute_literal(host, args, template_name)?;
-        }
-        substitute_literal(&mut d.container, args, template_name)?;
     }
     for e in &mut fields.env.entries {
         substitute_literal(&mut e.key, args, template_name)?;
