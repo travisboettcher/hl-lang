@@ -89,7 +89,7 @@ top_decl       ::= named_decl | template_decl | use_decl
 
 named_decl     ::= IDENT IDENT body
 
-template_decl  ::= "template" IDENT param_list? ( body | "=" statement )
+template_decl  ::= "template" IDENT param_list? body
 
 use_decl       ::= "use" STRING "as" IDENT
 

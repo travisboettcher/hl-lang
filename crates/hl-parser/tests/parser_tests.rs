@@ -2234,25 +2234,6 @@ fn param_list_unknown_type_is_error() {
 }
 
 #[test]
-fn template_decl_equals_shorthand() {
-    let program = parse_ok("template t = restart unless-stopped\n");
-    let template = as_template(&program.decls[0]);
-    assert_eq!(
-        template
-            .fields
-            .restart
-            .as_ref()
-            .unwrap()
-            .policy
-            .as_ref()
-            .unwrap()
-            .text(),
-        "unless-stopped"
-    );
-    assert!(template.fields.image.is_none());
-}
-
-#[test]
 fn param_list_trailing_comma_is_error() {
     let err = parse("template t(a,) {\n}\n").unwrap_err();
     assert!(matches!(err, ParseError::UnexpectedToken { .. }));

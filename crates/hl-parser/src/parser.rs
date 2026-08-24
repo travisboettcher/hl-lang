@@ -1586,7 +1586,7 @@ impl<'src> Parser<'src> {
         Ok(UseDecl { path, alias, span })
     }
 
-    /// `template_decl ::= "template" IDENT param_list? ( body | "=" statement )`.
+    /// `template_decl ::= "template" IDENT param_list? body`.
     fn parse_template_decl(&mut self) -> Result<TemplateDecl, ParseError> {
         let template_tok = self.expect(TokenKind::Template)?;
         let name_tok = self.expect(TokenKind::Ident)?;
@@ -1608,26 +1608,10 @@ impl<'src> Parser<'src> {
         // fully parsed; `template_decl` is never nested, so there's no
         // outer value to restore instead of `None`.
         self.template_params = Some(params.clone());
-        let (fields_map, body_span) = if self.peek().kind == TokenKind::Equals {
-            self.bump();
-            let mut fields = StructFields::new();
-            let stmt_start = self.peek().span;
-            self.parse_statement_into(&schema::TEMPLATE, &mut fields)?;
-            let end = self.tokens[self.pos.saturating_sub(1)].span.end;
-            (
-                fields,
-                Span {
-                    start: stmt_start.start,
-                    end,
-                    line: stmt_start.line,
-                    col: stmt_start.col,
-                    file: stmt_start.file,
-                },
-            )
-        } else if self.peek().kind == TokenKind::LBrace {
+        let (fields_map, body_span) = if self.peek().kind == TokenKind::LBrace {
             self.parse_struct_body(&schema::TEMPLATE)?
         } else {
-            return Err(self.unexpected(Expected::Description("`{` or `=`")));
+            return Err(self.unexpected(Expected::Description("`{`")));
         };
         self.template_params = None;
 
