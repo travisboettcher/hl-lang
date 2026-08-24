@@ -34,7 +34,8 @@ infrastructure?" If not, it's a template, not a grammar feature.
 ```
 IDENT   ::= [A-Za-z_][A-Za-z0-9_-]*
 NUMBER  ::= [0-9]+
-STRING  ::= '"' [^"\n]* '"'
+STRING  ::= '"' ( [^"\\\n] | ESCAPE )* '"'
+ESCAPE  ::= '\\' ( '"' | '\\' | 'n' | 't' | 'r' )
 COMMENT ::= '#' [^\n]*        # to end of line; not part of the token stream
 
 Reserved (not usable as IDENT): "template"
@@ -60,8 +61,15 @@ Punctuation: { } [ ] ( ) : = -> , . $
   (`$port`), see Composition, below. It's reserved for exactly that one
   purpose—not a general sigil for anything else.
 - `NUMBER` is integer-only: `[0-9]+`, no sign, no decimal point, no exponent.
-- `STRING` is double-quoted with no escape sequences, and can't contain a
-  literal `"` or a newline—an unterminated string is a lex error.
+- `STRING` is double-quoted, and a backslash escapes the character after
+  it. The five escape sequences are `\"`, `\\`, `\n`, `\t`, and `\r`, and
+  a backslash followed by anything else is a lex error—an escape the
+  language doesn't have never means the two characters that spell it.
+- A `STRING` still can't span a literal newline in the source: write the
+  newline as `\n` instead. An unterminated string—one whose line ends
+  before its closing `"`—is a lex error, and so is a string ending in a
+  backslash, since that backslash escapes the closing quote and leaves
+  the literal open.
 - `->` is always a single token. A bare `-` is never valid on its own (it
   only ever appears inside an `IDENT`'s tail, or as the lead character of
   `->`).

@@ -15,6 +15,20 @@ pub enum LexError {
     /// a valid token on its own (it only appears inside an `IDENT`'s tail,
     /// or as the lead character of `->`).
     DanglingDash { span: Span },
+    /// A `\` inside a string literal was followed by a character that
+    /// forms no escape sequence (#181).
+    ///
+    /// A hard error rather than a passthrough of the two characters or a
+    /// silent drop of the backslash: either of those would let a literal
+    /// mean something other than what it says, which is the failure mode
+    /// escapes exist to remove. `span` covers the backslash and the
+    /// character after it.
+    UnknownEscape { ch: char, span: Span },
+    /// A `\` inside a string literal with nothing after it to escape.
+    /// Only reachable through [`crate::unescape`] directly — the lexer's
+    /// own scan can't produce it, since a `\` before the closing quote
+    /// escapes that quote and the literal ends up unterminated instead.
+    DanglingEscape { span: Span },
 }
 
 impl LexError {
@@ -23,7 +37,9 @@ impl LexError {
         match self {
             LexError::UnterminatedString { span }
             | LexError::UnexpectedChar { span, .. }
-            | LexError::DanglingDash { span } => *span,
+            | LexError::DanglingDash { span }
+            | LexError::UnknownEscape { span, .. }
+            | LexError::DanglingEscape { span } => *span,
         }
     }
 }
@@ -52,6 +68,27 @@ impl fmt::Display for LexError {
                 write!(
                     f,
                     "{}:{}: unexpected '-' (expected '->' or an identifier)",
+                    span.line, span.col
+                )
+            }
+            // The offending character is rendered through
+            // `escape_debug` so a `\` followed by a real tab reads as
+            // something a person can see, rather than as a gap in the
+            // message.
+            LexError::UnknownEscape { ch, .. } => {
+                write!(
+                    f,
+                    "{}:{}: unknown escape sequence `\\{}` — a string literal supports {}",
+                    span.line,
+                    span.col,
+                    ch.escape_debug(),
+                    crate::escape::ESCAPE_HINT
+                )
+            }
+            LexError::DanglingEscape { .. } => {
+                write!(
+                    f,
+                    "{}:{}: a string literal can't end with a lone `\\` — write a backslash as `\\\\`",
                     span.line, span.col
                 )
             }
@@ -90,6 +127,42 @@ mod display_tests {
         assert_eq!(
             err.to_string(),
             "2:4: unexpected character '/' — string values must be quoted (\"...\")"
+        );
+    }
+
+    #[test]
+    fn unknown_escape_display_names_the_sequence_and_the_supported_set() {
+        let err = LexError::UnknownEscape {
+            ch: 'q',
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            r#"2:4: unknown escape sequence `\q` — a string literal supports `\"`, `\\`, `\n`, `\t`, and `\r`"#
+        );
+    }
+
+    /// A `\` followed by a real tab character is still an unknown
+    /// escape, and the message has to show it as something visible.
+    #[test]
+    fn unknown_escape_display_renders_a_control_character_readably() {
+        let err = LexError::UnknownEscape {
+            ch: '\t',
+            span: span(),
+        };
+        assert!(
+            err.to_string()
+                .starts_with(r"2:4: unknown escape sequence `\\t`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn dangling_escape_display() {
+        let err = LexError::DanglingEscape { span: span() };
+        assert_eq!(
+            err.to_string(),
+            r"2:4: a string literal can't end with a lone `\` — write a backslash as `\\`"
         );
     }
 

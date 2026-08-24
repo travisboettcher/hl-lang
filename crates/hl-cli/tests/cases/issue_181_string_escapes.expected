@@ -1,0 +1,13 @@
+--- compose ---
+services:
+  api:
+    image: nginx:latest
+    environment:
+    - 'CONFIG_JSON={"level": "debug", "quiet": false}'
+    - |-
+      BANNER=api says:
+      line two
+    - WINDOWS_PATH=C:\logs\api
+    entrypoint: |-
+      sh -c "echo starting
+      exec nginx -g 'daemon off;'"

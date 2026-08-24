@@ -1,0 +1,9 @@
+# #181: the other half of giving `STRING` escapes — a sequence the
+# language doesn't have is a compile error pointing at the backslash,
+# rather than a backslash silently dropped or passed through into the
+# generated document. A value that looks right but isn't is the failure
+# mode escapes exist to remove, so `\u` here has to stop the build.
+service api {
+  image "nginx:latest"
+  env HOME_DIR = "/home\users/api"
+}

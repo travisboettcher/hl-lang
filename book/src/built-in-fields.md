@@ -190,6 +190,12 @@ entry into the label. (`entrypoint "web,web-secure"` is therefore an
 error—write `entrypoint web, web-secure`.) `hllc` rejects a comma in a
 `middleware` name for the same reason.
 
+All three reject a control character too, such as the newline a string
+literal writes as `\n` (see
+[Numbers and strings](./syntax-basics.md#numbers-and-strings)). A hostname,
+an entry point name, and a middleware name have no use for one, and a
+label carrying one no longer means what it reads as.
+
 `expose` gives a service exactly one Traefik router. If you need more
 than one—a public host and a local-network host, or an API path prefix
 split off from a frontend—see [`router`](#router) below.

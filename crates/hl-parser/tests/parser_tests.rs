@@ -153,6 +153,61 @@ fn restart_primary_shorthand_string_policy() {
     assert!(matches!(policy, Literal::Str(_, _)));
 }
 
+/// #181: the AST stores what a string literal *means*, so a `\n` in
+/// source is a newline by the time any later stage sees it — not the two
+/// characters that were typed.
+#[test]
+fn string_literal_holds_the_decoded_value() {
+    let program = parse_ok("service s {\n  container_name \"a\\nb\\\"c\\\\d\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    let name = service.fields.container_name.as_ref().unwrap();
+    assert_eq!(name.text(), "a\nb\"c\\d");
+    assert!(matches!(name, Literal::Str(_, _)));
+}
+
+/// Decoding shortens the value, so the span has to keep describing the
+/// source text rather than the decoded string — a diagnostic pointing at
+/// this literal still has to land on the characters the user wrote.
+#[test]
+fn a_decoded_literal_span_still_covers_its_source_text() {
+    let source = "service s {\n  container_name \"a\\nb\"\n}\n";
+    let program = parse_ok(source);
+    let service = as_service(&program.decls[0]);
+    let span = service.fields.container_name.as_ref().unwrap().span();
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        "\"a\\nb\"",
+        "span {span:?}"
+    );
+}
+
+/// A string used as a field name is decoded the same way a value is.
+#[test]
+fn string_key_is_decoded_too() {
+    let program = parse_ok("service s {\n  raw {\n    \"a\\tb\": \"v\"\n  }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.raw.entries[0].key.text(), "a\tb");
+}
+
+/// An escape sequence the language doesn't have never reaches the AST:
+/// tokenizing fails first, and `parse` reports it as the lex error it is.
+#[test]
+fn unknown_escape_is_reported_as_a_lex_error() {
+    let err = parse("service s {\n  container_name \"a\\qb\"\n}\n").unwrap_err();
+    match &err {
+        ParseError::Lex(errors) => assert!(
+            matches!(errors[0], hl_lexer::LexError::UnknownEscape { ch: 'q', .. }),
+            "{errors:?}"
+        ),
+        other => panic!("expected a lex error, got {other:?}"),
+    }
+    assert_eq!(
+        err.to_string(),
+        "2:20: unknown escape sequence `\\q` — a string literal supports \
+         `\\\"`, `\\\\`, `\\n`, `\\t`, and `\\r`"
+    );
+}
+
 #[test]
 fn restart_primary_shorthand_accepts_leading_colon() {
     let program = parse_ok("service s {\n  restart: unless-stopped\n}\n");

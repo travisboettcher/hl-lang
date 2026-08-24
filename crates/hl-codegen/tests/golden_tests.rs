@@ -1916,10 +1916,11 @@ fn raw_leaves_built_in_fields_it_does_not_name_alone() {
 /// it's the property that has to hold across *any* future swap of the
 /// underlying YAML library, not just that one.
 ///
-/// A literal newline isn't covered because it can't reach codegen: the
-/// lexer rejects a raw newline inside a string literal
-/// (`LexError::UnterminatedString`) and there are no escape sequences,
-/// so no `.hll` source can express one.
+/// A literal newline is covered too, since #181 gave `STRING` the `\n`
+/// escape that expresses one. It's the most structural character YAML
+/// has — an unquoted one would end the scalar and start a new line of
+/// document — so it belongs on every channel above rather than only on
+/// the `raw` value that motivated the escape.
 #[test]
 fn yaml_hostile_values_round_trip_as_data_not_structure() {
     let yaml = generate_from(
@@ -1938,12 +1939,14 @@ fn yaml_hostile_values_round_trip_as_data_not_structure() {
            env NUL = \"value\0with nul\"\n  \
            env FLOW = \"[a, b]{c: d}\"\n  \
            env ANCHOR = \"&anchor *alias\"\n  \
+           env NEWLINE = \"first\\nsecond: value\"\n  \
            volume hostile-vol -> \"/mnt/# hash\"\n  \
            networks [shared]\n  \
            raw {\n    \
              colon_val: \"raw: colon value\"\n    \
              hash_val: \"raw # hash value\"\n    \
              nul_val: \"raw\0nul\"\n    \
+             newline_val: \"raw\\nnewline: value\"\n    \
              nested: {\n      \
                \"key: with colon\": \"v1\"\n      \
                \"key # with hash\": \"v2\"\n    \
@@ -1976,6 +1979,7 @@ fn yaml_hostile_values_round_trip_as_data_not_structure() {
             "NUL=value\0with nul",
             "FLOW=[a, b]{c: d}",
             "ANCHOR=&anchor *alias",
+            "NEWLINE=first\nsecond: value",
         ],
         "\n--- actual ---\n{yaml}"
     );
@@ -1988,6 +1992,7 @@ fn yaml_hostile_values_round_trip_as_data_not_structure() {
     assert_eq!(web["colon_val"], s("raw: colon value"));
     assert_eq!(web["hash_val"], s("raw # hash value"));
     assert_eq!(web["nul_val"], s("raw\0nul"));
+    assert_eq!(web["newline_val"], s("raw\nnewline: value"));
     assert_eq!(web["nested"]["key: with colon"], s("v1"));
     assert_eq!(web["nested"]["key # with hash"], s("v2"));
 

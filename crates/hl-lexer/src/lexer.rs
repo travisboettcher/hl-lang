@@ -108,7 +108,16 @@ impl<'src> Lexer<'src> {
         loop {
             match lexer.next_token() {
                 Ok(tok) => {
-                    let is_eof = tok.kind == crate::token::TokenKind::Eof;
+                    // Reaching `Eof` is this loop's *only* exit: an error
+                    // doesn't end it, because the whole point is to keep
+                    // scanning and report every one in a single pass (#87).
+                    // That makes the test a load-bearing terminator, so it's
+                    // written as a variant match rather than an equality —
+                    // an inverted `==` would leave the compiler spinning on
+                    // any input that lexes to errors and nothing else, which
+                    // `tokenize_collecting_errors_finds_every_bad_escape` is
+                    // the first input in the suite to produce.
+                    let is_eof = matches!(tok.kind, crate::token::TokenKind::Eof);
                     tokens.push(tok);
                     if is_eof {
                         break;
@@ -348,9 +357,22 @@ impl<'src> Lexer<'src> {
 
     /// `start` is the byte offset of the opening `"`. The opening quote
     /// is always exactly one byte (ASCII), so the content begins at
-    /// `start + 1`. There is no escape handling of any kind: a `\` is an
-    /// ordinary content character, and `{{`/`}}` interpolation markers
-    /// (resolved later at codegen time) are never inspected here.
+    /// `start + 1`.
+    ///
+    /// A `\` escapes the character after it (#181), so a `\"` is content
+    /// rather than the closing quote. The returned `lexeme` is the
+    /// literal's source text with the quotes stripped and the escapes
+    /// still written as they were — [`crate::unescape`] is what turns
+    /// them into the characters they stand for, and it runs here too, so
+    /// an escape sequence the language doesn't have is a lex error at
+    /// the point it's written rather than something a later stage
+    /// discovers.
+    ///
+    /// A literal newline still ends the literal (as an unterminated
+    /// string), including one directly after a `\`: `\n` is how a string
+    /// spells a newline, and there is no line-continuation escape.
+    /// `{{`/`}}` interpolation markers (resolved later at codegen time)
+    /// are never inspected here.
     fn scan_string(&mut self, start: usize, line: u32, col: u32) -> Result<Token<'src>, LexError> {
         let content_start = start + 1;
         let mut content_end = content_start;
@@ -359,17 +381,33 @@ impl<'src> Lexer<'src> {
                 Some('"') => {
                     let (idx, c) = self.bump().expect("peeked '\"' must be consumable");
                     let end = idx + c.len_utf8();
+                    let lexeme = &self.source[content_start..content_end];
+                    let span = Span {
+                        start: offset(start),
+                        end: offset(end),
+                        line,
+                        col,
+                        file: self.file,
+                    };
+                    crate::unescape(lexeme, span)?;
                     return Ok(Token {
                         kind: TokenKind::Str,
-                        lexeme: &self.source[content_start..content_end],
-                        span: Span {
-                            start: offset(start),
-                            end: offset(end),
-                            line,
-                            col,
-                            file: self.file,
-                        },
+                        lexeme,
+                        span,
                     });
+                }
+                Some('\\') => {
+                    let (idx, c) = self.bump().expect("peeked '\\' must be consumable");
+                    content_end = idx + c.len_utf8();
+                    // The escaped character joins the content whatever
+                    // it is, so a `\"` can't close the literal. A `\`
+                    // with a newline or end of input after it escapes
+                    // nothing and falls through to the unterminated arm
+                    // on the next turn of the loop.
+                    if !matches!(self.peek_char(), Some('\n') | None) {
+                        let (idx, c) = self.bump().expect("peeked char must be consumable");
+                        content_end = idx + c.len_utf8();
+                    }
                 }
                 Some('\n') | None => {
                     return Err(LexError::UnterminatedString {

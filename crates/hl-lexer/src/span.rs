@@ -138,7 +138,10 @@ impl fmt::Display for Location<'_> {
 /// For a [`crate::TokenKind::Str`] token, `span` covers the entire token
 /// including both quote characters, while the token's `lexeme` is the
 /// quote-stripped inner content — so for string tokens
-/// `span.end - span.start == lexeme.len() + 2`.
+/// `span.end - span.start == lexeme.len() + 2`. That holds for a
+/// literal carrying backslash escapes too: the `lexeme` is source text,
+/// not the shorter decoded value, so its bytes still line up with the
+/// bytes the span covers.
 ///
 /// The `Eof` token's span is zero-width (`start == end`) at `source.len()`.
 ///

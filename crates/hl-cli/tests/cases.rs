@@ -143,6 +143,14 @@ fn require_rationale(path: &Path) -> datatest_stable::Result<()> {
 fn check(path: &Path, expected: std::path::PathBuf) -> datatest_stable::Result<()> {
     let assert = Assert::new()
         .action_env(DEFAULT_ACTION_ENV)
+        // Snapbox rewrites every `\` to `/` by default, to paper over
+        // Windows path separators — and its own docs note it can't tell
+        // a separator from any other backslash. A `.hll` string literal
+        // can hold a backslash (#181), and a diagnostic about one names
+        // it, so leaving that on would record an expectation the
+        // compiler never actually produces. CI is Linux-only, where
+        // there is no separator to normalize in the first place.
+        .normalize_paths(false)
         // The diff is built into a `String` rather than written to a
         // stream, so `anstream`'s own terminal detection never gets to
         // strip the escapes — leaving them in would litter the output of
