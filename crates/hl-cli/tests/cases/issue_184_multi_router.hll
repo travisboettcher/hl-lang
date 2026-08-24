@@ -1,0 +1,52 @@
+# #184: `expose` models exactly one Traefik router — one `host`, one
+# `Host()` rule, one `entrypoints=` label — so a service needing several
+# routers off one container had to abandon `expose` and hand-write the
+# whole label list in `raw { labels: [...] }`, losing every check
+# `expose` performs. This pins the label set the issue asks for, taken
+# verbatim from a real `vikunja` service: four routers off one container,
+# a public host and a LAN host, each split between an API prefix group
+# and a catch-all frontend.
+#
+# What each `router` block contributes:
+#   - the router id, `traefik.http.routers.vikunja-<name>`, from the name
+#     written after the keyword;
+#   - the `Host()` rule, with `path_prefix`'s alternatives `||`-joined
+#     inside one `&&`-ed parenthesized group;
+#   - its own `entrypoints=` label, so the public and LAN routers reach
+#     different entry points rather than sharing one.
+#
+# `expose 3456` keeps its exact meaning: Compose's `expose:` key plus the
+# one `loadbalancer.server.port` label, which is per Compose service
+# rather than per router — a `router` block deliberately carries no port.
+network traefik-net {
+  external
+  name: "docker_default"
+}
+
+service vikunja {
+  image "vikunja/vikunja:latest"
+  expose 3456
+  networks [traefik-net]
+
+  router api {
+    host: "vikunja.techdebtor.io"
+    entrypoint: web-secure
+    path_prefix: ["/api/v1", "/dav/", "/.well-known/"]
+  }
+
+  router api-local {
+    host: "vikunja.techdebtor.local"
+    entrypoint: local
+    path_prefix: ["/api/v1", "/dav/", "/.well-known/"]
+  }
+
+  router frontend {
+    host: "vikunja.techdebtor.io"
+    entrypoint: web-secure
+  }
+
+  router frontend-local {
+    host: "vikunja.techdebtor.local"
+    entrypoint: local
+  }
+}

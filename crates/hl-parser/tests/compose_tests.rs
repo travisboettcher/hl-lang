@@ -2089,6 +2089,19 @@ fn assert_no_params(service: &Service) {
         assert_not_param(&entry.key);
         assert_raw_value_no_param(&entry.value);
     }
+    // `router`'s two literal-holding sub-fields (#184). Adding a field
+    // without extending this walk is exactly what #168 was: the
+    // `Literal::Param` survives composition and codegen emits the
+    // parameter's own name into the generated document, silently and
+    // with exit 0.
+    for router in &fields.routers {
+        if let Some(host) = &router.host {
+            assert_not_param(host);
+        }
+        for prefix in &router.path_prefix {
+            assert_not_param(prefix);
+        }
+    }
 }
 
 fn assert_not_param(lit: &Literal) {
@@ -2380,4 +2393,243 @@ fn unqualified_env_file_is_accepted() {
     let composed = compose_ok("service s {\n  image \"x\"\n  env_file [\"miniflux.env\"]\n}\n");
     let service = single_service(&composed);
     assert_eq!(service.fields.env_file.len(), 1);
+}
+
+// --- `router` merge (#184) ---
+
+fn router_named<'a>(service: &'a Service, name: &str) -> &'a hl_parser::Router {
+    service
+        .fields
+        .routers
+        .iter()
+        .find(|r| r.key() == Some(name))
+        .unwrap_or_else(|| panic!("no router named {name:?}"))
+}
+
+fn router_entrypoints(router: &hl_parser::Router) -> Vec<&str> {
+    router.entrypoint.iter().map(|r| r.name.as_str()).collect()
+}
+
+fn router_prefixes(router: &hl_parser::Router) -> Vec<&str> {
+    router.path_prefix.iter().map(Literal::text).collect()
+}
+
+/// `router` merges keyed by name, then per sub-field within each name —
+/// `expose`'s own per-sub-field merge, one level deeper. This is
+/// `service_own_body_can_override_just_expose_host`'s exact scenario
+/// applied to a router: the service replaces just `host` and still
+/// inherits the template's `entrypoint` and `path_prefix` without
+/// repeating them.
+#[test]
+fn service_own_body_can_override_just_one_router_subfield() {
+    let composed = compose_ok(
+        "template api_router {\n  \
+           router api {\n    host: \"placeholder.example.com\"\n    \
+             entrypoint: web-secure\n    path_prefix: [\"/api/v1\"]\n  }\n\
+         }\n\
+         service vikunja {\n  \
+           with api_router\n  image \"vikunja/vikunja\"\n  \
+           router api { host: \"vikunja.techdebtor.io\" }\n\
+         }\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(service.fields.routers.len(), 1);
+    let api = router_named(service, "api");
+    assert_eq!(api.host.as_ref().unwrap().text(), "vikunja.techdebtor.io");
+    assert_eq!(router_entrypoints(api), vec!["web-secure"]);
+    assert_eq!(router_prefixes(api), vec!["/api/v1"]);
+}
+
+/// Two *different* router names from two tiers are two routers, not a
+/// collision — the keyed half of the merge.
+#[test]
+fn routers_with_different_names_accumulate_across_tiers() {
+    let composed = compose_ok(
+        "template defaults {\n  router lan, host: \"a.example.local\"\n}\n\
+         template public {\n  router web, host: \"a.example.com\"\n}\n\
+         service s {\n  with public\n  image \"x\"\n  router admin, host: \"admin.example.com\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let names: Vec<Option<&str>> = service.fields.routers.iter().map(|r| r.key()).collect();
+    assert_eq!(names, vec![Some("lan"), Some("web"), Some("admin")]);
+}
+
+/// Two explicit templates disagreeing on one router's `host` is a
+/// collision, reported with the router's own name — the same rule two
+/// explicit templates setting `expose.host` already hit, keyed so the
+/// message says *which* router.
+#[test]
+fn explicit_templates_setting_the_same_router_host_collide() {
+    let err = compose_err(
+        "template a {\n  router api, host: \"a.example.com\"\n}\n\
+         template b {\n  router api, host: \"b.example.com\"\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::MapKeyCollision(details) => {
+            assert_eq!(details.field, "router.host");
+            assert_eq!(details.key, "api");
+            assert_eq!(details.first_template, "a");
+            assert_eq!(details.second_template, "b");
+        }
+        other => panic!("expected MapKeyCollision on router.host, got {other:?}"),
+    }
+}
+
+/// ...but two explicit templates setting *different* sub-fields of one
+/// router don't collide, exactly as they don't for `expose`.
+#[test]
+fn explicit_templates_setting_different_router_subfields_do_not_collide() {
+    let composed = compose_ok(
+        "template a {\n  router api, host: \"a.example.com\"\n}\n\
+         template b {\n  router api, entrypoint: web-secure\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let api = router_named(service, "api");
+    assert_eq!(api.host.as_ref().unwrap().text(), "a.example.com");
+    assert_eq!(router_entrypoints(api), vec!["web-secure"]);
+}
+
+/// A router's `entrypoint` is set-like, so two tiers naming the same one
+/// yield a router attached to it once — `expose.entrypoint`'s own
+/// distinct-name rule.
+#[test]
+fn router_entrypoints_concatenate_and_dedupe() {
+    let composed = compose_ok(
+        "template a {\n  router api, entrypoint: web\n}\n\
+         template b {\n  router api, entrypoint: web-secure\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n  \
+           router api {\n    host: \"a.example.com\"\n    entrypoint: web-secure\n  }\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        router_entrypoints(router_named(service, "api")),
+        vec!["web", "web-secure"]
+    );
+}
+
+/// `path_prefix` concatenates *without* deduping, unlike `entrypoint`:
+/// the entries are `||` alternatives whose written order is observable
+/// in the emitted rule, the same reasoning that keeps `dns` and
+/// `env_file` order-preserving.
+#[test]
+fn router_path_prefixes_concatenate_in_tier_order() {
+    let composed = compose_ok(
+        "template a {\n  router api, path_prefix: [\"/api/v1\"]\n}\n\
+         service s {\n  with a\n  image \"x\"\n  \
+           router api {\n    host: \"a.example.com\"\n    path_prefix: [\"/dav/\"]\n  }\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        router_prefixes(router_named(service, "api")),
+        vec!["/api/v1", "/dav/"]
+    );
+}
+
+/// `defaults` loses to an explicit template on a router's scalar
+/// sub-field, silently, the way it loses everywhere else.
+#[test]
+fn defaults_router_host_is_overridden_silently() {
+    let composed = compose_ok(
+        "template defaults {\n  router api, host: \"placeholder.example.com\"\n}\n\
+         template a {\n  router api, host: \"a.example.com\"\n}\n\
+         service s {\n  with a\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        router_named(service, "api").host.as_ref().unwrap().text(),
+        "a.example.com"
+    );
+}
+
+/// A `$param` in a router's `host` is substituted like every other
+/// literal slot — #168's bug class, which is a field added without
+/// extending `substitute_params`' walk.
+#[test]
+fn router_host_param_is_substituted() {
+    let composed = compose_ok(
+        "template routed(h: String) {\n  router api { host: $h }\n}\n\
+         service s {\n  with routed { h: \"a.example.com\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        router_named(service, "api").host.as_ref().unwrap().text(),
+        "a.example.com"
+    );
+    assert_no_params(service);
+}
+
+/// And each `path_prefix` entry, which is why the field holds literals
+/// rather than references: a reference has no `$param` form to
+/// substitute at all.
+#[test]
+fn router_path_prefix_params_are_substituted() {
+    let composed = compose_ok(
+        "template routed(h: String, api: String, dav: String) {\n  \
+           router api { host: $h\n    path_prefix: [$api, $dav] }\n\
+         }\n\
+         service s {\n  \
+           with routed { h: \"a.example.com\", api: \"/api/v1\", dav: \"/dav/\" }\n  \
+           image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let api = router_named(service, "api");
+    assert_eq!(api.host.as_ref().unwrap().text(), "a.example.com");
+    assert_eq!(router_prefixes(api), vec!["/api/v1", "/dav/"]);
+    assert_no_params(service);
+}
+
+/// A router's entry point names something in the deployment's own
+/// `traefik.yml`, not a declaration any `.hll` file exports, so a
+/// qualifier has nothing to resolve against — rejected exactly as
+/// `expose.entrypoint`'s is, rather than silently dropped on the way to
+/// the label.
+#[test]
+fn qualified_router_entrypoint_reference_is_rejected() {
+    let err = compose_err(
+        "service s {\n  image \"x\"\n  router api, host: \"a.example.com\", entrypoint: traefik.web\n}\n",
+    );
+    assert!(
+        matches!(
+            err,
+            ComposeError::UnsupportedQualifiedReference { field: "router.entrypoint", ref alias, .. } if alias == "traefik"
+        ),
+        "got {err:?}"
+    );
+}
+
+/// The unnamed `router { }` form merges under its own key, distinct from
+/// every named one — it isn't a wildcard that soaks up named blocks.
+#[test]
+fn unnamed_router_merges_under_its_own_key() {
+    let composed = compose_ok(
+        "template a {\n  router { entrypoint: web-secure }\n}\n\
+         service s {\n  with a\n  image \"x\"\n  \
+           router { host: \"a.example.com\" }\n  router api, host: \"b.example.com\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(service.fields.routers.len(), 2);
+    let unnamed = service
+        .fields
+        .routers
+        .iter()
+        .find(|r| r.key().is_none())
+        .expect("unnamed router kept");
+    assert_eq!(unnamed.host.as_ref().unwrap().text(), "a.example.com");
+    assert_eq!(router_entrypoints(unnamed), vec!["web-secure"]);
+}
+
+/// A service that never mentions `router` composes to an empty list, so
+/// every file written before the field existed reaches codegen with
+/// exactly the fields it always had.
+#[test]
+fn a_service_without_routers_composes_to_an_empty_list() {
+    let composed = compose_ok(
+        "template internal_web(port) {\n  expose $port, entrypoint: web-secure\n}\n\
+         service s {\n  with internal_web { port: 8080 }\n  image \"x\"\n  \
+           expose { host: \"a.example.com\" }\n}\n",
+    );
+    let service = single_service(&composed);
+    assert!(service.fields.routers.is_empty());
 }

@@ -5,8 +5,8 @@ use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 use crate::ast::{
     Command, DependsOnCondition, DependsOnEntry, DeviceEntry, DeviceMap, Entrypoint, EnvEntry,
     EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Param, ParamType,
-    Program, PublishEntry, PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Service,
-    ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
+    Program, PublishEntry, PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Router,
+    Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
     VolumeDriverOpt, VolumeEntry, VolumeHost, VolumeMap,
 };
 use crate::error::{Expected, ParseError};
@@ -103,6 +103,16 @@ enum FieldValue {
     /// An accumulating `depends_on`-list field. See
     /// [`schema::FieldKind::DependsOnList`]'s doc.
     DependsOnEntries(Vec<DependsOnEntry>),
+    /// An accumulating list-of-literals field (`router`'s `path_prefix`,
+    /// #184). [`Self::RefList`]'s twin for the one list field whose
+    /// entries have to be [`Literal`]s — see
+    /// [`schema::FieldKind::LiteralList`]'s doc.
+    LiteralList(Vec<Literal>),
+    /// An accumulating, name-keyed nested struct-kind field (`router`,
+    /// #184): one `(optional name, its own field bag, its span)` per
+    /// block written, in source order. See
+    /// [`schema::FieldKind::NamedNested`]'s doc.
+    NamedStructs(Vec<(Option<Ident>, StructFields, Span)>),
 }
 
 /// The parsed value of a [`schema::FieldKind::ScalarOrList`] field —
@@ -140,7 +150,9 @@ impl FieldValue {
             | FieldValue::Raw(_)
             | FieldValue::RefList(_)
             | FieldValue::TemplateInvocations(_)
-            | FieldValue::DependsOnEntries(_) => {
+            | FieldValue::DependsOnEntries(_)
+            | FieldValue::LiteralList(_)
+            | FieldValue::NamedStructs(_) => {
                 unreachable!("map/list-kind fields accumulate and are never duplicate-checked")
             }
         }
@@ -401,6 +413,41 @@ impl<'src> Parser<'src> {
             self.parse_bare_reference_list()
         } else {
             Err(self.unexpected(Expected::Description("a reference or a list of references")))
+        }
+    }
+
+    /// The unbracketed `"/a", "/b"` form of a
+    /// [`schema::FieldKind::LiteralList`] value — [`Self::parse_bare_reference_list`]'s
+    /// twin for the one list field whose entries are [`Literal`]s rather
+    /// than [`Reference`]s (`router`'s `path_prefix`, #184). The same
+    /// `KEY :` one-token lookahead decides whether a comma continues
+    /// this list or starts a sibling field, and for the same reason: in
+    /// `router api, path_prefix: "/api", entrypoint: web`, the second
+    /// comma begins `entrypoint`, not a second prefix.
+    fn parse_bare_literal_list(&mut self) -> Result<Vec<Literal>, ParseError> {
+        let mut items = vec![self.parse_literal()?];
+        while self.peek().kind == TokenKind::Comma && !self.comma_starts_a_new_field() {
+            self.bump();
+            items.push(self.parse_literal()?);
+        }
+        Ok(items)
+    }
+
+    /// A [`schema::FieldKind::LiteralList`] value: an optional leading
+    /// `:`, then either a bracketed list of literals or the bare
+    /// comma-list sugar. Exactly [`Self::parse_reference_list_value`]'s
+    /// shape, over literals.
+    fn parse_literal_list_value(&mut self) -> Result<Vec<Literal>, ParseError> {
+        if self.peek().kind == TokenKind::Colon {
+            self.bump();
+        }
+        if self.peek().kind == TokenKind::LBracket {
+            let (items, _) = self.parse_bracket_literal_list()?;
+            Ok(items)
+        } else if self.at_value_start() {
+            self.parse_bare_literal_list()
+        } else {
+            Err(self.unexpected(Expected::Description("a value or a list of values")))
         }
     }
 
@@ -824,17 +871,45 @@ impl<'src> Parser<'src> {
             return Ok((fields, span));
         }
 
-        // Beyond that, zero or more explicit secondary fields — the same
-        // "trailing comma continues, its absence ends the statement" rule
-        // every other comma-list in the grammar follows: a comma is
-        // required before each one, and one-token lookahead past it
-        // confirms the next key genuinely names one of the nested type's
-        // own fields (excluding the alias keyword, whose only valid
-        // position is the immediate, comma-free one above) before
-        // consuming it as part of this value — otherwise the comma (and
-        // whatever follows it) is left for the enclosing body, where a
-        // bare comma is never a valid statement start and now correctly
-        // errors instead of silently reattaching elsewhere.
+        // Beyond that, zero or more explicit secondary fields.
+        self.parse_secondary_fields(nested, &mut fields)?;
+
+        let last_end = self.tokens[self.pos.saturating_sub(1)].span.end;
+        let span = Span {
+            start: start_span.start,
+            end: last_end,
+            line: start_span.line,
+            col: start_span.col,
+            file: start_span.file,
+        };
+        Ok((fields, span))
+    }
+
+    /// Zero or more explicit `, key: value` secondary fields of `nested`,
+    /// continuing whatever value the caller has already started — the
+    /// same "trailing comma continues, its absence ends the statement"
+    /// rule every other comma-list in the grammar follows: a comma is
+    /// required before each one, and one-token lookahead past it
+    /// confirms the next key genuinely names one of the nested type's
+    /// own fields (excluding the alias keyword, whose only valid
+    /// position is the immediate, comma-free one
+    /// [`Self::parse_struct_primary_shorthand`] handles) before
+    /// consuming it as part of this value — otherwise the comma (and
+    /// whatever follows it) is left for the enclosing body, where a bare
+    /// comma is never a valid statement start and so correctly errors
+    /// instead of silently reattaching elsewhere.
+    ///
+    /// Factored out of [`Self::parse_struct_primary_shorthand`] when
+    /// `router` gained the same tail (#184): `router api, host: "...",
+    /// entrypoint: web-secure` continues from a *name* rather than from
+    /// a primary value, but everything after that first token is the
+    /// identical production, and having one copy of it is what keeps the
+    /// two spellings from drifting.
+    fn parse_secondary_fields(
+        &mut self,
+        nested: &'static TypeSchema,
+        fields: &mut StructFields,
+    ) -> Result<(), ParseError> {
         loop {
             if self.peek().kind != TokenKind::Comma {
                 break;
@@ -855,18 +930,9 @@ impl<'src> Parser<'src> {
                 break;
             }
             self.bump();
-            self.parse_statement_into(nested, &mut fields)?;
+            self.parse_statement_into(nested, fields)?;
         }
-
-        let last_end = self.tokens[self.pos.saturating_sub(1)].span.end;
-        let span = Span {
-            start: start_span.start,
-            end: last_end,
-            line: start_span.line,
-            col: start_span.col,
-            file: start_span.file,
-        };
-        Ok((fields, span))
+        Ok(())
     }
 
     /// **Termination invariant** (for [`Self::parse_struct_body`]'s `while
@@ -960,7 +1026,95 @@ impl<'src> Parser<'src> {
                 }
                 Ok(())
             }
+            FieldKind::LiteralList => {
+                let items = self.parse_literal_list_value()?;
+                match fields
+                    .entry(field.name)
+                    .or_insert_with(|| FieldValue::LiteralList(Vec::new()))
+                {
+                    FieldValue::LiteralList(v) => v.extend(items),
+                    _ => unreachable!("field kind is stable for a given field name"),
+                }
+                Ok(())
+            }
+            FieldKind::NamedNested(nested) => {
+                self.parse_named_nested_into(field, nested, key_span, fields)
+            }
         }
+    }
+
+    /// Parses one `router <name>? ( "{" body "}" | ( "," field )* )`
+    /// statement (#184) and appends it to the field's accumulated list.
+    ///
+    /// Two spellings, mirroring what the rest of the grammar already
+    /// offers a struct-kind value:
+    ///
+    /// - the canonical braced body, `router api { host: "..." }`, whose
+    ///   fields are newline-separated like any other struct body;
+    /// - the comma-continued form, `router api, host: "...", entrypoint:
+    ///   web-secure`, which reuses [`Self::parse_secondary_fields`]
+    ///   verbatim — the same production `expose 8096, host: "..."`
+    ///   already parses, continuing from the router's name instead of
+    ///   from a primary value.
+    ///
+    /// The name is optional and, when present, is an `IDENT` — never a
+    /// `STRING`, and never a `$param`. It lands in a label *key*, so the
+    /// narrow grammar is the first half of the injection guard (see
+    /// [`crate::ast::Router`]); codegen's own check is the second.
+    /// Leaving the name off (`router { ... }`) claims the same router id
+    /// `expose.host` does, which codegen rejects if the service sets
+    /// both.
+    ///
+    /// The unnamed form requires the braced body: with no name and no
+    /// `{`, there is no first token to continue a comma-list from, and
+    /// `router host: "x"` would have to guess whether `host` names the
+    /// router or its own field. Guessing is what the braces exist to
+    /// avoid.
+    fn parse_named_nested_into(
+        &mut self,
+        field: &'static FieldSchema,
+        nested: &'static TypeSchema,
+        key_span: Span,
+        fields: &mut StructFields,
+    ) -> Result<(), ParseError> {
+        // Mirrors `parse_nested_into`: an optional leading colon
+        // (`router: { ... }`) is accepted alongside the bare form.
+        if self.peek().kind == TokenKind::Colon {
+            self.bump();
+        }
+        let name = if self.peek().kind == TokenKind::Ident {
+            let tok = self.bump();
+            Some(Ident {
+                name: tok.lexeme.to_string(),
+                span: tok.span,
+            })
+        } else {
+            None
+        };
+        let (nested_fields, span) = if self.peek().kind == TokenKind::LBrace {
+            let (nested_fields, body_span) = self.parse_struct_body(nested)?;
+            let span = join_spans(key_span, body_span);
+            (nested_fields, span)
+        } else if name.is_some() {
+            let mut nested_fields = StructFields::new();
+            self.parse_secondary_fields(nested, &mut nested_fields)?;
+            let last_end = self.tokens[self.pos.saturating_sub(1)].span.end;
+            let span = Span {
+                end: last_end,
+                ..key_span
+            };
+            (nested_fields, span)
+        } else {
+            return Err(self.unexpected(Expected::Description("a name or `{`")));
+        };
+        match fields
+            .entry(field.name)
+            .or_insert_with(|| FieldValue::NamedStructs(Vec::new()))
+        {
+            FieldValue::NamedStructs(v) => v.push((name, nested_fields, span)),
+            _ => unreachable!("field kind is stable for a given field name"),
+        }
+        Ok(())
     }
 
     fn parse_field_value_literal(&mut self) -> Result<Literal, ParseError> {
@@ -1374,7 +1528,7 @@ impl<'src> Parser<'src> {
             "volume" => Ok(TopDecl::Volume(lower_volume(name, fields, span))),
             "service" => Ok(TopDecl::Service(Box::new(lower_service(
                 name, fields, span,
-            )))),
+            )?))),
             _ => {
                 unreachable!("top_level_type only ever returns the network/volume/service schemas")
             }
@@ -1466,7 +1620,7 @@ impl<'src> Parser<'src> {
         Ok(TemplateDecl {
             name,
             params,
-            fields: lower_service_fields(fields_map),
+            fields: lower_service_fields(fields_map)?,
             span,
         })
     }
@@ -1681,7 +1835,13 @@ fn lower_volume(name: Ident, mut fields: StructFields, span: Span) -> Volume {
 /// Lowers a raw `StructFields` map into a [`ServiceFields`] — shared by
 /// both `lower_service` and `parse_template_decl`, since a `service` body
 /// and a `template` body accept exactly the same field set.
-fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
+///
+/// Fallible only for `router` (#184): two blocks in one body claiming the
+/// same router id would silently collapse to one, so the duplicate is
+/// caught here, where both spans are still in hand — the same place and
+/// the same reasoning as `merge_map_entries`' own intra-body uniqueness
+/// check for `volume`/`env`/`publish`.
+fn lower_service_fields(mut fields: StructFields) -> Result<ServiceFields, ParseError> {
     let image = match fields.remove("image") {
         Some(FieldValue::Struct(f, s)) => Some(lower_image(f, s)),
         _ => None,
@@ -1689,6 +1849,10 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
     let expose = match fields.remove("expose") {
         Some(FieldValue::Struct(f, s)) => Some(lower_expose(f, s)),
         _ => None,
+    };
+    let routers = match fields.remove("router") {
+        Some(FieldValue::NamedStructs(v)) => lower_routers(v)?,
+        _ => Vec::new(),
     };
     let traefik = match fields.remove("traefik") {
         Some(FieldValue::Struct(f, s)) => Some(lower_traefik(f, s)),
@@ -1810,9 +1974,10 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         },
         _ => Vec::new(),
     };
-    ServiceFields {
+    Ok(ServiceFields {
         image,
         expose,
+        routers,
         traefik,
         restart,
         healthcheck,
@@ -1831,15 +1996,72 @@ fn lower_service_fields(mut fields: StructFields) -> ServiceFields {
         command,
         entrypoint,
         with,
+    })
+}
+
+/// Lowers each accumulated `router` block into a [`Router`], rejecting
+/// two blocks in one body that claim the same router id (#184).
+///
+/// A router id is what the emitted label key is built from
+/// (`traefik.http.routers.<service>-<name>`), so two blocks sharing one
+/// name aren't two routers — they're one router described twice, with
+/// whichever came last silently winning. That is the same failure
+/// `DuplicateMapKey` already refuses for two `volume` entries at one
+/// container path, so it gets the same treatment: a hard error naming
+/// both locations. The unnamed `router { }` form has an id too (the
+/// service's own name), so writing it twice collides in exactly the same
+/// way.
+///
+/// Note this is a *within one body* check. Two different tiers — a
+/// template and the service that uses it — naming the same router is not
+/// a duplicate at all but the merge this field is designed around; see
+/// `compose.rs`'s `merge_routers`.
+fn lower_routers(
+    entries: Vec<(Option<Ident>, StructFields, Span)>,
+) -> Result<Vec<Router>, ParseError> {
+    let mut routers: Vec<Router> = Vec::with_capacity(entries.len());
+    for (name, fields, span) in entries {
+        let key = name.as_ref().map(|n| n.name.as_str());
+        if let Some(first) = routers.iter().find(|r| r.key() == key) {
+            return Err(ParseError::DuplicateRouterName {
+                name: key.map(str::to_string),
+                first: first.span,
+                second: span,
+            });
+        }
+        routers.push(lower_router(name, fields, span));
+    }
+    Ok(routers)
+}
+
+fn lower_router(name: Option<Ident>, mut fields: StructFields, span: Span) -> Router {
+    let host = match fields.remove("host") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
+    let entrypoint = match fields.remove("entrypoint") {
+        Some(FieldValue::RefList(v)) => v,
+        _ => Vec::new(),
+    };
+    let path_prefix = match fields.remove("path_prefix") {
+        Some(FieldValue::LiteralList(v)) => v,
+        _ => Vec::new(),
+    };
+    Router {
+        name,
+        host,
+        entrypoint,
+        path_prefix,
+        span,
     }
 }
 
-fn lower_service(name: Ident, fields: StructFields, span: Span) -> Service {
-    Service {
+fn lower_service(name: Ident, fields: StructFields, span: Span) -> Result<Service, ParseError> {
+    Ok(Service {
         name,
-        fields: lower_service_fields(fields),
+        fields: lower_service_fields(fields)?,
         span,
-    }
+    })
 }
 
 fn lower_image(mut fields: StructFields, span: Span) -> Image {

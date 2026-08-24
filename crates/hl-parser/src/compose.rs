@@ -25,7 +25,7 @@ use hl_lexer::{SourceMap, Span};
 use crate::ast::{
     Command, DependsOnEntry, DeviceEntry, DeviceMap, Entrypoint, EnvEntry, EnvMap, Expose,
     Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, ParamType, Program, PublishEntry,
-    PublishMap, RawMap, RawValue, Reference, Restart, Service, ServiceFields, TemplateDecl,
+    PublishMap, RawMap, RawValue, Reference, Restart, Router, Service, ServiceFields, TemplateDecl,
     TemplateInvocation, TopDecl, Traefik, Volume, VolumeEntry, VolumeHost, VolumeMap,
 };
 use crate::schema::MapSide;
@@ -1498,6 +1498,15 @@ fn resolve_qualified_references<R: SymbolResolver>(
     if let Some(expose) = &fields.expose {
         reject_qualified(&expose.entrypoint, "expose.entrypoint")?;
     }
+    // A `router`'s own `entrypoint` list (#184) names the same thing
+    // `expose.entrypoint` does — an entry point in the deployment's
+    // `traefik.yml`, which no `.hll` file declares — so it gets the same
+    // rejection for the same reason: codegen reads only
+    // `Reference::name`, so an unchecked `traefik.web` would compile to
+    // `entrypoints=web` with the qualifier silently gone.
+    for router in &fields.routers {
+        reject_qualified(&router.entrypoint, "router.entrypoint")?;
+    }
     Ok(())
 }
 
@@ -1536,6 +1545,21 @@ fn substitute_params(
         }
         if let Some(h) = &mut e.host {
             substitute_literal(h, args, template_name)?;
+        }
+    }
+    // `router`'s own literal slots (#184). Its `host` is `expose.host`'s
+    // twin — a template that parameterizes one parameterizes the other —
+    // and each `path_prefix` entry is a plain `Literal` for exactly this
+    // reason (see `schema::FieldKind::LiteralList`). Missing either would
+    // reproduce #168's live bug class: the `Literal::Param` survives to
+    // codegen, which emits the parameter's own name into a Traefik rule
+    // and exits 0.
+    for router in &mut fields.routers {
+        if let Some(h) = &mut router.host {
+            substitute_literal(h, args, template_name)?;
+        }
+        for prefix in &mut router.path_prefix {
+            substitute_literal(prefix, args, template_name)?;
         }
     }
     if let Some(r) = &mut fields.restart
@@ -1918,6 +1942,47 @@ struct MergeAcc {
     /// it's a `FieldKind::BoolFlag`, not a [`Literal`], so it can't ride
     /// [`Self::scalars`]/[`SCALAR_FIELDS`] either.
     privileged: Option<(Span, Tier)>,
+    /// `router`'s own merge point (#184), keyed by router name and
+    /// merged *per sub-field* within each key — see [`merge_routers`].
+    ///
+    /// Not [`merge_map`], despite being keyed: `merge_map` replaces a
+    /// colliding entry outright, which would mean a service body writing
+    /// `router api { host: "..." }` silently discarded the `entrypoint`
+    /// and `path_prefix` a template gave the same router. `expose`
+    /// already merges per sub-field for exactly this reason, and a
+    /// `router` is `expose`'s router half made repeatable, so it has to
+    /// keep that property — one level deeper, since the sub-fields sit
+    /// under a name rather than directly on the struct.
+    routers: Vec<RouterAcc>,
+}
+
+/// One router's own accumulator, keyed by [`Self::key`] — a [`Router`]
+/// mid-merge, with the tier that last set the scalar `host` tracked
+/// alongside it exactly as [`MergeAcc::scalars`] tracks its own.
+///
+/// `entrypoint` and `path_prefix` carry no `Tier`: like every other list
+/// in the language they concatenate unconditionally, so there's no
+/// collision to attribute to a tier.
+struct RouterAcc {
+    name: Option<Ident>,
+    host: Option<(Literal, Tier)>,
+    entrypoint: Vec<Reference>,
+    path_prefix: Vec<Literal>,
+    span: Span,
+}
+
+impl RouterAcc {
+    fn key(&self) -> Option<&str> {
+        self.name.as_ref().map(|n| n.name.as_str())
+    }
+}
+
+/// A router id as a diagnostic renders it. The unnamed `router { }` form
+/// has a real id — the service's own name — but nothing the *user* wrote
+/// to quote back, so it's named for what it is rather than as an empty
+/// string.
+fn router_key_display(key: Option<&str>) -> String {
+    key.unwrap_or("<unnamed>").to_string()
 }
 
 impl MergeAcc {
@@ -1992,6 +2057,22 @@ impl MergeAcc {
         if let Some((privileged_span, _)) = self.privileged {
             fields.privileged = Some(privileged_span);
         }
+        // In accumulated order, which is tier order: `defaults`' routers
+        // first, then each `with` target's left to right, then the
+        // body's own, with a name any earlier tier already contributed
+        // merged in place rather than appended. That's what makes label
+        // emission order a stable function of the source (#184).
+        fields.routers = self
+            .routers
+            .into_iter()
+            .map(|r| Router {
+                name: r.name,
+                host: r.host.map(|(lit, _)| lit),
+                entrypoint: r.entrypoint,
+                path_prefix: r.path_prefix,
+                span: r.span,
+            })
+            .collect();
         fields
     }
 }
@@ -2453,7 +2534,114 @@ fn merge_tier(
     // see `merge_depends_on`'s own doc for the narrower collision rule
     // this field needs.
     merge_depends_on(&mut acc.depends_on, incoming.depends_on, tier)?;
+    // Keyed by router name, then merged sub-field by sub-field within
+    // each key — see `merge_routers`' own doc for why neither
+    // `merge_map` nor `LIST_FIELDS` fits (#184).
+    merge_routers(&mut acc.routers, incoming.routers, tier)?;
     acc.raw.entries.extend(incoming.raw.entries);
+    Ok(())
+}
+
+/// Merges `router` blocks into `acc`, keyed by router name (#184).
+///
+/// Two levels of merging, not one. Between routers, this is keyed like
+/// [`merge_map`]: a name no tier has contributed yet is appended, and a
+/// name an earlier tier already contributed is merged into rather than
+/// added twice. *Within* one name, each sub-field then merges by its own
+/// kind, exactly the way `expose`'s `port`/`host`/`entrypoint` do — the
+/// scalar `host` follows [`merge_scalar`]'s Own-always-wins /
+/// `defaults`-always-loses / two-explicit-templates-collide rule, while
+/// `entrypoint` and `path_prefix` concatenate.
+///
+/// That second level is the whole point. [`merge_map`]'s own
+/// full-entry replacement is right for `volume`/`publish`, where an
+/// entry is a single mapping with nothing inside it to keep, but a
+/// router is a record: a service body writing `router api { host: "..."
+/// }` over a template's `router api { entrypoint: web-secure }` means
+/// "same router, different host," not "throw the entry point away." So
+/// this reads as the keyed form of the per-sub-field merge
+/// docs/DESIGN.md already describes for `expose`.
+///
+/// `entrypoint` dedupes by name and `path_prefix` doesn't, matching what
+/// each list means: naming one entry point twice attaches the router to
+/// it once, while path prefixes are `||` alternatives whose written
+/// order is observable in the emitted rule — the same split
+/// [`ListField::dedupe`] already draws between `middleware`/`networks`
+/// and `dns`/`env_file`.
+fn merge_routers(
+    acc: &mut Vec<RouterAcc>,
+    incoming: Vec<Router>,
+    tier: &Tier,
+) -> Result<(), ComposeError> {
+    for router in incoming {
+        let key = router.key().map(str::to_string);
+        let Some(pos) = acc.iter().position(|held| held.key() == key.as_deref()) else {
+            acc.push(RouterAcc {
+                name: router.name,
+                host: router.host.map(|h| (h, tier.clone())),
+                entrypoint: router.entrypoint,
+                path_prefix: router.path_prefix,
+                span: router.span,
+            });
+            continue;
+        };
+        if let Some(host) = router.host {
+            merge_router_host(&mut acc[pos], key.as_deref(), host, tier)?;
+        }
+        // First occurrence wins, so accumulated order stays tier order
+        // with later repeats dropped — `expose.entrypoint`'s own rule,
+        // reached through the same comparison on `Reference::name` (a
+        // qualified entry can never get this far: it's rejected outright
+        // by `resolve_qualified_references`).
+        for entry in router.entrypoint {
+            if !acc[pos]
+                .entrypoint
+                .iter()
+                .any(|held| held.name == entry.name)
+            {
+                acc[pos].entrypoint.push(entry);
+            }
+        }
+        acc[pos].path_prefix.extend(router.path_prefix);
+        // The most recent contributor's span, so a diagnostic about the
+        // merged router points at the most specific place it was
+        // written — the service's own body when it wrote one, the
+        // template otherwise.
+        acc[pos].span = router.span;
+    }
+    Ok(())
+}
+
+/// [`merge_scalar`]'s rule applied to one router's `host`, reported as a
+/// [`ComposeError::MapKeyCollision`] rather than a
+/// [`ComposeError::FieldCollision`] because the field alone
+/// (`router.host`) doesn't say *which* router collided — the key does,
+/// and `MapKeyCollision` is the variant that already carries one.
+fn merge_router_host(
+    acc: &mut RouterAcc,
+    key: Option<&str>,
+    host: Literal,
+    tier: &Tier,
+) -> Result<(), ComposeError> {
+    match acc.host.take() {
+        None => acc.host = Some((host, tier.clone())),
+        Some((existing, existing_tier)) => match (&existing_tier, tier) {
+            (_, Tier::Own) => acc.host = Some((host, Tier::Own)),
+            (Tier::Defaults, _) => acc.host = Some((host, tier.clone())),
+            (Tier::Explicit(first), Tier::Explicit(second)) => {
+                return Err(ComposeError::MapKeyCollision(Box::new(MapKeyCollision {
+                    field: "router.host",
+                    side: MapSide::Key,
+                    key: router_key_display(key),
+                    first_template: first.clone(),
+                    second_template: second.clone(),
+                    first: existing.span(),
+                    second: host.span(),
+                })));
+            }
+            _ => unreachable!("Own is always merged last; Defaults is always merged first"),
+        },
+    }
     Ok(())
 }
 

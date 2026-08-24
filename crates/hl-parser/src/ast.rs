@@ -329,6 +329,77 @@ pub struct Expose {
     pub span: Span,
 }
 
+/// A parsed `router` block (#184) — one Traefik router computed off this
+/// service, independent of [`Expose`].
+///
+/// `expose` models exactly one router: one `host`, one `Host()` rule,
+/// one `entrypoints=` label. A service needing a second router (a public
+/// host beside a LAN host, an API path split off from a frontend) had no
+/// way to say so and had to move its whole label list into `raw {
+/// labels: [...] }`, losing every check `expose` performs. A `router`
+/// block is that second way to say it, and the two are deliberately
+/// independent: `expose` keeps its exact meaning, its exact merge rows,
+/// and its exact emitted labels, so a file written before this field
+/// existed compiles to the same bytes.
+///
+/// `name` keys the emitted label: `router api { ... }` on service
+/// `vikunja` emits `traefik.http.routers.vikunja-api.*`, while the
+/// unnamed `router { ... }` emits `traefik.http.routers.vikunja.*` — the
+/// very id `expose.host` produces, which is why setting both is a hard
+/// error (`hl_codegen`'s own `ExposeHostWithUnnamedRouter`).
+///
+/// The name is an [`Ident`], never a string, for the same reason a
+/// `service`/`network`/`volume` declaration's name is: it lands in a
+/// label *key*, not a value, and `IDENT`'s own grammar
+/// (`[A-Za-z_][A-Za-z0-9_-]*`) can't spell the `.`, `=`, backtick, or
+/// space a forged `traefik.*` key would need. Codegen re-checks it
+/// anyway — see `hl_codegen`'s own router-name guard — so the rule holds
+/// for an AST built by any other route too.
+///
+/// A `router` carries no port. Compose's `loadbalancer.server.port`
+/// label is per Compose *service*, not per router, so it stays derived
+/// from [`Expose::port`] exactly as before, and several routers off one
+/// container all balance onto that one port. `middleware` likewise stays
+/// a service-level field and applies to every router the service has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Router {
+    /// `None` for the unnamed `router { ... }` form, which claims the
+    /// same router id `expose.host` does.
+    pub name: Option<Ident>,
+    /// The hostname this router matches, spliced into the
+    /// ``Host(`...`)`` rule. `Option` for the same reason as
+    /// [`Image::reference`] — the parser enforces no required fields —
+    /// but a router reaching codegen with no host at all is an error
+    /// there, since the host is the whole of what creates a router.
+    pub host: Option<Literal>,
+    /// The Traefik entry points this router attaches to — spelled and
+    /// merged exactly like [`Expose::entrypoint`], including the empty
+    /// case meaning "emit no `entrypoints=` label at all."
+    pub entrypoint: Vec<Reference>,
+    /// Path prefixes to `&&` onto the `Host()` rule, `||`-joined inside
+    /// one parenthesized group: `path_prefix: ["/api/v1", "/dav/"]`
+    /// yields ``Host(`h`) && (PathPrefix(`/api/v1`) ||
+    /// PathPrefix(`/dav/`))``. A list of plain [`Literal`]s rather than
+    /// [`Reference`]s (unlike `entrypoint`) because a prefix is free text
+    /// a template legitimately parameterizes with `$param`, and the
+    /// grammar has no parameter in reference position.
+    ///
+    /// Order is observable — it's the order the `||` alternatives are
+    /// written in — so this concatenates on merge without the
+    /// distinct-name dedupe `entrypoint` gets, the same split
+    /// `dns`/`env_file` already draw against `middleware`/`networks`.
+    pub path_prefix: Vec<Literal>,
+    pub span: Span,
+}
+
+impl Router {
+    /// This router's own name, or `None` for the unnamed form — the key
+    /// composition merges on and codegen builds the label id from.
+    pub fn key(&self) -> Option<&str> {
+        self.name.as_ref().map(|n| n.name.as_str())
+    }
+}
+
 /// A parsed `restart` field. `policy` is `Option` for the same reason as
 /// [`Image::reference`] — see that doc.
 #[derive(Debug, Clone, PartialEq)]
@@ -706,6 +777,17 @@ pub struct TemplateInvocation {
 pub struct ServiceFields {
     pub image: Option<Image>,
     pub expose: Option<Expose>,
+    /// `router <name> { ... }` blocks (#184), in source order — the
+    /// extra Traefik routers this service computes beyond the one
+    /// `expose.host` creates. Empty for every service that never
+    /// mentions `router`, which is what keeps an `expose`-only file
+    /// generating byte-identical output. See [`Router`]'s own doc.
+    ///
+    /// Merged by router name, and per sub-field within each name — the
+    /// same shape `expose` merges by, so a service body can override
+    /// just one sub-field of a template-supplied router of the same
+    /// name. See `compose.rs`'s `merge_routers`.
+    pub routers: Vec<Router>,
     /// `traefik { disabled }` (#159). See [`Traefik`]'s doc. Codegen's
     /// `labels.rs` is the sole reader — a service that leaves this unset
     /// gets exactly today's computed label list, byte for byte.
