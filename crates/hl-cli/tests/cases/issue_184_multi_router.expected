@@ -1,0 +1,23 @@
+--- compose ---
+services:
+  vikunja:
+    image: vikunja/vikunja:latest
+    networks:
+    - traefik-net
+    expose:
+    - 3456
+    labels:
+    - traefik.docker.network=docker_default
+    - traefik.http.routers.vikunja-api.rule=Host(`vikunja.techdebtor.io`) && (PathPrefix(`/api/v1`) || PathPrefix(`/dav/`) || PathPrefix(`/.well-known/`))
+    - traefik.http.routers.vikunja-api.entrypoints=web-secure
+    - traefik.http.routers.vikunja-api-local.rule=Host(`vikunja.techdebtor.local`) && (PathPrefix(`/api/v1`) || PathPrefix(`/dav/`) || PathPrefix(`/.well-known/`))
+    - traefik.http.routers.vikunja-api-local.entrypoints=local
+    - traefik.http.routers.vikunja-frontend.rule=Host(`vikunja.techdebtor.io`)
+    - traefik.http.routers.vikunja-frontend.entrypoints=web-secure
+    - traefik.http.routers.vikunja-frontend-local.rule=Host(`vikunja.techdebtor.local`)
+    - traefik.http.routers.vikunja-frontend-local.entrypoints=local
+    - traefik.http.services.vikunja.loadbalancer.server.port=3456
+networks:
+  traefik-net:
+    name: docker_default
+    external: true

@@ -1,0 +1,42 @@
+# #184: a `router` block goes through the same three merge paths every
+# other field does, and each one has bitten this project before:
+#
+#   - `$param` substitution, in `host` and in every `path_prefix` entry.
+#     A field added without extending `substitute_params`' walk emits the
+#     parameter's own name into the generated document and exits 0 —
+#     that was #168, in `healthcheck`.
+#   - `{{name}}` interpolation in `host`, the repo's main template idiom
+#     (`"{{name}}.internal.techdebtor.io"`), resolved at codegen against
+#     the service's own name.
+#   - the keyed, per-sub-field merge: `api-docs` below is supplied whole
+#     by a template, and the service replaces only its `host` while still
+#     inheriting `entrypoint` and `path_prefix` — `expose`'s own
+#     per-sub-field merge, one level deeper because a router's sub-fields
+#     sit under a name.
+#
+# `lan` shows the same three tiers stacking rather than colliding: the
+# template contributes the entry point, the service the host.
+template public_api(prefix: String) {
+  router api-docs {
+    host: "placeholder.example.com"
+    entrypoint: web-secure
+    path_prefix: [$prefix, "/openapi.json"]
+  }
+  router lan {
+    entrypoint: local
+  }
+}
+
+service docs {
+  image "swaggerapi/swagger-ui"
+  expose 8080
+  with public_api { prefix: "/api/v1" }
+
+  # Overrides just this router's `host`; `entrypoint` and both
+  # `path_prefix` entries still come from `public_api` above.
+  router api-docs { host: "docs.techdebtor.io" }
+
+  # `{{name}}` resolves to the service's own name, exactly as it does in
+  # `expose.host`.
+  router lan { host: "{{name}}.internal.techdebtor.io" }
+}

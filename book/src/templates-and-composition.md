@@ -199,6 +199,20 @@ Different field kinds merge differently:
   *each other*: a template that sets `entrypoint` and a template that
   sets `command` merge cleanly, and the service gets both.
 
+- **`router`** merges keyed by router name, and then per sub-field
+  within each name—both halves of the two preceding rules, one nested
+  inside the other. Keyed, so a template's `router api` and a service's `router
+  web` give the service two routers rather than one. Per sub-field, so a
+  service body writing `router api { host: "..." }` over a template's
+  `router api { entrypoint: web-secure, path_prefix: [...] }` keeps the
+  entry point and the prefixes it didn't mention. Within one name,
+  `host` is a scalar and collides between two explicit templates,
+  `entrypoint` concatenates by distinct name like `middleware`, and
+  `path_prefix` concatenates keeping duplicates like `dns`, since the
+  prefixes are alternatives whose order is observable in the emitted
+  rule. A collision names the router as well as the field, since a
+  message about `router.host` alone doesn't say which router.
+
 That last point about per-sub-field merging means a service's own body
 can override just `expose.host` while still inheriting `port`/
 `entrypoint` from a `with`-listed template, without repeating them:

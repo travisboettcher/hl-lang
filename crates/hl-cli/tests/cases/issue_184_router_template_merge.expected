@@ -1,0 +1,12 @@
+--- compose ---
+services:
+  docs:
+    image: swaggerapi/swagger-ui
+    expose:
+    - 8080
+    labels:
+    - traefik.http.routers.docs-api-docs.rule=Host(`docs.techdebtor.io`) && (PathPrefix(`/api/v1`) || PathPrefix(`/openapi.json`))
+    - traefik.http.routers.docs-api-docs.entrypoints=web-secure
+    - traefik.http.routers.docs-lan.rule=Host(`docs.internal.techdebtor.io`)
+    - traefik.http.routers.docs-lan.entrypoints=local
+    - traefik.http.services.docs.loadbalancer.server.port=8080

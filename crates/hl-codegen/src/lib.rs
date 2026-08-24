@@ -207,6 +207,62 @@ pub enum CodegenError {
         disabled_span: Span,
         span: Span,
     },
+    /// A `router` block (#184) sets no `host`.
+    ///
+    /// [`Self::RouterFieldWithoutHost`]'s exact analogue, one level in:
+    /// there, a field that can only exist *on* a router has no router to
+    /// attach to; here, the block that exists only to *be* a router says
+    /// nothing about which requests reach it, so there is no rule to
+    /// emit and nothing the block could have meant. A `router` is
+    /// stricter than `expose` about this on purpose — `expose` has a
+    /// second job (Compose's own `expose:` key) that a host-less block
+    /// still does, and a `router` has none.
+    ///
+    /// `router` is the block's own name, or `None` for the unnamed
+    /// `router { }` form.
+    RouterBlockWithoutHost {
+        service: String,
+        router: Option<String>,
+        span: Span,
+    },
+    /// A service sets `expose.host` *and* an unnamed `router { }` (#184).
+    ///
+    /// Both claim the same Traefik router id — `expose.host` has always
+    /// produced `traefik.http.routers.<service>`, and that is exactly
+    /// what an unnamed `router` block means too — so the two would write
+    /// the same label keys, with one silently overwriting the other in
+    /// the emitted `labels:` list. Naming the block
+    /// (`router web { ... }`) gives it its own id and resolves it.
+    ExposeHostWithUnnamedRouter {
+        service: String,
+        /// Where `expose.host` was set, so the message can name both
+        /// halves of the contradiction.
+        host_span: Span,
+        span: Span,
+    },
+    /// A `router` block's name contains a character that can't appear in
+    /// a Traefik label *key* (#184).
+    ///
+    /// [`Self::UnsafeLabelValue`]'s counterpart for the other side of
+    /// the `=`. A router name is spliced into the key
+    /// `traefik.http.routers.<name>.rule`, so a `.` or an `=` in it
+    /// doesn't corrupt one label's value — it forges a *different* label
+    /// entirely, which is why the value-side [`Self::UnsafeLabelValue`]
+    /// set (tuned for the rule grammar a value is spliced into) is the
+    /// wrong set here. The name is checked against what a Traefik router
+    /// name may hold instead: ASCII letters, digits, `-`, and `_`.
+    ///
+    /// The grammar already makes this unreachable from `.hll` source —
+    /// a router name is an `IDENT`, whose own lexical rule admits
+    /// exactly those characters — so this is the second of two locks on
+    /// the same door, kept because codegen must not depend on the
+    /// parser's grammar to stay safe.
+    UnsafeRouterName {
+        service: String,
+        name: String,
+        character: char,
+        span: Span,
+    },
 }
 
 impl CodegenError {
@@ -220,7 +276,10 @@ impl CodegenError {
             | CodegenError::UnsubstitutedParameter { span, .. }
             | CodegenError::UnsafeLabelValue { span, .. }
             | CodegenError::RouterFieldWithoutHost { span, .. }
-            | CodegenError::TraefikDisabledWithRouterField { span, .. } => *span,
+            | CodegenError::TraefikDisabledWithRouterField { span, .. }
+            | CodegenError::RouterBlockWithoutHost { span, .. }
+            | CodegenError::ExposeHostWithUnnamedRouter { span, .. }
+            | CodegenError::UnsafeRouterName { span, .. } => *span,
         }
     }
 
@@ -319,6 +378,34 @@ impl CodegenError {
                 f,
                 "{at}: service `{service}` sets `{field}`, but `traefik` is disabled (at {}), so there is no router for it to attach to — drop the `{field}` or remove `disabled`",
                 disabled_span.locate(files)
+            ),
+            CodegenError::RouterBlockWithoutHost {
+                service, router, ..
+            } => {
+                let named = match router {
+                    Some(name) => format!("`router {name}`"),
+                    None => "an unnamed `router`".to_string(),
+                };
+                write!(
+                    f,
+                    "{at}: service `{service}` declares {named} with no `host`, so there is no rule for Traefik to match — add a host (`host: \"{service}.example.com\"`) or drop the `router`"
+                )
+            }
+            CodegenError::ExposeHostWithUnnamedRouter {
+                service, host_span, ..
+            } => write!(
+                f,
+                "{at}: service `{service}` declares an unnamed `router`, but `expose.host` (at {}) already claims the router id `traefik.http.routers.{service}` — name the router (`router web {{ ... }}`) or drop the `expose.host`",
+                host_span.locate(files)
+            ),
+            CodegenError::UnsafeRouterName {
+                service,
+                name,
+                character,
+                ..
+            } => write!(
+                f,
+                "{at}: service `{service}` names a router `{name}`, which must not contain {character:?} — the name becomes part of the Traefik label key (`traefik.http.routers.{name}.rule`), so it would write a different label than the one intended"
             ),
         }
     }
@@ -1193,6 +1280,83 @@ mod error_display_tests {
         assert_eq!(
             err.to_string(),
             "3:5: `middleware` must not contain ',' — it would change the meaning of the generated Traefik label"
+        );
+    }
+
+    // --- `router` diagnostics (#184) ---
+
+    /// The named form quotes the router back, so a service with four of
+    /// them says which one is missing its host.
+    #[test]
+    fn router_block_without_host_display() {
+        let err = CodegenError::RouterBlockWithoutHost {
+            service: "vikunja".to_string(),
+            router: Some("api".to_string()),
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: service `vikunja` declares `router api` with no `host`, so there is no rule \
+             for Traefik to match — add a host (`host: \"vikunja.example.com\"`) or drop the \
+             `router`"
+        );
+    }
+
+    /// The unnamed form has no name to quote, so it's named for what it
+    /// is rather than as an empty string.
+    #[test]
+    fn unnamed_router_block_without_host_display() {
+        let err = CodegenError::RouterBlockWithoutHost {
+            service: "web".to_string(),
+            router: None,
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: service `web` declares an unnamed `router` with no `host`, so there is no rule \
+             for Traefik to match — add a host (`host: \"web.example.com\"`) or drop the `router`"
+        );
+    }
+
+    /// The collision names both halves and the id they're fighting over,
+    /// since neither line is wrong on its own — it's the pair that is.
+    #[test]
+    fn expose_host_with_unnamed_router_display() {
+        let err = CodegenError::ExposeHostWithUnnamedRouter {
+            service: "web".to_string(),
+            host_span: Span {
+                start: 0,
+                end: 0,
+                line: 2,
+                col: 3,
+                file: FileId::ANONYMOUS,
+            },
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: service `web` declares an unnamed `router`, but `expose.host` (at 2:3) already \
+             claims the router id `traefik.http.routers.web` — name the router \
+             (`router web { ... }`) or drop the `expose.host`"
+        );
+    }
+
+    /// The message says *key*, not value, because that's what makes this
+    /// a different rejection from [`CodegenError::UnsafeLabelValue`]: a
+    /// bad name doesn't corrupt one label, it writes a different one.
+    #[test]
+    fn unsafe_router_name_display() {
+        let err = CodegenError::UnsafeRouterName {
+            service: "web".to_string(),
+            name: "a.tls".to_string(),
+            character: '.',
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: service `web` names a router `a.tls`, which must not contain '.' — the name \
+             becomes part of the Traefik label key (`traefik.http.routers.a.tls.rule`), so it \
+             would write a different label than the one intended"
         );
     }
 }
