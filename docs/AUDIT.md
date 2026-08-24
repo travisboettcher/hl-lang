@@ -353,7 +353,27 @@ a restriction the design already regrets.
 
 ---
 
-### F9—what earns a schema row needs an explicit bar
+### F9—what earns a schema row needs an explicit bar: rejected
+
+**Withdrawn.** #204 closed without merging, on this reasoning: *"I want to keep
+`raw` as an escape hatch for unimplemented features, not a go-to
+implementation."* The rest of this finding stays recorded because the
+observation that prompted it holds, but the proposal doesn't—read it as
+history, not as a live item.
+
+The disagreement is about what `raw` is for, and the call on that belongs
+to whoever sets direction here. This finding treated `raw` as a permanent
+home for any key the compiler doesn't transform. `raw` is instead a waiting
+room: a key sits there until it earns a real field, and a thin
+pass-through today is a candidate for promotion tomorrow rather than
+something to push back out. Under that reading a bar phrased as
+"otherwise it belongs in `raw`" points the wrong way, since it would
+freeze exactly the keys most likely to grow behavior later.
+
+What survives is the underlying measurement, minus the conclusion: the
+schema grew by roughly one row per release, and four of those rows do
+nothing the compiler couldn't skip. Whether that's drift or a healthy
+backlog working itself off is the question this finding answered wrongly.
 
 **Evidence.** `dns`, `env_file`, `container_name`, and `driver_opts` are
 thin pass-throughs. None validates, interpolates, or reshapes anything,
@@ -367,14 +387,15 @@ a homelab with completely different infrastructure? That test screens for
 *genericness*, and all four pass it. It doesn't screen for *value added
 over `raw`*, which is the axis the growth actually runs along.
 
-**Proposal.** Add a second bar to the design-principle section of
-`DESIGN.md`: **a Compose key earns a row only when the compiler does
-something to it**—validates it, interpolates into it, reshapes it, or
+**Proposal, as rejected.** Add a second bar to the design-principle
+section of `DESIGN.md`: a Compose key earns a row only when the compiler
+does something to it—validates it, interpolates into it, reshapes it, or
 merges it non-trivially. Otherwise it belongs in `raw`.
 
-Apply the bar to future additions rather than removing today's fields.
-F7 is the prerequisite that makes `raw` a safe destination. The four
-fields named here are simply what the bar would have caught.
+See the note opening this finding for why that last sentence is the part
+that failed. F7 stands on its own and doesn't depend on this: silently
+dropping a value in `raw` is a bug whether `raw` is a permanent home or a
+waiting room.
 
 ---
 
@@ -459,7 +480,7 @@ sits in the middle rather than first.
 | 4 | **F1** with **F6**, split `expose` and `router` by job | high | breaking |
 | 5 | **F7** with **F8**, `raw` collision checking and renames | low | breaking |
 | 6 | **F5**, one separator rule | medium | widening only |
-| 7 | **F9**, **F10**, and **F11**, for policy, and for parameter types | low | mixed |
+| 7 | **F10** and **F11**, for the dead form, and for parameter types | low | mixed |
 
 Steps 1 through 3 are pure internal consolidation and account for most of
 the code the audit would delete. Step 4 is the one restructure a user
