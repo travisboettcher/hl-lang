@@ -26,7 +26,9 @@ fn jellyfin_fixture_parses_to_expected_ast() {
 
     let expose = service.fields.expose.as_ref().expect("expose field set");
     assert_eq!(expose.port.as_ref().unwrap().text(), "8096");
-    assert_eq!(expose.host.as_ref().unwrap().text(), "media.techdebtor.io");
+    let router = &service.fields.routers[0];
+    assert_eq!(router.key(), None);
+    assert_eq!(router.host.as_ref().unwrap().text(), "media.techdebtor.io");
 
     assert_eq!(service.fields.volumes.entries.len(), 1);
     assert_eq!(service.fields.volumes.entries[0].host.text(), "/mnt/media");
@@ -88,11 +90,13 @@ fn syncthing_fixture_composes_to_expected_service() {
         matches!(port, Literal::Number { .. }),
         "expose.port should be substituted with the invocation's Number argument, got {port:?}"
     );
+    let router = &service.fields.routers[0];
+    assert_eq!(router.key(), None);
     assert_eq!(
-        expose.host.as_ref().unwrap().text(),
+        router.host.as_ref().unwrap().text(),
         "{{name}}.internal.techdebtor.io"
     );
-    let entrypoints: Vec<&str> = expose.entrypoint.iter().map(|r| r.text()).collect();
+    let entrypoints: Vec<&str> = router.entrypoint.iter().map(|r| r.text()).collect();
     assert_eq!(entrypoints, vec!["web-secure"]);
     let restart = service.fields.restart.as_ref().expect("restart field set");
     assert_eq!(restart.policy.as_ref().unwrap().text(), "unless-stopped");

@@ -14,7 +14,11 @@ volume syncthing-config {}
 template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
-  expose $port, host: "{{name}}.internal.techdebtor.io", entrypoint: web-secure
+  expose $port
+  router {
+    host: "{{name}}.internal.techdebtor.io"
+    entrypoint: web-secure
+  }
   middleware local-ipwhitelist
 }
 

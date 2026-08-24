@@ -737,17 +737,18 @@ fn raw_entrypoint_overrides_the_built_in_entrypoint() {
     ");
 }
 
-/// The service-level `entrypoint` field and `expose`'s own `entrypoint`
+/// The service-level `entrypoint` field and `router`'s own `entrypoint`
 /// sub-field name two unrelated things, and a service setting both
 /// emits both: a Compose `entrypoint:` key for the first and a Traefik
 /// `entrypoints=` label for the second.
 #[test]
-fn service_entrypoint_and_expose_entrypoint_reach_different_output() {
+fn service_entrypoint_and_router_entrypoint_reach_different_output() {
     let yaml = generate_from(
         "service web {\n  \
            image \"nginx\"\n  \
            entrypoint \"/bin/sh -c 'do-a-thing'\"\n  \
-           expose 8080, host: \"web.example.com\", entrypoint: web-secure\n\
+           expose 8080\n  \
+           router {\n    host: \"web.example.com\"\n    entrypoint: web-secure\n  }\n\
          }\n",
     );
     assert_yaml_snapshot!(yaml_value(&yaml), @r#"
@@ -1109,11 +1110,12 @@ fn parameterized_middleware_reaches_the_middlewares_label() {
 
 /// Hard constraint (#196): the Traefik metacharacter guard has to keep
 /// applying to exactly the values it applied to before — including a
-/// `$param` substituted into `expose.host`, which already went through
-/// the guard pre-#196 (`expose.host` was always `Literal`-typed), and a
-/// `$param` substituted into `middleware`, which is new since #196 gave
-/// that position a `Literal` slot for the first time. Both must still be
-/// rejected.
+/// `$param` substituted into a router's `host` (`expose <port> as
+/// $host`'s own sugared unnamed router, since #198), which already went
+/// through the guard pre-#196 (a router's `host` was always
+/// `Literal`-typed), and a `$param` substituted into `middleware`, which
+/// is new since #196 gave that position a `Literal` slot for the first
+/// time. Both must still be rejected.
 #[test]
 fn traefik_guard_still_applies_to_a_substituted_param() {
     let host_err = generate_err(
@@ -1124,11 +1126,11 @@ fn traefik_guard_still_applies_to_a_substituted_param() {
         matches!(
             host_err,
             CodegenError::UnsafeLabelValue {
-                field: "expose.host",
+                field: "router.host",
                 ..
             }
         ),
-        "expected UnsafeLabelValue for expose.host, got {host_err:?}"
+        "expected UnsafeLabelValue for router.host, got {host_err:?}"
     );
 
     let middleware_err = generate_err(
@@ -1580,9 +1582,9 @@ fn unknown_interpolation_is_error() {
     ));
 }
 
-/// #65: a backtick in `expose.host` used to compile to a valid Traefik
-/// rule matching every host, since `Host()`'s value has no escape for
-/// its own delimiter.
+/// #65: a backtick in a router's `host` used to compile to a valid
+/// Traefik rule matching every host, since `Host()`'s value has no
+/// escape for its own delimiter.
 #[test]
 fn backtick_in_expose_host_is_error() {
     let err = generate_err(
@@ -1591,7 +1593,7 @@ fn backtick_in_expose_host_is_error() {
     assert!(matches!(
         err,
         CodegenError::UnsafeLabelValue {
-            field: "expose.host",
+            field: "router.host",
             character: '`',
             ..
         }
@@ -1604,7 +1606,7 @@ fn backtick_in_expose_host_is_error() {
 #[test]
 fn several_entrypoints_join_into_one_label() {
     let yaml = generate_from(
-        "service s {\n  image \"x\"\n  expose 80, host: \"ok.example.com\", entrypoint: web, web-secure\n}\n",
+        "service s {\n  image \"x\"\n  expose 80\n  router {\n    host: \"ok.example.com\"\n    entrypoint: web, web-secure\n  }\n}\n",
     );
     assert!(
         yaml.contains("traefik.http.routers.s.entrypoints=web,web-secure"),
@@ -1619,12 +1621,12 @@ fn several_entrypoints_join_into_one_label() {
 #[test]
 fn comma_inside_one_entrypoint_is_error_with_a_list_hint() {
     let err = generate_err(
-        "service s {\n  image \"x\"\n  expose 80, host: \"ok.example.com\", entrypoint: \"web,web-secure\"\n}\n",
+        "service s {\n  image \"x\"\n  expose 80\n  router {\n    host: \"ok.example.com\"\n    entrypoint: \"web,web-secure\"\n  }\n}\n",
     );
     assert!(matches!(
         err,
         CodegenError::UnsafeLabelValue {
-            field: "expose.entrypoint",
+            field: "router.entrypoint",
             character: ',',
             ..
         }
@@ -2125,19 +2127,20 @@ fn yaml_hostile_values_round_trip_as_data_not_structure() {
     );
 }
 
-/// #80: `middleware` with no `expose.host` used to compile to a service
+/// #80/#198: `middleware` with no `router` used to compile to a service
 /// with no `labels:` key at all — the auth middleware the user asked for
 /// silently absent from a deployment that otherwise looked fine. There
 /// is no router for it to attach to, so this is a build failure now.
 #[test]
-fn middleware_without_a_host_is_an_error() {
+fn middleware_without_a_router_is_an_error() {
     let err = generate_err("service w {\n  image \"n\"\n  expose 80\n  middleware auth\n}\n");
     assert!(
         matches!(
             &err,
-            CodegenError::RouterFieldWithoutHost {
+            CodegenError::RouterBlockWithoutHost {
                 service,
                 field: "middleware",
+                router: None,
                 ..
             } if service == "w"
         ),
@@ -2145,36 +2148,37 @@ fn middleware_without_a_host_is_an_error() {
     );
     assert_eq!(
         err.to_string(),
-        "4:14: service `w` sets `middleware` but has no `expose.host`, so there is no Traefik \
-         router to attach it to — add a host (`expose <port> as \"w.example.com\"`) or drop the \
-         `middleware`"
+        "4:14: service `w` sets `middleware` but has no `router` to attach it to — add a \
+         router (`router { host: \"w.example.com\" }`) or drop the `middleware`"
     );
 }
 
-/// The same rule for the other router-attached field, and the one
-/// reported first when a service sets both — a host-less `expose` block
-/// is exactly the shape a forgotten `as "..."` leaves behind.
+/// The mirror-image mistake one level in: a `router` block that sets no
+/// `host` is refused before `middleware` is even looked at, since the
+/// block itself has nothing to attach `middleware` to.
 #[test]
-fn entrypoint_without_a_host_is_an_error() {
+fn router_entrypoint_without_a_host_is_an_error() {
     let err = generate_err(
-        "service w {\n  image \"n\"\n  expose 80, entrypoint: web-secure\n  middleware auth\n}\n",
+        "service w {\n  image \"n\"\n  expose 80\n  router { entrypoint: web-secure }\n  middleware auth\n}\n",
     );
     assert!(
         matches!(
             err,
-            CodegenError::RouterFieldWithoutHost {
-                field: "expose.entrypoint",
+            CodegenError::RouterBlockWithoutHost {
+                field: "router",
+                router: None,
                 ..
             }
         ),
-        "expected the entrypoint to be reported first, got: {err:?}"
+        "expected the hostless router to be reported first, got: {err:?}"
     );
 }
 
-/// A service that sets neither router-attached field is unaffected — no
-/// host, no router, no labels, and no diagnostic.
+/// A service that sets neither `router` nor `middleware` is unaffected —
+/// no router, no labels, and no diagnostic. `expose <port>` alone stays
+/// legal (constraint #3): it's Compose's own `expose:` key.
 #[test]
-fn a_hostless_service_without_router_fields_still_builds() {
+fn a_routerless_service_without_middleware_still_builds() {
     let yaml = generate_from("service w {\n  image \"n\"\n  expose 80\n}\n");
     let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
     assert!(parsed["services"]["w"].get("labels").is_none());
@@ -2380,7 +2384,7 @@ fn traefik_disabled_with_expose_host_is_an_error() {
             &err,
             CodegenError::TraefikDisabledWithRouterField {
                 service,
-                field: "expose.host",
+                field: "router",
                 ..
             } if service == "db"
         ),
@@ -2388,8 +2392,8 @@ fn traefik_disabled_with_expose_host_is_an_error() {
     );
     assert_eq!(
         err.to_string(),
-        "3:18: service `db` sets `expose.host`, but `traefik` is disabled (at 4:13), so there is \
-         no router for it to attach to — drop the `expose.host` or remove `disabled`"
+        "3:15: service `db` sets `router`, but `traefik` is disabled (at 4:13), so there is \
+         no router for it to attach to — drop the `router` or remove `disabled`"
     );
 }
 
@@ -2411,11 +2415,12 @@ fn traefik_disabled_with_middleware_is_an_error() {
 }
 
 #[test]
-fn traefik_disabled_with_entrypoint_is_an_error() {
+fn traefik_disabled_with_router_block_is_an_error() {
     let err = generate_err(
         "service db {\n  \
            image \"postgres:15\"\n  \
-           expose 5432, entrypoint: web-secure\n  \
+           expose 5432\n  \
+           router { entrypoint: web-secure }\n  \
            traefik { disabled }\n\
          }\n",
     );
@@ -2423,7 +2428,7 @@ fn traefik_disabled_with_entrypoint_is_an_error() {
         matches!(
             err,
             CodegenError::TraefikDisabledWithRouterField {
-                field: "expose.entrypoint",
+                field: "router",
                 ..
             }
         ),

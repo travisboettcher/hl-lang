@@ -10,8 +10,8 @@ use hl_parser::{Literal, Router, ServiceFields, Span};
 use crate::{CodegenError, interp};
 
 /// Characters rejected in every label value the user writes directly —
-/// `expose.host` and each `expose.entrypoint` entry. Motivated by
-/// `expose.host`, which is spliced verbatim into
+/// a router's `host` and each `entrypoint` entry. Motivated by `host`,
+/// which is spliced verbatim into
 /// a ``Host(`...`)`` router rule. A backtick alone is enough to break
 /// out: it closes the value and everything after it is read as more
 /// rule grammar, so `` host "ok.example.com`) || HostRegexp(`{any:.+}" ``
@@ -26,7 +26,7 @@ use crate::{CodegenError, interp};
 /// clearly-dangerous characters rather than an attempt at a full
 /// hostname grammar, so no legitimate existing config is broken.
 ///
-/// `expose.entrypoint` shares this exact set, `,` included. It used to
+/// `entrypoint` shares this exact set, `,` included. It used to
 /// need its own copy with `,` carved out, because a single scalar
 /// `entrypoint "web,websecure"` was the only way to attach a router to
 /// more than one entry point. Now that `entrypoint` is a list and
@@ -115,79 +115,24 @@ fn reject_metacharacters(
     }
 }
 
-/// The first field a service sets that only means anything attached to a
-/// Traefik router, if it sets one at all — in the order [`compute`]
-/// would have emitted their labels, so the field reported is the first
-/// one that needed the missing `expose.host`.
-///
-/// Both are pointed at by their first entry's own span rather than the
-/// field's: a repeated `middleware` accumulates entries across a
-/// template and the service's own body, and the first one is the entry
-/// that the merged service leads with.
-///
-/// The two fields need different routers, which is why `router` blocks
-/// (#184) only rescue one of them. `expose.entrypoint`'s label goes on
-/// `traefik.http.routers.<service>` specifically — the router
-/// `expose.host` and nothing else creates — so a `router` block can't
-/// stand in for the missing host there. `middleware` is service-level
-/// and attaches to *every* router the service has, so a service with a
-/// `router` block has somewhere to put it and isn't router-less at all.
-/// A service with no `router` blocks reaches exactly the same answer
-/// this function gave before they existed.
-fn router_field_needing_host(fields: &ServiceFields) -> Option<(&'static str, Span)> {
-    fields
-        .expose
-        .as_ref()
-        .and_then(|e| e.entrypoint.first())
-        .map(|r| ("expose.entrypoint", r.span()))
-        .or_else(|| {
-            if !fields.routers.is_empty() {
-                return None;
-            }
-            fields.middleware.first().map(|r| ("middleware", r.span()))
-        })
-}
-
 /// The first Traefik-specific field a *disabled* service also sets, if
 /// it sets one at all (#159) — checked in the same order [`compute`]
 /// would have emitted their labels were the service not disabled
-/// (`expose.host`, then `expose.entrypoint`, then `middleware`), so the
-/// field named in the diagnostic is the first one that contradicts
-/// `traefik { disabled }`.
+/// (each `router` block, then `middleware`), so the field named in the
+/// diagnostic is the first one that contradicts `traefik { disabled }`.
 ///
 /// `expose.port` deliberately isn't checked here: it's Compose's own
 /// `expose:` key, plain container-network visibility with nothing to do
 /// with Traefik, so a disabled service may still declare it (#159) —
 /// see [`crate::CodegenError::TraefikDisabledWithRouterField`]'s doc.
-/// `expose.host` leads because disabling Traefik makes even the host
-/// that would have *created* the router a contradiction, not just the
-/// fields that would attach to it. A `router` block (#184) is the same
-/// kind of contradiction one step further along — a whole router
-/// declared on a service that just said it wants none — and sorts
-/// between the `expose` sub-fields and `middleware`, which is where its
-/// labels would have been emitted.
-///
-/// This deliberately spells the order out rather than reusing
-/// [`router_field_needing_host`] for its last two rows, as it used to:
-/// that function now answers a narrower question (which field lacks a
-/// router it could attach to), and a `router` block makes the two
-/// questions diverge — it *gives* `middleware` a router, so
-/// `router_field_needing_host` stops reporting `middleware`, while a
-/// disabled service contradicts both.
+/// A `router` block leads because disabling Traefik makes even the
+/// block that would have *created* a router a contradiction, not just
+/// `middleware`, which only ever attaches to one.
 fn traefik_conflict_field(fields: &ServiceFields) -> Option<(&'static str, Span)> {
     fields
-        .expose
-        .as_ref()
-        .and_then(|e| e.host.as_ref())
-        .map(|host| ("expose.host", host.span()))
-        .or_else(|| {
-            fields
-                .expose
-                .as_ref()
-                .and_then(|e| e.entrypoint.first())
-                .map(|r| ("expose.entrypoint", r.span()))
-        })
-        .or_else(|| fields.routers.first().map(|r| ("router", r.span)))
+        .routers
+        .first()
+        .map(|r| ("router", r.span))
         .or_else(|| fields.middleware.first().map(|r| ("middleware", r.span())))
 }
 
@@ -300,6 +245,7 @@ fn push_router_labels(
         None => {
             return Err(CodegenError::RouterBlockWithoutHost {
                 service: service_name.to_string(),
+                field: "router",
                 router: router.key().map(str::to_string),
                 span: router.span,
             });
@@ -336,40 +282,34 @@ fn push_router_labels(
 
 /// Computes `service_name`'s Traefik label list, in this order:
 /// `traefik.docker.network=` (if `docker_network` is set — the real name
-/// of whichever of the service's declared networks is `external`),
-/// the router rule (from `expose.host`), `.entrypoints=` (if
-/// `expose.entrypoint` is non-empty — one comma-joined label for the
-/// whole list, the same shape as `.middlewares=` below but with no
-/// `@file` suffix, which is a file-provider convention specific to
-/// middleware references), `.middlewares=` (if any, each getting an
-/// `@file` suffix — the file provider's own reference convention,
-/// confirmed mechanical/always-on, not homelab-specific), and finally
-/// the loadbalancer port (if `expose.port` is set and the service has a
-/// router at all) — emitted whenever a port is set, even when
-/// technically redundant with Traefik's single-port default, matching
-/// every real example's own "always explicit" convention.
+/// of whichever of the service's declared networks is `external`), then
+/// one group per `router` block (#184, #198), in source order —
+/// `<id>.rule=` (with `path_prefix`'s alternatives `&&`-ed onto the
+/// `Host()` when the block sets any, `<id>` being `<service>` for the
+/// unnamed form and `<service>-<name>` for a named one), its own
+/// `.entrypoints=` (if the block's `entrypoint` list is non-empty — one
+/// comma-joined label for the whole list, the same shape as
+/// `.middlewares=` below but with no `@file` suffix, which is a
+/// file-provider convention specific to middleware references), and the
+/// service-level `.middlewares=` (if any, each getting an `@file` suffix
+/// — the file provider's own reference convention, confirmed
+/// mechanical/always-on, not homelab-specific) — and finally, once, the
+/// loadbalancer port (from `expose.port`) if the service has any router
+/// at all. A service that writes no `router` block (`expose <port> as
+/// "<host>"`'s own sugared one included) reaches none of that and emits
+/// only the `traefik.docker.network=` line, if any.
 ///
-/// Then, after that, one such group per `router` block (#184), in source
-/// order: `<service>-<name>.rule=` (with `path_prefix`'s alternatives
-/// `&&`-ed onto the `Host()` when the block sets any), its own
-/// `.entrypoints=`, and the same service-level `.middlewares=` list the
-/// `expose` router gets. A service that writes no `router` block reaches
-/// none of that and emits exactly the list it always did, byte for byte
-/// — the whole reason `router` is its own repeatable field rather than a
-/// change to `expose`.
-///
-/// Both router-attached fields — `expose.entrypoint` and `middleware` —
-/// require a router to attach to. `expose.entrypoint` requires
-/// `expose.host` specifically, since its label goes on the router only
-/// that host creates; `middleware` is satisfied by any router the
-/// service has, `expose.host`'s or a `router` block's. Setting either
-/// with nothing to attach to is [`CodegenError::RouterFieldWithoutHost`],
-/// not a silently label-less service (#80). A `router` block that sets
-/// no `host` at all is [`CodegenError::RouterBlockWithoutHost`], for the
-/// same reason one step in, and a service that sets both `expose.host`
-/// and an *unnamed* `router` is
-/// [`CodegenError::ExposeHostWithUnnamedRouter`], since the two would
-/// claim one router id.
+/// `middleware` only ever means anything attached to a router, so it
+/// requires at least one — any `router` block, unnamed or named. Setting
+/// it with none at all is [`CodegenError::RouterBlockWithoutHost`], not a
+/// silently label-less service (#80). A `router` block that sets no
+/// `host` at all is the same error one step in — the block that exists
+/// only to *be* a router says nothing about which requests reach it.
+/// Once every router block is confirmed to have a host, a service that
+/// has at least one but sets no `expose <port>` is
+/// [`CodegenError::RouterWithoutPort`] (#198): a router with no port to
+/// load-balance onto used to mean Traefik silently guessed one, and now
+/// means `hllc` refuses to compile instead.
 ///
 /// A service that sets `traefik { disabled }` (#159) short-circuits all
 /// of the above: the returned list is exactly `["traefik.enable=false"]`,
@@ -408,60 +348,28 @@ pub fn compute(
         labels.push(format!("traefik.docker.network={net}"));
     }
 
-    let expose_host = fields.expose.as_ref().and_then(|e| e.host.as_ref());
-
-    // Checked before any label is emitted, so "no `expose` block at all"
-    // and "an `expose` block with no `host`" take the same path — a
-    // `middleware` line is equally router-less either way.
-    if expose_host.is_none()
-        && let Some((field, span)) = router_field_needing_host(fields)
+    // `middleware` only ever means anything attached to a router, so
+    // with no router at all there's nothing to attach it to (#80, #144,
+    // #198) — checked before any label is emitted, so a service is
+    // refused the same way whether it never wrote `router` at all or
+    // just hasn't gotten to it yet.
+    if fields.routers.is_empty()
+        && let Some(first) = fields.middleware.first()
     {
-        return Err(CodegenError::RouterFieldWithoutHost {
+        return Err(CodegenError::RouterBlockWithoutHost {
             service: service_name.to_string(),
-            field,
-            span,
+            field: "middleware",
+            router: None,
+            span: first.span(),
         });
-    }
-
-    // An unnamed `router { }` claims `traefik.http.routers.<service>`,
-    // which is precisely the id `expose.host` produces — two blocks
-    // writing the same label keys, one silently overwriting the other in
-    // the emitted list. Refused rather than resolved in either
-    // direction, since neither reading is the obvious one (#184).
-    if let Some(host_lit) = expose_host
-        && let Some(unnamed) = fields.routers.iter().find(|r| r.name.is_none())
-    {
-        return Err(CodegenError::ExposeHostWithUnnamedRouter {
-            service: service_name.to_string(),
-            host_span: host_lit.span(),
-            span: unnamed.span,
-        });
-    }
-
-    if let Some(host_lit) = expose_host {
-        let host = interp::resolve(host_lit.text(), bindings, host_lit.span())?;
-        reject_metacharacters(&host, "expose.host", LABEL_METACHARACTERS, host_lit.span())?;
-        labels.push(format!(
-            "traefik.http.routers.{service_name}.rule=Host(`{host}`)"
-        ));
-
-        let entrypoint = fields
-            .expose
-            .as_ref()
-            .map(|e| e.entrypoint.as_slice())
-            .unwrap_or_default();
-        if let Some(label) =
-            entrypoints_label(service_name, "expose.entrypoint", entrypoint, bindings)?
-        {
-            labels.push(label);
-        }
-        if let Some(label) = middlewares_label(service_name, &fields.middleware)? {
-            labels.push(label);
-        }
     }
 
     // In source order (#184), which composition has already made a
     // stable function of the source — see `compose.rs`'s `merge_routers`.
+    // `expose <port> as "<host>"`'s own sugared unnamed router is just
+    // another entry here (`crate::parser::Parser::parse_expose_as_sugar`
+    // pushes it during parsing), so it reaches the exact same
+    // `push_router_labels` call every hand-written `router` block does.
     for router in &fields.routers {
         push_router_labels(
             &mut labels,
@@ -473,17 +381,26 @@ pub fn compute(
     }
 
     // Per Compose *service*, not per router: a container listens on one
-    // port however many routers point at it, so this stays exactly where
-    // it was — derived from `expose.port`, emitted once, and only when
-    // the service has a router for it to serve. A `router` block carries
-    // no port of its own for the same reason (#184).
-    if let Some(port) = fields.expose.as_ref().and_then(|e| e.port.as_ref())
-        && (expose_host.is_some() || !fields.routers.is_empty())
-    {
-        labels.push(format!(
-            "traefik.http.services.{service_name}.loadbalancer.server.port={}",
-            port.text()
-        ));
+    // port however many routers point at it, so this is emitted once,
+    // only when the service has a router for it to serve — and, since
+    // #198 left `expose.port` the one remaining source of a port, a
+    // router with none at all is refused rather than left for Traefik to
+    // guess (the live defect #198 closes: a service routed only by
+    // `router` blocks with no `expose` used to emit no
+    // `loadbalancer.server.port` label at all, silently).
+    if !fields.routers.is_empty() {
+        match fields.expose.as_ref().and_then(|e| e.port.as_ref()) {
+            Some(port) => labels.push(format!(
+                "traefik.http.services.{service_name}.loadbalancer.server.port={}",
+                port.text()
+            )),
+            None => {
+                return Err(CodegenError::RouterWithoutPort {
+                    service: service_name.to_string(),
+                    span: fields.routers[0].span,
+                });
+            }
+        }
     }
 
     Ok(labels)
@@ -520,6 +437,50 @@ mod tests {
             .collect()
     }
 
+    /// `expose { port }` (#198) — the one field left on `Expose`.
+    fn expose_port(value: u64) -> Expose {
+        Expose {
+            port: Some(Literal::Number {
+                text: value.to_string(),
+                value,
+                span: span(),
+            }),
+            span: span(),
+        }
+    }
+
+    fn router(name: Option<&str>, host: Option<&str>) -> Router {
+        Router {
+            name: name.map(|n| Ident {
+                name: n.to_string(),
+                span: span(),
+            }),
+            host: host.map(lit),
+            entrypoint: Vec::new(),
+            path_prefix: Vec::new(),
+            span: span(),
+        }
+    }
+
+    fn with_routers(routers: Vec<Router>) -> ServiceFields {
+        ServiceFields {
+            routers,
+            ..Default::default()
+        }
+    }
+
+    /// An unnamed `router { host: ... }` — the shape `expose <port> as
+    /// "<host>"` desugars to (#198), and the direct replacement for the
+    /// old `expose_with_host` helper this module used before `host` moved
+    /// off `Expose`.
+    fn router_with_host(host: &str) -> ServiceFields {
+        with_routers(vec![router(None, Some(host))])
+    }
+
+    fn prefixes(paths: &[&str]) -> Vec<Literal> {
+        paths.iter().map(|p| lit(p)).collect()
+    }
+
     #[test]
     fn no_expose_means_no_router_labels() {
         let fields = ServiceFields::default();
@@ -527,11 +488,15 @@ mod tests {
         assert!(labels.is_empty());
     }
 
-    /// #80: a `middleware` with no router to attach to is refused rather
-    /// than dropped — and refused whether the service has a host-less
-    /// `expose` block or no `expose` block at all.
+    /// #80/#198: `middleware` only ever means anything attached to a
+    /// router, so with none at all there's nothing to attach it to —
+    /// whether the service has no `expose` at all or an `expose <port>`
+    /// with nothing routing to it. A port with no router is exactly as
+    /// router-less as no `expose` at all (constraint #3: `expose <port>`
+    /// alone stays legal, it just doesn't rescue a router-less
+    /// `middleware`).
     #[test]
-    fn middleware_without_a_host_is_rejected() {
+    fn middleware_without_a_router_is_rejected() {
         let mut fields = ServiceFields {
             middleware: refs(&["forwardAuth-authentik"]),
             ..Default::default()
@@ -539,67 +504,33 @@ mod tests {
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
-            CodegenError::RouterFieldWithoutHost {
+            CodegenError::RouterBlockWithoutHost {
                 field: "middleware",
+                router: None,
                 ..
             }
         ));
 
-        fields.expose = Some(Expose {
-            port: Some(Literal::Number {
-                text: "80".to_string(),
-                value: 80,
-                span: span(),
-            }),
-            host: None,
-            entrypoint: Vec::new(),
-            span: span(),
-        });
+        fields.expose = Some(expose_port(80));
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
-            CodegenError::RouterFieldWithoutHost {
+            CodegenError::RouterBlockWithoutHost {
                 field: "middleware",
+                router: None,
                 ..
             }
         ));
     }
 
-    /// `expose.entrypoint` needs the same router, and is the field
-    /// reported when a service sets both — it's the one whose label would
-    /// have been emitted first.
+    /// The guard is specific to router-attached fields: a service with
+    /// neither a router nor `middleware` still generates its non-router
+    /// labels and no diagnostic.
     #[test]
-    fn entrypoint_without_a_host_is_rejected_before_middleware() {
+    fn an_expose_with_no_port_and_no_router_is_fine() {
         let fields = ServiceFields {
             expose: Some(Expose {
                 port: None,
-                host: None,
-                entrypoint: refs(&["web-secure"]),
-                span: span(),
-            }),
-            middleware: refs(&["forwardAuth-authentik"]),
-            ..Default::default()
-        };
-        let err = compute("s", &fields, None, &bindings()).unwrap_err();
-        assert!(matches!(
-            err,
-            CodegenError::RouterFieldWithoutHost {
-                field: "expose.entrypoint",
-                ..
-            }
-        ));
-    }
-
-    /// The guard is specific to the router-attached fields: a host-less
-    /// service that sets neither still generates its non-router labels
-    /// and no diagnostic.
-    #[test]
-    fn a_hostless_service_without_router_fields_is_fine() {
-        let fields = ServiceFields {
-            expose: Some(Expose {
-                port: None,
-                host: None,
-                entrypoint: Vec::new(),
                 span: span(),
             }),
             ..Default::default()
@@ -617,32 +548,16 @@ mod tests {
 
     #[test]
     fn host_only_produces_rule_but_no_entrypoints_label() {
-        let fields = ServiceFields {
-            expose: Some(Expose {
-                port: None,
-                host: Some(lit("syncthing.internal.techdebtor.io")),
-                entrypoint: Vec::new(),
-                span: span(),
-            }),
-            ..Default::default()
-        };
+        let mut fields = router_with_host("syncthing.internal.techdebtor.io");
+        fields.expose = Some(expose_port(8384));
         let labels = compute("syncthing", &fields, None, &bindings()).unwrap();
         assert_eq!(
             labels,
-            vec!["traefik.http.routers.syncthing.rule=Host(`syncthing.internal.techdebtor.io`)"]
+            vec![
+                "traefik.http.routers.syncthing.rule=Host(`syncthing.internal.techdebtor.io`)",
+                "traefik.http.services.syncthing.loadbalancer.server.port=8384",
+            ]
         );
-    }
-
-    fn expose_with_host(host: &str) -> ServiceFields {
-        ServiceFields {
-            expose: Some(Expose {
-                port: None,
-                host: Some(lit(host)),
-                entrypoint: Vec::new(),
-                span: span(),
-            }),
-            ..Default::default()
-        }
     }
 
     /// #65: the exact escape from the issue — a backtick closes the
@@ -650,12 +565,12 @@ mod tests {
     /// yielding a valid rule that matches every host.
     #[test]
     fn backtick_in_host_is_rejected() {
-        let fields = expose_with_host("ok.example.com`) || HostRegexp(`{any:.+}");
+        let fields = router_with_host("ok.example.com`) || HostRegexp(`{any:.+}");
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
             CodegenError::UnsafeLabelValue {
-                field: "expose.host",
+                field: "router.host",
                 character: '`',
                 ..
             }
@@ -664,12 +579,12 @@ mod tests {
 
     #[test]
     fn comma_in_host_is_rejected() {
-        let fields = expose_with_host("a.example.com,b.example.com");
+        let fields = router_with_host("a.example.com,b.example.com");
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
             CodegenError::UnsafeLabelValue {
-                field: "expose.host",
+                field: "router.host",
                 character: ',',
                 ..
             }
@@ -683,12 +598,12 @@ mod tests {
     /// wouldn't have stopped.
     #[test]
     fn newline_in_host_is_rejected() {
-        let fields = expose_with_host("ok.example.com\nsecond.example.com");
+        let fields = router_with_host("ok.example.com\nsecond.example.com");
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
             CodegenError::UnsafeLabelValue {
-                field: "expose.host",
+                field: "router.host",
                 character: '\n',
                 ..
             }
@@ -699,13 +614,13 @@ mod tests {
     /// codegen joins with commas.
     #[test]
     fn newline_in_entrypoint_is_rejected() {
-        let mut fields = expose_with_host("ok.example.com");
-        fields.expose.as_mut().unwrap().entrypoint = refs(&["web\nsecure"]);
+        let mut fields = router_with_host("ok.example.com");
+        fields.routers[0].entrypoint = refs(&["web\nsecure"]);
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
             CodegenError::UnsafeLabelValue {
-                field: "expose.entrypoint",
+                field: "router.entrypoint",
                 character: '\n',
                 ..
             }
@@ -716,7 +631,7 @@ mod tests {
     /// that joins them — the control-character check is what covers it.
     #[test]
     fn newline_in_middleware_reference_is_rejected() {
-        let mut fields = expose_with_host("ok.example.com");
+        let mut fields = router_with_host("ok.example.com");
         fields.middleware = refs(&["authentik\nsecond"]);
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
@@ -733,12 +648,12 @@ mod tests {
     /// literal one could always be typed straight into a string.
     #[test]
     fn tab_in_host_is_rejected() {
-        let fields = expose_with_host("ok.example.com\t");
+        let fields = router_with_host("ok.example.com\t");
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
             CodegenError::UnsafeLabelValue {
-                field: "expose.host",
+                field: "router.host",
                 character: '\t',
                 ..
             }
@@ -749,13 +664,13 @@ mod tests {
     /// only appears after `{{name}}` interpolation is still caught.
     #[test]
     fn host_is_checked_after_interpolation() {
-        let fields = expose_with_host("{{name}}.example.com");
+        let fields = router_with_host("{{name}}.example.com");
         let bindings = HashMap::from([("name", "bad`)")]);
         let err = compute("s", &fields, None, &bindings).unwrap_err();
         assert!(matches!(
             err,
             CodegenError::UnsafeLabelValue {
-                field: "expose.host",
+                field: "router.host",
                 character: '`',
                 ..
             }
@@ -764,13 +679,13 @@ mod tests {
 
     #[test]
     fn backtick_in_entrypoint_is_rejected() {
-        let mut fields = expose_with_host("ok.example.com");
-        fields.expose.as_mut().unwrap().entrypoint = refs(&["web`-secure"]);
+        let mut fields = router_with_host("ok.example.com");
+        fields.routers[0].entrypoint = refs(&["web`-secure"]);
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
             CodegenError::UnsafeLabelValue {
-                field: "expose.entrypoint",
+                field: "router.entrypoint",
                 character: '`',
                 ..
             }
@@ -783,13 +698,13 @@ mod tests {
     /// against. This used to be the one accepted metacharacter here.
     #[test]
     fn comma_in_a_single_entrypoint_is_rejected() {
-        let mut fields = expose_with_host("ok.example.com");
-        fields.expose.as_mut().unwrap().entrypoint = refs(&["web,web-secure"]);
+        let mut fields = router_with_host("ok.example.com");
+        fields.routers[0].entrypoint = refs(&["web,web-secure"]);
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
             CodegenError::UnsafeLabelValue {
-                field: "expose.entrypoint",
+                field: "router.entrypoint",
                 character: ',',
                 ..
             }
@@ -802,8 +717,9 @@ mod tests {
     /// `@file` suffix, which is `middleware`'s convention alone.
     #[test]
     fn several_entrypoints_join_into_one_label() {
-        let mut fields = expose_with_host("ok.example.com");
-        fields.expose.as_mut().unwrap().entrypoint = refs(&["web", "web-secure"]);
+        let mut fields = router_with_host("ok.example.com");
+        fields.routers[0].entrypoint = refs(&["web", "web-secure"]);
+        fields.expose = Some(expose_port(80));
         let labels = compute("s", &fields, None, &bindings()).unwrap();
         assert!(
             labels
@@ -818,8 +734,9 @@ mod tests {
     /// `labels:` map and leave only the last entry point attached.
     #[test]
     fn several_entrypoints_produce_exactly_one_entrypoints_label() {
-        let mut fields = expose_with_host("ok.example.com");
-        fields.expose.as_mut().unwrap().entrypoint = refs(&["web", "web-secure", "metrics"]);
+        let mut fields = router_with_host("ok.example.com");
+        fields.routers[0].entrypoint = refs(&["web", "web-secure", "metrics"]);
+        fields.expose = Some(expose_port(80));
         let labels = compute("s", &fields, None, &bindings()).unwrap();
         assert_eq!(
             labels
@@ -834,14 +751,14 @@ mod tests {
     /// entry point spelled as a string so it can carry a `{{name}}`.
     #[test]
     fn entrypoint_is_checked_after_interpolation() {
-        let mut fields = expose_with_host("ok.example.com");
-        fields.expose.as_mut().unwrap().entrypoint = refs(&["{{name}}-secure"]);
+        let mut fields = router_with_host("ok.example.com");
+        fields.routers[0].entrypoint = refs(&["{{name}}-secure"]);
         let bindings = HashMap::from([("name", "web`")]);
         let err = compute("s", &fields, None, &bindings).unwrap_err();
         assert!(matches!(
             err,
             CodegenError::UnsafeLabelValue {
-                field: "expose.entrypoint",
+                field: "router.entrypoint",
                 character: '`',
                 ..
             }
@@ -852,8 +769,9 @@ mod tests {
     /// lands in the label.
     #[test]
     fn entrypoint_is_interpolated_into_the_label() {
-        let mut fields = expose_with_host("ok.example.com");
-        fields.expose.as_mut().unwrap().entrypoint = refs(&["{{name}}-secure"]);
+        let mut fields = router_with_host("ok.example.com");
+        fields.routers[0].entrypoint = refs(&["{{name}}-secure"]);
+        fields.expose = Some(expose_port(80));
         let labels = compute("s", &fields, None, &bindings()).unwrap();
         assert!(
             labels
@@ -867,7 +785,7 @@ mod tests {
     /// a single name splices an extra entry into it.
     #[test]
     fn comma_in_middleware_reference_is_rejected() {
-        let mut fields = expose_with_host("ok.example.com");
+        let mut fields = router_with_host("ok.example.com");
         fields.middleware = refs(&["a,b"]);
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
@@ -885,27 +803,25 @@ mod tests {
     /// grammar.
     #[test]
     fn ordinary_hostname_punctuation_is_still_accepted() {
-        let fields = expose_with_host("my-service.sub_domain.example.com:8443");
+        let mut fields = router_with_host("my-service.sub_domain.example.com:8443");
+        fields.expose = Some(expose_port(80));
         let labels = compute("s", &fields, None, &bindings()).unwrap();
         assert_eq!(
             labels,
-            vec!["traefik.http.routers.s.rule=Host(`my-service.sub_domain.example.com:8443`)"]
+            vec![
+                "traefik.http.routers.s.rule=Host(`my-service.sub_domain.example.com:8443`)",
+                "traefik.http.services.s.loadbalancer.server.port=80",
+            ]
         );
     }
 
     #[test]
-    fn full_expose_produces_all_router_labels_in_order() {
+    fn full_router_produces_all_labels_in_order() {
+        let mut r = router(None, Some("syncthing.internal.techdebtor.io"));
+        r.entrypoint = refs(&["web-secure"]);
         let fields = ServiceFields {
-            expose: Some(Expose {
-                port: Some(Literal::Number {
-                    text: "8384".to_string(),
-                    value: 8384,
-                    span: span(),
-                }),
-                host: Some(lit("syncthing.internal.techdebtor.io")),
-                entrypoint: refs(&["web-secure"]),
-                span: span(),
-            }),
+            routers: vec![r],
+            expose: Some(expose_port(8384)),
             middleware: vec![
                 Literal::Ident("local-ipwhitelist".to_string(), span()),
                 Literal::Ident("forwardAuth-authentik".to_string(), span()),
@@ -948,81 +864,18 @@ mod tests {
         assert_eq!(labels, vec!["traefik.enable=false"]);
     }
 
-    /// `expose.port` is Compose's own `expose:` key, not Traefik's — a
+    /// `expose <port>` is Compose's own `expose:` key, not Traefik's — a
     /// disabled service may still declare it, and doing so changes
     /// nothing about the Traefik label list.
     #[test]
     fn disabled_service_with_only_expose_port_still_emits_only_enable_false() {
         let fields = ServiceFields {
             traefik: Some(disabled_traefik()),
-            expose: Some(Expose {
-                port: Some(Literal::Number {
-                    text: "5432".to_string(),
-                    value: 5432,
-                    span: span(),
-                }),
-                host: None,
-                entrypoint: Vec::new(),
-                span: span(),
-            }),
+            expose: Some(expose_port(5432)),
             ..Default::default()
         };
         let labels = compute("db", &fields, None, &bindings()).unwrap();
         assert_eq!(labels, vec!["traefik.enable=false"]);
-    }
-
-    /// `expose.host` on a disabled service is the direct contradiction
-    /// the issue calls out: reported before `expose.entrypoint` and
-    /// `middleware`, since it's the field that would have created the
-    /// router those two attach to.
-    #[test]
-    fn disabled_service_with_expose_host_is_rejected() {
-        let fields = ServiceFields {
-            traefik: Some(disabled_traefik()),
-            expose: Some(Expose {
-                port: None,
-                host: Some(lit("db.example.com")),
-                entrypoint: Vec::new(),
-                span: span(),
-            }),
-            ..Default::default()
-        };
-        let err = compute("db", &fields, None, &bindings()).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                CodegenError::TraefikDisabledWithRouterField {
-                    field: "expose.host",
-                    ..
-                }
-            ),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn disabled_service_with_entrypoint_is_rejected() {
-        let mut fields = ServiceFields {
-            traefik: Some(disabled_traefik()),
-            ..Default::default()
-        };
-        fields.expose = Some(Expose {
-            port: None,
-            host: None,
-            entrypoint: refs(&["web-secure"]),
-            span: span(),
-        });
-        let err = compute("db", &fields, None, &bindings()).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                CodegenError::TraefikDisabledWithRouterField {
-                    field: "expose.entrypoint",
-                    ..
-                }
-            ),
-            "got {err:?}"
-        );
     }
 
     #[test]
@@ -1046,28 +899,21 @@ mod tests {
     }
 
     /// When a disabled service contradicts itself on more than one
-    /// front, `expose.host` is the one named — the same "first in
-    /// emission order" convention `entrypoint_without_a_host_is_rejected_before_middleware`
-    /// already documents for the router-less case.
+    /// front, the `router` block is the one named — the same "first in
+    /// emission order" convention `traefik_conflict_field` documents:
+    /// a whole router is a bigger contradiction than a field that merely
+    /// attaches to one.
     #[test]
-    fn disabled_service_with_host_and_middleware_reports_host_first() {
-        let fields = ServiceFields {
-            traefik: Some(disabled_traefik()),
-            expose: Some(Expose {
-                port: None,
-                host: Some(lit("db.example.com")),
-                entrypoint: Vec::new(),
-                span: span(),
-            }),
-            middleware: refs(&["forwardAuth-authentik"]),
-            ..Default::default()
-        };
+    fn disabled_service_with_router_and_middleware_reports_router_first() {
+        let mut fields = with_routers(vec![router(Some("api"), Some("db.example.com"))]);
+        fields.traefik = Some(disabled_traefik());
+        fields.middleware = refs(&["forwardAuth-authentik"]);
         let err = compute("db", &fields, None, &bindings()).unwrap_err();
         assert!(
             matches!(
                 err,
                 CodegenError::TraefikDisabledWithRouterField {
-                    field: "expose.host",
+                    field: "router",
                     ..
                 }
             ),
@@ -1080,44 +926,26 @@ mod tests {
     /// when `fields.traefik.disabled` is actually `Some`.
     #[test]
     fn no_traefik_field_leaves_ordinary_computation_untouched() {
-        let fields = expose_with_host("syncthing.internal.techdebtor.io");
+        let mut fields = router_with_host("syncthing.internal.techdebtor.io");
+        fields.expose = Some(expose_port(8384));
         let labels = compute("syncthing", &fields, None, &bindings()).unwrap();
         assert_eq!(
             labels,
-            vec!["traefik.http.routers.syncthing.rule=Host(`syncthing.internal.techdebtor.io`)"]
+            vec![
+                "traefik.http.routers.syncthing.rule=Host(`syncthing.internal.techdebtor.io`)",
+                "traefik.http.services.syncthing.loadbalancer.server.port=8384",
+            ]
         );
     }
 
-    // --- `router` blocks (#184) ---
-
-    fn router(name: Option<&str>, host: Option<&str>) -> Router {
-        Router {
-            name: name.map(|n| Ident {
-                name: n.to_string(),
-                span: span(),
-            }),
-            host: host.map(lit),
-            entrypoint: Vec::new(),
-            path_prefix: Vec::new(),
-            span: span(),
-        }
-    }
-
-    fn with_routers(routers: Vec<Router>) -> ServiceFields {
-        ServiceFields {
-            routers,
-            ..Default::default()
-        }
-    }
-
-    fn prefixes(paths: &[&str]) -> Vec<Literal> {
-        paths.iter().map(|p| lit(p)).collect()
-    }
+    // --- `router` blocks (#184, #198) ---
 
     /// The whole of #184 in one assertion: the exact label set the issue
     /// asks for, from four `router` blocks off one container. Read it
     /// against the issue's own hand-written `raw { labels: [...] }`
-    /// list — every router label matches, label for label.
+    /// list — every router label matches, label for label. Also the
+    /// `hl-cli` regression fixture `issue_184_multi_router.hll`'s own
+    /// `expose 3456`, byte for byte.
     #[test]
     fn four_routers_produce_the_issue_s_own_label_set() {
         let mut api = router(Some("api"), Some("vikunja.techdebtor.io"));
@@ -1131,7 +959,8 @@ mod tests {
         let mut frontend_local = router(Some("frontend-local"), Some("vikunja.techdebtor.local"));
         frontend_local.entrypoint = refs(&["local"]);
 
-        let fields = with_routers(vec![api, api_local, frontend, frontend_local]);
+        let mut fields = with_routers(vec![api, api_local, frontend, frontend_local]);
+        fields.expose = Some(expose_port(3456));
         let labels = compute("vikunja", &fields, Some("docker_default"), &bindings()).unwrap();
         assert_eq!(
             labels,
@@ -1145,32 +974,41 @@ mod tests {
                 "traefik.http.routers.vikunja-frontend.entrypoints=web-secure",
                 "traefik.http.routers.vikunja-frontend-local.rule=Host(`vikunja.techdebtor.local`)",
                 "traefik.http.routers.vikunja-frontend-local.entrypoints=local",
+                "traefik.http.services.vikunja.loadbalancer.server.port=3456",
             ]
         );
     }
 
     /// A named router keys its labels under `<service>-<name>`, leaving
-    /// the bare `<service>` id free for `expose.host`.
+    /// the bare `<service>` id free for the unnamed form.
     #[test]
     fn named_router_keys_labels_under_service_dash_name() {
-        let fields = with_routers(vec![router(Some("api"), Some("a.example.com"))]);
+        let mut fields = with_routers(vec![router(Some("api"), Some("a.example.com"))]);
+        fields.expose = Some(expose_port(80));
         let labels = compute("app", &fields, None, &bindings()).unwrap();
         assert_eq!(
             labels,
-            vec!["traefik.http.routers.app-api.rule=Host(`a.example.com`)"]
+            vec![
+                "traefik.http.routers.app-api.rule=Host(`a.example.com`)",
+                "traefik.http.services.app.loadbalancer.server.port=80",
+            ]
         );
     }
 
-    /// The unnamed form claims the service's own id — exactly what
-    /// `expose.host` produces, which is what makes writing both an
-    /// error.
+    /// The unnamed form claims the service's own id — which is what
+    /// makes writing it twice in one body (by hand or via `expose <port>
+    /// as "<host>"`'s own sugar) a `ParseError::DuplicateRouterName`.
     #[test]
     fn unnamed_router_keys_labels_under_the_service_name() {
-        let fields = with_routers(vec![router(None, Some("a.example.com"))]);
+        let mut fields = with_routers(vec![router(None, Some("a.example.com"))]);
+        fields.expose = Some(expose_port(80));
         let labels = compute("app", &fields, None, &bindings()).unwrap();
         assert_eq!(
             labels,
-            vec!["traefik.http.routers.app.rule=Host(`a.example.com`)"]
+            vec![
+                "traefik.http.routers.app.rule=Host(`a.example.com`)",
+                "traefik.http.services.app.loadbalancer.server.port=80",
+            ]
         );
     }
 
@@ -1182,7 +1020,8 @@ mod tests {
         let mut first = router(Some("one"), Some("one.example.com"));
         first.entrypoint = refs(&["web-secure"]);
         let second = router(Some("two"), Some("two.example.com"));
-        let fields = with_routers(vec![first, second]);
+        let mut fields = with_routers(vec![first, second]);
+        fields.expose = Some(expose_port(80));
         let labels = compute("app", &fields, None, &bindings()).unwrap();
         assert_eq!(
             labels,
@@ -1190,6 +1029,28 @@ mod tests {
                 "traefik.http.routers.app-one.rule=Host(`one.example.com`)",
                 "traefik.http.routers.app-one.entrypoints=web-secure",
                 "traefik.http.routers.app-two.rule=Host(`two.example.com`)",
+                "traefik.http.services.app.loadbalancer.server.port=80",
+            ]
+        );
+    }
+
+    /// Two routers sharing one port is the ordinary case, not a
+    /// collision: distinct ids, one `loadbalancer.server.port=` label
+    /// shared between them.
+    #[test]
+    fn unnamed_router_plus_a_named_router_emits_both() {
+        let mut fields = with_routers(vec![
+            router(None, Some("a.example.com")),
+            router(Some("api"), Some("b.example.com")),
+        ]);
+        fields.expose = Some(expose_port(80));
+        let labels = compute("app", &fields, None, &bindings()).unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                "traefik.http.routers.app.rule=Host(`a.example.com`)",
+                "traefik.http.routers.app-api.rule=Host(`b.example.com`)",
+                "traefik.http.services.app.loadbalancer.server.port=80",
             ]
         );
     }
@@ -1202,12 +1063,14 @@ mod tests {
     fn three_path_prefixes_join_into_one_parenthesized_group() {
         let mut r = router(Some("api"), Some("a.example.com"));
         r.path_prefix = prefixes(&["/api/v1", "/dav/", "/.well-known/"]);
-        let fields = with_routers(vec![r]);
+        let mut fields = with_routers(vec![r]);
+        fields.expose = Some(expose_port(80));
         let labels = compute("app", &fields, None, &bindings()).unwrap();
         assert_eq!(
             labels,
             vec![
-                "traefik.http.routers.app-api.rule=Host(`a.example.com`) && (PathPrefix(`/api/v1`) || PathPrefix(`/dav/`) || PathPrefix(`/.well-known/`))"
+                "traefik.http.routers.app-api.rule=Host(`a.example.com`) && (PathPrefix(`/api/v1`) || PathPrefix(`/dav/`) || PathPrefix(`/.well-known/`))",
+                "traefik.http.services.app.loadbalancer.server.port=80",
             ]
         );
     }
@@ -1218,21 +1081,23 @@ mod tests {
     fn one_path_prefix_still_gets_its_parentheses() {
         let mut r = router(Some("api"), Some("a.example.com"));
         r.path_prefix = prefixes(&["/api/v1"]);
-        let fields = with_routers(vec![r]);
+        let mut fields = with_routers(vec![r]);
+        fields.expose = Some(expose_port(80));
         let labels = compute("app", &fields, None, &bindings()).unwrap();
         assert_eq!(
             labels,
             vec![
-                "traefik.http.routers.app-api.rule=Host(`a.example.com`) && (PathPrefix(`/api/v1`))"
+                "traefik.http.routers.app-api.rule=Host(`a.example.com`) && (PathPrefix(`/api/v1`))",
+                "traefik.http.services.app.loadbalancer.server.port=80",
             ]
         );
     }
 
-    /// No prefixes leaves the rule exactly what `expose.host` has always
-    /// produced.
+    /// No prefixes leaves the rule a bare host match.
     #[test]
     fn no_path_prefix_leaves_the_rule_a_bare_host_match() {
-        let fields = with_routers(vec![router(Some("api"), Some("a.example.com"))]);
+        let mut fields = with_routers(vec![router(Some("api"), Some("a.example.com"))]);
+        fields.expose = Some(expose_port(80));
         let labels = compute("app", &fields, None, &bindings()).unwrap();
         assert!(
             labels[0].ends_with(".rule=Host(`a.example.com`)"),
@@ -1241,8 +1106,7 @@ mod tests {
     }
 
     /// A `router` block with no `host` has no rule to emit and can't
-    /// have meant anything — the mirror of `expose`'s own
-    /// host-less-router rule, one level in.
+    /// have meant anything.
     #[test]
     fn router_without_a_host_is_rejected() {
         let fields = with_routers(vec![router(Some("api"), None)]);
@@ -1250,7 +1114,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                CodegenError::RouterBlockWithoutHost { ref router, .. } if router.as_deref() == Some("api")
+                CodegenError::RouterBlockWithoutHost { field: "router", ref router, .. } if router.as_deref() == Some("api")
             ),
             "got {err:?}"
         );
@@ -1265,7 +1129,11 @@ mod tests {
         assert!(
             matches!(
                 err,
-                CodegenError::RouterBlockWithoutHost { router: None, .. }
+                CodegenError::RouterBlockWithoutHost {
+                    field: "router",
+                    router: None,
+                    ..
+                }
             ),
             "got {err:?}"
         );
@@ -1280,7 +1148,13 @@ mod tests {
         let fields = with_routers(vec![r]);
         let err = compute("app", &fields, None, &bindings()).unwrap_err();
         assert!(
-            matches!(err, CodegenError::RouterBlockWithoutHost { .. }),
+            matches!(
+                err,
+                CodegenError::RouterBlockWithoutHost {
+                    field: "router",
+                    ..
+                }
+            ),
             "got {err:?}"
         );
     }
@@ -1294,39 +1168,14 @@ mod tests {
         let fields = with_routers(vec![r]);
         let err = compute("app", &fields, None, &bindings()).unwrap_err();
         assert!(
-            matches!(err, CodegenError::RouterBlockWithoutHost { .. }),
+            matches!(
+                err,
+                CodegenError::RouterBlockWithoutHost {
+                    field: "router",
+                    ..
+                }
+            ),
             "got {err:?}"
-        );
-    }
-
-    /// `expose.host` and an unnamed `router` both claim
-    /// `traefik.http.routers.<service>`, so one would silently overwrite
-    /// the other in the emitted list. Refused rather than resolved.
-    #[test]
-    fn expose_host_plus_an_unnamed_router_is_rejected() {
-        let mut fields = expose_with_host("a.example.com");
-        fields.routers = vec![router(None, Some("b.example.com"))];
-        let err = compute("app", &fields, None, &bindings()).unwrap_err();
-        assert!(
-            matches!(err, CodegenError::ExposeHostWithUnnamedRouter { .. }),
-            "got {err:?}"
-        );
-    }
-
-    /// A *named* router alongside `expose.host` is the ordinary case,
-    /// not a collision: the two ids differ, so both routers are emitted,
-    /// `expose`'s first.
-    #[test]
-    fn expose_host_plus_a_named_router_emits_both() {
-        let mut fields = expose_with_host("a.example.com");
-        fields.routers = vec![router(Some("api"), Some("b.example.com"))];
-        let labels = compute("app", &fields, None, &bindings()).unwrap();
-        assert_eq!(
-            labels,
-            vec![
-                "traefik.http.routers.app.rule=Host(`a.example.com`)",
-                "traefik.http.routers.app-api.rule=Host(`b.example.com`)",
-            ]
         );
     }
 
@@ -1384,20 +1233,21 @@ mod tests {
     #[test]
     fn ordinary_router_names_are_accepted() {
         for name in ["api", "api-local", "api_v1", "v2"] {
-            let fields = with_routers(vec![router(Some(name), Some("a.example.com"))]);
+            let mut fields = with_routers(vec![router(Some(name), Some("a.example.com"))]);
+            fields.expose = Some(expose_port(80));
             let labels = compute("app", &fields, None, &bindings()).unwrap();
             assert_eq!(
                 labels,
-                vec![format!(
-                    "traefik.http.routers.app-{name}.rule=Host(`a.example.com`)"
-                )]
+                vec![
+                    format!("traefik.http.routers.app-{name}.rule=Host(`a.example.com`)"),
+                    "traefik.http.services.app.loadbalancer.server.port=80".to_string(),
+                ]
             );
         }
     }
 
-    /// The value-side guard covers a `router`'s own `host` exactly as it
-    /// covers `expose.host` — the same rule grammar, the same backtick
-    /// escape from #65.
+    /// The value-side guard covers a `router`'s own `host` — the same
+    /// rule grammar, the same backtick escape from #65.
     #[test]
     fn backtick_in_a_router_host_is_rejected() {
         let fields = with_routers(vec![router(
@@ -1462,7 +1312,7 @@ mod tests {
 
     /// Every value guard here runs on the *resolved* text, so a
     /// metacharacter that only appears after `{{name}}` interpolation is
-    /// still caught — `expose.host`'s own rule, applied to `router`.
+    /// still caught.
     #[test]
     fn router_host_is_checked_after_interpolation() {
         let fields = with_routers(vec![router(Some("api"), Some("{{name}}.example.com"))]);
@@ -1483,25 +1333,33 @@ mod tests {
 
     /// And the resolved text, not the raw `{{name}}`, is what lands in
     /// the rule — the `"{{name}}.internal.example.com"` template idiom
-    /// works in a `router` exactly as it does in `expose`.
+    /// works in a `router` the same way it did in `expose.host` before
+    /// #198.
     #[test]
     fn router_host_is_interpolated_into_the_rule() {
-        let fields = with_routers(vec![router(Some("api"), Some("{{name}}.example.com"))]);
+        let mut fields = with_routers(vec![router(Some("api"), Some("{{name}}.example.com"))]);
+        fields.expose = Some(expose_port(80));
         let labels = compute("syncthing", &fields, None, &bindings()).unwrap();
         assert_eq!(
             labels,
-            vec!["traefik.http.routers.syncthing-api.rule=Host(`syncthing.example.com`)"]
+            vec![
+                "traefik.http.routers.syncthing-api.rule=Host(`syncthing.example.com`)",
+                "traefik.http.services.syncthing.loadbalancer.server.port=80",
+            ]
         );
     }
 
     /// `middleware` stays a service-level field: one list, attached to
-    /// every router the service has, `expose`'s included. Per-router
-    /// middleware isn't expressible yet.
+    /// every router the service has. Per-router middleware isn't
+    /// expressible yet.
     #[test]
     fn middleware_attaches_to_every_router() {
-        let mut fields = expose_with_host("a.example.com");
+        let mut fields = with_routers(vec![
+            router(None, Some("a.example.com")),
+            router(Some("api"), Some("b.example.com")),
+        ]);
         fields.middleware = refs(&["forwardAuth-authentik"]);
-        fields.routers = vec![router(Some("api"), Some("b.example.com"))];
+        fields.expose = Some(expose_port(80));
         let labels = compute("app", &fields, None, &bindings()).unwrap();
         assert_eq!(
             labels,
@@ -1510,72 +1368,40 @@ mod tests {
                 "traefik.http.routers.app.middlewares=forwardAuth-authentik@file",
                 "traefik.http.routers.app-api.rule=Host(`b.example.com`)",
                 "traefik.http.routers.app-api.middlewares=forwardAuth-authentik@file",
+                "traefik.http.services.app.loadbalancer.server.port=80",
             ]
         );
     }
 
     /// A `router` block is a router, so `middleware` beside one has
     /// somewhere to attach and is no longer the router-less mistake #80
-    /// refuses — even with no `expose.host` anywhere.
+    /// refuses.
     #[test]
-    fn middleware_with_a_router_and_no_expose_host_is_accepted() {
+    fn middleware_with_a_router_is_accepted() {
         let mut fields = with_routers(vec![router(Some("api"), Some("a.example.com"))]);
         fields.middleware = refs(&["forwardAuth-authentik"]);
+        fields.expose = Some(expose_port(80));
         let labels = compute("app", &fields, None, &bindings()).unwrap();
         assert_eq!(
             labels,
             vec![
                 "traefik.http.routers.app-api.rule=Host(`a.example.com`)",
                 "traefik.http.routers.app-api.middlewares=forwardAuth-authentik@file",
+                "traefik.http.services.app.loadbalancer.server.port=80",
             ]
-        );
-    }
-
-    /// `expose.entrypoint` is *not* rescued by a `router` block: its
-    /// label goes on `traefik.http.routers.<service>` specifically, the
-    /// router only `expose.host` creates.
-    #[test]
-    fn expose_entrypoint_still_needs_expose_host_even_beside_a_router() {
-        let mut fields = with_routers(vec![router(Some("api"), Some("a.example.com"))]);
-        fields.expose = Some(Expose {
-            port: None,
-            host: None,
-            entrypoint: refs(&["web-secure"]),
-            span: span(),
-        });
-        let err = compute("app", &fields, None, &bindings()).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                CodegenError::RouterFieldWithoutHost {
-                    field: "expose.entrypoint",
-                    ..
-                }
-            ),
-            "got {err:?}"
         );
     }
 
     /// `loadbalancer.server.port` stays per Compose service, derived
     /// from `expose.port`: one label however many routers point at the
-    /// container, and emitted for a service whose only routers are
-    /// `router` blocks.
+    /// container.
     #[test]
     fn expose_port_still_produces_exactly_one_loadbalancer_label() {
         let mut fields = with_routers(vec![
             router(Some("api"), Some("a.example.com")),
             router(Some("web"), Some("b.example.com")),
         ]);
-        fields.expose = Some(Expose {
-            port: Some(Literal::Number {
-                text: "3456".to_string(),
-                value: 3456,
-                span: span(),
-            }),
-            host: None,
-            entrypoint: Vec::new(),
-            span: span(),
-        });
+        fields.expose = Some(expose_port(3456));
         let labels = compute("app", &fields, None, &bindings()).unwrap();
         assert_eq!(
             labels
@@ -1595,8 +1421,8 @@ mod tests {
     }
 
     /// `traefik { disabled }` covers `router` blocks too: a whole router
-    /// declared on a service that just said it wants none is the same
-    /// contradiction `expose.host` raises there.
+    /// declared on a service that just said it wants none is a
+    /// contradiction, port or no port.
     #[test]
     fn disabled_service_with_a_router_is_rejected() {
         let mut fields = with_routers(vec![router(Some("api"), Some("a.example.com"))]);
@@ -1634,26 +1460,22 @@ mod tests {
         );
     }
 
-    /// The regression that matters most (#184's whole premise): a
-    /// service that uses only `expose` reaches none of the new code and
-    /// emits exactly what it emitted before `router` existed.
+    /// The regression that matters most (#198's whole premise): the
+    /// exact scenario `expose <port> as "<host>"` desugars to — an
+    /// unnamed router plus a port plus middleware — emits exactly the
+    /// same label list `expose.host` always did, byte for byte, id
+    /// included. See `hl-parser`'s own parser tests for proof the sugar
+    /// itself still parses to this same shape.
     #[test]
-    fn an_expose_only_service_emits_exactly_what_it_always_did() {
+    fn sugared_expose_as_router_emits_exactly_what_expose_host_always_did() {
+        let mut r = router(None, Some("{{name}}.internal.techdebtor.io"));
+        r.entrypoint = refs(&["web-secure"]);
         let fields = ServiceFields {
-            expose: Some(Expose {
-                port: Some(Literal::Number {
-                    text: "8384".to_string(),
-                    value: 8384,
-                    span: span(),
-                }),
-                host: Some(lit("{{name}}.internal.techdebtor.io")),
-                entrypoint: refs(&["web-secure"]),
-                span: span(),
-            }),
+            routers: vec![r],
+            expose: Some(expose_port(8384)),
             middleware: refs(&["local-ipwhitelist", "forwardAuth-authentik"]),
             ..Default::default()
         };
-        assert!(fields.routers.is_empty());
         let labels = compute("syncthing", &fields, Some("docker_default"), &bindings()).unwrap();
         assert_eq!(
             labels,
@@ -1665,5 +1487,35 @@ mod tests {
                 "traefik.http.services.syncthing.loadbalancer.server.port=8384",
             ]
         );
+    }
+
+    // --- a router with no port to balance onto (#198) ---
+
+    /// The live defect #198 closes: a service routed only by `router`
+    /// blocks used to emit no `loadbalancer.server.port` label at all
+    /// when it forgot `expose <port>` — valid output, Traefik left to
+    /// guess. Now it's a compile error instead.
+    #[test]
+    fn router_without_a_port_is_rejected() {
+        let fields = with_routers(vec![router(Some("api"), Some("a.example.com"))]);
+        let err = compute("app", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(err, CodegenError::RouterWithoutPort { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// `expose <port>` with no router at all stays legal (constraint
+    /// #3): it's Compose's own `expose:` key, container-network
+    /// visibility, nothing to do with Traefik, so there's no router for
+    /// it to need.
+    #[test]
+    fn a_port_with_no_router_needs_no_router() {
+        let fields = ServiceFields {
+            expose: Some(expose_port(8080)),
+            ..Default::default()
+        };
+        let labels = compute("s", &fields, None, &bindings()).unwrap();
+        assert!(labels.is_empty());
     }
 }

@@ -1,8 +1,8 @@
 use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    ArrowMapHost, Command, DependsOnCondition, Entrypoint, Expected, Expose, HealthcheckTest,
-    Literal, ParseError, TemplateDecl, TopDecl, UseDecl, parse,
+    ArrowMapHost, Command, DependsOnCondition, Entrypoint, Expected, HealthcheckTest, Literal,
+    ParseError, TemplateDecl, TopDecl, UseDecl, parse,
 };
 
 fn parse_ok(source: &str) -> hl_parser::Program {
@@ -250,7 +250,7 @@ fn unknown_field_on_a_nested_type_has_no_raw_hint() {
     assert_eq!(message, "2:12: unknown field \"bogus\" on `expose`");
 }
 
-// --- expose / `as` alias ---
+// --- expose / `as` sugar (#198) ---
 
 #[test]
 fn expose_primary_only() {
@@ -258,73 +258,66 @@ fn expose_primary_only() {
     let service = as_service(&program.decls[0]);
     let expose = service.fields.expose.as_ref().unwrap();
     assert_eq!(expose.port.as_ref().unwrap().text(), "8096");
-    assert!(expose.host.is_none());
+    assert!(service.fields.routers.is_empty());
 }
 
+/// `expose <port> as "<host>"` desugars to `expose { port }` plus an
+/// unnamed `router { host }` (#198) — `host` no longer lives on `Expose`
+/// itself, so the spelling survives as bespoke parser sugar reaching for
+/// `router` instead. This is the hard constraint the whole issue rests
+/// on: the sugar must keep parsing to *something* that emits the exact
+/// labels it always did (see `hl-codegen`'s own
+/// `sugared_expose_as_router_emits_exactly_what_expose_host_always_did`).
 #[test]
-fn expose_as_sugar_aliases_to_host() {
+fn expose_as_sugar_desugars_to_port_plus_unnamed_router() {
     let program = parse_ok("service s {\n  expose 8096 as \"host.example.com\"\n}\n");
     let service = as_service(&program.decls[0]);
     let expose = service.fields.expose.as_ref().unwrap();
-    assert_eq!(expose.host.as_ref().unwrap().text(), "host.example.com");
+    assert_eq!(expose.port.as_ref().unwrap().text(), "8096");
+    assert_eq!(service.fields.routers.len(), 1);
+    let router = &service.fields.routers[0];
+    assert_eq!(router.key(), None);
+    assert_eq!(router.host.as_ref().unwrap().text(), "host.example.com");
+    assert!(router.entrypoint.is_empty());
+    assert!(router.path_prefix.is_empty());
 }
 
+/// `host` is no longer a field of `expose` at all (#198) — routing
+/// fields live on `router` exclusively — so the pre-#198 explicit
+/// comma-separated spelling is simply an unknown-field situation now: the
+/// `host:` key doesn't resolve against `EXPOSE`'s own (port-only) field
+/// list, the comma is left for the enclosing body, and a bare comma is
+/// never a valid statement start there.
 #[test]
-fn expose_host_explicit_field_form() {
-    let program = parse_ok("service s {\n  expose 8096, host: \"host.example.com\"\n}\n");
-    let service = as_service(&program.decls[0]);
-    let expose = service.fields.expose.as_ref().unwrap();
-    assert_eq!(expose.host.as_ref().unwrap().text(), "host.example.com");
-}
-
-/// `as` is a one-shot fusion onto the primary value (no comma, no further
-/// continuation) — a duplicate `host` can only be triggered through the
-/// explicit comma-separated field form now, never by mixing `as` with a
-/// trailing `host:`, since that combination no longer parses at all (see
-/// `alias_sugar_cannot_be_followed_by_further_secondary_fields`).
-#[test]
-fn expose_duplicate_host_via_explicit_fields_is_error() {
-    let err = parse("service s {\n  expose 8096, host: \"a\", host: \"b\"\n}\n").unwrap_err();
-    assert!(matches!(
-        err,
-        ParseError::DuplicateField {
-            type_name: "expose",
-            field: "host",
-            ..
-        }
-    ));
+fn expose_host_field_no_longer_parses() {
+    let err = parse("service s {\n  expose 8096, host: \"host.example.com\"\n}\n").unwrap_err();
+    assert!(
+        matches!(err, ParseError::UnexpectedToken { .. }),
+        "got {err:?}"
+    );
 }
 
 /// `as` fuses onto the primary value as one self-contained unit (docs/
 /// DESIGN.md's desugaring rule 3) — it cannot be followed by further
-/// secondary fields, comma or no comma. If a service needs more than
-/// `as` alone provides, it must use the explicit comma-separated field
-/// form instead (`expose port, host: "...", entrypoint: "..."`) or the
-/// canonical `expose { ... }` body.
+/// secondary fields, comma or no comma, exactly as the pre-#198 schema-
+/// driven alias sugar it replaced. A service that needs more than a bare
+/// host must write the router out explicitly (`expose <port>` plus
+/// `router { host: "...", entrypoint: ... }`).
 ///
-/// #87: this dead end used to surface as a generic "expected a newline
-/// before the next field, found Comma" from the *enclosing* body, never
-/// mentioning the explicit field-list form that's the actual fix. It now
-/// gets a dedicated error naming it directly.
+/// Unlike before #198, there's no dedicated diagnostic for this dead end
+/// any more (`ParseError::AliasSugarCannotContinue` is gone — see F6 of
+/// #198): whatever follows is left for the enclosing body's own
+/// statement loop, which reports the generic "expected a field name"
+/// error a bare comma there always produces.
 #[test]
 fn alias_sugar_cannot_be_followed_by_further_secondary_fields() {
     let err = parse(
         "service s {\n  expose 8096 as \"host.example.com\", entrypoint: \"web-secure\"\n}\n",
     )
     .unwrap_err();
-    match err {
-        ParseError::AliasSugarCannotContinue {
-            type_name: "expose",
-            keyword: "as",
-            primary_field: "port",
-            alias_field: "host",
-            ..
-        } => {}
-        other => panic!("expected AliasSugarCannotContinue, got {other:?}"),
-    }
     assert!(
-        err.to_string().contains("expose <port>, host:"),
-        "expected the canonical form in the message, got: {err}"
+        matches!(err, ParseError::UnexpectedToken { .. }),
+        "got {err:?}"
     );
 }
 
@@ -704,7 +697,7 @@ fn entrypoint_duplicate_is_error() {
 }
 
 /// Deliberately no bare comma-list sugar, matching `command` — and
-/// worth pinning separately here, since `expose`'s own `entrypoint`
+/// worth pinning separately here, since `router`'s own `entrypoint`
 /// *does* take exactly that sugar. The two fields share a name, not a
 /// grammar.
 #[test]
@@ -712,18 +705,20 @@ fn entrypoint_bare_comma_list_is_rejected() {
     assert!(parse("service s {\n  entrypoint \"a\", \"b\"\n}\n").is_err());
 }
 
-/// The service-level field and `expose`'s reference-list sub-field
+/// The service-level field and `router`'s reference-list sub-field
 /// coexist in one body, each resolved against its own enclosing type's
 /// field list: the bare `entrypoint` statement sets `ServiceFields`'s
-/// scalar-or-list field, while the one after `expose`'s comma sets
-/// `Expose::entrypoint`.
+/// scalar-or-list field, while the one inside `router`'s body sets
+/// `Router::entrypoint` — an unrelated field two levels removed, not the
+/// same slot under a different name.
 #[test]
-fn service_entrypoint_and_expose_entrypoint_coexist() {
+fn service_entrypoint_and_router_entrypoint_coexist() {
     let program = parse_ok(
         "service s {\n  \
            image \"nginx\"\n  \
            entrypoint [\"/bin/sh\", \"-c\", \"do-a-thing\"]\n  \
-           expose 8080, host: \"s.example.com\", entrypoint: web, web-secure\n\
+           expose 8080\n  \
+           router {\n    host: \"s.example.com\"\n    entrypoint: web, web-secure\n  }\n\
          }\n",
     );
     let service = as_service(&program.decls[0]);
@@ -734,31 +729,9 @@ fn service_entrypoint_and_expose_entrypoint_coexist() {
         }
         other => panic!("expected Entrypoint::Exec, got {other:?}"),
     }
-    let expose = service.fields.expose.as_ref().unwrap();
-    let names: Vec<&str> = expose.entrypoint.iter().map(|r| r.text()).collect();
+    let router = &service.fields.routers[0];
+    let names: Vec<&str> = router.entrypoint.iter().map(|r| r.text()).collect();
     assert_eq!(names, vec!["web", "web-secure"]);
-}
-
-/// The `expose { }` braced body reaches the same place, and its
-/// `entrypoint` still resolves against `EXPOSE`'s field list rather
-/// than the service's — a bracketed list there is a list of
-/// *references*, not an exec-form command.
-#[test]
-fn expose_body_entrypoint_is_still_a_reference_list() {
-    let program = parse_ok(
-        "service s {\n  \
-           entrypoint \"/entrypoint.sh\"\n  \
-           expose {\n    port: 8080\n    entrypoint: [web-secure]\n  }\n\
-         }\n",
-    );
-    let service = as_service(&program.decls[0]);
-    match service.fields.entrypoint.as_ref().unwrap() {
-        Entrypoint::Shell(lit) => assert_eq!(lit.text(), "/entrypoint.sh"),
-        other => panic!("expected Entrypoint::Shell, got {other:?}"),
-    }
-    let expose = service.fields.expose.as_ref().unwrap();
-    let names: Vec<&str> = expose.entrypoint.iter().map(|r| r.text()).collect();
-    assert_eq!(names, vec!["web-secure"]);
 }
 
 // --- bool flag ---
@@ -991,70 +964,48 @@ fn map_entry_in_a_top_level_volume_body_is_error() {
     ));
 }
 
-fn entrypoints(expose: &Expose) -> Vec<&str> {
-    expose.entrypoint.iter().map(|r| r.text()).collect()
-}
-
-#[test]
-fn expose_entrypoint_field() {
-    let program = parse_ok("service s {\n  expose 8096, entrypoint: web-secure\n}\n");
-    let service = as_service(&program.decls[0]);
-    let expose = service.fields.expose.as_ref().unwrap();
-    assert_eq!(entrypoints(expose), vec!["web-secure"]);
+fn router_entrypoints_of(router: &hl_parser::Router) -> Vec<&str> {
+    router.entrypoint.iter().map(|r| r.text()).collect()
 }
 
 /// `entrypoint` is a reference list, spelled exactly like `middleware`:
-/// a bare comma-separated list, a bracketed list, or a repeat of the
-/// field, all of which accumulate.
+/// a bare comma-separated list, a bracketed list, a quoted name, or a
+/// repeat of the field, all of which accumulate.
 #[test]
-fn expose_entrypoint_accepts_a_bare_list() {
-    let program =
-        parse_ok("service s {\n  expose { port: 8096\n entrypoint: web, web-secure }\n}\n");
+fn router_entrypoint_accepts_a_bracketed_list_and_a_quoted_name() {
+    let program = parse_ok(
+        "service s {\n  router {\n    host: \"a.example.com\"\n    \
+         entrypoint: [web, web-secure]\n    entrypoint: \"metrics\"\n  }\n}\n",
+    );
     let service = as_service(&program.decls[0]);
-    let expose = service.fields.expose.as_ref().unwrap();
-    assert_eq!(entrypoints(expose), vec!["web", "web-secure"]);
+    let router = &service.fields.routers[0];
+    assert_eq!(
+        router_entrypoints_of(router),
+        vec!["web", "web-secure", "metrics"]
+    );
 }
 
+/// `host`/`entrypoint` together on the unnamed router, via the braced
+/// body — the shape `docs/DESIGN.md`'s `internal_web` template uses (the
+/// unnamed form has no name to continue a comma-list from, so the
+/// braced body is its only multi-field spelling). Exercised inside a
+/// `template` body specifically, matching that real worked example.
 #[test]
-fn expose_entrypoint_accepts_a_bracketed_list() {
-    let program = parse_ok("service s {\n  expose 8096, entrypoint: [web, web-secure]\n}\n");
-    let service = as_service(&program.decls[0]);
-    let expose = service.fields.expose.as_ref().unwrap();
-    assert_eq!(entrypoints(expose), vec!["web", "web-secure"]);
-}
-
-/// A quoted entry point is still a reference — `parse_key` accepts a
-/// STRING — which is what keeps `entrypoint "{{name}}-secure"` (and
-/// every pre-list config that quoted a single name) working.
-#[test]
-fn expose_entrypoint_accepts_a_quoted_name() {
-    let program = parse_ok("service s {\n  expose 8096, entrypoint: \"web-secure\"\n}\n");
-    let service = as_service(&program.decls[0]);
-    let expose = service.fields.expose.as_ref().unwrap();
-    assert_eq!(entrypoints(expose), vec!["web-secure"]);
-}
-
-/// `host`/`entrypoint` together, via the explicit comma-separated field
-/// form rather than `as` — the shape `docs/DESIGN.md`'s `internal_web`
-/// template now uses, since `as` can't be combined with anything else
-/// (see `alias_sugar_cannot_be_followed_by_further_secondary_fields`).
-/// Exercised inside a `template` body specifically, matching that real
-/// worked example.
-#[test]
-fn expose_host_and_entrypoint_fields_in_template_body() {
+fn router_host_and_entrypoint_fields_in_template_body() {
     let program = parse_ok(
         "template internal_web(port) {\n  \
-           expose $port, host: \"{{name}}.internal.techdebtor.io\", entrypoint: \"web-secure\"\n  \
+           expose $port\n  \
+           router {\n    host: \"{{name}}.internal.techdebtor.io\"\n    entrypoint: \"web-secure\"\n  }\n  \
            middleware local-ipwhitelist\n\
          }\n",
     );
     let template = as_template(&program.decls[0]);
-    let expose = template.fields.expose.as_ref().unwrap();
+    let router = &template.fields.routers[0];
     assert_eq!(
-        expose.host.as_ref().unwrap().text(),
+        router.host.as_ref().unwrap().text(),
         "{{name}}.internal.techdebtor.io"
     );
-    assert_eq!(entrypoints(expose), vec!["web-secure"]);
+    assert_eq!(router_entrypoints_of(router), vec!["web-secure"]);
     assert_eq!(template.fields.middleware.len(), 1);
 }
 
@@ -1066,11 +1017,11 @@ fn expose_host_and_entrypoint_fields_in_template_body() {
 #[test]
 fn bare_entrypoint_list_stops_at_the_next_field_key() {
     let program =
-        parse_ok("service s {\n  expose 8096, entrypoint: web, host: \"x.example.com\"\n}\n");
+        parse_ok("service s {\n  router api, entrypoint: web, host: \"x.example.com\"\n}\n");
     let service = as_service(&program.decls[0]);
-    let expose = service.fields.expose.as_ref().unwrap();
-    assert_eq!(entrypoints(expose), vec!["web"]);
-    assert_eq!(expose.host.as_ref().unwrap().text(), "x.example.com");
+    let router = &service.fields.routers[0];
+    assert_eq!(router_entrypoints_of(router), vec!["web"]);
+    assert_eq!(router.host.as_ref().unwrap().text(), "x.example.com");
 }
 
 /// The same lookahead must not over-trigger: a comma followed by a
@@ -1092,21 +1043,6 @@ fn bare_middleware_list_still_continues_past_a_comma() {
 fn different_fields_joined_by_comma_on_one_line_is_error() {
     let err = parse("service s {\n  expose 8096, image \"foo/bar:latest\"\n}\n").unwrap_err();
     assert!(matches!(err, ParseError::UnexpectedToken { .. }));
-}
-
-#[test]
-fn expose_without_entrypoint_field_is_empty() {
-    let program = parse_ok("service s {\n  expose 8096\n}\n");
-    let service = as_service(&program.decls[0]);
-    assert!(
-        service
-            .fields
-            .expose
-            .as_ref()
-            .unwrap()
-            .entrypoint
-            .is_empty()
-    );
 }
 
 // --- container_name ---
@@ -2697,9 +2633,10 @@ fn router_unnamed_braced_body_parses() {
     assert_eq!(routers(service)[0].key(), None);
 }
 
-/// The comma-continued spelling, the same production `expose 8096, host:
-/// "..."` already parses — continuing from the router's name instead of
-/// from a primary value.
+/// The comma-continued spelling: the same secondary-field production a
+/// primary-value shorthand continues from (see
+/// `Parser::parse_secondary_fields`), here continuing from the router's
+/// name instead of from a primary value.
 #[test]
 fn router_comma_shorthand_parses() {
     let program = parse_ok(

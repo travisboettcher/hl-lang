@@ -269,8 +269,8 @@ pub enum ComposeError {
     UnknownAlias { alias: String, span: Span },
     /// A qualified reference (`alias.name`) was used on a reference-list
     /// field that has no cross-file meaning — `middleware`,
-    /// `depends_on`, `dns`, `env_file`, `expose.entrypoint`,
-    /// `router.entrypoint`, or `router.path_prefix`. (`depends_on` names
+    /// `depends_on`, `dns`, `env_file`, `router.entrypoint`, or
+    /// `router.path_prefix`. (`depends_on` names
     /// a same-file sibling service; the others aren't resolved against
     /// anything an `.hll` file declares at all — an entry point lives in
     /// the deployment's own `traefik.yml`, and an `env_file` path lives
@@ -1584,27 +1584,18 @@ fn resolve_qualified_references<R: SymbolResolver>(
     reject_qualified(&fields.dns, "dns")?;
     // An `env_file` path lives on disk next to the compose file, which
     // no `.hll` file declares, so there's nothing for an alias to
-    // resolve against — same reasoning as `expose.entrypoint` just
+    // resolve against — same reasoning as `router.entrypoint` just
     // below.
     reject_qualified(&fields.env_file, "env_file")?;
-    // `expose.entrypoint` joined this list when it became a reference
-    // list. An entry point names something in the deployment's own
-    // `traefik.yml`, which no `.hll` file declares, so there is nothing
-    // for an alias to resolve against — and codegen reads only
-    // `Literal::text`, so an unchecked `traefik.web` would compile
-    // happily to `entrypoints=web` with the qualifier silently gone.
-    if let Some(expose) = &fields.expose {
-        reject_qualified(&expose.entrypoint, "expose.entrypoint")?;
-    }
-    // A `router`'s own `entrypoint` list (#184) names the same thing
-    // `expose.entrypoint` does — an entry point in the deployment's
-    // `traefik.yml`, which no `.hll` file declares — so it gets the same
-    // rejection for the same reason: codegen reads only `Literal::text`,
-    // so an unchecked `traefik.web` would compile to `entrypoints=web`
-    // with the qualifier silently gone. `path_prefix` (#196) gets the
-    // same check for the first time here: before #196 it couldn't parse
-    // a qualifier at all (see [`crate::schema::allows_qualified_reference`]'s
-    // doc), so there was nothing yet to reject.
+    // A `router`'s own `entrypoint` list (#184) names an entry point in
+    // the deployment's own `traefik.yml`, which no `.hll` file declares,
+    // so there is nothing for an alias to resolve against — and codegen
+    // reads only `Literal::text`, so an unchecked `traefik.web` would
+    // compile to `entrypoints=web` with the qualifier silently gone.
+    // `path_prefix` (#196) gets the same check for the first time here:
+    // before #196 it couldn't parse a qualifier at all (see
+    // [`crate::schema::allows_qualified_reference`]'s doc), so there was
+    // nothing yet to reject.
     for router in &fields.routers {
         reject_qualified(&router.entrypoint, "router.entrypoint")?;
         reject_qualified(&router.path_prefix, "router.path_prefix")?;
@@ -1647,21 +1638,17 @@ fn substitute_params(
     {
         substitute_literal(r, args, template_name)?;
     }
-    if let Some(e) = &mut fields.expose {
-        if let Some(p) = &mut e.port {
-            substitute_numeric_literal(p, args, template_name)?;
-        }
-        if let Some(h) = &mut e.host {
-            substitute_literal(h, args, template_name)?;
-        }
+    if let Some(e) = &mut fields.expose
+        && let Some(p) = &mut e.port
+    {
+        substitute_numeric_literal(p, args, template_name)?;
     }
-    // `router`'s own literal slots (#184). Its `host` is `expose.host`'s
-    // twin — a template that parameterizes one parameterizes the other —
-    // and both `entrypoint` and `path_prefix` are `Literal` lists for
-    // exactly this reason (see `schema::FieldKind::ReferenceList`).
-    // Missing any of the three would reproduce #168's live bug class: the
-    // `Literal::Param` survives to codegen, which emits the parameter's
-    // own name into a Traefik rule and exits 0.
+    // `router`'s own literal slots (#184) — `host`, `entrypoint`, and
+    // `path_prefix` are all `Literal`-carrying (see
+    // `schema::FieldKind::ReferenceList`). Missing any of the three would
+    // reproduce #168's live bug class: the `Literal::Param` survives to
+    // codegen, which emits the parameter's own name into a Traefik rule
+    // and exits 0.
     for router in &mut fields.routers {
         if let Some(h) = &mut router.host {
             substitute_literal(h, args, template_name)?;
@@ -1795,15 +1782,15 @@ fn substitute_params(
         }
     }
     // The reference-shaped list fields #196 newly opened to `$param` —
-    // `middleware`, `networks`, `dns`, `env_file`, `expose.entrypoint`,
-    // and a `depends_on` entry's own reference (`router.entrypoint` and
-    // `router.path_prefix` are the same kind of field but already got
-    // substituted in the router loop above) — walk through
-    // `substitute_reference_literal` rather than plain
-    // `substitute_literal`: #201 dropped `: Number`/`: String` parameter
-    // annotations, so this is the one place left that still rejects a
-    // substituted bare number, since these positions' own grammar could
-    // never hold one directly even written by hand. Before #196 none of
+    // `middleware`, `networks`, `dns`, `env_file`, and a `depends_on`
+    // entry's own reference (`router.entrypoint` and `router.path_prefix`
+    // are the same kind of field but already got substituted in the
+    // router loop above) — walk through `substitute_reference_literal`
+    // rather than plain `substitute_literal`: #201 dropped
+    // `: Number`/`: String` parameter annotations, so this is the one
+    // place left that still rejects a substituted bare number, since
+    // these positions' own grammar could never hold one directly even
+    // written by hand. Before #196 none of
     // these could hold a `Literal::Param` at all (they were
     // `Reference`-typed, and a `Reference` had nowhere to put one), so
     // this walk simply didn't exist; missing any one of these rows now
@@ -1821,11 +1808,6 @@ fn substitute_params(
     }
     for lit in &mut fields.env_file {
         substitute_reference_literal(lit, args, template_name)?;
-    }
-    if let Some(e) = &mut fields.expose {
-        for lit in &mut e.entrypoint {
-            substitute_reference_literal(lit, args, template_name)?;
-        }
     }
     for entry in &mut fields.depends_on {
         substitute_reference_literal(&mut entry.reference, args, template_name)?;
@@ -2101,12 +2083,12 @@ impl Spanned for RawEntry {
 /// or "anything-vs-own" (silent overrides).
 ///
 /// `scalars` holds every single-value collision point in the language —
-/// `image.ref`, `expose.port`/`expose.host`, `restart.policy`,
+/// `image.ref`, `expose.port`, `restart.policy`,
 /// `container_name`, `healthcheck`'s five plain-`Literal` sub-fields,
 /// and any future one — keyed
 /// generically by name, always the fully-dotted canonical path down to
-/// the concrete sub-field (`expose`'s two scalar sub-fields; `image`/
-/// `restart`'s one apiece), never a struct's own bare name, so a field's
+/// the concrete sub-field (`image`/`expose`/`restart` each have one
+/// today), never a struct's own bare name, so a field's
 /// key is a stable function of its own identity rather than how many
 /// siblings its struct happens to have today (see #27: keying a
 /// single-field struct under its bare name meant the key would have to
@@ -2131,15 +2113,17 @@ impl Spanned for RawEntry {
 /// point a one-line addition rather than a new `MergeAcc` field plus new
 /// hand-written merge/rebuild logic.
 ///
-/// `lists` is the same idea for every plain reference-list field — the
-/// four bare ones on `ServiceFields` (`middleware`/`networks`/`dns`/
-/// `env_file`) plus `expose.entrypoint`, which lives inside a
-/// nested struct and so can't be a plain `MergeAcc` field the way the
-/// others once were. They carry no `Tier`: list fields concatenate
+/// `lists` is the same idea for every plain reference-list field —
+/// `middleware`/`networks`/`dns`/`env_file`, the four bare ones directly
+/// on `ServiceFields`. They carry no `Tier`: list fields concatenate
 /// unconditionally, so there is no collision to attribute to a tier.
-/// See [`LIST_FIELDS`]. `devices` isn't among them any more either — see
-/// [`Self::arrow_maps`]'s own doc for why it moved onto the same
-/// `merge_map` path as `env`/`volume`/`publish` (#167).
+/// See [`LIST_FIELDS`]. `router.entrypoint`/`router.path_prefix` aren't
+/// among them, even though they're the same [`FieldKind::ReferenceList`]
+/// kind — they live one level deeper, under a router name, so they merge
+/// through [`Self::routers`] instead (see [`merge_routers`]'s own doc).
+/// `devices` isn't among them either — see [`Self::arrow_maps`]'s own doc
+/// for why it moved onto the same `merge_map` path as
+/// `env`/`volume`/`publish` (#167).
 ///
 /// `depends_on` isn't one of the four — it moved into its own
 /// `depends_on` field below, merged key-by-key on the referenced
@@ -2277,13 +2261,12 @@ impl MergeAcc {
                 (field.set)(&mut fields, value);
             }
         }
-        // Deliberately after `SCALAR_FIELDS`: `expose.entrypoint`'s
-        // `set` can create the `Expose` that holds it, and the span it
-        // stamps on a freshly created one is meant to lose to
-        // `expose.port`'s and `expose.host`'s (see [`ScalarField`]'s
-        // doc). Running the whole scalar table first keeps
-        // `entrypoint` last in that preference order, exactly where it
-        // sat when it was the table's third `expose` row.
+        // Order relative to `SCALAR_FIELDS` above no longer matters for
+        // span preference the way it once did for `expose.entrypoint`:
+        // every row left in `LIST_FIELDS` (`middleware`/`networks`/`dns`/
+        // `env_file`) sits directly on `ServiceFields`, with no nested
+        // struct for a `set` to `get_or_insert` and no span of its own to
+        // race against.
         for field in LIST_FIELDS {
             if let Some(values) = self.lists.remove(field.key) {
                 (field.set)(&mut fields, values);
@@ -2351,7 +2334,7 @@ impl ScalarValue {
 /// One scalar (or scalar-*like*, see [`ScalarValue`]) collision point in
 /// `ServiceFields` — a slot that lives either directly on `ServiceFields`
 /// (`container_name`, `command`, `entrypoint`, `privileged`) or inside one
-/// of its `Nested` struct fields (`image.ref`, `expose.port`/`.host`,
+/// of its `Nested` struct fields (`image.ref`, `expose.port`,
 /// `restart.policy`, every `healthcheck` sub-field, `traefik.disabled`) —
 /// described generically by `key` (the identity-stable, fully-dotted name
 /// [`merge_scalar`]/`ComposeError` key collisions by — see #27) plus a
@@ -2368,24 +2351,15 @@ impl ScalarValue {
 /// bare [`Literal`]) converts to and from [`ScalarValue`], so that
 /// knowledge stays local to the one row that needs it.
 ///
-/// `expose`'s entries are listed `port` then `host` in that order
-/// deliberately: `set`'s `get_or_insert` only stamps a freshly created
-/// `Expose`'s span from the *first* sub-field processed that's actually
-/// present, so this order reproduces the same port-over-host span
-/// preference the old hand-written `into_service_fields` documented.
-/// `expose.entrypoint` is no longer a row here — it's a reference list
-/// now, so it lives in [`LIST_FIELDS`] — but it still sorts *after*
-/// both of these for span purposes, because
-/// [`MergeAcc::into_service_fields`] runs this whole table before that
-/// one (the span itself stays cosmetic — see [`Expose`]'s doc —
-/// nothing downstream reads it for anything but existence). The same
-/// preference holds one struct over: `healthcheck.test` sorts after
-/// `healthcheck`'s five plain-`Literal` sub-fields, and `.disable` after
-/// `.test`, so a `get_or_insert` that has to materialize `Healthcheck`
-/// from scratch always stamps its span from the most specific sub-field
-/// actually present — the same rule this table already applied to
-/// `expose`, now covering the two rows that joined it from their own
-/// dedicated `MergeAcc` slots (#197).
+/// `expose` is down to its one field, `port`, since #198 moved `host`
+/// and `entrypoint` onto `router` — so its `set`'s `get_or_insert`
+/// always stamps a freshly created `Expose`'s span from `port` itself,
+/// with no sibling sub-field left to race against for span preference
+/// the way `healthcheck`'s several still do: `healthcheck.test` sorts
+/// after `healthcheck`'s five plain-`Literal` sub-fields, and `.disable`
+/// after `.test`, so a `get_or_insert` that has to materialize
+/// `Healthcheck` from scratch always stamps its span from the most
+/// specific sub-field actually present (#197).
 struct ScalarField {
     key: &'static str,
     take: fn(&mut ServiceFields) -> Option<ScalarValue>,
@@ -2435,35 +2409,7 @@ static SCALAR_FIELDS: &[ScalarField] = &[
         set: |f, v| {
             let v = expect_literal(v, "expose.port");
             let span = v.span();
-            f.expose
-                .get_or_insert(Expose {
-                    port: None,
-                    host: None,
-                    entrypoint: Vec::new(),
-                    span,
-                })
-                .port = Some(v);
-        },
-    },
-    ScalarField {
-        key: "expose.host",
-        take: |f| {
-            f.expose
-                .as_mut()
-                .and_then(|e| e.host.take())
-                .map(ScalarValue::Literal)
-        },
-        set: |f, v| {
-            let v = expect_literal(v, "expose.host");
-            let span = v.span();
-            f.expose
-                .get_or_insert(Expose {
-                    port: None,
-                    host: None,
-                    entrypoint: Vec::new(),
-                    span,
-                })
-                .host = Some(v);
+            f.expose.get_or_insert(Expose { port: None, span }).port = Some(v);
         },
     },
     ScalarField {
@@ -2741,29 +2687,27 @@ fn empty_traefik(span: Span) -> Traefik {
 /// path convention `ScalarField::key` documents. `set` is only ever
 /// called with a non-empty list — see [`merge_tier`].
 ///
-/// Introduced when `expose.entrypoint` became a list (hl-lang#73).
-/// Before that, every reference list sat directly on `ServiceFields`,
-/// so [`merge_tier`] and [`MergeAcc::into_service_fields`] could just
-/// name each one — but `entrypoint` lives inside `expose`, which
-/// `into_service_fields` *rebuilds*, so it needs the same read-out/
-/// write-back indirection the scalars already had. Given one list field
-/// had to be described by function pointers, all five are (`depends_on`
-/// no longer among them — see [`MergeAcc`]'s doc for why #155 moved it
-/// onto its own [`merge_depends_on`]-based merge point instead, and
-/// `devices` never was — see [`MergeAcc::devices`]'s doc for why #167
-/// gave it the same `merge_map` treatment `publish` gets instead): the
-/// whole point of [`SCALAR_FIELDS`] (see hl-lang#28) is that both merge
-/// functions stay one generic loop apiece with no hand-enumerated
-/// knowledge of `ServiceFields`'s shape, and leaving four lists
-/// hand-named beside a one-row table would have kept exactly the shape
-/// that design set out to remove.
+/// Introduced when `expose.entrypoint` became a list (hl-lang#73), back
+/// when `entrypoint` lived inside `expose`, which
+/// `MergeAcc::into_service_fields` *rebuilds* — needing the same
+/// read-out/write-back indirection the scalars already had, rather than
+/// the plain "name each one" every other reference list got. #198 moved
+/// `entrypoint` off `expose` entirely (it lives under a router name now,
+/// merged through [`MergeAcc::routers`] instead — see [`merge_routers`]),
+/// so the four rows left here (`middleware`/`networks`/`dns`/`env_file`)
+/// no longer strictly need the indirection for that original reason —
+/// kept anyway since they still ride the same table [`SCALAR_FIELDS`]
+/// (see hl-lang#28) exists to generalize: both merge functions stay one
+/// generic loop apiece with no hand-enumerated knowledge of
+/// `ServiceFields`'s shape, and a bespoke `MergeAcc` field per list would
+/// be exactly the shape that design set out to remove.
 struct ListField {
     key: &'static str,
     take: fn(&mut ServiceFields) -> Vec<Literal>,
     set: fn(&mut ServiceFields, Vec<Literal>),
     /// Whether repeats of an already-accumulated name are dropped
     /// rather than appended (hl-lang#69). True for the set-like fields
-    /// — `networks`, `middleware`, `expose.entrypoint` — where naming
+    /// — `networks`, `middleware` — where naming
     /// the same thing twice means exactly what naming it once means, so
     /// the repeat is pure noise: it duplicated `networks:` entries and
     /// `middlewares=` label values in the output, made a single
@@ -2787,32 +2731,6 @@ struct ListField {
 }
 
 static LIST_FIELDS: &[ListField] = &[
-    ListField {
-        key: "expose.entrypoint",
-        dedupe: true,
-        take: |f| {
-            f.expose
-                .as_mut()
-                .map(|e| std::mem::take(&mut e.entrypoint))
-                .unwrap_or_default()
-        },
-        set: |f, v| {
-            // `v` is never empty — see [`merge_tier`]'s `acc.lists`
-            // invariant — so `v[0]` is safe, and the span it stamps on
-            // a freshly created `Expose` is the first entry point's:
-            // cosmetic, and only ever reached when neither `port` nor
-            // `host` was set at all.
-            let span = v[0].span();
-            f.expose
-                .get_or_insert(Expose {
-                    port: None,
-                    host: None,
-                    entrypoint: Vec::new(),
-                    span,
-                })
-                .entrypoint = v;
-        },
-    },
     ListField {
         key: "middleware",
         dedupe: true,
@@ -2914,11 +2832,9 @@ fn merge_tier(
     //
     // The emptiness check is load-bearing, not a micro-optimization:
     // it's what establishes `acc.lists`'s invariant that a key present
-    // in the map always maps to a non-empty list. `into_service_fields`
-    // relies on it (an empty list must round-trip as "field unset", not
-    // as an `Expose` materialized to hold nothing), and
-    // [`LIST_FIELDS`]'s `expose.entrypoint` `set` relies on it harder
-    // still — it reads `v[0]` for a span. Deduping can't undermine
+    // in the map always maps to a non-empty list — `into_service_fields`
+    // relies on it, since a `set` writes the whole merged list back in
+    // one call rather than accumulating into it. Deduping can't undermine
     // that: a non-empty `values` whose every entry is dropped as a
     // repeat can only happen when the accumulated list already held
     // those names, i.e. was already non-empty.
@@ -3050,7 +2966,8 @@ fn merge_routers(
             merge_router_host(&mut acc[pos], key.as_deref(), host, tier)?;
         }
         // First occurrence wins, so accumulated order stays tier order
-        // with later repeats dropped — `expose.entrypoint`'s own rule,
+        // with later repeats dropped — the same dedupe-by-name rule
+        // `LIST_FIELDS`'s set-like rows follow (see [`ListField::dedupe`]),
         // reached through the same comparison on `Literal::text` (a
         // qualified entry can never get this far: it's rejected outright
         // by `resolve_qualified_references`).
@@ -3188,7 +3105,7 @@ fn merge_depends_on(
 }
 
 /// Merges one scalar (or scalar-*like*, see [`ScalarValue`]) collision
-/// point, keyed by `field` (e.g. `"expose.host"`, `"healthcheck.test"`,
+/// point, keyed by `field` (e.g. `"expose.port"`, `"healthcheck.test"`,
 /// `"privileged"`), into `acc`. `Own` always wins unconditionally;
 /// `Defaults` is silently overridden by anything; two `Explicit` tiers
 /// setting the same key is a compile error. The single merge routine

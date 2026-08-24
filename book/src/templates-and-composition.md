@@ -16,7 +16,11 @@ A template accepts exactly the same fields as a `service` body (see
 template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
-  expose $port, host: "{{name}}.internal.example.com", entrypoint: web-secure
+  expose $port
+  router {
+    host: "{{name}}.internal.example.com"
+    entrypoint: web-secure
+  }
   middleware local-ipwhitelist
 }
 ```
@@ -83,7 +87,8 @@ template linuxserver_app(puid, pgid) {
 
 template linuxserver_web(puid, pgid, port) {
   with linuxserver_app { puid: $puid, pgid: $pgid }
-  expose $port, entrypoint: web-secure
+  expose $port
+  router { entrypoint: web-secure }
 }
 ```
 
@@ -167,9 +172,9 @@ survives the explicit tier.
 
 Different field kinds merge differently:
 
-- **List fields** (`middleware`, `networks`, `dns`, `env_file`, and
-  `expose`'s `entrypoint`) concatenate—no collision is possible, since
-  there's nothing to overwrite. All but `dns` and `env_file` concatenate
+- **List fields** (`middleware`, `networks`, `dns`, `env_file`) concatenate—no
+  collision is possible, since there's nothing to overwrite. All but `dns`
+  and `env_file` concatenate
   *by distinct name*: naming the same network in a template and again in
   the service's own body means what naming it once means, so `hllc`
   drops the repeat rather than emitting it twice. The first occurrence
@@ -205,20 +210,21 @@ Different field kinds merge differently:
   but its collision check also looks at the *value*: two entries that
   agree aren't a real collision the way two `env` entries sharing a key
   always are, whatever those two entries' values happen to be.
-- **Scalar fields** (`image`, `restart`) error on collision among
-  explicit templates only, per the preceding rule.
-- **`expose` and `healthcheck`** are the built-in struct fields with
+- **Scalar fields** (`image`, `restart`, `expose`'s `port`) error on
+  collision among explicit templates only, per the preceding rule.
+- **`healthcheck` and `router`** are the built-in struct fields with
   more than one sub-field, and both merge per sub-field independently
   rather than as one indivisible unit—the same key-by-key reasoning as
   a map field, applied to a struct's named fields instead of a map's
-  keys. Each sub-field then follows its own kind's rule: `expose.port`/
-  `.host` and every `healthcheck` sub-field but `entrypoint`/`test` are
-  scalars and collide (`healthcheck.test` collides too, even though its
-  value isn't a plain string or number—see below), while
-  `expose.entrypoint` is a list and concatenates, so two explicit
-  templates each naming one entry point produce a router attached to
-  both—and two naming the *same* entry point produce a router attached
-  to it once, per the preceding distinct-name rule.
+  keys. Each sub-field then follows its own kind's rule. Every
+  `healthcheck` sub-field but `test` is a scalar and collides like
+  `expose.port` does, and `test` collides the same way even though its
+  value isn't a plain string or number—see below. A `router`'s `host`
+  is a scalar and collides, while its `entrypoint` is a list and
+  concatenates, so two explicit templates each naming one entry point
+  produce a router attached to both—and two naming the *same* entry
+  point produce a router attached to it once, per the preceding
+  distinct-name rule.
 
   `healthcheck.test` and `healthcheck.disable` collide the same way a
   scalar sub-field does, even though neither is a plain `Literal`:
@@ -258,16 +264,16 @@ Different field kinds merge differently:
   message about `router.host` alone doesn't say which router.
 
 That last point about per-sub-field merging means a service's own body
-can override just `expose.host` while still inheriting `port`/
-`entrypoint` from a `with`-listed template, without repeating them:
+can override just a router's `host` while still inheriting its
+`entrypoint` from a `with`-listed template, without repeating it:
 
 ```hll
 service it-tools {
   with internal_web { port: 8080 }
   image "corentinth/it-tools:latest"
-  # overrides just expose.host—port and entrypoint still come from
-  # internal_web
-  expose { host: "tools.internal.example.com" }
+  # overrides just the unnamed router's host—its entrypoint still comes
+  # from internal_web
+  router { host: "tools.internal.example.com" }
 }
 ```
 
@@ -287,7 +293,11 @@ volume syncthing-config {}
 template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
-  expose $port, host: "{{name}}.internal.example.com", entrypoint: web-secure
+  expose $port
+  router {
+    host: "{{name}}.internal.example.com"
+    entrypoint: web-secure
+  }
   middleware local-ipwhitelist
 }
 
@@ -310,8 +320,8 @@ service syncthing {
 `syncthing` ends up with:
 
 - a network reference and `restart` from `internal_web`
-- an `expose` block built from `internal_web`'s `port` parameter plus
-  its own `{{name}}`-interpolated host
+- an `expose` block built from `internal_web`'s `port` parameter, and an
+  unnamed `router` block with its `{{name}}`-interpolated host
 - a middleware entry each from `internal_web` and `authenticated`
 - two `env` entries from `linuxserver_app`
 - its own `image` and `volume`, which no template sets

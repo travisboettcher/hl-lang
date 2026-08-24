@@ -35,8 +35,8 @@ pub enum FieldKind {
     /// entries across repeated writes (per docs/DESIGN.md's rule 4).
     Nested(&'static TypeSchema),
     /// A list of reference-shaped [`crate::ast::Literal`]s — `middleware`,
-    /// `networks`, `dns`, `env_file`, `expose.entrypoint`,
-    /// `router.entrypoint`, and `router.path_prefix`. Accumulates across
+    /// `networks`, `dns`, `env_file`, `router.entrypoint`, and
+    /// `router.path_prefix`. Accumulates across
     /// repeats; settable via a bracketed list, the bare comma-list sugar,
     /// or repeated statements — never duplicate-checked, since list
     /// fields can't collide.
@@ -115,9 +115,10 @@ pub enum FieldKind {
     /// `host`/`entrypoint`/`path_prefix` body — so it gets its own kind
     /// rather than bending either of those.
     ///
-    /// The name is optional (`router { ... }` claims the same router id
-    /// `expose.host` does) and is an `IDENT`, never a `STRING`, matching
-    /// how a top-level declaration's own name is spelled — see
+    /// The name is optional (`router { ... }` is the unnamed form,
+    /// claiming the service's own router id) and is an `IDENT`, never a
+    /// `STRING`, matching how a top-level declaration's own name is
+    /// spelled — see
     /// [`crate::ast::Router`]'s doc for why a label *key* can't take
     /// arbitrary string content.
     NamedNested(&'static TypeSchema),
@@ -164,12 +165,6 @@ pub struct TypeSchema {
     /// keys are plain literal values with nothing to resolve against, so
     /// they keep the ordinary all-literal entry parsing.
     pub key_may_be_reference: bool,
-    /// A bare keyword (no colon) that aliases to a named secondary
-    /// field, e.g. `("as", "host")` on `expose`: `expose 8096 as "..."`
-    /// desugars to `expose { port: 8096, host: "..." }`. Kept as schema
-    /// data (not a hardcoded per-type branch in the parser) so the
-    /// engine stays generic.
-    pub bare_keyword_alias: Option<(&'static str, &'static str)>,
     /// Whether an instance needs an instance name (`network foo { ... }`,
     /// `service foo { ... }`) — true only for the two top-level types.
     pub needs_name: bool,
@@ -191,44 +186,38 @@ pub static IMAGE: TypeSchema = TypeSchema {
     map_separator: None,
     uniqueness: None,
     key_may_be_reference: false,
-    bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
 };
 
-/// `expose 8096 as "host"` / `expose { port: 8096, host: "host", entrypoint: web-secure }`.
-/// `entrypoint` is a reference *list* of Traefik entry-point names
-/// (`entrypoint web, web-secure`), spelled exactly like `middleware`,
-/// because Traefik's `entrypoints=` label is itself comma-separated —
-/// modelling that as a list keeps the comma codegen's to write rather
-/// than the user's, so no label value has to permit one. Left empty,
-/// codegen omits the `entrypoints=` label entirely rather than
-/// defaulting to any specific value, matching Traefik's own real
-/// behavior ("no entry points" attaches to all of them) since any one
-/// entry-point name is specific to a given homelab's own `traefik.yml`,
-/// not a generic default the compiler should assume.
+/// `expose 8096` / `expose { port: 8096 }` — Compose's own `expose:` key
+/// (container-network visibility) plus the
+/// `traefik.http.services.<svc>.loadbalancer.server.port` label. Nothing
+/// else: `expose` used to also model exactly one Traefik router (`host`,
+/// `entrypoint`) before #198 moved all routing onto [`ROUTER`], leaving
+/// `port` the one field left here — a plain Compose concern with nothing
+/// to do with Traefik, so a `traefik { disabled }` service may still set
+/// it (`hl_codegen`'s own `traefik_conflict_field` doesn't check it).
+///
+/// `expose <port> as "<host>"` still parses — it's the shortest way to
+/// write the overwhelmingly common single-router service, and it's all
+/// over the book — but it's no longer schema-driven sugar onto a field of
+/// this type the way it was through #197 (`bare_keyword_alias`, see F6 of
+/// #198). `EXPOSE` has no `host` left for `as` to alias onto, so the
+/// parser recognizes the spelling directly and desugars it to `expose {
+/// port }` plus an unnamed `router { host }` — see
+/// `crate::parser::Parser::parse_expose_as_sugar`.
 pub static EXPOSE: TypeSchema = TypeSchema {
     type_name: "expose",
     kind: SchemaKind::Struct,
-    fields: &[
-        FieldSchema {
-            name: "port",
-            kind: FieldKind::Scalar,
-        },
-        FieldSchema {
-            name: "host",
-            kind: FieldKind::Scalar,
-        },
-        FieldSchema {
-            name: "entrypoint",
-            kind: FieldKind::ReferenceList,
-        },
-    ],
+    fields: &[FieldSchema {
+        name: "port",
+        kind: FieldKind::Scalar,
+    }],
     primary_field: Some("port"),
     map_separator: None,
     uniqueness: None,
     key_may_be_reference: false,
-    bare_keyword_alias: Some(("as", "host")),
     needs_name: false,
     schema_free: false,
 };
@@ -237,11 +226,16 @@ pub static EXPOSE: TypeSchema = TypeSchema {
 /// — one Traefik router computed off this service (#184), repeatable and
 /// keyed by the optional name written right after the keyword.
 ///
-/// [`EXPOSE`] models exactly one router and keeps doing so, byte for
-/// byte. This is the second way to ask for one, for the service that
-/// needs several: a public host beside a LAN host, an API path split off
-/// from a frontend. See [`crate::ast::Router`]'s doc for the whole
-/// rationale and for why the name is an `IDENT`.
+/// `router` owns every field that only ever means anything attached to a
+/// Traefik router (#198) — `expose` used to model exactly one router of
+/// its own (`host`, `entrypoint`) and no longer does; see [`EXPOSE`]'s
+/// doc. The unnamed `router { ... }` form is the common single-router
+/// case, and `expose <port> as "<host>"` still reaches it, just via
+/// bespoke parser sugar rather than a field of `expose` itself. A service
+/// that needs several routers — a public host beside a LAN host, an API
+/// path split off from a frontend — names each block instead.
+/// See [`crate::ast::Router`]'s doc for the whole rationale and for why
+/// the name is an `IDENT`.
 ///
 /// No `primary_field`, for [`HEALTHCHECK`]'s reason rather than
 /// [`TRAEFIK`]'s: the position right after the keyword is already spoken
@@ -250,14 +244,12 @@ pub static EXPOSE: TypeSchema = TypeSchema {
 /// it as `router api { host: "..." }` or `router api, host: "..."`
 /// instead.
 ///
-/// `entrypoint` is [`FieldKind::ReferenceList`], the same kind and the
-/// same spelling as [`EXPOSE`]'s own, deliberately: two fields that
-/// produce the same `entrypoints=` label should not be two different
-/// grammars. `path_prefix` is `FieldKind::ReferenceList` too (#196) —
-/// before #196 it needed its own `LiteralList` kind purely so a `$param`
-/// could reach it, back when a reference-list entry couldn't carry one;
-/// see [`FieldKind::ReferenceList`]'s own doc for why that's no longer a
-/// reason to keep the two kinds apart, and
+/// `entrypoint` is [`FieldKind::ReferenceList`], the same kind
+/// `middleware`/`networks` use. `path_prefix` is `FieldKind::ReferenceList`
+/// too (#196) — before #196 it needed its own `LiteralList` kind purely so
+/// a `$param` could reach it, back when a reference-list entry couldn't
+/// carry one; see [`FieldKind::ReferenceList`]'s own doc for why that's no
+/// longer a reason to keep the two kinds apart, and
 /// [`allows_qualified_reference`] for why `path_prefix` still rejects
 /// the qualified form the merge made syntactically reachable here.
 /// `router` carries no `port`: `loadbalancer.server.port` is per Compose
@@ -283,7 +275,6 @@ pub static ROUTER: TypeSchema = TypeSchema {
     map_separator: None,
     uniqueness: None,
     key_may_be_reference: false,
-    bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
 };
@@ -300,7 +291,6 @@ pub static RESTART: TypeSchema = TypeSchema {
     map_separator: None,
     uniqueness: None,
     key_may_be_reference: false,
-    bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
 };
@@ -370,7 +360,6 @@ pub static HEALTHCHECK: TypeSchema = TypeSchema {
     map_separator: None,
     uniqueness: None,
     key_may_be_reference: false,
-    bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
 };
@@ -420,7 +409,6 @@ pub static TRAEFIK: TypeSchema = TypeSchema {
     map_separator: None,
     uniqueness: None,
     key_may_be_reference: false,
-    bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
 };
@@ -457,7 +445,6 @@ pub static VOLUME: TypeSchema = TypeSchema {
     map_separator: Some(TokenKind::Arrow),
     uniqueness: Some(MapSide::Value),
     key_may_be_reference: true,
-    bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
 };
@@ -485,7 +472,6 @@ pub static PUBLISH: TypeSchema = TypeSchema {
     map_separator: Some(TokenKind::Arrow),
     uniqueness: Some(MapSide::Value),
     key_may_be_reference: false,
-    bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
 };
@@ -517,7 +503,6 @@ pub static DEVICES: TypeSchema = TypeSchema {
     map_separator: Some(TokenKind::Arrow),
     uniqueness: Some(MapSide::Value),
     key_may_be_reference: false,
-    bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
 };
@@ -532,7 +517,6 @@ pub static ENV: TypeSchema = TypeSchema {
     map_separator: Some(TokenKind::Equals),
     uniqueness: Some(MapSide::Key),
     key_may_be_reference: false,
-    bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
 };
@@ -554,7 +538,6 @@ pub static RAW: TypeSchema = TypeSchema {
     map_separator: Some(TokenKind::Colon),
     uniqueness: Some(MapSide::Key),
     key_may_be_reference: false,
-    bare_keyword_alias: None,
     needs_name: false,
     schema_free: true,
 };
@@ -583,7 +566,6 @@ pub static NETWORK: TypeSchema = TypeSchema {
     map_separator: None,
     uniqueness: None,
     key_may_be_reference: false,
-    bare_keyword_alias: None,
     needs_name: true,
     schema_free: false,
 };
@@ -604,7 +586,6 @@ pub static DRIVER_OPTS: TypeSchema = TypeSchema {
     map_separator: Some(TokenKind::Colon),
     uniqueness: Some(MapSide::Key),
     key_may_be_reference: false,
-    bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
 };
@@ -647,7 +628,6 @@ pub static VOLUME_DECL: TypeSchema = TypeSchema {
     map_separator: None,
     uniqueness: None,
     key_may_be_reference: false,
-    bare_keyword_alias: None,
     needs_name: true,
     schema_free: false,
 };
@@ -667,7 +647,6 @@ pub static WITH: TypeSchema = TypeSchema {
     map_separator: None,
     uniqueness: None,
     key_may_be_reference: false,
-    bare_keyword_alias: None,
     needs_name: false,
     schema_free: false,
 };
@@ -828,7 +807,6 @@ pub static SERVICE: TypeSchema = TypeSchema {
     map_separator: None,
     uniqueness: None,
     key_may_be_reference: false,
-    bare_keyword_alias: None,
     needs_name: true,
     schema_free: false,
 };
@@ -845,7 +823,6 @@ pub static TEMPLATE: TypeSchema = TypeSchema {
     map_separator: None,
     uniqueness: None,
     key_may_be_reference: false,
-    bare_keyword_alias: None,
     needs_name: true,
     schema_free: false,
 };
@@ -889,9 +866,9 @@ pub fn supports_raw(schema: &'static TypeSchema) -> bool {
 /// Whether an `alias.name`-qualified [`crate::ast::Literal::Qualified`]
 /// is *semantically* legal at `field_path` — the fully-dotted canonical
 /// name every reference-shaped position uses elsewhere in this crate
-/// (`"networks"`, `"middleware"`, `"expose.entrypoint"`,
-/// `"router.entrypoint"`, `"router.path_prefix"`, `"depends_on"`, or
-/// `"volume"` for a named-volume mount's host side).
+/// (`"networks"`, `"middleware"`, `"router.entrypoint"`,
+/// `"router.path_prefix"`, `"depends_on"`, or `"volume"` for a
+/// named-volume mount's host side).
 ///
 /// `false` for every position but the two listed here (#196). Before
 /// #196's [`crate::ast::Literal`]/`Reference` unification this question
@@ -928,20 +905,10 @@ pub enum FieldResolution {
 }
 
 /// The single function every field-name lookup in the parser goes
-/// through. This is what keeps the `as`→`host` alias driven by schema
-/// data instead of hardcoded per-type branches in the parser body.
+/// through — the generic engine's one lookup table, so a type's own
+/// field list is the only thing that decides what a key resolves to.
 pub fn resolve_field(schema: &'static TypeSchema, key_text: &str) -> FieldResolution {
     if let Some(field) = schema.fields.iter().find(|f| f.name == key_text) {
-        return FieldResolution::Field(field);
-    }
-    if let Some((keyword, target)) = schema.bare_keyword_alias
-        && key_text == keyword
-    {
-        let field = schema
-            .fields
-            .iter()
-            .find(|f| f.name == target)
-            .expect("bare_keyword_alias target must exist in the type's own field list");
         return FieldResolution::Field(field);
     }
     if schema.schema_free {
