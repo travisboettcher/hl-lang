@@ -157,8 +157,11 @@ pub struct TypeSchema {
     /// literally `:` means it needs no extra sugar path at all, since
     /// that's already the canonical form).
     pub map_separator: Option<TokenKind>,
-    /// Which side of a map entry is uniqueness-checked; `None` only for
-    /// `raw`, which is schema-free and checks nothing.
+    /// Which side of a map entry is uniqueness-checked. Meaningful only
+    /// for a [`SchemaKind::Map`] type — every one of those defines a
+    /// side, `raw` included as of #193 — and always `None` for a
+    /// [`SchemaKind::Struct`] type, which has no map entries for a side
+    /// to describe.
     pub uniqueness: Option<MapSide>,
     /// Map-kind types only: whether a bare `IDENT` on the *key* side of
     /// an entry is a reference to a top-level declaration
@@ -538,14 +541,21 @@ pub static ENV: TypeSchema = TypeSchema {
 };
 
 /// `raw { any_key: any_value }` — schema-free passthrough, no unknown-key
-/// or uniqueness checking.
+/// checking. `uniqueness` is `Some(MapSide::Key)`, the same convention
+/// `env` uses, since #193: a `with`-merge collision on a repeated `raw`
+/// key now raises the same `MapKeyCollision` a repeated `env` key does,
+/// rather than silently keeping whichever tier merged last. This field's
+/// value is read only by `hl_parser::compose`'s cross-tier merge — the
+/// parser's own `schema_free` body-parsing path (`parse_raw_body`) never
+/// reads it, so a `raw` key repeated within *one* body still isn't
+/// checked, unchanged from before #193.
 pub static RAW: TypeSchema = TypeSchema {
     type_name: "raw",
     kind: SchemaKind::Map,
     fields: &[],
     primary_field: None,
     map_separator: Some(TokenKind::Colon),
-    uniqueness: None,
+    uniqueness: Some(MapSide::Key),
     key_may_be_reference: false,
     bare_keyword_alias: None,
     needs_name: false,

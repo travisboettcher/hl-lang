@@ -25,7 +25,7 @@ use hl_lexer::{SourceMap, Span};
 use crate::ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Command, DependsOnEntry, Entrypoint, EnvEntry, EnvMap,
     Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, ParamType, Program,
-    RawMap, RawValue, Reference, Restart, Router, Service, ServiceFields, TemplateDecl,
+    RawEntry, RawMap, RawValue, Reference, Restart, Router, Service, ServiceFields, TemplateDecl,
     TemplateInvocation, TopDecl, Traefik, Volume,
 };
 use crate::schema::MapSide;
@@ -1828,6 +1828,11 @@ impl Spanned for EnvEntry {
         self.span
     }
 }
+impl Spanned for RawEntry {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
 /// The accumulator a field-bag's tiers merge into, tracking which tier
 /// last set each value so [`merge_scalar`]/[`merge_map`] can tell
 /// "explicit-vs-explicit" (an error) apart from "defaults-vs-anything"
@@ -1907,7 +1912,16 @@ struct MergeAcc {
     /// why it's merged like a map field (keyed by the referenced
     /// service's name) rather than riding [`Self::lists`].
     depends_on: Vec<(DependsOnEntry, Tier)>,
-    raw: RawMap,
+    /// `raw`'s own merge point (#193) — moved here from a bare [`RawMap`]
+    /// once `raw` stopped being the language's one unconditionally
+    /// concatenated map field. Merged key-by-key through the same
+    /// [`merge_map`] `env` uses, keyed the same way
+    /// ([`MapSide::Key`]), now that [`crate::schema::RAW`]'s own `uniqueness`
+    /// names one: own always wins, `defaults` always loses, and two
+    /// explicit `with`-listed templates setting the same key collide
+    /// with [`ComposeError::MapKeyCollision`] instead of the second one
+    /// silently overwriting the first.
+    raw: Vec<(RawEntry, Tier)>,
     /// `healthcheck.test`'s own collision point — not part of `scalars`
     /// above because [`HealthcheckTest`] isn't a [`Literal`]. Merged by
     /// `merge_scalar_like`, which is [`merge_scalar`] generalized over
@@ -2002,7 +2016,9 @@ impl MergeAcc {
                 entries: self.env.into_iter().map(|(v, _)| v).collect(),
             },
             depends_on: self.depends_on.into_iter().map(|(v, _)| v).collect(),
-            raw: self.raw,
+            raw: RawMap {
+                entries: self.raw.into_iter().map(|(v, _)| v).collect(),
+            },
             ..Default::default()
         };
         // `volume`/`publish`/`devices` (#192) — see [`Self::arrow_maps`]'s
@@ -2412,15 +2428,18 @@ static ARROW_MAP_FIELDS: &[ArrowMapField] = &[
     },
 ];
 
-/// Merges one tier's [`ServiceFields`] into `acc`. List fields (`raw`,
-/// plus every [`LIST_FIELDS`] entry) concatenate rather than collide —
-/// see [`ComposeError::MapKeyCollision`]'s doc for why `raw` in
-/// particular is never collision-checked, consistent with its existing
-/// intra-body no-uniqueness behavior. The set-like reference lists
-/// concatenate *by distinct name*, dropping a repeat of a name an
+/// Merges one tier's [`ServiceFields`] into `acc`. Every [`LIST_FIELDS`]
+/// entry concatenates rather than collides — the set-like reference
+/// lists concatenate *by distinct name*, dropping a repeat of a name an
 /// earlier tier (or an earlier entry of the same list) already
 /// contributed; see [`ListField::dedupe`] for which fields those are
-/// and why `dns`/`env_file` aren't among them.
+/// and why `dns`/`env_file` aren't among them. `raw` isn't one of them
+/// any more (#193) — it merges key-by-key through [`merge_map`] exactly
+/// like `env`, so two explicit templates setting the same `raw` key
+/// collide instead of the second one silently winning. Only the
+/// cross-tier merge changed: a `raw` key repeated *within* one body
+/// still isn't checked, since that's the parser's own
+/// `parse_raw_body`, a separate code path this function never touches.
 fn merge_tier(
     acc: &mut MergeAcc,
     mut incoming: ServiceFields,
@@ -2582,7 +2601,17 @@ fn merge_tier(
     // each key — see `merge_routers`' own doc for why neither
     // `merge_map` nor `LIST_FIELDS` fits (#184).
     merge_routers(&mut acc.routers, incoming.routers, tier)?;
-    acc.raw.entries.extend(incoming.raw.entries);
+    // Keyed like `env` — same [`MapSide::Key`] uniqueness convention —
+    // now that `raw` isn't the language's one unconditionally
+    // concatenated map field any more (#193). See `MergeAcc::raw`'s doc.
+    merge_map(
+        &mut acc.raw,
+        "raw",
+        MapSide::Key,
+        incoming.raw.entries,
+        tier,
+        |e| e.key.text().to_string(),
+    )?;
     Ok(())
 }
 

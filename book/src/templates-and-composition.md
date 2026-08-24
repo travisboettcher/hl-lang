@@ -153,14 +153,19 @@ Different field kinds merge differently:
   explicit templates' conditions genuinely *differ* is it the same
   `MapKeyCollision` compile error two templates setting the same `env`
   key to two different values would raise.
-- **Map fields** (`volume`, `env`) merge key-by-key (or value-by-value
-  for `volume`, since its uniqueness check is on the container-path
-  side)—a genuine collision on the same key, regardless of whether the
-  two values happen to agree, is the preceding compile error case.
-  The preceding entry's `depends_on` keys like a map field too, but its
-  collision check also looks at the *value*: two entries that agree
-  aren't a real collision the way two `env` entries sharing a key always
-  are, whatever those two entries' values happen to be.
+- **Map fields** (`volume`, `env`, `raw`) merge key-by-key (or
+  value-by-value for `volume`, since its uniqueness check is on the
+  container-path side)—a genuine collision on the same key, regardless
+  of whether the two values happen to agree, is the preceding compile
+  error case. `raw` followed this rule only starting in #193—before
+  that it was the one field the merge concatenated outright at every
+  tier, so two explicit templates setting the same `raw` key compiled
+  with the second one's value silently winning instead of raising a
+  collision—see [`raw`'s own section](./built-in-fields.md#raw) for that
+  history. The preceding entry's `depends_on` keys like a map field too,
+  but its collision check also looks at the *value*: two entries that
+  agree aren't a real collision the way two `env` entries sharing a key
+  always are, whatever those two entries' values happen to be.
 - **Scalar fields** (`image`, `restart`) error on collision among
   explicit templates only, per the preceding rule.
 - **`expose` and `healthcheck`** are the built-in struct fields with

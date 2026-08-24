@@ -1193,22 +1193,97 @@ fn own_body_override_replaces_the_inherited_entrys_read_only_flag_not_just_its_h
     assert!(service.fields.volumes.entries[0].read_only);
 }
 
+/// #193: `raw` merges key-by-key through the same [`MapSide::Key`]
+/// convention `env` uses, rather than concatenating outright regardless
+/// of key. Entries naming *distinct* keys still accumulate across every
+/// tier, in tier order — this test replaces a pre-#193 one of the same
+/// shape that asserted three tiers writing the *same* `raw` key all
+/// survived side by side (`"a"`, `"b"`, `"c"`), which was #193's own bug:
+/// the compiler silently kept the value from every tier instead of
+/// letting the later ones win or collide the way `env`'s repeated key
+/// already did.
 #[test]
-fn raw_concatenates_across_tiers_with_repeated_key_no_error() {
+fn raw_entries_from_every_tier_accumulate_by_distinct_key() {
     let composed = compose_ok(
-        "template a {\n  raw { key: \"a\" }\n}\n\
-         template b {\n  raw { key: \"b\" }\n}\n\
-         service s {\n  with a, b\n  raw { key: \"c\" }\n}\n",
+        "template defaults {\n  raw { d: \"d\" }\n}\n\
+         template a {\n  raw { a: \"a\" }\n}\n\
+         template b {\n  raw { b: \"b\" }\n}\n\
+         service s {\n  with a, b\n  raw { c: \"c\" }\n}\n",
     );
     let service = single_service(&composed);
-    let values: Vec<&str> = service
+    let keys: Vec<&str> = service
         .fields
         .raw
         .entries
         .iter()
-        .map(|e| raw_text(&e.value))
+        .map(|e| e.key.text())
         .collect();
-    assert_eq!(values, vec!["a", "b", "c"]);
+    assert_eq!(keys, vec!["d", "a", "b", "c"]);
+}
+
+/// #193's own regression: two *explicit* templates setting the same
+/// `raw` key now collide exactly the way the same conflict on `env`
+/// already did — see `explicit_templates_env_key_collision_is_error`
+/// above. `crates/hl-cli/tests/cases/issue_193_raw_template_collision.hll`
+/// pins the rendered diagnostic; this test pins the `ComposeError`
+/// variant and its fields instead, which a case file can't express.
+#[test]
+fn explicit_templates_raw_key_collision_is_error() {
+    let err = compose_err(
+        "template a {\n  raw { key: \"a\" }\n}\n\
+         template b {\n  raw { key: \"b\" }\n}\n\
+         service s {\n  with a, b\n}\n",
+    );
+    match err {
+        ComposeError::MapKeyCollision(details) => {
+            assert_eq!(details.field, "raw");
+            assert_eq!(details.side, MapSide::Key);
+            assert_eq!(details.key, "key");
+            assert_eq!(details.first_template, "a");
+            assert_eq!(details.second_template, "b");
+        }
+        other => panic!("expected MapKeyCollision, got {other:?}"),
+    }
+}
+
+/// `defaults`-loses, `raw`'s own version of
+/// `defaults_map_entry_is_silently_overridden_by_explicit_template`
+/// above: when the implicit `defaults` template and an explicit
+/// `with`-listed template both set the same `raw` key, the explicit
+/// template's value silently wins — no collision is raised, even though
+/// both contributors are templates, because `defaults` never
+/// participates in conflict-checking.
+#[test]
+fn raw_defaults_entry_is_silently_overridden_by_explicit_template() {
+    let composed = compose_ok(
+        "template defaults {\n  raw { key: \"default\" }\n}\n\
+         template t {\n  raw { key: \"explicit\" }\n}\n\
+         service s {\n  image \"x\"\n  with t\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries = &service.fields.raw.entries;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key.text(), "key");
+    assert_eq!(raw_text(&entries[0].value), "explicit");
+}
+
+/// Own-always-wins, `raw`'s own version of
+/// `service_body_overrides_inherited_map_entry_unconditionally` above: a
+/// service's own `raw` key silently replaces a `with`-listed template's
+/// value for the same key, with no collision — `Own` never competes with
+/// an `Explicit` tier the way two `Explicit` tiers compete with each
+/// other.
+#[test]
+fn raw_own_body_overrides_inherited_map_entry_unconditionally() {
+    let composed = compose_ok(
+        "template a {\n  raw { key: \"template\" }\n}\n\
+         service s {\n  with a\n  raw { key: \"own\" }\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries = &service.fields.raw.entries;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key.text(), "key");
+    assert_eq!(raw_text(&entries[0].value), "own");
 }
 
 #[test]
