@@ -667,7 +667,8 @@ same collision rule as a scalar
 field even though it isn't one—see the `healthcheck.test`/`.disable`
 paragraph below for how a bare-presence flag rides the same
 Own-always-wins/`defaults`-always-loses/two-explicit-collide rule
-through `merge_scalar_like` instead of `merge_scalar`.
+through the same table-driven `SCALAR_FIELDS`/`merge_scalar` every
+other scalar field uses.
 
 `depends_on` merges key-by-key too, not by the set-like lists' rule,
 even though its surface grammar is still a reference list
@@ -731,32 +732,49 @@ service's own body can override just `expose.host` (or just
 only collide if they set the *same* scalar sub-field, not merely the
 same enclosing field overall.
 
-`healthcheck.test`, whose type is `HealthcheckTest`, `healthcheck.disable`,
-a bare-presence flag, and `privileged`, another bare-presence flag but a
-field directly on `ServiceFields` rather than nested inside a struct,
-aren't `Literal`s, so none of the three can ride the same name-keyed
-`SCALAR_FIELDS` table `expose.port`/`.host`/`restart.policy` do—
-`merge_scalar_like` in `compose.rs` is `merge_scalar` generalized over
-the value type, applied to three dedicated `MergeAcc` slots instead of
-more table rows, since only these three fields need it—see #153, #157.
+`healthcheck.test`, whose type is `HealthcheckTest`, `healthcheck.disable`
+and `privileged`—two bare-presence flags, `privileged` a field directly
+on `ServiceFields` rather than nested inside a struct—and
+`command`/`entrypoint`, whose types `Command`/`Entrypoint` each carry
+Compose's own shell-string-or-exec-list pair of shapes, aren't plain
+`Literal`s. None of these six can hold a bare `Literal` the way
+`expose.port`/`.host`/`restart.policy` do. `compose.rs` used to give
+each of them its own `MergeAcc` slot and route it through a second
+generic function, `merge_scalar_like`—`merge_scalar` generalized over
+the value type, kept separate since only these six fields needed it.
+#197 folded that second function and all six slots back into
+`SCALAR_FIELDS` itself: each row's value is a `ScalarValue`, an enum
+with a `Literal` arm for the ordinary case, a `List` arm for the
+shell/exec pair's exec form (the shell form still rides `Literal`), and
+a `Flag` arm for a bare-presence field's own span—its only "value."
+`HealthcheckTest`/`Command`/`Entrypoint` stay separate types—they're
+three different Compose keys, and collapsing them would blur that—but
+they convert to and from the same pair of `ScalarValue` arms in each
+row's own `take`/`set`. `merge_scalar` and `MergeAcc::into_service_fields`
+stay the two generic loops #28 established. None of the six needs a
+bespoke field or a second merge function any more. `command` sets
+`ServiceFields::command` straight from its row's merged value, the way
+`container_name`'s row already does, rather than reaching through a
+`get_or_insert` on an enclosing struct the way `healthcheck.test`'s row
+reaches into `Healthcheck` first.
 
-`command`'s own type, `Command`, shares this same shell-string-or-
-exec-list shape and merges through the same `merge_scalar_like`, with a
-third dedicated `MergeAcc` slot of its own—see #156. It's the direct
-`ServiceFields` case rather than the nested-struct one: `command` sets
-`ServiceFields::command` straight from `merge_scalar_like`'s result, the
-way `container_name`'s row in `SCALAR_FIELDS` sets its own field
-directly, rather than reaching through a `get_or_insert` on an enclosing
-struct the way `healthcheck.test` reaches into `Healthcheck` first.
+`SCALAR_FIELDS` places `healthcheck.test` and `.disable` right after
+`healthcheck`'s five plain-`Literal` rows, and `.disable` after `.test`,
+preserving the same span-preference rule `expose`'s rows already
+followed: a row's `get_or_insert` only stamps a freshly materialized
+struct's span when nothing earlier in the table already did, so the
+most specific sub-field present wins the cosmetic span. This ordering is
+explicit in the table itself, not an accident of hash iteration—
+`SCALAR_FIELDS` is an ordered list, not a map, precisely so this
+preference stays a stable function of source order.
 
-`entrypoint`'s own type, `Entrypoint`, merges the same way `command`
-does, in a fourth dedicated `MergeAcc` slot—see #183. It's a scalar-like
-field, not a list field: a service's own `entrypoint` replaces an
-inherited one outright rather than concatenating with it, and two
-explicit templates that each set `entrypoint` collide. Replacing is the
-only defensible rule here, since the value is one whole argument vector:
-concatenating two exec lists would build a command line neither template
-asked for. `entrypoint` and `command` hold separate slots, so a template
+`entrypoint` is a scalar-like field, not a list field: a service's own
+`entrypoint` replaces an inherited one outright rather than
+concatenating with it, and two explicit templates that each set
+`entrypoint` collide. Replacing is the only defensible rule here, since
+the value is one whole argument vector: concatenating two exec lists
+would build a command line neither template asked for. `entrypoint` and
+`command` are two separate rows keyed independently, so a template
 setting one and a template setting the other merge cleanly rather than
 collide.
 
