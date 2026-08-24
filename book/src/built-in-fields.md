@@ -95,110 +95,53 @@ template—`hllc --build` fails if one is missing.
 
 ## `expose`
 
-Primary field: `port`. Secondary-field shorthand: `as` aliases to `host`.
+Primary field: `port`—the one field this type has.
 
 | Field | Accepts | Default |
 |---|---|---|
-| `port` | number | *No default—omitting `expose` entirely just means no Traefik routing* |
-| `host` | string | unset, no router rule generated |
-| `entrypoint` | reference list | empty—label omitted, so Traefik attaches the router to every entry point |
+| `port` | number | *No default—omitting `expose` entirely just means Compose gets no `expose:` entry* |
+
+```hll,fragment
+expose 8096
+```
+
+`expose` is Compose's own `expose:` key—container-network visibility,
+reachable from other containers on the same network but never published
+to the host (for that, see [`publish`](#publish))—plus the
+`traefik.http.services.<service>.loadbalancer.server.port` label,
+written whenever the service has at least one [`router`](#router). It has
+nothing to do with which hostname routes to a service or which Traefik
+entry points a router attaches to—that's `router`'s job entirely, one
+section down.
+
+### The `as` sugar
+
+`expose <port> as "<host>"` desugars to `expose { port }` plus an
+unnamed `router { host }`—it's sugar for the single-router service,
+which is most of them:
 
 ```hll,fragment
 expose 8096 as "media.example.com"
 # same as:
-# expose {
-#   port: 8096
-#   host: "media.example.com"
-# }
+# expose { port: 8096 }
+# router { host: "media.example.com" }
 ```
 
 `as` is a one-shot fusion, not a list—you can't follow it with more
-fields. To also set `entrypoint`, name `host` explicitly instead:
+fields. A service that also needs an entry point, a path prefix, or a
+second router writes `router` out explicitly instead:
 
 ```hll,fragment
-expose 8096, host: "media.example.com", entrypoint: web-secure
-```
-
-`expose`'s `entrypoint` sub-field has nothing to do with the
-service-level [`entrypoint` field](#entrypoint) further down, which
-overrides the image's `ENTRYPOINT`. This one names Traefik entry points,
-and it's only ever the one written inside an `expose` body or after an
-`expose` shorthand's comma. A service can set both.
-
-`entrypoint` is a **reference list**, spelled exactly like `middleware`
-below—a bare name, several comma-separated names, or a bracketed list:
-
-```hll,fragment
-expose {
-  port: 8096
+expose 8096
+router {
   host: "media.example.com"
-  entrypoint: web, web-secure
+  entrypoint: web-secure
 }
 ```
 
-However many entry points you name, they produce **one** label:
-`traefik.http.routers.<service>.entrypoints=` with the names
-comma-joined (`entrypoints=web,web-secure`)—`hllc` writes the commas,
-you write the names. Leave `entrypoint` off entirely and `hllc` emits
-no `entrypoints=` label at all, which is Traefik's own way of saying
-"attach this router to every entry point."
-
-One caveat if you write a bare list in the `expose 8096, ...` shorthand
-form: the list ends at the next `field:`, so
-`expose 8096, entrypoint: web, host: "media.example.com"` sets one entry
-point and a host, not two entry points. Put `entrypoint` last, use
-brackets (`entrypoint: [web, web-secure]`), or use the `expose { ... }`
-body if you want a bare list in the middle.
-
-`expose.port` becomes Compose's `expose:` entry—the port is reachable
-from other containers on the same network, but it isn't published to
-the host. For that, see [`publish`](#publish). If set, `expose.host`
-generates a Traefik router-rule label (`Host(...)`,) routing that
-hostname to this service. If non-empty, `expose.entrypoint` restricts
-that router to the named Traefik entry points instead of all of them.
-
-`expose.host` is what switches Traefik routing on at all. With no `host`
-set there's no router, so neither `entrypoint` nor `middleware` has
-anything to attach to. Setting either one without a host is a **compile
-error**, not a service quietly built without them:
-
-```hll,ignore
-service web {
-  image "nginx"
-  expose 80                  # no `as "web.example.com"`, so no router
-  middleware forwardAuth-authentik
-}
-```
-
-```text
-web.hll:4:14: service `web` sets `middleware` but has no `expose.host`, so there is no Traefik router to attach it to — add a host (`expose <port> as "web.example.com"`) or drop the `middleware`
-```
-
-Earlier versions emitted no `labels:` key at all here and exited 0, so a
-service whose author forgot `as "..."` deployed with its authentication
-missing and nothing said so. Add the host, or drop the
-`middleware`/`entrypoint`. Each of those spellings means something on
-its own, but the pair without a host doesn't.
-
-Because `hllc` splices `host` directly into the router rule
-(``Host(`...`)``, which has no escape for its own backtick delimiter), it
-rejects a `host` containing any rule metacharacter, most notably a
-backtick, plus `` ( ) { } | & , " ' \ ``. `hllc` checks each `entrypoint`
-entry against that same set, comma included: it owns the comma that
-joins entry points, so a comma inside one name would splice an extra
-entry into the label. (`entrypoint "web,web-secure"` is therefore an
-error—write `entrypoint web, web-secure`.) `hllc` rejects a comma in a
-`middleware` name for the same reason.
-
-All three reject a control character too, such as the newline a string
-literal writes as `\n` (see
-[Numbers and strings](./syntax-basics.md#numbers-and-strings)). A hostname,
-an entry point name, and a middleware name have no use for one, and a
-label carrying one no longer means what it reads as.
-
-`expose` gives a service exactly one Traefik router. If you need more
-than one—a public host and a local-network host, or an API path prefix
-split off from a frontend—see [`router`](#router) below.
+**Migrating from an older `hll` file:** `expose 80, host: "h",
+entrypoint: web`—a pre-#198 spelling—becomes `expose 80` plus a
+`router` block naming the same `host`/`entrypoint` pair.
 
 ## `router`
 
@@ -211,8 +154,9 @@ after the keyword, so there's nowhere for a bare value to go.
 | `entrypoint` | reference list | empty—label omitted, so Traefik attaches the router to every entry point |
 | `path_prefix` | list of strings | empty—the rule matches the host alone |
 
-A `router` block declares one Traefik router. Unlike `expose`, you can
-write it as many times as you need, each block naming its own router:
+A `router` block declares one Traefik router, and owns every field that
+only ever means anything attached to one. Write it as many times as you
+need, each block naming its own router:
 
 ```hll,fragment
 router api {
@@ -236,11 +180,12 @@ traefik.http.routers.vikunja-frontend.entrypoints=web-secure
 ```
 
 The name after the keyword becomes part of the label key:
-`traefik.http.routers.<service>-<name>`. Leave it off and the router
-takes the service's own name, `traefik.http.routers.<service>`, which is
-the id [`expose`](#expose) already uses—so a service can't set
-`expose.host` and an unnamed `router` at once. Name the router, or drop
-the `expose.host`.
+`traefik.http.routers.<service>-<name>`. Leave it off (`router { ... }`,
+no name) and the router takes the service's own name,
+`traefik.http.routers.<service>`—the **unnamed** form, and the shape
+`expose <port> as "<host>"` desugars to. Writing the unnamed form twice
+in one body, by hand or once by hand and once through the `as` sugar,
+is a compile error: two blocks can't both claim one router id.
 
 A name is a bare identifier, so it holds letters, digits, `-`, and `_`
 and nothing else. That restriction is deliberate rather than incidental:
@@ -248,11 +193,28 @@ the name lands in a label **key**, where a `.` would extend the key and
 an `=` would end it, so a name that could hold either would let a router
 write a `traefik.*` label other than the one you asked for.
 
-The comma form works here too, the same shorthand `expose` takes:
+The comma form works here too, the same shorthand a nested struct field
+takes when it has more than one field:
 
 ```hll,fragment
 router api, host: "vikunja.example.com", entrypoint: web-secure
 ```
+
+`entrypoint` is a **reference list**, spelled exactly like `middleware`
+below—a bare name, several comma-separated names, or a bracketed list.
+However many you name, they produce **one** label:
+`traefik.http.routers.<id>.entrypoints=` with the names comma-joined
+(`entrypoints=web,web-secure`)—`hllc` writes the commas, you write the
+names. Leave `entrypoint` off entirely and `hllc` emits no
+`entrypoints=` label at all, which is Traefik's own way of saying
+"attach this router to every entry point."
+
+One caveat if you write a bare list in the preceding comma-shorthand
+form: the list ends at the next `field:`, so `router api, entrypoint: web,
+host: "vikunja.example.com"` sets one entry point and a host, not two
+entry points. Put `entrypoint` last, use brackets (`entrypoint: [web,
+web-secure]`), or use the braced `router { ... }` body if you want a
+bare list in the middle.
 
 `path_prefix` narrows the router to requests under one of the listed
 paths. `hllc` joins them with `||` inside one parenthesized group and
@@ -260,32 +222,22 @@ paths. `hllc` joins them with `||` inside one parenthesized group and
 tighter than `||` and matching every host under the last prefix. A single
 prefix keeps its parentheses too, so the rule reads the same either way.
 
-`hllc` checks `host`, each `entrypoint`, and each `path_prefix` against
-the same metacharacter set it checks `expose.host` against, and resolves
-`{{name}}` in `host` the same way—so the
-`"{{name}}.internal.example.com"` template idiom works here as well.
+Because `hllc` splices `host` directly into the router rule
+(``Host(`...`)``, which has no escape for its own backtick delimiter), it
+rejects a `host` containing any rule metacharacter, most notably a
+backtick, plus `` ( ) { } | & , " ' \ ``. `hllc` checks each `entrypoint`
+entry against that same set, comma included: it owns the comma that
+joins entry points, so a comma inside one name would splice an extra
+entry into the label. (`entrypoint "web,web-secure"` is therefore an
+error—write `entrypoint web, web-secure`.) `hllc` rejects a comma in a
+`middleware` name for the same reason, and resolves `{{name}}` in `host`
+too, so the `"{{name}}.internal.example.com"` template idiom works here.
 
-### Choosing between `expose` and `router`
-
-Reach for `expose` when a service has one hostname, which is most
-services. It's shorter, and its `port` is doing a second job:
-`loadbalancer.server.port` plus Compose's own `expose:` key.
-
-Reach for `router` when one container needs more than one router. You can
-use both together, as long as you name every `router` block—`expose`
-keeps its own router and its port, and each `router` block adds another
-beside it.
-
-Two things a `router` block deliberately doesn't carry:
-
-- **No port.** `traefik.http.services.<service>.loadbalancer.server.port`
-  is one label per Compose service, not per router—a container listens on
-  one port no matter how many routers point at it—so it stays derived
-  from `expose.port`. A service whose only routers are `router` blocks
-  still writes `expose <port>` to set it.
-- **No middleware.** [`middleware`](#middleware-depends_on-networks-dns-env_file)
-  stays a service-level field and applies to *every* router the service
-  has, `expose`'s included. Per-router middleware isn't expressible yet.
+All three reject a control character too, such as the newline a string
+literal writes as `\n` (see
+[Numbers and strings](./syntax-basics.md#numbers-and-strings)). A hostname,
+an entry point name, and a middleware name have no use for one, and a
+label carrying one no longer means what it reads as.
 
 A `router` with no `host` is a compile error, not a router quietly
 missing from the output:
@@ -308,15 +260,59 @@ two routers, it's one router described twice, with the second silently
 winning—the same reason two `volume` entries can't share one container
 path.
 
+`router` deliberately doesn't carry a port or a middleware list:
+
+- **No port.** `traefik.http.services.<service>.loadbalancer.server.port`
+  is one label per Compose service, not per router—a container listens on
+  one port no matter how many routers point at it—so it comes from
+  [`expose`](#expose)'s own `port` instead. A service with at least one
+  `router` block but no `expose <port>` is a compile error too: a router
+  with nothing to load-balance onto used to mean Traefik silently guessed
+  a port, and now means `hllc` refuses to compile.
+
+  ```hll,ignore
+  service web {
+    image "nginx"
+    router api {
+      host: "web.example.com"
+    }
+  }
+  ```
+
+  ```text
+  web.hll:3:3: service `web` declares a `router` but sets no `expose <port>`, so Traefik has no port to load-balance onto — add `expose <port>` or drop the `router`
+  ```
+
+- **No middleware.** [`middleware`](#middleware-depends_on-networks-dns-env_file)
+  stays a service-level field and applies to *every* router the service
+  has. Per-router middleware isn't expressible yet. `middleware` needs at
+  least one router to attach to—naming one with no `router` block
+  anywhere is a compile error, not a service quietly built without it:
+
+  ```hll,ignore
+  service web {
+    image "nginx"
+    expose 80
+    middleware forwardAuth-authentik
+  }
+  ```
+
+  ```text
+  web.hll:4:14: service `web` sets `middleware` but has no `router` to attach it to — add a router (`router { host: "web.example.com" }`) or drop the `middleware`
+  ```
+
+  Earlier versions emitted no `labels:` key at all here and exited 0, so a
+  service whose author forgot a host deployed with its authentication
+  missing and nothing said so.
+
 ## `traefik`
 
 No primary field—like `healthcheck`, no one sub-field stands in for the
 whole struct, so `traefik { ... }` requires the braced body.
 
 `hllc` computes a Traefik label list for every service by default:
-`traefik.docker.network=`, the router rule and its
-`entrypoints=`/`middlewares=` labels from [`expose`](#expose),
-[`router`](#router), and `middleware`, and the load-balancer port.
+`traefik.docker.network=`, each [`router`](#router) block's rule and its
+`entrypoints=`/`middlewares=` labels, and the load-balancer port.
 
 The `disabled` flag switches all of that off for one service and emits
 `traefik.enable=false` in its place, nothing else, not even
@@ -345,7 +341,7 @@ services:
 ```
 
 This is the dedicated answer to a shape several real homelab services
-share: a backing database with no `expose`/`middleware` of its own,
+share: a backing database with no `router`/`middleware` of its own,
 sitting next to a Traefik-facing sibling service in the same file.
 Before this field, the only way to say "no Traefik" was to replace the
 *entire* computed label list through `raw`:
@@ -361,9 +357,8 @@ instrument for a one-label change, and it silently stops tracking
 whatever `traefik.docker.network=`/router labels a future edit to the
 service would otherwise have added.
 
-Only `expose.host`, `expose.entrypoint`, a `router` block, and
-`middleware` conflict with
-`disabled`. Plain `expose.port` doesn't—it's Compose's own `expose:` key,
+Only a `router` block and `middleware` conflict with `disabled`. Plain
+`expose <port>` doesn't—it's Compose's own `expose:` key,
 container-network visibility with no Traefik involvement at all, so a
 service that turns Traefik off can still declare one:
 
@@ -387,9 +382,9 @@ services:
       - "traefik.enable=false"
 ```
 
-Setting `expose.host`, `expose.entrypoint`, or `middleware` on a service
-that turns Traefik off is a **compile error**, the same treatment
-[`expose`](#expose)'s own router-less-middleware check gives the mirror
+Setting a `router` block or `middleware` on a service that turns Traefik
+off is a **compile error**, the same treatment
+[`router`](#router)'s own router-less-middleware check gives the mirror
 mistake:
 
 ```hll,ignore
@@ -403,7 +398,7 @@ service db {
 ```
 
 ```text
-db.hll:3:18: service `db` sets `expose.host`, but `traefik` is disabled (at db.hll:5:5), so there is no router for it to attach to — drop the `expose.host` or remove `disabled`
+db.hll:3:15: service `db` sets `router`, but `traefik` is disabled (at db.hll:5:5), so there is no router for it to attach to — drop the `router` or remove `disabled`
 ```
 
 Both sides of that contradiction mean something on their own—only the
@@ -424,11 +419,11 @@ the value side, the same convention `volume` follows for its own
 `publish` is Compose's `ports:` key, which puts the port on the Docker
 host where the rest of the local network can reach it. That's the
 opposite of [`expose`](#expose), Compose's `expose:` key, which reaches
-only other containers on the same network, plus the Traefik routing
-labels. A service behind Traefik wants `expose`. A service that takes
-traffic directly, such as Pi-hole on 53, Syncthing's sync port, or a
-game server, wants `publish`. Setting both is fine and means both
-things.
+only other containers on the same network. A service behind Traefik
+wants `expose` (plus a [`router`](#router) block, or its `as "<host>"`
+sugar, for the routing itself). A service that takes traffic directly,
+such as Pi-hole on 53, Syncthing's sync port, or a game server, wants
+`publish`. Setting both is fine and means both things.
 
 ```hll,build
 service pihole {
@@ -676,7 +671,7 @@ compile error, since both are scalar fields, not repeatable—unlike
 
 ## `healthcheck`
 
-No primary field—unlike `image`'s `ref` or `expose`'s `port`, no one
+No primary field—unlike `image`'s `ref` or `expose`'s own `port`, no one
 sub-field stands in for the whole healthcheck, so `healthcheck { ... }`
 requires the braced body. `healthcheck "..."` doesn't parse.
 
@@ -780,14 +775,14 @@ env_file ["miniflux.env", "common.env"]
   names comma-joined. Every name also gets an `@file` suffix appended
   (`middlewares=local-ipwhitelist@file,forwardAuth-authentik@file`)—that's
   Traefik's file-provider reference convention, applied unconditionally,
-  so write the bare middleware name and let `hllc` add it. Like
-  `expose`'s `entrypoint`—which joins its own list the same way, just
-  without the `@file` suffix—`middleware` needs a router to attach to:
-  with neither an `expose.host` nor a [`router`](#router) block there's
-  nothing to attach anything to, so naming a middleware anyway is a
-  compile error, as [`expose`](#expose) describes. The field is
-  service-level, so a service with several `router` blocks gets the same
-  middleware list on every one of them.
+  so write the bare middleware name and let `hllc` add it. Like a
+  [`router`](#router)'s own `entrypoint`—which joins its own list the
+  same way, just without the `@file` suffix—`middleware` needs a router
+  to attach to: with no `router` block anywhere there's nothing to
+  attach anything to, so naming a middleware anyway is a compile error,
+  as `router` describes. The field is service-level, so a service with
+  several `router` blocks gets the same middleware list on every one of
+  them.
 - `depends_on` names a same-file sibling `service` this one depends
   on—it's not cross-file, and doesn't accept a qualified `alias.name`.
   Each entry may optionally add a `{ condition: ... }` body naming one

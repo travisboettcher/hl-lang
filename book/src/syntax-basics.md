@@ -38,10 +38,10 @@ Every statement is one of two shapes:
 
 A "value" itself can be a string (`"jellyfin/jellyfin:latest"`), a number
 (`8096`), a bare word (`unless-stopped`), a list (`[a, b, c]`), or another
-nested statement—bodies nest arbitrarily, which is how `expose { port:
-8096, host: "..." }` and `with internal_web { port: 8080 }` both work: the
-`{ ... }` after `internal_web` is itself a body, using the exact same
-grammar as a service's own top-level body.
+nested statement—bodies nest arbitrarily, which is how `router { host:
+"...", entrypoint: web-secure }` and `with internal_web { port: 8080 }`
+both work: the `{ ... }` after `internal_web` is itself a body, using
+the exact same grammar as a service's own top-level body.
 
 ## Reserved words
 
@@ -75,30 +75,39 @@ field is which.
 
 ## Secondary-field shorthand
 
-`expose` needs more than just a port in practice—it also needs the
-hostname Traefik should route from. Rather than dropping back to the full
-form (a canonical `{ }` body, each field on its own line—see [Layout
-rules](#layout-rules) below), one specific shorthand lets a second field
-fuse directly onto the primary value with no comma:
+A type with several fields—`router`, most often, since a router usually
+needs a `host` and sometimes an `entrypoint` or a `path_prefix` too—lets
+you skip the full `{ }` body (each field on its own line—see [Layout
+rules](#layout-rules) below) and instead fuse further fields onto the
+primary position with a leading comma:
 
 ```hll,fragment
-expose 8096 as "media.example.com"
+router api, host: "media.example.com", entrypoint: web-secure
 # same as:
-# expose {
-#   port: 8096
+# router api {
 #   host: "media.example.com"
+#   entrypoint: web-secure
 # }
 ```
 
-`as` is the one built-in case of this—it aliases onto `expose`'s `host`
-field. It's a one-shot continuation, though, not a list: nothing else can
-follow `as`, comma or no comma—`expose 8096 as "media.example.com",
-entrypoint: web-secure` is a **compile error**. To set additional fields,
-drop the `as` shorthand and name `host` explicitly instead. From there,
-you can add further `key: value` fields, each preceded by a comma:
+From there, you can keep adding further `key: value` fields, each
+preceded by a comma.
+
+`expose <port> as "<host>"` looks similar but is a different mechanism—a
+bespoke, one-shot spelling that desugars to `expose { port }` plus an
+unnamed `router { host }` (see [Built-in
+Fields](./built-in-fields.md#expose)), not a comma-continued field list.
+`as` fuses onto the primary value and stops there: nothing else can
+follow it, comma or no comma—`expose 8096 as "media.example.com",
+entrypoint: web-secure` is a **compile error**. A service that needs
+more than a bare host writes `router` out explicitly instead:
 
 ```hll,fragment
-expose 8096, host: "media.example.com", entrypoint: web-secure
+expose 8096
+router {
+  host: "media.example.com"
+  entrypoint: web-secure
+}
 ```
 
 ## Map-style shorthand
@@ -192,8 +201,8 @@ per-service hostname without knowing the service's name in advance:
 
 ```hll
 template internal_web(port) {
-  expose $port, host: "{{name}}.internal.example.com"
-}
+  expose $port
+  router { host: "{{name}}.internal.example.com" }}
 ```
 
 Applied inside `service syncthing { with internal_web { port: 8384 } }`,
@@ -237,11 +246,11 @@ error. So is a string ending in a backslash, such as `"C:\"`—that
 backslash escapes the closing quote, which leaves the string unfinished.
 Write a trailing backslash as `\\`.
 
-A value that lands in a Traefik label—`expose.host`, plus each
-`expose.entrypoint` entry—rejects a newline or a tab, on top of the
-metacharacter set it already rejects. Neither one belongs in a hostname
-or an entry point name, and either one changes what the generated label
-means.
+A value that lands in a Traefik label—a [`router`](./built-in-fields.md#router)'s
+`host`, plus each `entrypoint` entry—rejects a newline or a tab, on top
+of the metacharacter set it already rejects. Neither one belongs in a
+hostname or an entry point name, and either one changes what the
+generated label means.
 
 A `template`'s declared parameter carries no type annotation—just a bare
 name (`template linuxserver_app(puid, pgid) { ... }`). Instead,

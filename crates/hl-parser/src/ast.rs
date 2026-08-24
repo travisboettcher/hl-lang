@@ -346,46 +346,42 @@ pub struct Image {
 
 /// A parsed `expose` field. `port` is `Option` for the same reason as
 /// [`Image::reference`] — see that doc.
+///
+/// Through #197, `expose` also modeled exactly one Traefik router of its
+/// own (`host`, `entrypoint`). #198 moved every Traefik-routing field
+/// onto [`Router`], leaving `port` — Compose's own `expose:` key plus the
+/// `loadbalancer.server.port` label, with nothing to do with Traefik —
+/// the only thing left here. `expose <port> as "<host>"` still parses,
+/// but as bespoke parser sugar that produces an unnamed [`Router`]
+/// alongside this `Expose`, not by setting a field of this struct — see
+/// `crate::parser::Parser::parse_expose_as_sugar`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Expose {
     pub port: Option<Literal>,
-    /// Settable either via the canonical `host: "..."` field or the
-    /// `as "..."` bare-keyword alias sugar; both produce this same slot.
-    pub host: Option<Literal>,
-    /// The Traefik entry points to route through (e.g. `entrypoint
-    /// web, web-secure`). A list rather than a scalar because Traefik's
-    /// own `entrypoints=` label is a comma-separated list: making the
-    /// language model that directly lets codegen own the joining, so
-    /// no label value ever has to tolerate a user-written comma.
-    ///
-    /// Empty means the generated router gets no `entrypoints=` label at
-    /// all — Traefik's own default of attaching to every entry point —
-    /// rather than the parser guessing a homelab-specific value. That's
-    /// why this is a plain `Vec` and not an `Option<Vec<_>>`: "unset"
-    /// and "set to nothing" have to mean the same thing here, and
-    /// `middleware` on [`ServiceFields`] already spells that shape.
-    pub entrypoint: Vec<Literal>,
     pub span: Span,
 }
 
 /// A parsed `router` block (#184) — one Traefik router computed off this
-/// service, independent of [`Expose`].
+/// service.
 ///
-/// `expose` models exactly one router: one `host`, one `Host()` rule,
-/// one `entrypoints=` label. A service needing a second router (a public
-/// host beside a LAN host, an API path split off from a frontend) had no
-/// way to say so and had to move its whole label list into `raw {
-/// labels: [...] }`, losing every check `expose` performs. A `router`
-/// block is that second way to say it, and the two are deliberately
-/// independent: `expose` keeps its exact meaning, its exact merge rows,
-/// and its exact emitted labels, so a file written before this field
-/// existed compiles to the same bytes.
+/// Through #197, [`Expose`] modeled exactly one router of its own — one
+/// `host`, one `Host()` rule, one `entrypoints=` label — and a service
+/// needing a second router (a public host beside a LAN host, an API path
+/// split off from a frontend) had no way to say so short of abandoning
+/// `expose` and hand-writing the whole label list in `raw { labels: [...]
+/// }`, losing every check `expose` performed. `router` was the second way
+/// to say it; #198 then moved every Traefik-routing field off `expose`
+/// and onto `router` outright, so today `router` is the *only* way to
+/// say it — the unnamed `router { ... }` form (or its `expose <port> as
+/// "<host>"` sugar) is simply the common single-router case.
 ///
 /// `name` keys the emitted label: `router api { ... }` on service
 /// `vikunja` emits `traefik.http.routers.vikunja-api.*`, while the
-/// unnamed `router { ... }` emits `traefik.http.routers.vikunja.*` — the
-/// very id `expose.host` produces, which is why setting both is a hard
-/// error (`hl_codegen`'s own `ExposeHostWithUnnamedRouter`).
+/// unnamed `router { ... }` emits `traefik.http.routers.vikunja.*`.
+/// Writing the unnamed form twice in one body — by hand, or once by hand
+/// and once via `expose <port> as "<host>"`'s own sugar — is a hard
+/// error (`ParseError::DuplicateRouterName`): both would claim that same
+/// id.
 ///
 /// The name is an [`Ident`], never a string, for the same reason a
 /// `service`/`network`/`volume` declaration's name is: it lands in a
@@ -402,8 +398,7 @@ pub struct Expose {
 /// a service-level field and applies to every router the service has.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Router {
-    /// `None` for the unnamed `router { ... }` form, which claims the
-    /// same router id `expose.host` does.
+    /// `None` for the unnamed `router { ... }` form.
     pub name: Option<Ident>,
     /// The hostname this router matches, spliced into the
     /// ``Host(`...`)`` rule. `Option` for the same reason as
@@ -411,9 +406,18 @@ pub struct Router {
     /// but a router reaching codegen with no host at all is an error
     /// there, since the host is the whole of what creates a router.
     pub host: Option<Literal>,
-    /// The Traefik entry points this router attaches to — spelled and
-    /// merged exactly like [`Expose::entrypoint`], including the empty
-    /// case meaning "emit no `entrypoints=` label at all."
+    /// The Traefik entry points this router attaches to (e.g.
+    /// `entrypoint web, web-secure`). A list rather than a scalar because
+    /// Traefik's own `entrypoints=` label is itself comma-separated:
+    /// modelling that as a list keeps the comma codegen's to write rather
+    /// than the user's, so no label value ever has to tolerate one.
+    ///
+    /// Empty means this router gets no `entrypoints=` label at all —
+    /// Traefik's own default of attaching to every entry point — rather
+    /// than the parser guessing a homelab-specific value. That's why
+    /// this is a plain `Vec` and not an `Option<Vec<_>>`: "unset" and
+    /// "set to nothing" have to mean the same thing here, and
+    /// `middleware` on [`ServiceFields`] already spells that shape.
     pub entrypoint: Vec<Literal>,
     /// Path prefixes to `&&` onto the `Host()` rule, `||`-joined inside
     /// one parenthesized group: `path_prefix: ["/api/v1", "/dav/"]`
@@ -804,11 +808,10 @@ pub struct TemplateInvocation {
 pub struct ServiceFields {
     pub image: Option<Image>,
     pub expose: Option<Expose>,
-    /// `router <name> { ... }` blocks (#184), in source order — the
-    /// extra Traefik routers this service computes beyond the one
-    /// `expose.host` creates. Empty for every service that never
-    /// mentions `router`, which is what keeps an `expose`-only file
-    /// generating byte-identical output. See [`Router`]'s own doc.
+    /// `router <name> { ... }` blocks (#184), in source order — every
+    /// Traefik router this service computes, `expose <port> as
+    /// "<host>"`'s own sugared unnamed router included. See [`Router`]'s
+    /// own doc.
     ///
     /// Merged by router name, and per sub-field within each name — the
     /// same shape `expose` merges by, so a service body can override
@@ -826,7 +829,7 @@ pub struct ServiceFields {
     /// `publish 8096 -> 8096` entries — Compose's `ports:` key. Distinct
     /// from `expose` above, which is Compose's `expose:` (visible to
     /// other containers on the same network, never published to the
-    /// host) plus the Traefik router labels. Shares [`ArrowMap`] with
+    /// host) plus the `loadbalancer.server.port` label. Shares [`ArrowMap`] with
     /// [`Self::volumes`]/[`Self::devices`] below — see that type's own
     /// doc for the shape all three fields share and the two ways
     /// `volume` alone still differs.

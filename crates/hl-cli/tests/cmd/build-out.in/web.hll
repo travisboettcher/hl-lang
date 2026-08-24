@@ -1,4 +1,8 @@
 service web {
   image "nginx:alpine"
-  expose 80, host: "web.example.com", entrypoint: web-secure
+  expose 80
+  router {
+    host: "web.example.com"
+    entrypoint: web-secure
+  }
 }

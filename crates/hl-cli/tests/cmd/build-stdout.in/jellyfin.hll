@@ -8,6 +8,10 @@ service jellyfin {
   restart unless-stopped
   networks [traefik-net]
   env PUID = 1000
-  expose 8096, host: "jellyfin.example.com", entrypoint: web-secure
+  expose 8096
+  router {
+    host: "jellyfin.example.com"
+    entrypoint: web-secure
+  }
   middleware local-ipwhitelist
 }

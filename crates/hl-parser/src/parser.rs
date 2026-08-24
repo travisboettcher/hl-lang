@@ -117,7 +117,7 @@ enum FieldValue {
     /// An accumulating nested schema-free map-kind field (raw).
     Raw(RawMap),
     /// An accumulating reference-list field (middleware/networks/dns/
-    /// env_file/expose.entrypoint/router.entrypoint/router.path_prefix).
+    /// env_file/router.entrypoint/router.path_prefix).
     /// See [`schema::FieldKind::ReferenceList`]'s doc for why one `Vec`
     /// of [`Literal`]s now covers every row, `path_prefix` included.
     RefList(Vec<Literal>),
@@ -337,8 +337,8 @@ impl<'src> Parser<'src> {
 
     /// `reference ::= ( key ( "." IDENT )? ) | "$" IDENT` — every
     /// reference-shaped position's own value grammar (#196):
-    /// `middleware`/`networks`/`dns`/`env_file`/`expose.entrypoint`/
-    /// `router.entrypoint`/`router.path_prefix`, a `depends_on` entry,
+    /// `middleware`/`networks`/`dns`/`env_file`/`router.entrypoint`/
+    /// `router.path_prefix`, a `depends_on` entry,
     /// and a named-volume mount's host side. The trailing `.IDENT` names
     /// an import alias's declaration (`traefik.traefik-net`); only a
     /// plain `IDENT` key can be qualified this way — a `STRING` key's
@@ -416,9 +416,9 @@ impl<'src> Parser<'src> {
     /// "one-token lookahead decides whether this comma belongs to me or
     /// to whoever called me" rule [`Self::parse_struct_primary_shorthand`]
     /// already applies to its own trailing fields, and needed here for
-    /// the same reason now that `expose.entrypoint` is a reference list:
-    /// in `expose 8096, entrypoint: web, host: "x"`, the second comma
-    /// starts a sibling *field* of `expose`, not a second entry point,
+    /// the same reason now that `router.entrypoint` is a reference list:
+    /// in `router api, entrypoint: web, host: "x"`, the second comma
+    /// starts a sibling *field* of `router`, not a second entry point,
     /// and a greedy list would swallow `host` as one and then fail on
     /// its `:` with an error pointing nowhere near the real problem.
     ///
@@ -782,8 +782,8 @@ impl<'src> Parser<'src> {
     }
 
     /// The primary-value-shorthand form of a nested struct-kind field,
-    /// e.g. `expose 8096, as: "host"` instead of `expose { port: 8096,
-    /// host: "host" }`. After the primary value, it continues
+    /// e.g. `image "nginx:alpine"` instead of `image { ref:
+    /// "nginx:alpine" }`. After the primary value, it continues
     /// accumulating trailing secondary fields (docs/DESIGN.md's
     /// desugaring rule 3) exactly like any other comma-list: a leading
     /// comma is required to continue, and after it, the next key must
@@ -843,51 +843,6 @@ impl<'src> Parser<'src> {
             }
         };
 
-        // `nested.bare_keyword_alias` (e.g. `as`) may fuse directly onto
-        // the primary value with no comma and no further continuation —
-        // `expose port as "host"` is one self-contained unit, not the
-        // start of a list. It's deliberately a dead end: if a service
-        // needs more than the primary value plus this one aliased field,
-        // it must say so explicitly (`expose port, host: "...",
-        // entrypoint: "..."`, or the canonical `expose { ... }` body)
-        // rather than mixing the alias sugar with further comma-continued
-        // fields — `expose port as "host", entrypoint: "..."` no longer
-        // parses.
-        if let Some((keyword, alias_field)) = nested.bare_keyword_alias
-            && self.peek().kind == TokenKind::Ident
-            && self.peek().lexeme == keyword
-        {
-            self.parse_statement_into(nested, &mut fields)?;
-            // A comma right here is always someone trying to continue
-            // with more fields the way the explicit form allows
-            // (`expose port, host: "...", entrypoint: "..."`) but spelled
-            // with the alias sugar instead — that combination doesn't
-            // parse (see this fn's own doc above), and left to the
-            // enclosing body's own newline check, it surfaces as
-            // "expected a newline before the next field, found Comma"
-            // with no mention of what to write instead (#87). Naming the
-            // canonical form directly here is cheap and catches it before
-            // that generic message ever gets a chance to fire.
-            if self.peek().kind == TokenKind::Comma {
-                return Err(ParseError::AliasSugarCannotContinue {
-                    type_name: nested.type_name,
-                    keyword,
-                    primary_field: primary_name,
-                    alias_field,
-                    span: self.peek().span,
-                });
-            }
-            let last_end = self.tokens[self.pos.saturating_sub(1)].span.end;
-            let span = Span {
-                start: start_span.start,
-                end: last_end,
-                line: start_span.line,
-                col: start_span.col,
-                file: start_span.file,
-            };
-            return Ok((fields, span));
-        }
-
         // Beyond that, zero or more explicit secondary fields.
         self.parse_secondary_fields(nested, &mut fields)?;
 
@@ -908,13 +863,10 @@ impl<'src> Parser<'src> {
     /// rule every other comma-list in the grammar follows: a comma is
     /// required before each one, and one-token lookahead past it
     /// confirms the next key genuinely names one of the nested type's
-    /// own fields (excluding the alias keyword, whose only valid
-    /// position is the immediate, comma-free one
-    /// [`Self::parse_struct_primary_shorthand`] handles) before
-    /// consuming it as part of this value — otherwise the comma (and
-    /// whatever follows it) is left for the enclosing body, where a bare
-    /// comma is never a valid statement start and so correctly errors
-    /// instead of silently reattaching elsewhere.
+    /// own fields before consuming it as part of this value — otherwise
+    /// the comma (and whatever follows it) is left for the enclosing
+    /// body, where a bare comma is never a valid statement start and so
+    /// correctly errors instead of silently reattaching elsewhere.
     ///
     /// Factored out of [`Self::parse_struct_primary_shorthand`] when
     /// `router` gained the same tail (#184): `router api, host: "...",
@@ -932,17 +884,13 @@ impl<'src> Parser<'src> {
                 break;
             }
             let lookahead = &self.tokens[self.pos + 1];
-            let is_alias_keyword = nested
-                .bare_keyword_alias
-                .is_some_and(|(keyword, _)| lookahead.lexeme == keyword);
-            let continues = !is_alias_keyword
-                && match lookahead.kind {
-                    TokenKind::Ident | TokenKind::Str => !matches!(
-                        schema::resolve_field(nested, lookahead.lexeme),
-                        FieldResolution::Unknown
-                    ),
-                    _ => false,
-                };
+            let continues = match lookahead.kind {
+                TokenKind::Ident | TokenKind::Str => !matches!(
+                    schema::resolve_field(nested, lookahead.lexeme),
+                    FieldResolution::Unknown
+                ),
+                _ => false,
+            };
             if !continues {
                 break;
             }
@@ -1059,17 +1007,19 @@ impl<'src> Parser<'src> {
     ///   fields are newline-separated like any other struct body;
     /// - the comma-continued form, `router api, host: "...", entrypoint:
     ///   web-secure`, which reuses [`Self::parse_secondary_fields`]
-    ///   verbatim — the same production `expose 8096, host: "..."`
-    ///   already parses, continuing from the router's name instead of
-    ///   from a primary value.
+    ///   verbatim — the same production `image "ref", ...` (or any other
+    ///   primary-shorthand nested type with more than one field) already
+    ///   parses, continuing from the router's name instead of from a
+    ///   primary value.
     ///
     /// The name is optional and, when present, is an `IDENT` — never a
     /// `STRING`, and never a `$param`. It lands in a label *key*, so the
     /// narrow grammar is the first half of the injection guard (see
     /// [`crate::ast::Router`]); codegen's own check is the second.
-    /// Leaving the name off (`router { ... }`) claims the same router id
-    /// `expose.host` does, which codegen rejects if the service sets
-    /// both.
+    /// Leaving the name off (`router { ... }`) is the unnamed form,
+    /// claiming the service's own router id — writing it twice in one
+    /// body (whether by hand or via `expose <port> as "<host>"`'s own
+    /// sugar) is [`ParseError::DuplicateRouterName`].
     ///
     /// The unnamed form requires the braced body: with no name and no
     /// `{`, there is no first token to continue a comma-list from, and
@@ -1118,6 +1068,65 @@ impl<'src> Parser<'src> {
             .or_insert_with(|| FieldValue::NamedStructs(Vec::new()))
         {
             FieldValue::NamedStructs(v) => v.push((name, nested_fields, span)),
+            _ => unreachable!("field kind is stable for a given field name"),
+        }
+        Ok(())
+    }
+
+    /// `expose <port> as "<host>"` (#198): desugars to `expose { port }`
+    /// plus an unnamed `router { host }`. Called by
+    /// [`Self::parse_nested_into`] right after the `expose` field's own
+    /// primary-value shorthand has already parsed `port`, with the `as`
+    /// keyword still unconsumed.
+    ///
+    /// Bespoke grammar, not schema-driven sugar: through #197 this same
+    /// spelling was `TypeSchema::bare_keyword_alias`, a generic
+    /// keyword→field alias that fused `as` onto `EXPOSE`'s own `host`
+    /// field. #198 moved every Traefik-routing field off `expose` and
+    /// onto `router`, so `EXPOSE` has no `host` left for a generic alias
+    /// to target — but the spelling itself is kept, verbatim, because
+    /// it's the shortest way to write the overwhelmingly common
+    /// single-router service and it's all over the book (F6 of #198). An
+    /// unnamed `router` is exactly what an unadorned "give this service a
+    /// host" needs, so that's what this pushes onto the enclosing body's
+    /// own `router` field — the very entry a hand-written `router { host:
+    /// "..." }` block would have produced.
+    ///
+    /// Deliberately a dead end, exactly as the old alias sugar was: `as`
+    /// fuses onto the primary value as one self-contained unit (docs/
+    /// DESIGN.md's desugaring rule 3) and can't itself be followed by
+    /// further secondary fields, comma or no comma — a service that needs
+    /// more than a bare host must write the router out explicitly
+    /// (`expose <port>` plus `router { host: "...", entrypoint: ... }`).
+    /// Unlike before #198 (`ParseError::AliasSugarCannotContinue`, see
+    /// F6), there is no dedicated diagnostic for a trailing comma here:
+    /// whatever follows is left for the enclosing body's own statement
+    /// loop, which reports whatever generic error a stray token there
+    /// produces — the same "expected a newline before the next field"
+    /// message #87 originally motivated a dedicated error to avoid, now
+    /// accepted as the cost of not carrying a schema mechanism forward
+    /// for the sake of one spelling.
+    ///
+    /// A service that writes both this sugar and an explicit unnamed
+    /// `router { ... }` block gets [`ParseError::DuplicateRouterName`] —
+    /// the two pushed entries share the same `None` key — rather than a
+    /// dedicated diagnostic of its own (the old
+    /// `CodegenError::ExposeHostWithUnnamedRouter` is gone for the same
+    /// reason; see `hl_codegen`'s own doc).
+    fn parse_expose_as_sugar(&mut self, fields: &mut StructFields) -> Result<(), ParseError> {
+        let as_span = self.bump().span; // the `as` keyword itself
+        let host = self.parse_literal()?;
+        let span = Span {
+            end: host.span().end,
+            ..as_span
+        };
+        let mut router_fields = StructFields::new();
+        router_fields.insert("host", FieldValue::Scalar(host));
+        match fields
+            .entry("router")
+            .or_insert_with(|| FieldValue::NamedStructs(Vec::new()))
+        {
+            FieldValue::NamedStructs(v) => v.push((None, router_fields, span)),
             _ => unreachable!("field kind is stable for a given field name"),
         }
         Ok(())
@@ -1178,6 +1187,12 @@ impl<'src> Parser<'src> {
                 // called on a type with no primary field, so this is
                 // what keeps that call genuinely unreachable rather than
                 // merely untested.
+                //
+                // No `!= LBrace` guard here: `at_value_start` already
+                // excludes `{`, so pairing the two produced a mutant no
+                // input could kill — the two spellings agree on every
+                // reachable path.
+                let took_primary_shorthand = self.at_value_start();
                 let (nested_fields, span) = if self.peek().kind == TokenKind::LBrace {
                     self.parse_struct_body(nested)?
                 } else if nested.primary_field.is_some() && self.at_value_start() {
@@ -1187,6 +1202,19 @@ impl<'src> Parser<'src> {
                 } else {
                     return Err(self.unexpected(Expected::Description("a value or `{`")));
                 };
+                // `expose <port> as "<host>"` (#198): bespoke sugar, only
+                // reachable right after the bare primary-value shorthand —
+                // never after a braced `expose { ... }` body, matching
+                // where the old schema-driven `as`→`host` alias lived
+                // before F6 removed it — see
+                // [`Self::parse_expose_as_sugar`]'s own doc.
+                if took_primary_shorthand
+                    && std::ptr::eq(nested, &schema::EXPOSE)
+                    && self.peek().kind == TokenKind::Ident
+                    && self.peek().lexeme == "as"
+                {
+                    self.parse_expose_as_sugar(fields)?;
+                }
                 self.insert_single(
                     schema,
                     fields,
@@ -1863,9 +1891,9 @@ fn lower_service_fields(mut fields: StructFields) -> Result<ServiceFields, Parse
     // `entrypoint` (#183) lowers exactly like `command` just above —
     // the same `FieldKind::ScalarOrList` shape, into its own AST type.
     // Reached only for `entrypoint` written directly in a
-    // `service`/`template` body: `expose`'s own `entrypoint` sub-field
-    // is a reference list lowered by `lower_expose` instead, from a
-    // `StructFields` map the `expose` schema built.
+    // `service`/`template` body: `router`'s own `entrypoint` sub-field
+    // is an unrelated reference list, lowered by `lower_router` instead,
+    // from a `StructFields` map the `router` schema built.
     let entrypoint = match fields.remove("entrypoint") {
         Some(FieldValue::ScalarOrList(ScalarOrList::Scalar(lit))) => Some(Entrypoint::Shell(lit)),
         Some(FieldValue::ScalarOrList(ScalarOrList::List(items, list_span))) => {
@@ -2072,20 +2100,7 @@ fn lower_expose(mut fields: StructFields, span: Span) -> Expose {
         Some(FieldValue::Scalar(lit)) => Some(lit),
         _ => None,
     };
-    let host = match fields.remove("host") {
-        Some(FieldValue::Scalar(lit)) => Some(lit),
-        _ => None,
-    };
-    let entrypoint = match fields.remove("entrypoint") {
-        Some(FieldValue::RefList(v)) => v,
-        _ => Vec::new(),
-    };
-    Expose {
-        port,
-        host,
-        entrypoint,
-        span,
-    }
+    Expose { port, span }
 }
 
 fn lower_restart(mut fields: StructFields, span: Span) -> Restart {

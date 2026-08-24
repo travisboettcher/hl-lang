@@ -125,22 +125,6 @@ pub enum ParseError {
     /// resulting `RawValue` tree safe — dropping is the other recursion
     /// here, and it can't return an error at all.
     RawValueTooDeep { limit: usize, span: Span },
-    /// A `bare_keyword_alias` fusion (`as`) was immediately followed by a
-    /// comma — `expose port as "host", entrypoint: "..."`. The alias
-    /// fuses onto the primary value as a one-shot unit and can't itself
-    /// continue a field list (docs/DESIGN.md's desugaring rule 3), so
-    /// this is always someone reaching for the explicit comma-separated
-    /// field form and spelling it with the alias sugar instead. Left
-    /// unnamed, this surfaces from the *enclosing* body as a generic
-    /// "expected a newline before the next field" error that never
-    /// mentions what to write instead (#87).
-    AliasSugarCannotContinue {
-        type_name: &'static str,
-        keyword: &'static str,
-        primary_field: &'static str,
-        alias_field: &'static str,
-        span: Span,
-    },
     /// A `volume`/`env` bare entry's first value had neither `:` nor the
     /// type's own bare-entry separator after it. `span` is the entry's
     /// own first value, not wherever parsing next stumbled (often the
@@ -200,7 +184,6 @@ impl ParseError {
             | ParseError::ParamReferenceOutsideTemplate { span, .. }
             | ParseError::UnknownTemplateParam { span, .. }
             | ParseError::RawValueTooDeep { span, .. }
-            | ParseError::AliasSugarCannotContinue { span, .. }
             | ParseError::MapEntryMissingSeparator { span, .. }
             | ParseError::InvalidDependsOnCondition { span, .. }
             | ParseError::DuplicateRouterName { second: span, .. } => *span,
@@ -329,19 +312,6 @@ impl fmt::Display for ParseError {
             ParseError::RawValueTooDeep { limit, .. } => write!(
                 f,
                 "{}:{}: `raw` value nested more than {limit} levels deep",
-                span.line, span.col
-            ),
-            ParseError::AliasSugarCannotContinue {
-                type_name,
-                keyword,
-                primary_field,
-                alias_field,
-                ..
-            } => write!(
-                f,
-                "{}:{}: `{keyword}` fuses onto the primary value as a one-shot alias and can't \
-                 be followed by more fields — write `{type_name} <{primary_field}>, \
-                 {alias_field}: \"...\", ...` instead",
                 span.line, span.col
             ),
             ParseError::MapEntryMissingSeparator {

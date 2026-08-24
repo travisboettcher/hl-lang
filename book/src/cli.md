@@ -266,8 +266,7 @@ No flag silences them yet. When one is telling you about something you
 meant, the fix is to write it in a way that drops nothing, and the
 warning text names that fix in each case.
 
-A fourth construct once dropped this way—`middleware` or
-`expose.entrypoint` on a service with no `expose.host`—is a hard
-**error** instead, because a middleware with no router is never
-something you could have meant. See
-[`expose`](./built-in-fields.md#expose).
+A fourth construct once dropped this way—`middleware` on a service with
+no `router`—is a hard **error** instead, because a middleware with no
+router is never something you could have meant. See
+[`router`](./built-in-fields.md#router).

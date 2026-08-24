@@ -44,5 +44,9 @@ service from-exec-param {
 service router {
   image "alpine:3"
   entrypoint "/docker-entrypoint.sh"
-  expose 8080, host: "router.example.com", entrypoint: web, web-secure
+  expose 8080
+  router {
+    host: "router.example.com"
+    entrypoint: web, web-secure
+  }
 }

@@ -49,7 +49,11 @@ use "network.hll" as net
 template internal_web(port) {
   networks [net.traefik-net]
   restart unless-stopped
-  expose $port, host: "{{name}}.internal.example.com", entrypoint: web-secure
+  expose $port
+  router {
+    host: "{{name}}.internal.example.com"
+    entrypoint: web-secure
+  }
   middleware local-ipwhitelist
 }
 
