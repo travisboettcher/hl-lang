@@ -129,7 +129,7 @@ pub struct Param {
 
 /// A bare-identifier reference, e.g. an entry in `middleware`/
 /// `depends_on`/`networks`, the host side of a named-volume mount (see
-/// [`VolumeHost::Named`]), or a `network` name referenced from a
+/// [`ArrowMapHost::Named`]), or a `network` name referenced from a
 /// `service`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reference {
@@ -261,7 +261,7 @@ pub struct Network {
 /// the extra Compose knobs that only exist on the volume side.
 ///
 /// Note the *field* named `volume` inside a `service`/`template` body is
-/// a different, map-kind schema ([`VolumeMap`]) that happens to share
+/// a different, map-kind schema ([`ArrowMap`]) that happens to share
 /// the identifier — a top-level `volume x { ... }` declares the volume,
 /// a service-level `volume x -> "/path"` mounts it. Field lookup and
 /// top-level-type lookup are separate tables (`schema::resolve_field`
@@ -535,51 +535,73 @@ impl Entrypoint {
     }
 }
 
-/// `volume`'s entries. Uniqueness is checked on `container` (the value
-/// side of `host -> container`), matching Docker's own constraint that
-/// two mounts can't target the same container path even though the same
-/// host path can be mounted at multiple container paths.
+/// The shared entries type behind `volume`, `publish`, and `devices`
+/// (#192) — all three are `host -> container` arrow maps with uniqueness
+/// on the container side (the value half of `host -> container`),
+/// matching Docker's own constraint that two mounts/publications/device
+/// mappings can't target the same container-side path even though the
+/// same host-side one can appear more than once. One tree type replaces
+/// what were three near-identical pairs (`VolumeMap`/`VolumeEntry`,
+/// `PublishMap`/`PublishEntry`, `DeviceMap`/`DeviceEntry`) before this
+/// type existed — see [`ArrowMapEntry`] for the two ways an entry from
+/// one of these three fields can still differ from the other two's.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct VolumeMap {
-    pub entries: Vec<VolumeEntry>,
+pub struct ArrowMap {
+    pub entries: Vec<ArrowMapEntry>,
 }
 
-/// One `host -> container` mount entry, plus an optional trailing
-/// `{ read_only }` flag (#158) that emits Compose short syntax's `:ro`
-/// mode suffix (`/mnt/media:/data:ro`).
+/// One `host -> container` entry, shared by `volume`, `publish`, and
+/// `devices` (#192). All three fields parse and merge this same shape —
+/// see [`crate::schema::VOLUME`]/[`crate::schema::PUBLISH`]/
+/// [`crate::schema::DEVICES`] — and differ only in two schema-driven
+/// ways, both carried on this one type rather than needing three:
+///
+/// - [`Self::host`] is an [`ArrowMapHost`], which can only ever be
+///   [`ArrowMapHost::Named`] for `volume`
+///   ([`crate::schema::TypeSchema::key_may_be_reference`], true for that
+///   field alone) — `publish`/`devices` entries are always
+///   [`ArrowMapHost::BindMount`].
+/// - [`Self::read_only`] (#158) is set only by `volume`'s trailing
+///   `{ read_only }` body; Compose's own `devices:`/`ports:` short syntax
+///   carries their equivalent suffixes (a cgroup-permissions suffix, a
+///   protocol suffix) *inside* the container literal itself instead
+///   (`"/dev/xvda:rwm"`, `"53/udp"`), so `publish`/`devices` entries
+///   never set this flag — see [`crate::schema::PUBLISH`]/
+///   [`crate::schema::DEVICES`] for why that suffix rides the container
+///   half rather than becoming a second modifier shape here.
 ///
 /// `read_only` is a plain `bool`, not an `Option<Span>` like
 /// [`Network::external`]/[`Volume::external`]: those two report their own
 /// span back through [`crate::ParseError::DuplicateField`] when the same
-/// struct-kind body sets the flag twice, but a `volume` entry's body is
+/// struct-kind body sets the flag twice, but an arrow-map entry's body is
 /// hand-parsed (see the parser's own `parse_mount_map_entry`)
 /// rather than run through the generic struct-field engine, so there is
 /// no second occurrence within one entry for a span to ever distinguish—
 /// `{ read_only read_only }` is simply a syntax error at the second
 /// token, never a value this type has to represent.
 ///
-/// Syntax choice (#158): the issue's own two suggestions were a trailing
-/// bare flag after the primary form (`volume "/" -> "/rootfs",
-/// read_only`) or a `mode` sub-field body. The trailing-comma form was
-/// rejected as genuinely ambiguous, not just unusual: inside `volume`'s
-/// existing canonical multi-entry body (`volume { "/" -> "/rootfs",
-/// "/var/run" -> "/var/run" }`), a comma already means "the next map
-/// entry starts here," and a bare identifier is *already* legal there as
-/// the host side of a named-volume entry (`volume { "/" -> "/rootfs",
-/// read_only -> "/mnt2" }` legitimately mounts a volume literally named
-/// `read_only`). Telling "a flag on the previous entry" from "the start
-/// of a new entry that happens to run out of input before its own `->`"
-/// apart would need unbounded lookahead the rest of the grammar never
-/// asks for, for a distinction the parser can't make locally. A `{ ... }`
-/// body sidesteps that entirely: the outer `{` that opens `volume`'s own
-/// multi-entry body is only ever checked *before* any entry starts
-/// parsing (the parser's own `parse_field`, `SchemaKind::Map` arm), so a
-/// second, per-entry `{` after the container literal is never reachable
-/// from that position and free of ambiguity. It also mirrors
-/// existing precedent directly: `depends_on`'s own per-entry `{
-/// condition: ... }` body (#155) is exactly this shape—`IDENT`
-/// (optionally qualified) `->`/`:` value, then an optional `{ }` tail—so
-/// `volume "/" -> "/rootfs" { read_only }` reuses a pattern this
+/// Syntax choice for `read_only` (#158): the issue's own two suggestions
+/// were a trailing bare flag after the primary form (`volume "/" ->
+/// "/rootfs", read_only`) or a `mode` sub-field body. The trailing-comma
+/// form was rejected as genuinely ambiguous, not just unusual: inside
+/// `volume`'s existing canonical multi-entry body (`volume { "/" ->
+/// "/rootfs", "/var/run" -> "/var/run" }`), a comma already means "the
+/// next map entry starts here," and a bare identifier is *already* legal
+/// there as the host side of a named-volume entry (`volume { "/" ->
+/// "/rootfs", read_only -> "/mnt2" }` legitimately mounts a volume
+/// literally named `read_only`). Telling "a flag on the previous entry"
+/// from "the start of a new entry that happens to run out of input
+/// before its own `->`" apart would need unbounded lookahead the rest of
+/// the grammar never asks for, for a distinction the parser can't make
+/// locally. A `{ ... }` body sidesteps that entirely: the outer `{` that
+/// opens `volume`'s own multi-entry body is only ever checked *before*
+/// any entry starts parsing (the parser's own `parse_field`,
+/// `SchemaKind::Map` arm), so a second, per-entry `{` after the container
+/// literal is never reachable from that position and free of ambiguity.
+/// It also mirrors existing precedent directly: `depends_on`'s own
+/// per-entry `{ condition: ... }` body (#155) is exactly this shape—
+/// `IDENT` (optionally qualified) `->`/`:` value, then an optional `{ }`
+/// tail—so `volume "/" -> "/rootfs" { read_only }` reuses a pattern this
 /// language's readers already know rather than inventing a second one. A
 /// `mode` sub-field (`{ mode: "ro" }`) was rejected on scope grounds
 /// alone, not ambiguity: this milestone deliberately covers `:ro` only,
@@ -588,22 +610,24 @@ pub struct VolumeMap {
 /// unvalidated the way an arbitrary `mode` string would leave every
 /// value but `"ro"` silently unchecked.
 #[derive(Debug, Clone, PartialEq)]
-pub struct VolumeEntry {
-    pub host: VolumeHost,
+pub struct ArrowMapEntry {
+    pub host: ArrowMapHost,
     pub container: Literal,
     /// Whether this entry carried a `{ read_only }` body (#158). `false`
     /// for the overwhelming majority of entries, which carry no body at
     /// all—Compose's short syntax omits the `:ro` suffix entirely rather
     /// than spelling out `:rw`, and codegen matches that: this flag adds
     /// a suffix when set and changes nothing about the emitted string
-    /// when it isn't (see `hl_codegen`'s `resolve_volumes`).
+    /// when it isn't (see `hl_codegen`'s `resolve_volumes`). Always
+    /// `false` for a `publish`/`devices` entry — see this type's own doc.
     pub read_only: bool,
     pub span: Span,
 }
 
-/// The host side of a `volume` entry: either a path on the machine
-/// Compose runs on, or a reference to a named Docker volume declared by
-/// a top-level `volume` declaration.
+/// The host side of an [`ArrowMapEntry`]: either a path on the machine
+/// Compose runs on, or — for a `volume` entry only, see
+/// [`ArrowMapEntry`]'s own doc — a reference to a named Docker volume
+/// declared by a top-level `volume` declaration.
 ///
 /// Which one is a *syntactic* question, decided here by the parser from
 /// the token it read, not later by inspecting the string's shape: a
@@ -613,27 +637,31 @@ pub struct VolumeEntry {
 /// `networks [traefik-net]` entry is. That's what lets a named volume
 /// carry an `alias.name` qualifier at all — a string has no structure a
 /// qualifier could attach to — and it makes the distinction one the
-/// parser enforces rather than one codegen guesses.
+/// parser enforces rather than one codegen guesses. A `publish`/`devices`
+/// entry's host is always [`Self::BindMount`]: neither field's schema
+/// sets [`crate::schema::TypeSchema::key_may_be_reference`], so the
+/// parser never builds a [`Self::Named`] for either.
 #[derive(Debug, Clone, PartialEq)]
-pub enum VolumeHost {
+pub enum ArrowMapHost {
     /// A quoted path (or any other non-identifier literal, including a
     /// `$param` a template substitutes a path into) bind-mounted from
     /// the host. Needs no declaration — Docker itself requires none for
-    /// a host path.
+    /// a host path. The only variant `publish`/`devices` ever produce.
     BindMount(Literal),
     /// A bare `IDENT`, optionally `alias.`-qualified, naming a top-level
     /// [`Volume`] declaration. Resolved exactly like a `networks [x]`
     /// entry: a bare name against the entry file's own declarations, a
-    /// qualified one against the aliased module's.
+    /// qualified one against the aliased module's. `volume`-only — see
+    /// this type's own doc.
     Named(Reference),
 }
 
-impl VolumeHost {
+impl ArrowMapHost {
     /// The host's location in source.
     pub fn span(&self) -> Span {
         match self {
-            VolumeHost::BindMount(lit) => lit.span(),
-            VolumeHost::Named(r) => r.span,
+            ArrowMapHost::BindMount(lit) => lit.span(),
+            ArrowMapHost::Named(r) => r.span,
         }
     }
 
@@ -643,55 +671,10 @@ impl VolumeHost {
     /// declaration lives in rather than the volume).
     pub fn text(&self) -> &str {
         match self {
-            VolumeHost::BindMount(lit) => lit.text(),
-            VolumeHost::Named(r) => &r.name,
+            ArrowMapHost::BindMount(lit) => lit.text(),
+            ArrowMapHost::Named(r) => &r.name,
         }
     }
-}
-
-/// `publish`'s entries — host-port → container-port mappings, emitted as
-/// Compose's `ports:` list. Uniqueness is checked on `container` (the
-/// value side of `host -> container`), matching [`VolumeMap`]'s own
-/// convention; see [`crate::schema::PUBLISH`] for why that side rather
-/// than the host one.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct PublishMap {
-    pub entries: Vec<PublishEntry>,
-}
-
-/// One `host -> container` published-port entry. Both sides are plain
-/// [`Literal`]s rather than parsed port numbers: a quoted container side
-/// is how a protocol suffix is written (`publish 53 -> "53/udp"`), and a
-/// bare number is the ordinary case.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PublishEntry {
-    pub host: Literal,
-    pub container: Literal,
-    pub span: Span,
-}
-
-/// `devices`'s entries — host device path → container device path
-/// mappings, emitted as Compose's `devices:` list (#167, replacing
-/// #157's original pre-joined `"host:container"` string per review
-/// feedback). Uniqueness is checked on `container` (the value side of
-/// `host -> container`), exactly [`PublishMap`]'s own convention; see
-/// [`crate::schema::DEVICES`] for why that side rather than the host
-/// one.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct DeviceMap {
-    pub entries: Vec<DeviceEntry>,
-}
-
-/// One `host -> container` device-mapping entry. Both sides are plain
-/// [`Literal`]s, mirroring [`PublishEntry`]: a quoted container side is
-/// how Compose's optional `rwm`-style cgroup permissions suffix is
-/// written (`devices "/dev/sda" -> "/dev/xvda:rwm"`), and a bare path is
-/// the ordinary case.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DeviceEntry {
-    pub host: Literal,
-    pub container: Literal,
-    pub span: Span,
 }
 
 /// `env`'s entries. Uniqueness is checked on `key`.
@@ -799,9 +782,12 @@ pub struct ServiceFields {
     /// `publish 8096 -> 8096` entries — Compose's `ports:` key. Distinct
     /// from `expose` above, which is Compose's `expose:` (visible to
     /// other containers on the same network, never published to the
-    /// host) plus the Traefik router labels.
-    pub publish: PublishMap,
-    pub volumes: VolumeMap,
+    /// host) plus the Traefik router labels. Shares [`ArrowMap`] with
+    /// [`Self::volumes`]/[`Self::devices`] below — see that type's own
+    /// doc for the shape all three fields share and the two ways
+    /// `volume` alone still differs.
+    pub publish: ArrowMap,
+    pub volumes: ArrowMap,
     pub env: EnvMap,
     pub raw: RawMap,
     pub middleware: Vec<Reference>,
@@ -880,7 +866,7 @@ pub struct ServiceFields {
     /// container side through `compose.rs`'s `merge_map`, exactly like
     /// `publish`, rather than concatenating through `LIST_FIELDS`. See
     /// [`crate::schema::DEVICES`] for the uniqueness-side reasoning.
-    pub devices: DeviceMap,
+    pub devices: ArrowMap,
     /// Docker's own `container_name:` key. `None` means "default to the
     /// service's own name" (via the same `{{name}}` interpolation
     /// binding `expose`'s `as`-sugar already uses) — codegen, not the

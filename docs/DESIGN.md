@@ -279,14 +279,28 @@ consults neither table in the other's position. `network` has no
 equivalent pair today only because no field goes by the literal name
 `network`, since a service's list field is `networks`.
 
+`volume`'s service-level field, `publish`, and `devices` are three
+schema rows over one shared shape, unified at #192: a `->`-separated
+`host -> container` arrow map with uniqueness on the container side. All
+three parse and merge through one shared `ArrowMap`/`ArrowMapEntry` tree
+type rather than three near-identical ones, since the only things that
+ever varied row to row were two schema-driven bits, both covered below:
+whether the host side may name a declared top-level `volume`—
+`key_may_be_reference`, true for `volume` alone—and whether an entry
+carries a trailing `{ read_only }` modifier, likewise `volume`-only.
+`env`, `driver_opts`, and `raw` are map-kind too but outside this
+group—their uniqueness lands on the key side instead, per the preceding
+table, so they never shared `volume`/`publish`/`devices`' own value-side
+convention to begin with.
+
 The `volume` field is also the one map-kind type whose *key* side isn't
 restricted to a literal. Its host side is either a string, meaning a
 bind-mount path, or an identifier, optionally `alias.`-qualified,
 meaning a reference to a top-level `volume`
 declaration—`TypeSchema::key_may_be_reference`, true for that one type,
 is what selects the entry parser that draws the distinction. Every other
-map key—`env`, `publish`, `driver_opts`, `raw`—stays a plain literal,
-since none of them names anything an `.hll` file declares.
+map key—`env`, `publish`, `devices`, `driver_opts`, `raw`—stays a plain
+literal, since none of them names anything an `.hll` file declares.
 
 Every `volume` entry, on either side of that host-kind split, may also
 carry an optional trailing `{ read_only }` body—`volume "/" ->
@@ -323,7 +337,7 @@ unknown bare flag already gets rejected.
 `merge_map`'s existing full-entry replacement gives `read_only` the
 correct override behavior for free—see "Composition" later in this
 document. A later tier's entry with the same container path replaces
-the earlier `VolumeEntry` outright, flag included, instead of merging
+the earlier arrow-map entry outright, flag included, instead of merging
 field by field, so an overriding entry that writes no flag drops an
 inherited one, and an overriding entry that writes the flag never loses
 it. This field needed no merge-path change.
@@ -357,28 +371,29 @@ Compose's `expose:` key, which reaches only other containers on the same
 network, plus the Traefik router labels. A homelab needs both: much of
 it sits behind Traefik and wants `expose`, while Pi-hole on 53, a
 Syncthing sync port, or a game server takes traffic directly and wants
-`publish`—see #84. `publish` borrows `volume`'s `->` separator and its
-value-side uniqueness because it has the same shape, a host-side
-resource mapped onto a container-side one. Uniqueness lands on the
-container port rather than the host one because a protocol suffix rides
-on the container half of a Compose short-syntax mapping (`53:53/udp`),
-so checking the host side would reject one host port serving both
+`publish`—see #84. `publish`'s own uniqueness lands on the container
+port rather than the host one because a protocol suffix rides on the
+container half of a Compose short-syntax mapping (`53:53/udp`), so
+checking the host side would reject one host port serving both
 protocols—exactly the configuration the field exists to express.
 
-`devices` is `publish`'s closest sibling in this table—it borrows the
-identical `->` separator and value-side uniqueness for the identical
-reason, right down to the optional suffix: Compose's own `devices:`
-short syntax is `HOST:CONTAINER[:CGROUP_PERMISSIONS]`, so an optional
-`rwm`-style control-group permissions suffix rides the container half of
-a mapping—`"/dev/sda" -> "/dev/xvda:rwm"`—exactly the way a protocol
-suffix rides `publish`'s own container half. It shipped originally at
-#157 as a `FieldKind::ReferenceList` taking a single pre-joined
-`"host:container"` string, `devices ["/dev/kmsg:/dev/kmsg"]`. #167
-replaced that with this arrow-mapped shape after review feedback pointed
-out the inconsistency with `publish`/`volume`'s own spelling, and it now
-merges through the same `merge_map` those two fields use, keyed on the
-container side, rather than through `LIST_FIELDS`'s set-like
-concatenation.
+`devices` shares `publish`'s reasoning for keying uniqueness on the
+container side, right down to the optional suffix: Compose's own
+`devices:` short syntax is `HOST:CONTAINER[:CGROUP_PERMISSIONS]`, so an
+optional `rwm`-style control-group permissions suffix rides the
+container half of a mapping—`"/dev/sda" -> "/dev/xvda:rwm"`—exactly the
+way a protocol suffix rides `publish`'s own container half. It shipped
+originally at #157 as a `FieldKind::ReferenceList` taking a single
+pre-joined `"host:container"` string, `devices
+["/dev/kmsg:/dev/kmsg"]`. #167 replaced that with this arrow-mapped
+shape after review feedback pointed out the inconsistency with
+`publish`/`volume`'s own spelling, merging through the same `merge_map`
+those two fields use, keyed on the container side, rather than through
+`LIST_FIELDS`'s set-like concatenation. #192 then folded all three
+fields' own tree types together into the shared `ArrowMap`/
+`ArrowMapEntry` pair described in the preceding paragraphs, since by
+then all three were already identical `merge_map` calls differing only
+in which field name and which `ServiceFields` slot each read.
 
 `expose`'s own `entrypoint` sub-field is a list of references too
 (`entrypoint web, web-secure`), for the same reason it isn't a scalar

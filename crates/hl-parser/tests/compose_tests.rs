@@ -5,8 +5,8 @@
 
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    Command, ComposeError, ComposedProgram, Entrypoint, Expose, Healthcheck, HealthcheckTest,
-    Literal, RawValue, Service, VolumeHost, compose, parse,
+    ArrowMapHost, Command, ComposeError, ComposedProgram, Entrypoint, Expose, Healthcheck,
+    HealthcheckTest, Literal, RawValue, Service, compose, parse,
 };
 
 fn compose_ok(source: &str) -> ComposedProgram {
@@ -2035,7 +2035,7 @@ fn assert_no_params(service: &Service) {
         // Only a bind-mount host holds a literal; a named-volume host is
         // a `Reference`, which can never be a `$param` in the first
         // place (the grammar has no parameter in reference position).
-        if let VolumeHost::BindMount(host) = &v.host {
+        if let ArrowMapHost::BindMount(host) = &v.host {
             assert_not_param(host);
         }
         assert_not_param(&v.container);
@@ -2322,7 +2322,7 @@ fn bare_volume_reference_survives_composition_untouched() {
          service s {\n  image \"x\"\n  with mounts\n}\n",
     );
     let host = &composed.services[0].fields.volumes.entries[0].host;
-    let VolumeHost::Named(r) = host else {
+    let ArrowMapHost::Named(r) = host else {
         panic!("expected a named-volume host, got {host:?}");
     };
     assert!(r.qualifier.is_none());

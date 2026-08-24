@@ -40,8 +40,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use hl_parser::{
-    Command, ComposedProgram, DependsOnEntry, Entrypoint, Healthcheck, HealthcheckTest, Network,
-    Reference, Service, SourceMap, Span, Volume, VolumeHost, VolumeMap,
+    ArrowMap, ArrowMapHost, Command, ComposedProgram, DependsOnEntry, Entrypoint, Healthcheck,
+    HealthcheckTest, Network, Reference, Service, SourceMap, Span, Volume,
 };
 use indexmap::IndexMap;
 
@@ -103,7 +103,7 @@ pub enum CodegenError {
     },
     /// A service's `volume name -> "/path"` entry names a *named*
     /// volume — an unquoted identifier on the host side, per
-    /// [`hl_parser::VolumeHost`] — with no matching top-level `volume`
+    /// [`hl_parser::ArrowMapHost`] — with no matching top-level `volume`
     /// declaration in the same program.
     ///
     /// The exact analogue of [`Self::UnknownNetwork`], and for the same
@@ -841,13 +841,17 @@ fn generate_healthcheck(
 /// The direct counterpart of [`resolve_networks`], differing only in
 /// that not every entry is a reference: which entries are is settled by
 /// then, in the parser, by which token the host side was written as (see
-/// [`hl_parser::VolumeHost`]). A [`VolumeHost::Named`] resolves against
-/// `declared` exactly as a `networks [x]` entry resolves against the
-/// program's `network` declarations; a [`VolumeHost::BindMount`] passes
-/// through untouched and contributes nothing to `volumes:`, since Docker
-/// itself requires no declaration for a host path.
+/// [`hl_parser::ArrowMapHost`]). An [`ArrowMapHost::Named`] resolves
+/// against `declared` exactly as a `networks [x]` entry resolves against
+/// the program's `network` declarations; an [`ArrowMapHost::BindMount`]
+/// passes through untouched and contributes nothing to `volumes:`, since
+/// Docker itself requires no declaration for a host path. `volume` is the
+/// one caller that ever sees a `Named` host — `publish`/`devices` share
+/// this same [`ArrowMap`] shape but their schemas never produce one, so
+/// their own resolution (inline in [`generate_service`]) only ever takes
+/// this function's `BindMount` arm.
 fn resolve_volumes(
-    volumes: &VolumeMap,
+    volumes: &ArrowMap,
     declared: &[Volume],
     service_name: &str,
     bindings: &HashMap<&str, &str>,
@@ -861,8 +865,8 @@ fn resolve_volumes(
         let host = match &v.host {
             // A bind-mount path is an ordinary value and interpolates
             // like every other one (`volume "/srv/{{name}}" -> "/data"`).
-            VolumeHost::BindMount(lit) => interp::resolve(lit.text(), bindings, lit.span())?,
-            VolumeHost::Named(r) => {
+            ArrowMapHost::BindMount(lit) => interp::resolve(lit.text(), bindings, lit.span())?,
+            ArrowMapHost::Named(r) => {
                 let decl = declared
                     .iter()
                     .find(|d| d.name.name == r.name)

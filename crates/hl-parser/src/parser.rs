@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
-    Command, DependsOnCondition, DependsOnEntry, DeviceEntry, DeviceMap, Entrypoint, EnvEntry,
-    EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Param, ParamType,
-    Program, PublishEntry, PublishMap, RawEntry, RawMap, RawValue, Reference, Restart, Router,
-    Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
-    VolumeDriverOpt, VolumeEntry, VolumeHost, VolumeMap,
+    ArrowMap, ArrowMapEntry, ArrowMapHost, Command, DependsOnCondition, DependsOnEntry, Entrypoint,
+    EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Param,
+    ParamType, Program, RawEntry, RawMap, RawValue, Reference, Restart, Router, Service,
+    ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
+    VolumeDriverOpt,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -101,16 +101,20 @@ enum FieldValue {
     /// (key, value, entry span).
     LiteralMap(Vec<(Literal, Literal, Span)>),
     /// An accumulating `volume` field: same shape as [`Self::LiteralMap`]
-    /// except the key side is a [`VolumeHost`], which the parser has
+    /// except the key side is an [`ArrowMapHost`], which the parser has
     /// already split into a bind-mount literal or a named-volume
     /// reference (see [`schema::TypeSchema::key_may_be_reference`]), and
     /// a third `bool` carrying whether the entry's optional `{ read_only
     /// }` body (#158) was present. Not folded into [`Self::LiteralMap`]'s
     /// own `(Literal, Literal, Span)` shape even though `volume` is the
-    /// only field that ever populates this variant, since `env`/
-    /// `publish`/`driver_opts` share that shape too and gain nothing from
-    /// carrying a flag none of them has.
-    MountMap(Vec<(VolumeHost, Literal, bool, Span)>),
+    /// only field parsed through this path, since `env`/`publish`/
+    /// `driver_opts`/`devices` share that shape too and gain nothing from
+    /// carrying a flag none of them has — `publish`/`devices` still lower
+    /// into the very same [`crate::ast::ArrowMapEntry`] `volume` does
+    /// (see `lower_service_fields`), just via [`Self::LiteralMap`]
+    /// instead, since neither ever needs a named-reference host or a
+    /// trailing modifier body at parse time.
+    MountMap(Vec<(ArrowMapHost, Literal, bool, Span)>),
     /// An accumulating nested schema-free map-kind field (raw).
     Raw(RawMap),
     /// An accumulating reference-list field
@@ -1322,28 +1326,36 @@ impl<'src> Parser<'src> {
     }
 
     /// One `volume` entry — the same two forms as
-    /// [`Self::parse_literal_map_entry`], except the host side is a
-    /// [`VolumeHost`]: a quoted string (or other literal) is a
+    /// [`Self::parse_literal_map_entry`], except the host side is an
+    /// [`ArrowMapHost`]: a quoted string (or other literal) is a
     /// bind-mount path, and a bare `IDENT` is a reference to a top-level
     /// `volume` declaration, optionally `alias.`-qualified. See
-    /// [`VolumeHost`]'s own doc for why that distinction is drawn here,
+    /// [`ArrowMapHost`]'s own doc for why that distinction is drawn here,
     /// at parse time, rather than from the string's shape later on.
+    /// Reached only for `volume`, the one field whose schema sets
+    /// [`schema::TypeSchema::key_may_be_reference`] — `publish`/`devices`
+    /// entries go through [`Self::parse_literal_map_entry`] instead,
+    /// whose plain [`Literal`] host [`lower_service_fields`] wraps in
+    /// [`ArrowMapHost::BindMount`] on the way into the very same
+    /// [`crate::ast::ArrowMapEntry`] this function builds.
     ///
     /// The container literal may be followed by an optional `{ read_only
     /// }` body (#158), shaped like [`Self::parse_depends_on_entry`]'s own
     /// trailing `{ condition: ... }`: an `IDENT` (bare presence only, no
     /// `:`/value, matching [`schema::FieldKind::BoolFlag`]'s own
     /// convention for `external`/`disable`) that must read literally
-    /// `read_only`, then `}`. See [`VolumeEntry`]'s own doc for why this
-    /// shape was chosen over the issue's other candidates.
+    /// `read_only`, then `}`. See [`crate::ast::ArrowMapEntry`]'s own doc
+    /// for why this shape was chosen over the issue's other candidates,
+    /// and for why only this path — never `publish`/`devices`' own — ever
+    /// produces one.
     fn parse_mount_map_entry(
         &mut self,
         schema: &'static TypeSchema,
-    ) -> Result<(VolumeHost, Literal, bool, Span), ParseError> {
+    ) -> Result<(ArrowMapHost, Literal, bool, Span), ParseError> {
         let host = if self.peek().kind == TokenKind::Ident {
-            VolumeHost::Named(self.parse_reference()?)
+            ArrowMapHost::Named(self.parse_reference()?)
         } else {
-            VolumeHost::BindMount(self.parse_literal()?)
+            ArrowMapHost::BindMount(self.parse_literal()?)
         };
         let span = host.span();
         self.expect_map_separator(schema, span)?;
@@ -1718,10 +1730,10 @@ fn join_spans(start: Span, end: Span) -> Span {
 /// duplicate on whichever side [`TypeSchema::uniqueness`] names.
 ///
 /// Generic over the key side's own type so one routine serves every
-/// map-kind field: `env`/`publish`/`driver_opts` key on a [`Literal`],
-/// `volume` on a [`VolumeHost`]. `key_text` reads that side's text —
-/// `Literal::text` or `VolumeHost::text`, passed by the caller, since
-/// there is no one trait both already implement.
+/// map-kind field: `env`/`publish`/`driver_opts`/`devices` key on a
+/// [`Literal`], `volume` on an [`ArrowMapHost`]. `key_text` reads that
+/// side's text — `Literal::text` or `ArrowMapHost::text`, passed by the
+/// caller, since there is no one trait both already implement.
 fn merge_map_entries<K>(
     nested: &'static TypeSchema,
     bucket: &mut Vec<(K, Literal, Span)>,
@@ -1771,21 +1783,21 @@ fn merge_map_entries<K>(
 /// data riding along with whichever entry wins.
 fn merge_mount_map_entries(
     nested: &'static TypeSchema,
-    bucket: &mut Vec<(VolumeHost, Literal, bool, Span)>,
-    new_entries: Vec<(VolumeHost, Literal, bool, Span)>,
+    bucket: &mut Vec<(ArrowMapHost, Literal, bool, Span)>,
+    new_entries: Vec<(ArrowMapHost, Literal, bool, Span)>,
 ) -> Result<(), ParseError> {
     let side = nested
         .uniqueness
         .expect("volume schema must define a uniqueness side");
     for (host, container, read_only, span) in new_entries {
         let check = match side {
-            MapSide::Key => VolumeHost::text(&host),
+            MapSide::Key => ArrowMapHost::text(&host),
             MapSide::Value => container.text(),
         }
         .to_string();
         let dup = bucket.iter().find(|(h, c, _, _)| {
             let existing = match side {
-                MapSide::Key => VolumeHost::text(h),
+                MapSide::Key => ArrowMapHost::text(h),
                 MapSide::Value => c.text(),
             };
             existing == check
@@ -1912,24 +1924,33 @@ fn lower_service_fields(mut fields: StructFields) -> Result<ServiceFields, Parse
         }
         _ => None,
     };
+    // `publish`'s entries are always [`ArrowMapHost::BindMount`] — its
+    // schema leaves `key_may_be_reference` unset, so they're parsed via
+    // [`FieldValue::LiteralMap`] as plain `(Literal, Literal, Span)`
+    // pairs, not [`Self::parse_mount_map_entry`] — but they lower into
+    // the very same [`crate::ast::ArrowMapEntry`] `volume` does, with
+    // `read_only` always `false` (`publish` has no `{ read_only }`
+    // syntax; a protocol suffix rides inside the container literal
+    // instead — see [`crate::ast::ArrowMapEntry`]'s own doc).
     let publish = match fields.remove("publish") {
-        Some(FieldValue::LiteralMap(entries)) => PublishMap {
+        Some(FieldValue::LiteralMap(entries)) => ArrowMap {
             entries: entries
                 .into_iter()
-                .map(|(host, container, span)| PublishEntry {
-                    host,
+                .map(|(host, container, span)| ArrowMapEntry {
+                    host: ArrowMapHost::BindMount(host),
                     container,
+                    read_only: false,
                     span,
                 })
                 .collect(),
         },
-        _ => PublishMap::default(),
+        _ => ArrowMap::default(),
     };
     let volumes = match fields.remove("volume") {
-        Some(FieldValue::MountMap(entries)) => VolumeMap {
+        Some(FieldValue::MountMap(entries)) => ArrowMap {
             entries: entries
                 .into_iter()
-                .map(|(host, container, read_only, span)| VolumeEntry {
+                .map(|(host, container, read_only, span)| ArrowMapEntry {
                     host,
                     container,
                     read_only,
@@ -1937,7 +1958,7 @@ fn lower_service_fields(mut fields: StructFields) -> Result<ServiceFields, Parse
                 })
                 .collect(),
         },
-        _ => VolumeMap::default(),
+        _ => ArrowMap::default(),
     };
     let env = match fields.remove("env") {
         Some(FieldValue::LiteralMap(entries)) => EnvMap {
@@ -1976,18 +1997,21 @@ fn lower_service_fields(mut fields: StructFields) -> Result<ServiceFields, Parse
         Some(FieldValue::Flag(s)) => Some(s),
         _ => None,
     };
+    // Same shape as `publish` above — always `BindMount`, never a
+    // trailing `{ read_only }` body — see that field's own comment.
     let devices = match fields.remove("devices") {
-        Some(FieldValue::LiteralMap(entries)) => DeviceMap {
+        Some(FieldValue::LiteralMap(entries)) => ArrowMap {
             entries: entries
                 .into_iter()
-                .map(|(host, container, span)| DeviceEntry {
-                    host,
+                .map(|(host, container, span)| ArrowMapEntry {
+                    host: ArrowMapHost::BindMount(host),
                     container,
+                    read_only: false,
                     span,
                 })
                 .collect(),
         },
-        _ => DeviceMap::default(),
+        _ => ArrowMap::default(),
     };
     let with = match fields.remove("with") {
         Some(FieldValue::Struct(mut with_fields, _)) => match with_fields.remove("templates") {
