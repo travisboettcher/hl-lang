@@ -25,10 +25,10 @@ use hl_lexer::{SourceMap, Span};
 use crate::ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Command, DependsOnEntry, Entrypoint, EnvEntry, EnvMap,
     Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, ParamType, Program,
-    RawEntry, RawMap, RawValue, Reference, Restart, Router, Service, ServiceFields, TemplateDecl,
+    RawEntry, RawMap, RawValue, Restart, Router, Service, ServiceFields, TemplateDecl,
     TemplateInvocation, TopDecl, Traefik, Volume,
 };
-use crate::schema::MapSide;
+use crate::schema::{self, MapSide};
 
 /// How deep a chain of `with` invocations may nest before
 /// [`ComposeError::TemplateNestingTooDeep`] stops it.
@@ -221,18 +221,20 @@ pub enum ComposeError {
     UnknownAlias { alias: String, span: Span },
     /// A qualified reference (`alias.name`) was used on a reference-list
     /// field that has no cross-file meaning — `middleware`,
-    /// `depends_on`, `dns`, `env_file`, or `expose.entrypoint`.
-    /// (`depends_on` names a same-file sibling service; the others
-    /// aren't resolved against anything an `.hll` file declares at
-    /// all — an entry point lives in the deployment's own
-    /// `traefik.yml`, and an `env_file` path lives on disk next to the
-    /// compose file.) `devices` isn't among these any more: since #167
-    /// its entries are plain [`Literal`]s, like `publish`'s and `env`'s,
-    /// which have no `alias.` qualifier to carry in the first place, so
-    /// there's nothing here to reject. Rejected rather than silently
-    /// accepted or silently dropped. Only `networks` resolves a
-    /// qualifier, because a `network` really is a declaration another
-    /// file can export.
+    /// `depends_on`, `dns`, `env_file`, `expose.entrypoint`,
+    /// `router.entrypoint`, or `router.path_prefix`. (`depends_on` names
+    /// a same-file sibling service; the others aren't resolved against
+    /// anything an `.hll` file declares at all — an entry point lives in
+    /// the deployment's own `traefik.yml`, and an `env_file` path lives
+    /// on disk next to the compose file.) `devices` isn't among these:
+    /// since #167 its entries are plain [`Literal`]s, like `publish`'s
+    /// and `env`'s, which were never reference-shaped to begin with, so
+    /// there's nothing here to reject. See
+    /// [`crate::schema::allows_qualified_reference`] for the single
+    /// table this list is drawn from. Rejected rather than silently
+    /// accepted or silently dropped. Only `networks` and a named-volume
+    /// mount's host side resolve a qualifier, because those two really
+    /// are declarations another file can export.
     UnsupportedQualifiedReference {
         field: &'static str,
         alias: String,
@@ -271,7 +273,7 @@ pub enum ComposeError {
     /// with no diagnostic at any stage (#71).
     ///
     /// The lasting fix is to preserve the resolved identity on the
-    /// `Reference` so codegen never re-resolves by bare name at all;
+    /// `Literal` so codegen never re-resolves by bare name at all;
     /// this error is the contained stopgap, and stays worth keeping
     /// afterwards as a clarity check — two networks sharing one bare
     /// name in a single document is confusing whether or not the
@@ -1108,8 +1110,9 @@ pub fn compose(program: Program) -> Result<ComposedProgram, ComposeError> {
 /// this implements.
 ///
 /// `volumes` grows the same way `networks` does, and for the same
-/// reason: a named-volume mount's host side is a [`Reference`] (`volume
-/// alias.name -> "/config"`), so an imported `volume` declaration has to
+/// reason: a named-volume mount's host side is a reference-shaped
+/// [`Literal`] (`volume alias.name -> "/config"`), so an imported
+/// `volume` declaration has to
 /// be pulled into the program the mount belongs to before codegen can
 /// resolve it there.
 pub fn compose_with_resolver<R: SymbolResolver>(
@@ -1434,54 +1437,71 @@ fn resolve_invocation<R: SymbolResolver>(
 /// mount's host side are the two the language has — rewriting each to an
 /// unqualified, resolved bare reference so [`merge_tier`] never needs to
 /// know imports exist, and recording the declaration it reached in
-/// `imports`. Qualified `middleware`/`depends_on`/`dns`/`env_file`/
-/// `expose.entrypoint` entries are rejected outright — see
-/// [`ComposeError::UnsupportedQualifiedReference`]'s doc for why those
-/// have no cross-file meaning yet. `devices` needs no such rejection any
-/// more: since #167 its entries are plain [`Literal`]s, like `publish`'s
-/// and `env`'s, which have no `alias.` qualifier to even carry — a
-/// [`Reference`] is the only shape that could. Runs exactly once per scope, at
-/// the point that scope's own directly-written fields are merged (its
-/// `Tier::Own` step in [`compose_service`]/[`resolve_template`]) — by
-/// induction, every `ServiceFields` [`merge_tier`] ever sees has already
-/// passed through this, transitively, since a `with`-list target's own
-/// qualified references were already resolved when *it* was resolved.
+/// `imports`. Every other reference-shaped position rejects a qualified
+/// entry outright — [`schema::allows_qualified_reference`] is the single
+/// table of which positions are which, and
+/// [`ComposeError::UnsupportedQualifiedReference`]'s own doc explains why
+/// every rejected position has no cross-file meaning to resolve one
+/// against. `devices` needs no such check at all: since #167 its entries
+/// are plain [`Literal`]s that were never reference-shaped to begin with
+/// (see [`crate::schema::DEVICES`]), so there's no qualifier-carrying
+/// slot here to visit.
+///
+/// A [`Literal::Param`] passing through any of these loops untouched is
+/// correct, not an oversight: this runs on a scope's own
+/// still-unsubstituted body (its `Tier::Own` step, below), before
+/// [`substitute_params`] ever sees it, so an entry a template will later
+/// bind to a real value has no qualifier yet to resolve or reject either
+/// way — [`Literal::qualifier`] answers `None` for a `Param` exactly as
+/// it does for a plain `Ident`, which is what lets every loop here stay
+/// silent about it.
+///
+/// Runs exactly once per scope, at the point that scope's own
+/// directly-written fields are merged (its `Tier::Own` step in
+/// [`compose_service`]/[`resolve_template`]) — by induction, every
+/// `ServiceFields` [`merge_tier`] ever sees has already passed through
+/// this, transitively, since a `with`-list target's own qualified
+/// references were already resolved when *it* was resolved.
 fn resolve_qualified_references<R: SymbolResolver>(
     fields: &mut ServiceFields,
     scope: R::Scope,
     resolver: &R,
     imports: &mut Imports,
 ) -> Result<(), ComposeError> {
-    for r in &mut fields.networks {
-        if let Some(qualifier) = r.qualifier.take() {
-            let network = resolver.resolve_qualified_network(scope, &qualifier, &r.name, r.span)?;
-            r.name = network.name.name.clone();
-            imports.networks.push(Imported {
-                decl: network.clone(),
-                alias: qualifier.name.clone(),
-                reference: r.span,
-            });
-        }
-    }
-    for entry in &mut fields.volumes.entries {
-        let ArrowMapHost::Named(r) = &mut entry.host else {
+    debug_assert!(schema::allows_qualified_reference("networks"));
+    for lit in &mut fields.networks {
+        let Literal::Qualified(q) = lit else {
             continue;
         };
-        if let Some(qualifier) = r.qualifier.take() {
-            let volume = resolver.resolve_qualified_volume(scope, &qualifier, &r.name, r.span)?;
-            r.name = volume.name.name.clone();
-            imports.volumes.push(Imported {
-                decl: volume.clone(),
-                alias: qualifier.name.clone(),
-                reference: r.span,
-            });
-        }
+        let network = resolver.resolve_qualified_network(scope, &q.qualifier, &q.name, q.span)?;
+        imports.networks.push(Imported {
+            decl: network.clone(),
+            alias: q.qualifier.name.clone(),
+            reference: q.span,
+        });
+        *lit = Literal::Ident(network.name.name.clone(), q.span);
+    }
+    debug_assert!(schema::allows_qualified_reference("volume"));
+    for entry in &mut fields.volumes.entries {
+        let ArrowMapHost::Named(lit) = &mut entry.host else {
+            continue;
+        };
+        let Literal::Qualified(q) = lit else {
+            continue;
+        };
+        let volume = resolver.resolve_qualified_volume(scope, &q.qualifier, &q.name, q.span)?;
+        imports.volumes.push(Imported {
+            decl: volume.clone(),
+            alias: q.qualifier.name.clone(),
+            reference: q.span,
+        });
+        *lit = Literal::Ident(volume.name.name.clone(), q.span);
     }
     reject_qualified(&fields.middleware, "middleware")?;
-    // `depends_on`'s entries carry a `Reference` rather than being one,
+    // `depends_on`'s entries carry a `Literal` rather than being one,
     // since #155 gave each one an optional `condition` alongside it —
     // see [`ast::DependsOnEntry`]'s doc — so this maps down to the
-    // `Reference`s inside rather than passing the list straight through.
+    // literals inside rather than passing the list straight through.
     reject_qualified(fields.depends_on.iter().map(|e| &e.reference), "depends_on")?;
     reject_qualified(&fields.dns, "dns")?;
     // An `env_file` path lives on disk next to the compose file, which
@@ -1493,7 +1513,7 @@ fn resolve_qualified_references<R: SymbolResolver>(
     // list. An entry point names something in the deployment's own
     // `traefik.yml`, which no `.hll` file declares, so there is nothing
     // for an alias to resolve against — and codegen reads only
-    // `Reference::name`, so an unchecked `traefik.web` would compile
+    // `Literal::text`, so an unchecked `traefik.web` would compile
     // happily to `entrypoints=web` with the qualifier silently gone.
     if let Some(expose) = &fields.expose {
         reject_qualified(&expose.entrypoint, "expose.entrypoint")?;
@@ -1501,25 +1521,35 @@ fn resolve_qualified_references<R: SymbolResolver>(
     // A `router`'s own `entrypoint` list (#184) names the same thing
     // `expose.entrypoint` does — an entry point in the deployment's
     // `traefik.yml`, which no `.hll` file declares — so it gets the same
-    // rejection for the same reason: codegen reads only
-    // `Reference::name`, so an unchecked `traefik.web` would compile to
-    // `entrypoints=web` with the qualifier silently gone.
+    // rejection for the same reason: codegen reads only `Literal::text`,
+    // so an unchecked `traefik.web` would compile to `entrypoints=web`
+    // with the qualifier silently gone. `path_prefix` (#196) gets the
+    // same check for the first time here: before #196 it couldn't parse
+    // a qualifier at all (see [`crate::schema::allows_qualified_reference`]'s
+    // doc), so there was nothing yet to reject.
     for router in &fields.routers {
         reject_qualified(&router.entrypoint, "router.entrypoint")?;
+        reject_qualified(&router.path_prefix, "router.path_prefix")?;
     }
     Ok(())
 }
 
+/// Rejects a qualified entry in any reference-shaped position not listed
+/// in [`schema::allows_qualified_reference`] — every call site here
+/// names one of the `false` rows that table documents, and the
+/// `debug_assert` ties the two together so a row can't silently drift
+/// out of sync with which positions actually call this.
 fn reject_qualified<'a>(
-    refs: impl IntoIterator<Item = &'a Reference>,
+    values: impl IntoIterator<Item = &'a Literal>,
     field: &'static str,
 ) -> Result<(), ComposeError> {
-    for r in refs {
-        if let Some(q) = &r.qualifier {
+    debug_assert!(!schema::allows_qualified_reference(field));
+    for v in values {
+        if let Some(q) = v.qualifier() {
             return Err(ComposeError::UnsupportedQualifiedReference {
                 field,
                 alias: q.name.clone(),
-                span: r.span,
+                span: v.span(),
             });
         }
     }
@@ -1549,14 +1579,17 @@ fn substitute_params(
     }
     // `router`'s own literal slots (#184). Its `host` is `expose.host`'s
     // twin — a template that parameterizes one parameterizes the other —
-    // and each `path_prefix` entry is a plain `Literal` for exactly this
-    // reason (see `schema::FieldKind::LiteralList`). Missing either would
-    // reproduce #168's live bug class: the `Literal::Param` survives to
-    // codegen, which emits the parameter's own name into a Traefik rule
-    // and exits 0.
+    // and both `entrypoint` and `path_prefix` are `Literal` lists for
+    // exactly this reason (see `schema::FieldKind::ReferenceList`).
+    // Missing any of the three would reproduce #168's live bug class: the
+    // `Literal::Param` survives to codegen, which emits the parameter's
+    // own name into a Traefik rule and exits 0.
     for router in &mut fields.routers {
         if let Some(h) = &mut router.host {
             substitute_literal(h, args, template_name)?;
+        }
+        for entry in &mut router.entrypoint {
+            substitute_literal(entry, args, template_name)?;
         }
         for prefix in &mut router.path_prefix {
             substitute_literal(prefix, args, template_name)?;
@@ -1631,16 +1664,19 @@ fn substitute_params(
     }
     // `volume`, `publish`, and `devices` share one entry type since
     // #192, so they share one walk rather than three near-identical
-    // ones. Only a bind-mount host holds a literal to substitute into:
-    // a named-volume host is a `Reference`, exactly like a `networks
-    // [x]` entry, and references are never parameterized, since the
-    // grammar has no `$param` in reference position anywhere. Skipping
-    // that arm is therefore correct for `volume` and unreachable for
-    // the other two, whose schemas never set `key_may_be_reference` —
-    // and `debug_assert` says so out loud rather than leaving a
-    // `$param` to survive composition unresolved if that ever changes
-    // (#168's bug class, which nothing downstream would catch: codegen
-    // raises `UnsubstitutedParameter` for `raw` values only).
+    // ones. Only a bind-mount host holds a literal to substitute into: a
+    // named-volume host is only ever [`Literal::Ident`]/
+    // [`Literal::Qualified`], never [`Literal::Param`] — the parser
+    // routes a `$` token to the `BindMount` arm below instead (see
+    // [`crate::parser`]'s own `parse_mount_map_entry`), since a named
+    // volume's *identity* isn't the kind of thing #196 set out to make
+    // parameterizable, only the free-text positions were. Skipping that
+    // arm is therefore correct for `volume` and unreachable for the
+    // other two, whose schemas never set `key_may_be_reference` — and
+    // `debug_assert` says so out loud rather than leaving a `$param` to
+    // survive composition unresolved if that ever changes (#168's bug
+    // class, which nothing downstream would catch: codegen raises
+    // `UnsubstitutedParameter` for `raw` values only).
     for (field_name, entries) in [
         ("volume", &mut fields.volumes.entries),
         ("publish", &mut fields.publish.entries),
@@ -1673,6 +1709,38 @@ fn substitute_params(
             substitute_literal(&mut entry.key, args, template_name)?;
             substitute_raw_value(&mut entry.value, args);
         }
+    }
+    // The reference-shaped list fields #196 newly opened to `$param` —
+    // `middleware`, `networks`, `dns`, `env_file`, `expose.entrypoint`,
+    // and a `depends_on` entry's own reference (`router.entrypoint` and
+    // `router.path_prefix` are the same kind of field but already got
+    // substituted in the router loop above) — walk through
+    // `substitute_literal` exactly like every other `Literal` slot in
+    // this function. Before #196 none of these could hold a
+    // `Literal::Param` at all (they were `Reference`-typed, and a
+    // `Reference` had nowhere to put one), so this walk simply didn't
+    // exist; missing any one of these rows now would reproduce #168's
+    // bug class in a new position — a `$net` that survives composition
+    // unresolved and reaches codegen as the literal text `net`.
+    for lit in &mut fields.middleware {
+        substitute_literal(lit, args, template_name)?;
+    }
+    for lit in &mut fields.networks {
+        substitute_literal(lit, args, template_name)?;
+    }
+    for lit in &mut fields.dns {
+        substitute_literal(lit, args, template_name)?;
+    }
+    for lit in &mut fields.env_file {
+        substitute_literal(lit, args, template_name)?;
+    }
+    if let Some(e) = &mut fields.expose {
+        for lit in &mut e.entrypoint {
+            substitute_literal(lit, args, template_name)?;
+        }
+    }
+    for entry in &mut fields.depends_on {
+        substitute_literal(&mut entry.reference, args, template_name)?;
     }
     Ok(())
 }
@@ -1711,6 +1779,15 @@ fn check_argument_type(
         Literal::Str(_, _) => "a quoted string",
         Literal::Number { .. } => "a number",
         Literal::Ident(_, _) => "a bare identifier",
+        // Unreachable in practice: a template-invocation argument's
+        // value is parsed via `parse_raw_value`, which builds every
+        // literal through `parse_literal`, never
+        // `parse_literal_reference` — the one path that can ever produce
+        // `Literal::Qualified`. Handled rather than matched away with a
+        // wildcard so a future change that *does* reach a qualified
+        // argument gets a real (if generic) diagnostic instead of a
+        // silently-wrong type check.
+        Literal::Qualified(_) => "a qualified reference",
     };
     Err(ComposeError::ArgumentTypeMismatch {
         template: template_name.to_string(),
@@ -1887,7 +1964,7 @@ impl Spanned for RawEntry {
 #[derive(Default)]
 struct MergeAcc {
     scalars: HashMap<&'static str, (Literal, Tier)>,
-    lists: HashMap<&'static str, Vec<Reference>>,
+    lists: HashMap<&'static str, Vec<Literal>>,
     /// `volume`/`publish`/`devices`'s shared merge point (#192): one
     /// [`crate::ast::ArrowMapEntry`] bucket per field, keyed the same way
     /// [`Self::scalars`]/[`Self::lists`] are — by the field's own schema
@@ -1990,7 +2067,7 @@ struct MergeAcc {
 struct RouterAcc {
     name: Option<Ident>,
     host: Option<(Literal, Tier)>,
-    entrypoint: Vec<Reference>,
+    entrypoint: Vec<Literal>,
     path_prefix: Vec<Literal>,
     span: Span,
 }
@@ -2310,8 +2387,8 @@ fn empty_traefik(span: Span) -> Traefik {
 /// that design set out to remove.
 struct ListField {
     key: &'static str,
-    take: fn(&mut ServiceFields) -> Vec<Reference>,
-    set: fn(&mut ServiceFields, Vec<Reference>),
+    take: fn(&mut ServiceFields) -> Vec<Literal>,
+    set: fn(&mut ServiceFields, Vec<Literal>),
     /// Whether repeats of an already-accumulated name are dropped
     /// rather than appended (hl-lang#69). True for the set-like fields
     /// — `networks`, `middleware`, `expose.entrypoint` — where naming
@@ -2353,7 +2430,7 @@ static LIST_FIELDS: &[ListField] = &[
             // a freshly created `Expose` is the first entry point's:
             // cosmetic, and only ever reached when neither `port` nor
             // `host` was set at all.
-            let span = v[0].span;
+            let span = v[0].span();
             f.expose
                 .get_or_insert(Expose {
                     port: None,
@@ -2548,14 +2625,14 @@ fn merge_tier(
                 // this cheap and is the whole reason #69's exponential
                 // blowup stops here.
                 //
-                // Comparing by `Reference::name` alone is right because
-                // a qualified `networks [alias.name]` entry has already
+                // Comparing by `Literal::text` alone is right because a
+                // qualified `networks [alias.name]` entry has already
                 // been rewritten to its resolved bare name by
                 // [`resolve_qualified_references`] before any tier reaches
                 // this function, and the other deduped fields reject
                 // qualifiers outright.
                 for value in values {
-                    if !acc_values.iter().any(|held| held.name == value.name) {
+                    if !acc_values.iter().any(|held| held.text() == value.text()) {
                         acc_values.push(value);
                     }
                 }
@@ -2663,14 +2740,14 @@ fn merge_routers(
         }
         // First occurrence wins, so accumulated order stays tier order
         // with later repeats dropped — `expose.entrypoint`'s own rule,
-        // reached through the same comparison on `Reference::name` (a
+        // reached through the same comparison on `Literal::text` (a
         // qualified entry can never get this far: it's rejected outright
         // by `resolve_qualified_references`).
         for entry in router.entrypoint {
             if !acc[pos]
                 .entrypoint
                 .iter()
-                .any(|held| held.name == entry.name)
+                .any(|held| held.text() == entry.text())
             {
                 acc[pos].entrypoint.push(entry);
             }
@@ -2763,8 +2840,8 @@ fn merge_depends_on(
     tier: &Tier,
 ) -> Result<(), ComposeError> {
     for entry in incoming {
-        let key = entry.reference.name.clone();
-        if let Some(pos) = acc.iter().position(|(e, _)| e.reference.name == key) {
+        let key = entry.reference.text().to_string();
+        if let Some(pos) = acc.iter().position(|(e, _)| e.reference.text() == key) {
             let existing_tier = acc[pos].1.clone();
             match (&existing_tier, tier) {
                 (_, Tier::Own) => {

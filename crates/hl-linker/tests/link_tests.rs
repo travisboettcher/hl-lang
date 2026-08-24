@@ -46,8 +46,8 @@ fn two_hop_template_and_network_resolution() {
         "docker_default"
     );
     let network_ref = &composed.services[0].fields.networks[0];
-    assert!(network_ref.qualifier.is_none());
-    assert_eq!(network_ref.name, "traefik-net");
+    assert!(network_ref.qualifier().is_none());
+    assert_eq!(network_ref.text(), "traefik-net");
 }
 
 #[test]

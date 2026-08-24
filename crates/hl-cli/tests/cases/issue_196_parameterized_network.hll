@@ -1,0 +1,18 @@
+# #196: a template can now parameterize a `networks [...]` entry with a
+# `$param` — before the `Literal`/`Reference` unification, `networks`
+# was `Reference`-typed and a `Reference` had nowhere to put a `$param`,
+# so `networks [$net]` was a parse error with no way to fix it short of
+# a second grammar for the field. Pins that it now both parses and
+# resolves the substituted argument against the declared network.
+network proxy {
+  name: "real_proxy"
+}
+
+template web(net: String) {
+  networks [$net]
+}
+
+service app {
+  image "nginx:alpine"
+  with web { net: "proxy" }
+}

@@ -41,7 +41,7 @@ use std::fmt;
 
 use hl_parser::{
     ArrowMap, ArrowMapHost, Command, ComposedProgram, DependsOnEntry, Entrypoint, Healthcheck,
-    HealthcheckTest, Network, Reference, Service, SourceMap, Span, Volume,
+    HealthcheckTest, Literal, Network, Service, SourceMap, Span, Volume,
 };
 use indexmap::IndexMap;
 
@@ -471,7 +471,7 @@ pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenErr
             volumes.entry(vol_name).or_insert(vol_doc);
         }
         for r in &service.fields.networks {
-            referenced_networks.insert(r.name.as_str());
+            referenced_networks.insert(r.text());
         }
         services.insert(service.name.name.clone(), service_doc);
     }
@@ -603,14 +603,18 @@ fn generate_service(
     let labels = labels::compute(name, fields, docker_network.as_deref(), &bindings)?;
 
     let depends_on = generate_depends_on(&fields.depends_on);
-    let dns = fields.dns.iter().map(|r| r.name.clone()).collect();
+    let dns = fields.dns.iter().map(|r| r.text().to_string()).collect();
     // Paths, carried through verbatim — never resolved against `bindings`
     // (matching `dns`/`middleware`/`depends_on`/`networks` just above:
     // none of `hll`'s reference-list fields interpolate `{{name}}`) and
     // never inspected for existence, since Compose itself resolves each
     // one relative to the compose file at deploy time, not `hllc` at
     // compile time (#154).
-    let env_file = fields.env_file.iter().map(|r| r.name.clone()).collect();
+    let env_file = fields
+        .env_file
+        .iter()
+        .map(|r| r.text().to_string())
+        .collect();
 
     // Bare-presence only, exactly like `network`'s `external` — see
     // `ast::ServiceFields::privileged`'s doc (#157).
@@ -670,7 +674,10 @@ fn generate_service(
 fn generate_depends_on(entries: &[DependsOnEntry]) -> doc::DependsOnDoc {
     if entries.iter().all(|e| e.condition.is_none()) {
         return doc::DependsOnDoc::Short(
-            entries.iter().map(|e| e.reference.name.clone()).collect(),
+            entries
+                .iter()
+                .map(|e| e.reference.text().to_string())
+                .collect(),
         );
     }
     let mut long = IndexMap::new();
@@ -681,7 +688,7 @@ fn generate_depends_on(entries: &[DependsOnEntry]) -> doc::DependsOnDoc {
         // `effective_condition`, which is exactly what the short form
         // always meant.
         long.insert(
-            entry.reference.name.clone(),
+            entry.reference.text().to_string(),
             doc::DependsOnConditionDoc {
                 condition: entry.effective_condition().compose_value().to_string(),
             },
@@ -869,15 +876,15 @@ fn resolve_volumes(
             ArrowMapHost::Named(r) => {
                 let decl = declared
                     .iter()
-                    .find(|d| d.name.name == r.name)
+                    .find(|d| d.name.name == r.text())
                     .ok_or_else(|| {
                         CodegenError::UnknownVolume {
                             service: service_name.to_string(),
-                            volume: r.name.clone(),
+                            volume: r.text().to_string(),
                             // The offending reference itself, not the
                             // enclosing service — same choice #70 made for
                             // `UnknownNetwork`.
-                            span: r.span,
+                            span: r.span(),
                         }
                     })?;
                 let vol_doc = doc::VolumeDoc {
@@ -935,7 +942,7 @@ fn resolve_volumes(
 /// sorts last; checked for first so an explicit `networks [default]`
 /// doesn't end up listed twice.
 fn resolve_networks(
-    refs: &[Reference],
+    refs: &[Literal],
     declared: &[Network],
     service_name: &str,
     service_span: Span,
@@ -946,7 +953,7 @@ fn resolve_networks(
     let mut external_candidates = Vec::new();
 
     for r in refs {
-        match declared.iter().find(|n| n.name.name == r.name) {
+        match declared.iter().find(|n| n.name.name == r.text()) {
             Some(decl) => push_declared_network(
                 decl,
                 &mut compose_networks,
@@ -961,14 +968,14 @@ fn resolve_networks(
             // nothing to `docs`, leaving the top-level `networks:`
             // section to say nothing about it, same as Compose's own
             // output would.
-            None if r.name == IMPLICIT_DEFAULT_NETWORK => {
+            None if r.text() == IMPLICIT_DEFAULT_NETWORK => {
                 compose_networks.push(IMPLICIT_DEFAULT_NETWORK.to_string());
             }
             None => {
                 return Err(CodegenError::UnknownNetwork {
                     service: service_name.to_string(),
-                    network: r.name.clone(),
-                    span: r.span,
+                    network: r.text().to_string(),
+                    span: r.span(),
                 });
             }
         }

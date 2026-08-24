@@ -92,7 +92,7 @@ fn syncthing_fixture_composes_to_expected_service() {
         expose.host.as_ref().unwrap().text(),
         "{{name}}.internal.techdebtor.io"
     );
-    let entrypoints: Vec<&str> = expose.entrypoint.iter().map(|r| r.name.as_str()).collect();
+    let entrypoints: Vec<&str> = expose.entrypoint.iter().map(|r| r.text()).collect();
     assert_eq!(entrypoints, vec!["web-secure"]);
     let restart = service.fields.restart.as_ref().expect("restart field set");
     assert_eq!(restart.policy.as_ref().unwrap().text(), "unless-stopped");
@@ -101,7 +101,7 @@ fn syncthing_fixture_composes_to_expected_service() {
             .fields
             .networks
             .iter()
-            .map(|r| r.name.as_str())
+            .map(|r| r.text())
             .collect::<Vec<_>>(),
         vec!["traefik-net"]
     );
@@ -112,7 +112,7 @@ fn syncthing_fixture_composes_to_expected_service() {
             .fields
             .middleware
             .iter()
-            .map(|r| r.name.as_str())
+            .map(|r| r.text())
             .collect::<Vec<_>>(),
         vec!["local-ipwhitelist", "forwardAuth-authentik"]
     );

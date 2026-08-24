@@ -1,0 +1,14 @@
+# #196: a `$param` substituted into `networks [...]` still has to
+# resolve by name at codegen — the by-name `UnknownNetwork` check must
+# not be bypassed just because the name arrived through a template
+# argument instead of being written directly. `web`'s `net` argument
+# below names no declared network at all, so this must still fail
+# exactly as `networks [ghost]` written directly would.
+template web(net: String) {
+  networks [$net]
+}
+
+service app {
+  image "nginx:alpine"
+  with web { net: "ghost" }
+}

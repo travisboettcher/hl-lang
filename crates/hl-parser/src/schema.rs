@@ -34,11 +34,26 @@ pub enum FieldKind {
     /// write is `DuplicateField`); map-kind nested types accumulate
     /// entries across repeated writes (per docs/DESIGN.md's rule 4).
     Nested(&'static TypeSchema),
-    /// A list of bare-identifier/string references (`middleware`,
-    /// `networks`, `dns`, `env_file`). Accumulates across
-    /// repeats; settable via a bracketed list, the bare comma-list
-    /// sugar, or repeated statements — never duplicate-checked, since
-    /// list fields can't collide.
+    /// A list of reference-shaped [`crate::ast::Literal`]s — `middleware`,
+    /// `networks`, `dns`, `env_file`, `expose.entrypoint`,
+    /// `router.entrypoint`, and `router.path_prefix`. Accumulates across
+    /// repeats; settable via a bracketed list, the bare comma-list sugar,
+    /// or repeated statements — never duplicate-checked, since list
+    /// fields can't collide.
+    ///
+    /// Absorbed what used to be the separate `LiteralList` kind (#196):
+    /// before #196's [`crate::ast::Literal`]/`Reference` unification,
+    /// `router`'s `path_prefix` needed its own kind purely because a
+    /// `Reference` couldn't carry a `$param` and a `Literal` couldn't
+    /// carry a qualifier, so a field that had to accept `$param` (every
+    /// realistic `path_prefix`) couldn't be parsed the same way as one
+    /// that had to accept a qualifier (`middleware`/`networks`/...). Now
+    /// that one type does both, the two kinds parse and store identically
+    /// and there is nothing left to distinguish — see
+    /// [`allows_qualified_reference`] for the one way individual rows
+    /// still differ (whether a qualifier is *semantically* legal, not
+    /// syntactically), and `compose::reject_qualified` for where
+    /// that's enforced.
     ///
     /// `devices` moved off this kind and onto [`SchemaKind::Map`] (see
     /// [`DEVICES`]) once #167's review feedback asked for the same
@@ -47,8 +62,8 @@ pub enum FieldKind {
     ///
     /// `depends_on` moved off this kind and onto its own
     /// [`Self::DependsOnList`] when its entries gained an optional
-    /// `{ condition: ... }` body (#155) — a plain [`crate::ast::Reference`]
-    /// has nowhere to hang that.
+    /// `{ condition: ... }` body (#155) — a bare reference has nowhere to
+    /// hang that.
     ReferenceList,
     /// A list of template invocations (`with`'s `templates` field): each
     /// item is an `IDENT` naming a template, optionally followed by a
@@ -89,29 +104,6 @@ pub enum FieldKind {
     /// [`crate::ast::DependsOnEntry`]'s doc and
     /// [`crate::ParseError::InvalidDependsOnCondition`].
     DependsOnList,
-    /// A list of plain literals (`router`'s `path_prefix`, #184).
-    /// Accumulates across repeats and takes the same two spellings
-    /// [`Self::ReferenceList`] does — a bracketed list, the bare
-    /// comma-list sugar, or repeated statements — and is likewise never
-    /// duplicate-checked, since a list field can't collide.
-    ///
-    /// Not [`Self::ReferenceList`] itself, even though `dns` and
-    /// `env_file` already carry ordinary literal values in a
-    /// [`crate::ast::Reference`]: a [`Reference`](crate::ast::Reference)
-    /// is built from the parser's own `parse_key`, which accepts only
-    /// `IDENT`/`STRING`, so a `$param` can't be written into one at all.
-    /// A path prefix is exactly the kind of value a template
-    /// parameterizes, so its entries have to be [`crate::ast::Literal`]s
-    /// — the same reasoning that keeps `publish`/`devices`' own map
-    /// halves literals rather than references.
-    ///
-    /// Not [`Self::ScalarOrList`] either: that kind is
-    /// single-occurrence, with no bare comma-list sugar, because
-    /// `healthcheck.test`/`command` have to tell Compose's shell form
-    /// from its exec form by brackets alone. `path_prefix` has no such
-    /// pair of shapes — it is always a list — so it accumulates and
-    /// takes the sugar like every other list field.
-    LiteralList,
     /// A repeatable, *name-keyed* nested struct field — `router
     /// <name> { ... }` (#184), the only one today.
     ///
@@ -261,10 +253,15 @@ pub static EXPOSE: TypeSchema = TypeSchema {
 /// `entrypoint` is [`FieldKind::ReferenceList`], the same kind and the
 /// same spelling as [`EXPOSE`]'s own, deliberately: two fields that
 /// produce the same `entrypoints=` label should not be two different
-/// grammars. `path_prefix` is [`FieldKind::LiteralList`] rather than a
-/// reference list — see that kind's own doc for why a `$param` forces
-/// it. `router` carries no `port`: `loadbalancer.server.port` is per
-/// Compose service, not per router, so it stays [`EXPOSE`]'s.
+/// grammars. `path_prefix` is `FieldKind::ReferenceList` too (#196) —
+/// before #196 it needed its own `LiteralList` kind purely so a `$param`
+/// could reach it, back when a reference-list entry couldn't carry one;
+/// see [`FieldKind::ReferenceList`]'s own doc for why that's no longer a
+/// reason to keep the two kinds apart, and
+/// [`allows_qualified_reference`] for why `path_prefix` still rejects
+/// the qualified form the merge made syntactically reachable here.
+/// `router` carries no `port`: `loadbalancer.server.port` is per Compose
+/// service, not per router, so it stays [`EXPOSE`]'s.
 pub static ROUTER: TypeSchema = TypeSchema {
     type_name: "router",
     kind: SchemaKind::Struct,
@@ -279,7 +276,7 @@ pub static ROUTER: TypeSchema = TypeSchema {
         },
         FieldSchema {
             name: "path_prefix",
-            kind: FieldKind::LiteralList,
+            kind: FieldKind::ReferenceList,
         },
     ],
     primary_field: None,
@@ -887,6 +884,39 @@ pub fn supports_raw(schema: &'static TypeSchema) -> bool {
         .fields
         .iter()
         .any(|f| matches!(f.kind, FieldKind::Nested(nested) if nested.schema_free))
+}
+
+/// Whether an `alias.name`-qualified [`crate::ast::Literal::Qualified`]
+/// is *semantically* legal at `field_path` — the fully-dotted canonical
+/// name every reference-shaped position uses elsewhere in this crate
+/// (`"networks"`, `"middleware"`, `"expose.entrypoint"`,
+/// `"router.entrypoint"`, `"router.path_prefix"`, `"depends_on"`, or
+/// `"volume"` for a named-volume mount's host side).
+///
+/// `false` for every position but the two listed here (#196). Before
+/// #196's [`crate::ast::Literal`]/`Reference` unification this question
+/// didn't need schema data at all: only `Reference`-typed positions
+/// could ever *parse* a qualifier, and which of those resolved one
+/// (`networks`, a named-volume host) versus rejected it (everything
+/// else) was a hardcoded list of field names inline in
+/// `compose::resolve_qualified_references`. Now that every
+/// reference-shaped position parses the qualified form the same way —
+/// see [`FieldKind::ReferenceList`]'s own doc — whether one is legal
+/// once parsed has to live somewhere `compose::reject_qualified` can
+/// consult by name instead, which is what this function is.
+///
+/// `networks` and `volume` are the only two `true` rows because they're
+/// the only two with a real cross-file declaration to resolve a
+/// qualifier against — a `network`/`volume` declaration another file
+/// can `use ... as alias` and export. Every other row names something
+/// with no `.hll`-declared existence to qualify at all (a Traefik entry
+/// point or middleware in the deployment's own `traefik.yml`, a DNS
+/// server address, an `env_file` path on disk, a same-file sibling
+/// service for `depends_on`), so a qualified entry there is rejected
+/// with [`crate::compose::ComposeError::UnsupportedQualifiedReference`]
+/// rather than silently accepted with the qualifier dropped.
+pub fn allows_qualified_reference(field_path: &str) -> bool {
+    matches!(field_path, "networks" | "volume")
 }
 
 pub enum FieldResolution {
