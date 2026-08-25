@@ -3,9 +3,15 @@
 # it, `middleware` was `Reference`-typed and a `Reference` had nowhere
 # to put a `$param`. Pins that the substituted argument reaches the
 # generated `middlewares=` label, not the parameter's own name.
+#
+# `middleware` sits inside `router` since #221; the `$param` question
+# this pins is unchanged by that move, only its spelling is.
 template protected(mw) {
-  middleware $mw
-  expose 80 as "app.example.com"
+  expose 80
+  router {
+    host: "app.example.com"
+    middleware: $mw
+  }
 }
 
 service app {

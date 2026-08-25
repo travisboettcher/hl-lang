@@ -40,8 +40,9 @@ pub struct UseDecl {
 /// "$" IDENT`, no qualifier) and a `Reference` struct (`IDENT ( "."
 /// IDENT )?`, no `$param`) — purely because neither could represent the
 /// other's extra bit. That split meant a `Reference`-typed position
-/// (`networks`, `middleware`, `dns`, `env_file`, `expose.entrypoint`,
-/// `router.entrypoint`, a `depends_on` entry, a named-volume mount's
+/// (`networks`, `dns`, `env_file`, `expose.entrypoint`,
+/// `router.entrypoint`, `router.middleware`, a `depends_on` entry, a
+/// named-volume mount's
 /// host side) could never accept a `$param`: `template web(net)
 /// { networks [$net] }` was a parse error with no way to fix it short of
 /// giving `networks` a second grammar. Folding the qualifier into this
@@ -394,8 +395,9 @@ pub struct Expose {
 /// A `router` carries no port. Compose's `loadbalancer.server.port`
 /// label is per Compose *service*, not per router, so it stays derived
 /// from [`Expose::port`] exactly as before, and several routers off one
-/// container all balance onto that one port. `middleware` likewise stays
-/// a service-level field and applies to every router the service has.
+/// container all balance onto that one port. `middleware`, unlike the
+/// port, genuinely *is* per router, and #221 moved it here off
+/// `ServiceFields` outright — see [`Self::middleware`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Router {
     /// `None` for the unnamed `router { ... }` form.
@@ -416,8 +418,8 @@ pub struct Router {
     /// Traefik's own default of attaching to every entry point — rather
     /// than the parser guessing a homelab-specific value. That's why
     /// this is a plain `Vec` and not an `Option<Vec<_>>`: "unset" and
-    /// "set to nothing" have to mean the same thing here, and
-    /// `middleware` on [`ServiceFields`] already spells that shape.
+    /// "set to nothing" have to mean the same thing here, exactly as
+    /// they do for [`Self::middleware`] beside it.
     pub entrypoint: Vec<Literal>,
     /// Path prefixes to `&&` onto the `Host()` rule, `||`-joined inside
     /// one parenthesized group: `path_prefix: ["/api/v1", "/dav/"]`
@@ -433,9 +435,30 @@ pub struct Router {
     ///
     /// Order is observable — it's the order the `||` alternatives are
     /// written in — so this concatenates on merge without the
-    /// distinct-name dedupe `entrypoint` gets, the same split
-    /// `dns`/`env_file` already draw against `middleware`/`networks`.
+    /// distinct-name dedupe `entrypoint` and `middleware` get, the same
+    /// split `dns`/`env_file` already draw against `networks`.
     pub path_prefix: Vec<Literal>,
+    /// The Traefik middleware this router attaches (#221) — the whole
+    /// of the language's `middleware`, which through #220 was a
+    /// service-level field instead.
+    ///
+    /// Service-level was the wrong scope, not merely a coarser one. A
+    /// middleware only ever reaches Traefik as a label on one specific
+    /// router, so one list per service could not say what `gitea`
+    /// actually needs: a public router beside an internal one, where
+    /// only the internal one carries the IP allowlist. A service-wide
+    /// list forces the allowlist onto both routers or neither, and both
+    /// readings are wrong. Keeping the old field *beside* this one would
+    /// have left two spellings of one concept, with precedence rules to
+    /// learn and a silent wrong answer whenever someone reached for the
+    /// wrong one; #221 moved the field here instead. A body that still
+    /// writes the old spelling gets `ParseError::MovedField` rather than
+    /// a silently ignored line — see [`crate::schema::moved_field`].
+    ///
+    /// Empty means this router attaches no middleware, the same way an
+    /// empty [`Self::entrypoint`] means it names no entry point: a plain
+    /// `Vec`, with "unset" and "set to nothing" deliberately identical.
+    pub middleware: Vec<Literal>,
     pub span: Span,
 }
 
@@ -837,11 +860,10 @@ pub struct ServiceFields {
     pub volumes: ArrowMap,
     pub env: EnvMap,
     pub raw: RawMap,
-    pub middleware: Vec<Literal>,
     /// `depends_on [db]` / `depends_on [db { condition: service_healthy }]`
     /// (#155) — each entry is a same-file service reference, optionally
     /// carrying an explicit Compose readiness condition. Unlike
-    /// `middleware`/`networks`/`dns`/`env_file`, this isn't a plain
+    /// `networks`/`dns`/`env_file`, this isn't a plain
     /// [`Literal`] list: a bare reference has nowhere to hang the
     /// optional `{ condition: ... }` body, so it's its own
     /// [`DependsOnEntry`] type instead — see that type's own doc for why
@@ -877,7 +899,7 @@ pub struct ServiceFields {
     /// e.g. a LAN resolver IP) — a plain generic Compose key like
     /// `volume`/`env`/`expose`, not homelab-specific itself even though
     /// any one entry's value always is. List-typed and reference-list
-    /// shaped like `middleware`/`depends_on`/`networks` (accumulates
+    /// shaped like `depends_on`/`networks` (accumulates
     /// across repeats, never duplicate-checked), even though its entries
     /// are ordinary literal values (IP addresses) rather than references
     /// to another declaration — reusing [`Literal`] costs nothing here:
@@ -893,7 +915,7 @@ pub struct ServiceFields {
     /// generic Compose key, not homelab-specific itself even though most
     /// real entries point at a gitignored, homelab-specific `.env` file,
     /// list-typed and reference-list shaped like
-    /// `middleware`/`depends_on`/`networks`/`dns` (accumulates across
+    /// `depends_on`/`networks`/`dns` (accumulates across
     /// repeats, never duplicate-checked, and a bare `env_file "one.env"`
     /// is sugar for a one-element list), even though its entries are
     /// ordinary path strings rather than references to another

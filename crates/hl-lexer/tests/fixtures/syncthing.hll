@@ -5,11 +5,15 @@ template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
   expose $port as "{{name}}.internal.techdebtor.io"
-  middleware local-ipwhitelist
+  router {
+    middleware: local-ipwhitelist
+  }
 }
 
 template authenticated {
-  middleware forwardAuth-authentik
+  router {
+    middleware: forwardAuth-authentik
+  }
 }
 
 template linuxserver_app(puid, pgid) {

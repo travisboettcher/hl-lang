@@ -1085,16 +1085,17 @@ fn parameterized_network_naming_something_undeclared_is_still_unknown_network() 
     ));
 }
 
-/// The same gap #196 closed for `networks`, checked for `middleware`:
-/// before the unification a `Reference`-typed `middleware` entry could
-/// never carry a `$param` either. The substituted argument must reach
-/// the generated `middlewares=` label as itself, not as the parameter's
-/// own name (#168's bug class, reproduced in a new position if this
-/// regressed).
+/// The same gap #196 closed for `networks`, checked for `middleware`
+/// (a `router` field since #221): before the unification a
+/// `Reference`-typed entry could never carry a `$param` either. The
+/// substituted argument must reach the generated `middlewares=` label as
+/// itself, not as the parameter's own name (#168's bug class, reproduced
+/// in a new position if this regressed).
 #[test]
 fn parameterized_middleware_reaches_the_middlewares_label() {
     let yaml = generate_from(
-        "template protected(mw) {\n  middleware $mw\n  expose 80 as \"a.example.com\"\n}\n\
+        "template protected(mw) {\n  expose 80\n  \
+           router { host: \"a.example.com\"\n    middleware: $mw }\n}\n\
          service app {\n  image \"nginx\"\n  with protected { mw: \"forwardAuth-authentik\" }\n}\n",
     );
     let value = yaml_value(&yaml);
@@ -1113,9 +1114,9 @@ fn parameterized_middleware_reaches_the_middlewares_label() {
 /// `$param` substituted into a router's `host` (`expose <port> as
 /// $host`'s own sugared unnamed router, since #198), which already went
 /// through the guard pre-#196 (a router's `host` was always
-/// `Literal`-typed), and a `$param` substituted into `middleware`, which
-/// is new since #196 gave that position a `Literal` slot for the first
-/// time. Both must still be rejected.
+/// `Literal`-typed), and a `$param` substituted into a router's
+/// `middleware`, which is new since #196 gave that position a `Literal`
+/// slot for the first time. Both must still be rejected.
 #[test]
 fn traefik_guard_still_applies_to_a_substituted_param() {
     let host_err = generate_err(
@@ -1134,18 +1135,19 @@ fn traefik_guard_still_applies_to_a_substituted_param() {
     );
 
     let middleware_err = generate_err(
-        "template protected(mw) {\n  middleware $mw\n  expose 80 as \"a.example.com\"\n}\n\
+        "template protected(mw) {\n  expose 80\n  \
+           router { host: \"a.example.com\"\n    middleware: $mw }\n}\n\
          service app {\n  image \"nginx\"\n  with protected { mw: \"a,b\" }\n}\n",
     );
     assert!(
         matches!(
             middleware_err,
             CodegenError::UnsafeLabelValue {
-                field: "middleware",
+                field: "router.middleware",
                 ..
             }
         ),
-        "expected UnsafeLabelValue for middleware, got {middleware_err:?}"
+        "expected UnsafeLabelValue for router.middleware, got {middleware_err:?}"
     );
 }
 
@@ -1642,12 +1644,13 @@ fn comma_inside_one_entrypoint_is_error_with_a_list_hint() {
 #[test]
 fn comma_in_middleware_reference_is_error() {
     let err = generate_err(
-        "service s {\n  image \"x\"\n  expose 80 as \"ok.example.com\"\n  middleware [\"a,b\"]\n}\n",
+        "service s {\n  image \"x\"\n  expose 80\n  \
+           router { host: \"ok.example.com\"\n    middleware: [\"a,b\"] }\n}\n",
     );
     assert!(matches!(
         err,
         CodegenError::UnsafeLabelValue {
-            field: "middleware",
+            field: "router.middleware",
             character: ',',
             ..
         }
@@ -2127,49 +2130,33 @@ fn yaml_hostile_values_round_trip_as_data_not_structure() {
     );
 }
 
-/// #80/#198: `middleware` with no `router` used to compile to a service
-/// with no `labels:` key at all — the auth middleware the user asked for
-/// silently absent from a deployment that otherwise looked fine. There
-/// is no router for it to attach to, so this is a build failure now.
+/// #80's router-less-`middleware` failure can no longer be written at
+/// all since #221 moved the field inside `router`: the old spelling is
+/// refused one stage earlier, by the parser, with a diagnostic that
+/// says where the field went rather than offering the `raw` escape
+/// hatch that the generic unknown-field message would.
 #[test]
-fn middleware_without_a_router_is_an_error() {
-    let err = generate_err("service w {\n  image \"n\"\n  expose 80\n  middleware auth\n}\n");
-    assert!(
-        matches!(
-            &err,
-            CodegenError::RouterBlockWithoutHost {
-                service,
-                field: "middleware",
-                router: None,
-                ..
-            } if service == "w"
-        ),
-        "expected a router-less middleware error, got: {err:?}"
-    );
+fn service_level_middleware_is_a_parse_error_naming_its_new_home() {
+    let err = hl_parser::parse("service w {\n  image \"n\"\n  expose 80\n  middleware auth\n}\n")
+        .expect_err("expected a parse error");
     assert_eq!(
         err.to_string(),
-        "4:14: service `w` sets `middleware` but has no `router` to attach it to — add a \
-         router (`router { host: \"w.example.com\" }`) or drop the `middleware`"
+        "4:3: `middleware` is no longer a `service` field — move it inside the `router` block \
+         it applies to (`router { host: \"...\", middleware: ... }`)"
     );
 }
 
-/// The mirror-image mistake one level in: a `router` block that sets no
-/// `host` is refused before `middleware` is even looked at, since the
-/// block itself has nothing to attach `middleware` to.
+/// The mistake that survives: a `router` block that sets no `host` is
+/// refused before its own `middleware` is even looked at, since the
+/// block itself has nothing to attach that middleware to.
 #[test]
 fn router_entrypoint_without_a_host_is_an_error() {
     let err = generate_err(
-        "service w {\n  image \"n\"\n  expose 80\n  router { entrypoint: web-secure }\n  middleware auth\n}\n",
+        "service w {\n  image \"n\"\n  expose 80\n  \
+           router { entrypoint: web-secure\n    middleware: auth }\n}\n",
     );
     assert!(
-        matches!(
-            err,
-            CodegenError::RouterBlockWithoutHost {
-                field: "router",
-                router: None,
-                ..
-            }
-        ),
+        matches!(err, CodegenError::RouterWithoutHost { router: None, .. }),
         "expected the hostless router to be reported first, got: {err:?}"
     );
 }
@@ -2382,35 +2369,14 @@ fn traefik_disabled_with_expose_host_is_an_error() {
     assert!(
         matches!(
             &err,
-            CodegenError::TraefikDisabledWithRouterField {
-                service,
-                field: "router",
-                ..
-            } if service == "db"
+            CodegenError::TraefikDisabledWithRouter { service, .. } if service == "db"
         ),
         "got {err:?}"
     );
     assert_eq!(
         err.to_string(),
-        "3:15: service `db` sets `router`, but `traefik` is disabled (at 4:13), so there is \
-         no router for it to attach to — drop the `router` or remove `disabled`"
-    );
-}
-
-#[test]
-fn traefik_disabled_with_middleware_is_an_error() {
-    let err = generate_err(
-        "service db {\n  image \"postgres:15\"\n  middleware auth\n  traefik { disabled }\n}\n",
-    );
-    assert!(
-        matches!(
-            err,
-            CodegenError::TraefikDisabledWithRouterField {
-                field: "middleware",
-                ..
-            }
-        ),
-        "got {err:?}"
+        "3:15: service `db` declares a `router`, but `traefik` is disabled (at 4:13), so there \
+         is nothing for it to route — drop the `router` or remove `disabled`"
     );
 }
 
@@ -2425,13 +2391,7 @@ fn traefik_disabled_with_router_block_is_an_error() {
          }\n",
     );
     assert!(
-        matches!(
-            err,
-            CodegenError::TraefikDisabledWithRouterField {
-                field: "router",
-                ..
-            }
-        ),
+        matches!(err, CodegenError::TraefikDisabledWithRouter { .. }),
         "got {err:?}"
     );
 }
@@ -2473,4 +2433,129 @@ fn traefik_disabled_composes_through_a_template() {
         labels:
           - traefik.enable=false
     "#);
+}
+
+/// #221's motivating real service, end to end: `gitea` needs a public
+/// router with no middleware beside an internal one behind
+/// `local-ipwhitelist`. Before per-router `middleware`, the whole label
+/// list had to be hand-typed in `raw` — either both routers got the
+/// allowlist (breaking the intentionally public route) or neither did
+/// (dropping IP restriction on the internal-only one).
+#[test]
+fn gitea_public_and_internal_routers_carry_different_middleware() {
+    let yaml = generate_from(
+        "service gitea {\n  \
+           image \"gitea/gitea:latest\"\n  \
+           expose 3000\n  \
+           router public {\n    \
+             host: \"git.techdebtor.io\"\n    \
+             entrypoint: web-secure\n  \
+           }\n  \
+           router internal {\n    \
+             host: \"git.internal.techdebtor.io\"\n    \
+             entrypoint: web-secure\n    \
+             middleware: local-ipwhitelist\n  \
+           }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      gitea:
+        image: "gitea/gitea:latest"
+        expose:
+          - 3000
+        labels:
+          - "traefik.http.routers.gitea-public.rule=Host(`git.techdebtor.io`)"
+          - traefik.http.routers.gitea-public.entrypoints=web-secure
+          - "traefik.http.routers.gitea-internal.rule=Host(`git.internal.techdebtor.io`)"
+          - traefik.http.routers.gitea-internal.entrypoints=web-secure
+          - traefik.http.routers.gitea-internal.middlewares=local-ipwhitelist@file
+          - traefik.http.services.gitea.loadbalancer.server.port=3000
+    "#);
+}
+
+/// A router that names no `middleware` emits no `middlewares=` label,
+/// and nothing on a sibling router leaks onto it — the property that
+/// makes the public/internal split above mean what it reads as.
+#[test]
+fn a_router_naming_no_middleware_emits_no_middlewares_label() {
+    let yaml = generate_from(
+        "service app {\n  \
+           image \"nginx\"\n  \
+           expose 80\n  \
+           router public, host: \"app.techdebtor.io\"\n  \
+           router lan {\n    \
+             host: \"app.internal.techdebtor.io\"\n    \
+             middleware: local-ipwhitelist\n  \
+           }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      app:
+        image: nginx
+        expose:
+          - 80
+        labels:
+          - "traefik.http.routers.app-public.rule=Host(`app.techdebtor.io`)"
+          - "traefik.http.routers.app-lan.rule=Host(`app.internal.techdebtor.io`)"
+          - traefik.http.routers.app-lan.middlewares=local-ipwhitelist@file
+          - traefik.http.services.app.loadbalancer.server.port=80
+    "#);
+}
+
+/// A template can carry a router's middleware list, and the service
+/// body adds to it — the tier merge, deduped by name like `entrypoint`.
+/// The service-level field stays a separate slot, reaching only the
+/// routers that name none of their own.
+#[test]
+fn router_middleware_composes_through_a_template() {
+    let yaml = generate_from(
+        "template lan_only {\n  \
+           router lan, middleware: local-ipwhitelist\n\
+         }\n\
+         service app {\n  \
+           with lan_only\n  \
+           image \"nginx\"\n  \
+           expose 80\n  \
+           router lan {\n    \
+             host: \"app.internal.techdebtor.io\"\n    \
+             middleware: [local-ipwhitelist, forwardAuth-authentik]\n  \
+           }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      app:
+        image: nginx
+        expose:
+          - 80
+        labels:
+          - "traefik.http.routers.app-lan.rule=Host(`app.internal.techdebtor.io`)"
+          - "traefik.http.routers.app-lan.middlewares=local-ipwhitelist@file,forwardAuth-authentik@file"
+          - traefik.http.services.app.loadbalancer.server.port=80
+    "#);
+}
+
+/// A comma inside a router's own middleware name would splice an extra
+/// entry into the one comma-joined `middlewares=` label, exactly as it
+/// would in the service-level list — rejected, and named for the
+/// position the user actually wrote.
+#[test]
+fn comma_in_a_router_middleware_is_an_error() {
+    let err = generate_err(
+        "service s {\n  image \"x\"\n  expose 80\n  \
+           router api, host: \"ok.example.com\", middleware: \"a,b\"\n}\n",
+    );
+    assert!(
+        matches!(
+            err,
+            CodegenError::UnsafeLabelValue {
+                field: "router.middleware",
+                character: ',',
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
 }

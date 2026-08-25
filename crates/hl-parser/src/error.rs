@@ -78,6 +78,21 @@ pub enum ParseError {
         raw_escape_hatch: bool,
         span: Span,
     },
+    /// A field name a type used to have and no longer does (#221's
+    /// `middleware`, moved onto `router`). Told apart from
+    /// [`Self::UnknownField`] so the diagnostic can point at where the
+    /// field went instead of offering the `raw` escape hatch, which for
+    /// a moved field is advice that compiles and then means nothing —
+    /// see [`crate::schema::moved_field`].
+    MovedField {
+        type_name: &'static str,
+        field: String,
+        /// Where the field went, from [`crate::schema::moved_field`]'s
+        /// own table, so the wording lives beside the row that knows
+        /// about the move rather than here.
+        guidance: &'static str,
+        span: Span,
+    },
     /// A single-occurrence field (a scalar, a bare flag, or a
     /// struct-kind nested type) was set more than once in one body.
     DuplicateField {
@@ -177,6 +192,7 @@ impl ParseError {
             ParseError::UnexpectedToken { span, .. }
             | ParseError::UnknownTopLevelType { span, .. }
             | ParseError::UnknownField { span, .. }
+            | ParseError::MovedField { span, .. }
             | ParseError::DuplicateField { second: span, .. }
             | ParseError::DuplicateMapKey { second: span, .. }
             | ParseError::NumberOutOfRange { span, .. }
@@ -260,6 +276,16 @@ impl fmt::Display for ParseError {
                     span.line, span.col
                 )
             }
+            ParseError::MovedField {
+                type_name,
+                field,
+                guidance,
+                ..
+            } => write!(
+                f,
+                "{}:{}: `{field}` is no longer a `{type_name}` field — {guidance}",
+                span.line, span.col
+            ),
             ParseError::DuplicateField {
                 type_name,
                 field,

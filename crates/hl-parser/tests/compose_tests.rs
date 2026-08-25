@@ -676,7 +676,7 @@ fn healthcheck_disable_alone_still_materializes_healthcheck() {
 #[test]
 fn no_healthcheck_anywhere_leaves_it_unset() {
     let composed = compose_ok(
-        "template a {\n  middleware auth\n}\n\
+        "template a {\n  networks [proxy]\n}\n\
          service s {\n  with a\n  image \"x\"\n}\n",
     );
     let service = single_service(&composed);
@@ -1134,23 +1134,25 @@ fn raw_own_body_overrides_inherited_map_entry_unconditionally() {
 #[test]
 fn list_fields_concatenate_in_priority_order() {
     let composed = compose_ok(
-        "template defaults {\n  middleware d1\n}\n\
-         template a {\n  middleware a1\n}\n\
-         template b {\n  middleware b1\n}\n\
-         service s {\n  with a, b\n  middleware own1\n}\n",
+        "template defaults {\n  dns d1\n}\n\
+         template a {\n  dns a1\n}\n\
+         template b {\n  dns b1\n}\n\
+         service s {\n  with a, b\n  dns own1\n}\n",
     );
     let service = single_service(&composed);
-    let names: Vec<&str> = service.fields.middleware.iter().map(|r| r.text()).collect();
+    let names: Vec<&str> = service.fields.dns.iter().map(|r| r.text()).collect();
     assert_eq!(names, vec!["d1", "a1", "b1", "own1"]);
 }
 
 /// #69: the set-like lists concatenate *by distinct name*. Restating a
-/// network (or middleware) a template already supplies is a natural
-/// thing to write, and means exactly what stating it once means — so the
-/// repeat is dropped rather than duplicated into the output.
+/// network a template already supplies is a natural thing to write, and
+/// means exactly what stating it once means — so the repeat is dropped
+/// rather than duplicated into the output. (`middleware` used to be the
+/// second row here; #221 moved it onto `router`, where `merge_routers`
+/// dedupes it by this same rule — see the `router_middleware_*` tests.)
 ///
 /// `depends_on` used to be one of these set-like lists too, and this
-/// test used to cover it alongside `networks`/`middleware` — but #155
+/// test used to cover it alongside `networks` — but #155
 /// moved its merge onto its own keyed-by-service-name engine (see the
 /// `depends_on_*` tests below), since an entry can now carry a
 /// `condition` two templates could genuinely disagree about. Two
@@ -1165,16 +1167,15 @@ fn list_fields_concatenate_in_priority_order() {
 fn set_like_list_fields_dedupe_across_tiers() {
     let composed = compose_ok(
         "network proxy {\n  name: \"real\"\n}\n\
-         template a {\n  networks [proxy]\n  middleware auth\n}\n\
-         template b {\n  networks [proxy]\n  middleware auth\n}\n\
-         service s {\n  image \"x\"\n  with a, b\n  networks [proxy]\n  middleware auth\n}\n",
+         template a {\n  networks [proxy]\n}\n\
+         template b {\n  networks [proxy]\n}\n\
+         service s {\n  image \"x\"\n  with a, b\n  networks [proxy]\n}\n",
     );
     let service = single_service(&composed);
     let names = |refs: &[hl_parser::Literal]| -> Vec<String> {
         refs.iter().map(|r| r.text().to_string()).collect()
     };
     assert_eq!(names(&service.fields.networks), vec!["proxy"]);
-    assert_eq!(names(&service.fields.middleware), vec!["auth"]);
 }
 
 /// Deduping keeps the *first* occurrence, so the surviving order is
@@ -1183,12 +1184,12 @@ fn set_like_list_fields_dedupe_across_tiers() {
 #[test]
 fn deduped_list_keeps_first_occurrence_order() {
     let composed = compose_ok(
-        "template defaults {\n  middleware d1\n}\n\
-         template a {\n  middleware a1\n  middleware d1\n}\n\
-         service s {\n  image \"x\"\n  with a\n  middleware own1\n  middleware a1\n}\n",
+        "template defaults {\n  networks [d1]\n}\n\
+         template a {\n  networks [a1]\n  networks [d1]\n}\n\
+         service s {\n  image \"x\"\n  with a\n  networks [own1]\n  networks [a1]\n}\n",
     );
     let service = single_service(&composed);
-    let names: Vec<&str> = service.fields.middleware.iter().map(|r| r.text()).collect();
+    let names: Vec<&str> = service.fields.networks.iter().map(|r| r.text()).collect();
     assert_eq!(names, vec!["d1", "a1", "own1"]);
 }
 
@@ -1220,7 +1221,7 @@ fn repeated_entry_within_one_list_is_deduped() {
 /// reported as a timeout rather than as the caught mutant it should be.
 #[test]
 fn nested_with_chain_does_not_expand_exponentially() {
-    let mut source = String::from("template t0 {\n  middleware m\n}\n");
+    let mut source = String::from("template t0 {\n  networks [m]\n}\n");
     for i in 1..=12 {
         source.push_str(&format!(
             "template t{i} {{\n  with t{}, t{}\n}}\n",
@@ -1231,11 +1232,11 @@ fn nested_with_chain_does_not_expand_exponentially() {
     source.push_str("service s {\n  image \"x\"\n  with t12\n}\n");
     let composed = compose_ok(&source);
     let service = single_service(&composed);
-    assert_eq!(service.fields.middleware.len(), 1);
-    assert_eq!(service.fields.middleware[0].text(), "m");
+    assert_eq!(service.fields.networks.len(), 1);
+    assert_eq!(service.fields.networks[0].text(), "m");
 }
 
-/// `dns` is list-typed just like `middleware`/`networks` — it
+/// `dns` is list-typed just like `networks` — it
 /// concatenates across tiers rather than colliding. (`depends_on` no
 /// longer belongs in this list — #155 moved it onto a keyed merge; see
 /// the `depends_on_*` tests further down.)
@@ -1623,9 +1624,10 @@ fn template_argument_not_scalar_is_error() {
 //
 // #201 dropped `: Number`/`: String` annotations in favor of checking a
 // substituted argument against the *field's own* schema shape: a
-// reference-shaped position (`networks`, `middleware`, `dns`,
+// reference-shaped position (`networks`, `dns`,
 // `env_file`, `depends_on`, `expose.entrypoint`, `router.entrypoint`,
-// `router.path_prefix`) rejects a substituted `Literal::Number` — the
+// `router.path_prefix`, `router.middleware`) rejects a substituted
+// `Literal::Number` — the
 // one literal kind `parse_literal_reference` can never produce directly,
 // so a `Number` reaching one of these fields can only mean a template
 // caller passed a bare number where a reference belongs — while a
@@ -2163,9 +2165,6 @@ fn assert_no_params(service: &Service) {
     // The reference-shaped list fields #196 opened to `$param` for the
     // first time — see `compose::substitute_params`'s own comment on
     // this same set of fields.
-    for r in &fields.middleware {
-        assert_not_param(r);
-    }
     for r in &fields.networks {
         assert_not_param(r);
     }
@@ -2415,15 +2414,6 @@ fn qualified_template_invocation_with_no_use_decls_is_unknown_alias() {
 }
 
 #[test]
-fn qualified_middleware_reference_is_rejected() {
-    let err = compose_err("service s {\n  image \"x\"\n  middleware [traefik.auth]\n}\n");
-    assert!(matches!(
-        err,
-        ComposeError::UnsupportedQualifiedReference { field: "middleware", alias, .. } if alias == "traefik"
-    ));
-}
-
-#[test]
 fn qualified_depends_on_reference_is_rejected() {
     let err = compose_err("service s {\n  image \"x\"\n  depends_on [other.db]\n}\n");
     assert!(matches!(
@@ -2442,12 +2432,10 @@ fn qualified_dns_reference_is_rejected() {
 }
 
 #[test]
-fn unqualified_middleware_depends_on_dns_are_accepted() {
-    let composed = compose_ok(
-        "service s {\n  image \"x\"\n  middleware [auth]\n  depends_on [db]\n  dns [resolver]\n}\n",
-    );
+fn unqualified_depends_on_and_dns_are_accepted() {
+    let composed =
+        compose_ok("service s {\n  image \"x\"\n  depends_on [db]\n  dns [resolver]\n}\n");
     let service = single_service(&composed);
-    assert_eq!(service.fields.middleware.len(), 1);
     assert_eq!(service.fields.depends_on.len(), 1);
     assert_eq!(service.fields.dns.len(), 1);
 }
@@ -2488,6 +2476,10 @@ fn router_entrypoints(router: &hl_parser::Router) -> Vec<&str> {
 
 fn router_prefixes(router: &hl_parser::Router) -> Vec<&str> {
     router.path_prefix.iter().map(Literal::text).collect()
+}
+
+fn router_middleware(router: &hl_parser::Router) -> Vec<&str> {
+    router.middleware.iter().map(Literal::text).collect()
 }
 
 /// `router` merges keyed by name, then per sub-field within each name —
@@ -2702,9 +2694,125 @@ fn unnamed_router_merges_under_its_own_key() {
 #[test]
 fn a_service_without_routers_composes_to_an_empty_list() {
     let composed = compose_ok(
-        "template internal_web(port) {\n  expose $port\n  middleware auth\n}\n\
+        "template internal_web(port) {\n  expose $port\n  dns resolver\n}\n\
          service s {\n  with internal_web { port: 8080 }\n  image \"x\"\n}\n",
     );
     let service = single_service(&composed);
     assert!(service.fields.routers.is_empty());
+}
+
+// --- per-router `middleware` (#221) ---
+
+/// A router's own `middleware` merges across tiers exactly like its
+/// `entrypoint`: concatenated in tier order and deduped by name, since a
+/// repeat would be a repeated entry in the one comma-joined
+/// `middlewares=` label. A template supplies a base list; the service
+/// body adds to it.
+#[test]
+fn router_middleware_concatenates_and_dedupes_across_tiers() {
+    let composed = compose_ok(
+        "template a {\n  router internal, middleware: local-ipwhitelist\n}\n\
+         service s {\n  with a\n  image \"x\"\n  \
+           router internal {\n    host: \"a.example.local\"\n    \
+             middleware: [local-ipwhitelist, rate-limit]\n  }\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        router_middleware(router_named(service, "internal")),
+        vec!["local-ipwhitelist", "rate-limit"]
+    );
+}
+
+/// The old service-level spelling is a hard error rather than a
+/// silently ignored line (#221) — and it's a *parse* error, so it never
+/// reaches composition at all.
+#[test]
+fn service_level_middleware_no_longer_parses() {
+    let err = hl_parser::parse("service s {\n  image \"x\"\n  middleware auth\n}\n")
+        .expect_err("expected a parse error");
+    assert!(
+        matches!(
+            err,
+            hl_parser::ParseError::MovedField {
+                type_name: "service",
+                ref field,
+                ..
+            } if field == "middleware"
+        ),
+        "got {err:?}"
+    );
+}
+
+/// Two routers off one service carry independent lists — the whole
+/// point of #221, and the shape `gitea.hll`'s public/internal pair needs.
+#[test]
+fn two_routers_keep_independent_middleware_lists() {
+    let composed = compose_ok(
+        "service gitea {\n  image \"x\"\n  \
+           router public, host: \"git.example.com\"\n  \
+           router internal {\n    host: \"git.internal.example.com\"\n    \
+             middleware: local-ipwhitelist\n  }\n}\n",
+    );
+    let service = single_service(&composed);
+    assert!(router_middleware(router_named(service, "public")).is_empty());
+    assert_eq!(
+        router_middleware(router_named(service, "internal")),
+        vec!["local-ipwhitelist"]
+    );
+}
+
+/// A `$param` in a router's `middleware` is substituted like every other
+/// literal slot — #168's bug class, which is a field added without
+/// extending `substitute_params`' walk.
+#[test]
+fn router_middleware_params_are_substituted() {
+    let composed = compose_ok(
+        "template routed(h, mw) {\n  router api { host: $h\n    middleware: [$mw] }\n}\n\
+         service s {\n  \
+           with routed { h: \"a.example.com\", mw: local-ipwhitelist }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        router_middleware(router_named(service, "api")),
+        vec!["local-ipwhitelist"]
+    );
+    assert_no_params(service);
+}
+
+/// And it's reference-shaped, so a bare number substituted into it is
+/// the same shape error every other reference position raises (#201).
+#[test]
+fn router_middleware_rejects_a_number_argument() {
+    let err = compose_err(
+        "template t(mw) {\n  router api { middleware: [$mw] }\n}\n\
+         service s {\n  with t { mw: 1000 }\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentNotReferenceShaped {
+            template, param, ..
+        } => {
+            assert_eq!(template, "t");
+            assert_eq!(param, "mw");
+        }
+        other => panic!("expected ArgumentNotReferenceShaped, got {other:?}"),
+    }
+}
+
+/// A middleware lives in the deployment's own `traefik.yml`, not in a
+/// declaration any `.hll` file exports, so a qualifier has nothing to
+/// resolve against here either — rejected under the router's own field
+/// path, so the diagnostic says which position was written.
+#[test]
+fn qualified_router_middleware_reference_is_rejected() {
+    let err = compose_err(
+        "service s {\n  image \"x\"\n  \
+           router api, host: \"a.example.com\", middleware: traefik.forwardAuth\n}\n",
+    );
+    assert!(
+        matches!(
+            err,
+            ComposeError::UnsupportedQualifiedReference { field: "router.middleware", ref alias, .. } if alias == "traefik"
+        ),
+        "got {err:?}"
+    );
 }

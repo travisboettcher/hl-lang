@@ -1,0 +1,2 @@
+--- error ---
+issue_221_per_router_middleware.hll: 50:3: `middleware` is no longer a `service` field — move it inside the `router` block it applies to (`router { host: "...", middleware: ... }`)

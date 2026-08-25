@@ -13,12 +13,14 @@ template internal_web(port) {
   router {
     host: "{{name}}.internal.techdebtor.io"
     entrypoint: web-secure
+    middleware: local-ipwhitelist
   }
-  middleware local-ipwhitelist
 }
 
 template authenticated {
-  middleware forwardAuth-authentik
+  router {
+    middleware: forwardAuth-authentik
+  }
 }
 
 template linuxserver_app(puid, pgid) {

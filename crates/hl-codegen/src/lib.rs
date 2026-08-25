@@ -158,31 +158,25 @@ pub enum CodegenError {
         character: char,
         span: Span,
     },
-    /// A Traefik-only field has no router to attach to (#144, #184,
-    /// #198) — two shapes of the same underlying mistake, told apart by
-    /// `field`:
+    /// A `router` block sets no `host` (#144, #184, #198) — `router`
+    /// names which one (`None` for the unnamed form). The block that
+    /// exists only to *be* a router says nothing about which requests
+    /// reach it, so there is no rule to emit and nothing the block could
+    /// have meant. Until #80 the whole label list was simply dropped
+    /// here, which meant a service whose author forgot a host deployed
+    /// with its authentication middleware quietly absent: valid output,
+    /// wrong service, no diagnostic.
     ///
-    /// - `field == "middleware"`: the service sets `middleware` but has
-    ///   no `router` block at all — `router` is `None`, since there's no
-    ///   block to name. `middleware` only ever reaches Traefik as a label
-    ///   *on* a router, so with none at all there's nothing to attach it
-    ///   to. Until #80 that was handled by emitting nothing at all, which
-    ///   meant a service whose author forgot to add a router deployed
-    ///   with its authentication middleware quietly absent: valid
-    ///   output, wrong service, no diagnostic. A router-less `middleware`
-    ///   is never something a user can have meant, so it's an error
-    ///   rather than a warning.
-    /// - `field == "router"`: a `router` block itself sets no `host` —
-    ///   `router` names which one (`None` for the unnamed form). The
-    ///   block that exists only to *be* a router says nothing about
-    ///   which requests reach it, so there is no rule to emit and
-    ///   nothing the block could have meant.
+    /// Through #220 this variant carried a `field` telling it apart from
+    /// a second shape of the same mistake — a service-level `middleware`
+    /// with no `router` anywhere to attach it to. #221 moved `middleware`
+    /// inside `router`, so that shape can no longer be written: the list
+    /// only exists within the block it attaches to. What's left is one
+    /// question with one answer, so the discriminant is gone with it.
     ///
-    /// `span` points at the line to fix: `middleware`'s first entry for
-    /// the first shape, the router block itself for the second.
-    RouterBlockWithoutHost {
+    /// `span` points at the router block itself.
+    RouterWithoutHost {
         service: String,
-        field: &'static str,
         router: Option<String>,
         span: Span,
     },
@@ -198,15 +192,17 @@ pub enum CodegenError {
     /// `span` points at the first `router` block, which is the one that
     /// needs either a sibling `expose <port>` or removing.
     RouterWithoutPort { service: String, span: Span },
-    /// A service sets `traefik { disabled }` (#159) and also sets a
-    /// Traefik-specific field that flag exists to turn off: `middleware`
-    /// or a `router` block. Plain `expose <port>` doesn't conflict — it's
-    /// Compose's own `expose:` key, container-network visibility with no
-    /// Traefik involvement at all, so a disabled service may still
-    /// declare it. See `labels::traefik_conflict_field`'s doc for the
-    /// exact field order checked.
+    /// A service sets `traefik { disabled }` (#159) and also declares a
+    /// `router` block — the one construct that flag exists to turn off.
+    /// Plain `expose <port>` doesn't conflict — it's Compose's own
+    /// `expose:` key, container-network visibility with no Traefik
+    /// involvement at all, so a disabled service may still declare it.
+    /// Through #220 a service-level `middleware` was a second way to
+    /// reach this error; #221 moved that field inside `router`, so a
+    /// `router` block is now the only thing to check — see
+    /// `labels::traefik_conflict_router`.
     ///
-    /// A hard error, the same treatment [`Self::RouterBlockWithoutHost`]
+    /// A hard error, the same treatment [`Self::RouterWithoutHost`]
     /// (#144) gives the mirror-image mistake, and for the same reason:
     /// both are a field whose only meaning depends on a router existing,
     /// contradicted by something else the same service says about that
@@ -216,12 +212,11 @@ pub enum CodegenError {
     /// "valid output, wrong service" failure #144 already closed off for
     /// the router-less case, just from the opposite direction.
     ///
-    /// `field` is the offending field's name and `span` points at it;
-    /// `disabled_span` points at the `disabled` flag it contradicts, so
-    /// the rendered message can name both lines.
-    TraefikDisabledWithRouterField {
+    /// `span` points at the offending `router` block; `disabled_span`
+    /// points at the `disabled` flag it contradicts, so the rendered
+    /// message can name both lines.
+    TraefikDisabledWithRouter {
         service: String,
-        field: &'static str,
         disabled_span: Span,
         span: Span,
     },
@@ -260,9 +255,9 @@ impl CodegenError {
             | CodegenError::MissingImage { span, .. }
             | CodegenError::UnsubstitutedParameter { span, .. }
             | CodegenError::UnsafeLabelValue { span, .. }
-            | CodegenError::RouterBlockWithoutHost { span, .. }
+            | CodegenError::RouterWithoutHost { span, .. }
             | CodegenError::RouterWithoutPort { span, .. }
-            | CodegenError::TraefikDisabledWithRouterField { span, .. }
+            | CodegenError::TraefikDisabledWithRouter { span, .. }
             | CodegenError::UnsafeRouterName { span, .. } => *span,
         }
     }
@@ -349,40 +344,29 @@ impl CodegenError {
                     "{at}: `{field}` must not contain {character:?} — it would change the meaning of the generated Traefik label{hint}"
                 )
             }
-            CodegenError::RouterBlockWithoutHost {
-                service,
-                field,
-                router,
-                ..
+            CodegenError::RouterWithoutHost {
+                service, router, ..
             } => {
-                if *field == "router" {
-                    let named = match router {
-                        Some(name) => format!("`router {name}`"),
-                        None => "an unnamed `router`".to_string(),
-                    };
-                    write!(
-                        f,
-                        "{at}: service `{service}` declares {named} with no `host`, so there is no rule for Traefik to match — add a host (`host: \"{service}.example.com\"`) or drop the `router`"
-                    )
-                } else {
-                    write!(
-                        f,
-                        "{at}: service `{service}` sets `{field}` but has no `router` to attach it to — add a router (`router {{ host: \"{service}.example.com\" }}`) or drop the `{field}`"
-                    )
-                }
+                let named = match router {
+                    Some(name) => format!("`router {name}`"),
+                    None => "an unnamed `router`".to_string(),
+                };
+                write!(
+                    f,
+                    "{at}: service `{service}` declares {named} with no `host`, so there is no rule for Traefik to match — add a host (`host: \"{service}.example.com\"`) or drop the `router`"
+                )
             }
             CodegenError::RouterWithoutPort { service, .. } => write!(
                 f,
                 "{at}: service `{service}` declares a `router` but sets no `expose <port>`, so Traefik has no port to load-balance onto — add `expose <port>` or drop the `router`"
             ),
-            CodegenError::TraefikDisabledWithRouterField {
+            CodegenError::TraefikDisabledWithRouter {
                 service,
-                field,
                 disabled_span,
                 ..
             } => write!(
                 f,
-                "{at}: service `{service}` sets `{field}`, but `traefik` is disabled (at {}), so there is no router for it to attach to — drop the `{field}` or remove `disabled`",
+                "{at}: service `{service}` declares a `router`, but `traefik` is disabled (at {}), so there is nothing for it to route — drop the `router` or remove `disabled`",
                 disabled_span.locate(files)
             ),
             CodegenError::UnsafeRouterName {
@@ -1249,35 +1233,17 @@ mod error_display_tests {
         );
     }
 
-    /// #80/#198: the error that replaced the old silent drop names the
-    /// field, the service, and the fix — the missing `router` is not
-    /// something the service body shows on its face.
-    #[test]
-    fn middleware_without_a_router_display() {
-        let err = CodegenError::RouterBlockWithoutHost {
-            service: "web".to_string(),
-            field: "middleware",
-            router: None,
-            span: span(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "3:5: service `web` sets `middleware` but has no `router` to attach it to — add a \
-             router (`router { host: \"web.example.com\" }`) or drop the `middleware`"
-        );
-    }
-
     /// And a comma in a *different* field doesn't get it either.
     #[test]
     fn comma_in_middleware_display_has_no_list_hint() {
         let err = CodegenError::UnsafeLabelValue {
-            field: "middleware",
+            field: "router.middleware",
             character: ',',
             span: span(),
         };
         assert_eq!(
             err.to_string(),
-            "3:5: `middleware` must not contain ',' — it would change the meaning of the generated Traefik label"
+            "3:5: `router.middleware` must not contain ',' — it would change the meaning of the generated Traefik label"
         );
     }
 
@@ -1287,9 +1253,8 @@ mod error_display_tests {
     /// them says which one is missing its host.
     #[test]
     fn router_block_without_host_display() {
-        let err = CodegenError::RouterBlockWithoutHost {
+        let err = CodegenError::RouterWithoutHost {
             service: "vikunja".to_string(),
-            field: "router",
             router: Some("api".to_string()),
             span: span(),
         };
@@ -1305,9 +1270,8 @@ mod error_display_tests {
     /// is rather than as an empty string.
     #[test]
     fn unnamed_router_block_without_host_display() {
-        let err = CodegenError::RouterBlockWithoutHost {
+        let err = CodegenError::RouterWithoutHost {
             service: "web".to_string(),
-            field: "router",
             router: None,
             span: span(),
         };

@@ -1,2 +1,2 @@
 --- error ---
-issue_196_qualified_middleware_still_rejected.hll:12:14: `middleware` doesn't support a qualified reference yet (`shared.` ...)
+issue_196_qualified_middleware_still_rejected.hll:18:17: `router.middleware` doesn't support a qualified reference yet (`shared.` ...)
