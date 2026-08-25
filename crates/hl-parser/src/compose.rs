@@ -183,7 +183,8 @@ pub enum ComposeError {
     /// A `$param` substituted into a reference-shaped position
     /// (`networks`, `middleware`, `dns`, `env_file`, a `depends_on`
     /// entry's own reference, `expose.entrypoint`, `router.entrypoint`,
-    /// `router.path_prefix`) resolved to a bare number. #201 dropped
+    /// `router.path_prefix`, `router.middleware`) resolved to a bare
+    /// number. #201 dropped
     /// `: Number`/`: String` parameter annotations in favor of checking a
     /// substituted argument against the field it actually lands in —
     /// see docs/DESIGN.md's Syntactic grammar section for the full
@@ -269,8 +270,8 @@ pub enum ComposeError {
     UnknownAlias { alias: String, span: Span },
     /// A qualified reference (`alias.name`) was used on a reference-list
     /// field that has no cross-file meaning — `middleware`,
-    /// `depends_on`, `dns`, `env_file`, `router.entrypoint`, or
-    /// `router.path_prefix`. (`depends_on` names
+    /// `depends_on`, `dns`, `env_file`, `router.entrypoint`,
+    /// `router.path_prefix`, or `router.middleware`. (`depends_on` names
     /// a same-file sibling service; the others aren't resolved against
     /// anything an `.hll` file declares at all — an entry point lives in
     /// the deployment's own `traefik.yml`, and an `env_file` path lives
@@ -1596,9 +1597,13 @@ fn resolve_qualified_references<R: SymbolResolver>(
     // before #196 it couldn't parse a qualifier at all (see
     // [`crate::schema::allows_qualified_reference`]'s doc), so there was
     // nothing yet to reject.
+    // `router.middleware` (#221) names a middleware in that same
+    // `traefik.yml`, so it rejects a qualifier for exactly the reason
+    // the service-level `middleware` just above does.
     for router in &fields.routers {
         reject_qualified(&router.entrypoint, "router.entrypoint")?;
         reject_qualified(&router.path_prefix, "router.path_prefix")?;
+        reject_qualified(&router.middleware, "router.middleware")?;
     }
     Ok(())
 }
@@ -1643,9 +1648,9 @@ fn substitute_params(
     {
         substitute_numeric_literal(p, args, template_name)?;
     }
-    // `router`'s own literal slots (#184) — `host`, `entrypoint`, and
-    // `path_prefix` are all `Literal`-carrying (see
-    // `schema::FieldKind::ReferenceList`). Missing any of the three would
+    // `router`'s own literal slots (#184, #221) — `host`, `entrypoint`,
+    // `path_prefix`, and `middleware` are all `Literal`-carrying (see
+    // `schema::FieldKind::ReferenceList`). Missing any of the four would
     // reproduce #168's live bug class: the `Literal::Param` survives to
     // codegen, which emits the parameter's own name into a Traefik rule
     // and exits 0.
@@ -1658,6 +1663,9 @@ fn substitute_params(
         }
         for prefix in &mut router.path_prefix {
             substitute_reference_literal(prefix, args, template_name)?;
+        }
+        for mw in &mut router.middleware {
+            substitute_reference_literal(mw, args, template_name)?;
         }
     }
     if let Some(r) = &mut fields.restart
@@ -1783,9 +1791,10 @@ fn substitute_params(
     }
     // The reference-shaped list fields #196 newly opened to `$param` —
     // `middleware`, `networks`, `dns`, `env_file`, and a `depends_on`
-    // entry's own reference (`router.entrypoint` and `router.path_prefix`
-    // are the same kind of field but already got substituted in the
-    // router loop above) — walk through `substitute_reference_literal`
+    // entry's own reference (`router.entrypoint`, `router.path_prefix`,
+    // and `router.middleware` are the same kind of field but already got
+    // substituted in the router loop above) — walk through
+    // `substitute_reference_literal`
     // rather than plain `substitute_literal`: #201 dropped
     // `: Number`/`: String` parameter annotations, so this is the one
     // place left that still rejects a substituted bare number, since
@@ -2117,7 +2126,8 @@ impl Spanned for RawEntry {
 /// `middleware`/`networks`/`dns`/`env_file`, the four bare ones directly
 /// on `ServiceFields`. They carry no `Tier`: list fields concatenate
 /// unconditionally, so there is no collision to attribute to a tier.
-/// See [`LIST_FIELDS`]. `router.entrypoint`/`router.path_prefix` aren't
+/// See [`LIST_FIELDS`].
+/// `router.entrypoint`/`router.path_prefix`/`router.middleware` aren't
 /// among them, even though they're the same [`FieldKind::ReferenceList`]
 /// kind — they live one level deeper, under a router name, so they merge
 /// through [`Self::routers`] instead (see [`merge_routers`]'s own doc).
@@ -2198,14 +2208,15 @@ struct MergeAcc {
 /// mid-merge, with the tier that last set the scalar `host` tracked
 /// alongside it exactly as [`MergeAcc::scalars`] tracks its own.
 ///
-/// `entrypoint` and `path_prefix` carry no `Tier`: like every other list
-/// in the language they concatenate unconditionally, so there's no
-/// collision to attribute to a tier.
+/// `entrypoint`, `path_prefix`, and `middleware` carry no `Tier`: like
+/// every other list in the language they concatenate unconditionally, so
+/// there's no collision to attribute to a tier.
 struct RouterAcc {
     name: Option<Ident>,
     host: Option<(Literal, Tier)>,
     entrypoint: Vec<Literal>,
     path_prefix: Vec<Literal>,
+    middleware: Vec<Literal>,
     span: Span,
 }
 
@@ -2285,6 +2296,7 @@ impl MergeAcc {
                 host: r.host.map(|(lit, _)| lit),
                 entrypoint: r.entrypoint,
                 path_prefix: r.path_prefix,
+                middleware: r.middleware,
                 span: r.span,
             })
             .collect();
@@ -2928,7 +2940,7 @@ fn merge_tier(
 /// kind, exactly the way `expose`'s `port`/`host`/`entrypoint` do — the
 /// scalar `host` follows [`merge_scalar`]'s Own-always-wins /
 /// `defaults`-always-loses / two-explicit-templates-collide rule, while
-/// `entrypoint` and `path_prefix` concatenate.
+/// `entrypoint`, `path_prefix`, and `middleware` concatenate.
 ///
 /// That second level is the whole point. [`merge_map`]'s own
 /// full-entry replacement is right for `volume`/`publish`, where an
@@ -2939,12 +2951,22 @@ fn merge_tier(
 /// this reads as the keyed form of the per-sub-field merge
 /// docs/DESIGN.md already describes for `expose`.
 ///
-/// `entrypoint` dedupes by name and `path_prefix` doesn't, matching what
-/// each list means: naming one entry point twice attaches the router to
-/// it once, while path prefixes are `||` alternatives whose written
-/// order is observable in the emitted rule — the same split
-/// [`ListField::dedupe`] already draws between `middleware`/`networks`
-/// and `dns`/`env_file`.
+/// `entrypoint` and `middleware` dedupe by name and `path_prefix`
+/// doesn't, matching what each list means: naming one entry point or one
+/// middleware twice attaches the router to it once, while path prefixes
+/// are `||` alternatives whose written order is observable in the
+/// emitted rule — the same split [`ListField::dedupe`] already draws
+/// between `middleware`/`networks` and `dns`/`env_file`. `middleware`
+/// dedupes on the side its service-level namesake already sits on, for
+/// the same reason: a repeated middleware name would be a repeated entry
+/// in the one comma-joined `middlewares=` label.
+///
+/// A router's `middleware` merging across tiers this way — rather than
+/// the innermost tier replacing what an outer one said — is what makes a
+/// template able to supply a base list a service body adds to (#221).
+/// The *override* in #221 is between the router's merged list and the
+/// service-level field, resolved in codegen once composition is done,
+/// not between tiers here.
 fn merge_routers(
     acc: &mut Vec<RouterAcc>,
     incoming: Vec<Router>,
@@ -2958,6 +2980,7 @@ fn merge_routers(
                 host: router.host.map(|h| (h, tier.clone())),
                 entrypoint: router.entrypoint,
                 path_prefix: router.path_prefix,
+                middleware: router.middleware,
                 span: router.span,
             });
             continue;
@@ -2981,6 +3004,17 @@ fn merge_routers(
             }
         }
         acc[pos].path_prefix.extend(router.path_prefix);
+        // Deduped by name like `entrypoint` just above, and for the same
+        // reason — see this function's own doc (#221).
+        for entry in router.middleware {
+            if !acc[pos]
+                .middleware
+                .iter()
+                .any(|held| held.text() == entry.text())
+            {
+                acc[pos].middleware.push(entry);
+            }
+        }
         // The most recent contributor's span, so a diagnostic about the
         // merged router points at the most specific place it was
         // written — the service's own body when it wrote one, the

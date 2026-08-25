@@ -2637,6 +2637,10 @@ fn router_prefixes(router: &hl_parser::Router) -> Vec<&str> {
     router.path_prefix.iter().map(Literal::text).collect()
 }
 
+fn router_middleware(router: &hl_parser::Router) -> Vec<&str> {
+    router.middleware.iter().map(Literal::text).collect()
+}
+
 /// The canonical form: a name after the keyword, then a braced body
 /// whose fields are newline-separated like any other struct body.
 #[test]
@@ -2872,5 +2876,107 @@ fn duplicate_router_host_is_rejected() {
             }
         ),
         "got {err:?}"
+    );
+}
+
+// --- per-router `middleware` (#221) ---
+
+/// The field this issue asked for: a `router` block carrying its own
+/// middleware list, spelled exactly like the service-level field of the
+/// same name and resolved against `router`'s own field table rather
+/// than the service's.
+#[test]
+fn router_middleware_parses_in_a_braced_body() {
+    let program = parse_ok(
+        "service s {\n  router internal {\n    host: \"a.example.com\"\n    \
+         middleware: local-ipwhitelist\n  }\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    assert_eq!(
+        router_middleware(&routers(service)[0]),
+        vec!["local-ipwhitelist"]
+    );
+    // The service-level field of the same name stays untouched — the two
+    // are separate slots, not one field written in two places.
+    assert!(service.fields.middleware.is_empty());
+}
+
+/// It takes the bare comma-list sugar and the bracketed form every
+/// reference list takes, and accumulates across repeats of the field.
+#[test]
+fn router_middleware_accepts_a_bare_list_and_accumulates() {
+    let program = parse_ok(
+        "service s {\n  router internal {\n    host: \"a.example.com\"\n    \
+         middleware: local-ipwhitelist, forwardAuth-authentik\n    \
+         middleware: [rate-limit]\n  }\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    assert_eq!(
+        router_middleware(&routers(service)[0]),
+        vec!["local-ipwhitelist", "forwardAuth-authentik", "rate-limit"]
+    );
+}
+
+/// And the comma-continued spelling, where the same `KEY :` one-token
+/// lookahead that bounds `path_prefix`'s bare list bounds this one.
+#[test]
+fn router_middleware_in_comma_shorthand_ends_at_the_next_field() {
+    let program = parse_ok(
+        "service s {\n  router internal, middleware: local-ipwhitelist, \
+         host: \"a.example.com\"\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    assert_eq!(
+        router_middleware(&routers(service)[0]),
+        vec!["local-ipwhitelist"]
+    );
+    assert_eq!(
+        routers(service)[0].host.as_ref().unwrap().text(),
+        "a.example.com"
+    );
+}
+
+/// A `$param` reaches it like every other reference-shaped position
+/// (#196), so a template can parameterize which middleware one of its
+/// routers attaches.
+#[test]
+fn router_middleware_accepts_a_param() {
+    let program = parse_ok("template t(mw) {\n  router api { middleware: [$mw] }\n}\n");
+    let template = as_template(&program.decls[0]);
+    let router = &template.fields.routers[0];
+    assert!(matches!(&router.middleware[0], Literal::Param(name, _) if name == "mw"));
+}
+
+/// The qualified form parses here, exactly as it does in every other
+/// reference-shaped position — `compose()` is what rejects it, since a
+/// middleware has no `.hll` declaration for an alias to resolve against.
+#[test]
+fn qualified_router_middleware_reference_parses() {
+    let program = parse_ok("service s {\n  router api { middleware: common.forwardAuth }\n}\n");
+    let service = as_service(&program.decls[0]);
+    let r = &routers(service)[0].middleware[0];
+    assert_eq!(r.qualifier().unwrap().name, "common");
+    assert_eq!(r.text(), "forwardAuth");
+}
+
+/// The service-level and router-level fields share a spelling but not a
+/// slot: one body may write both, and each lands where it was written.
+#[test]
+fn service_and_router_middleware_are_separate_slots() {
+    let program = parse_ok(
+        "service s {\n  middleware forwardAuth-authentik\n  \
+         router internal, host: \"a.example.com\", middleware: local-ipwhitelist\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let names: Vec<&str> = service
+        .fields
+        .middleware
+        .iter()
+        .map(Literal::text)
+        .collect();
+    assert_eq!(names, vec!["forwardAuth-authentik"]);
+    assert_eq!(
+        router_middleware(&routers(service)[0]),
+        vec!["local-ipwhitelist"]
     );
 }

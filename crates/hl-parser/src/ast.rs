@@ -394,8 +394,9 @@ pub struct Expose {
 /// A `router` carries no port. Compose's `loadbalancer.server.port`
 /// label is per Compose *service*, not per router, so it stays derived
 /// from [`Expose::port`] exactly as before, and several routers off one
-/// container all balance onto that one port. `middleware` likewise stays
-/// a service-level field and applies to every router the service has.
+/// container all balance onto that one port. `middleware`, unlike the
+/// port, genuinely *is* per router, and since #221 has its own field
+/// here — see [`Self::middleware`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Router {
     /// `None` for the unnamed `router { ... }` form.
@@ -436,6 +437,25 @@ pub struct Router {
     /// distinct-name dedupe `entrypoint` gets, the same split
     /// `dns`/`env_file` already draw against `middleware`/`networks`.
     pub path_prefix: Vec<Literal>,
+    /// This router's own Traefik middleware list (#221), overriding the
+    /// service-level [`ServiceFields::middleware`] for this router alone
+    /// when it holds anything.
+    ///
+    /// Empty means "this router didn't say," and the service-level list
+    /// applies unchanged — so every `.hll` file written before this
+    /// field existed keeps emitting exactly the labels it always did.
+    /// That's why this is a plain `Vec` and not an `Option<Vec<_>>`, the
+    /// same shape and the same reasoning as [`Self::entrypoint`].
+    ///
+    /// Overriding rather than extending is the whole point of the field.
+    /// A service-level `middleware` already attaches to every router the
+    /// service has, so a per-router list that only ever *added* to it
+    /// would leave the case #221 reports unsayable: a public router
+    /// beside an internal one, where the public one must **not** carry
+    /// the internal one's IP allowlist. Extending would re-spell the
+    /// behavior that already exists; replacing is what makes two routers
+    /// off one container able to differ.
+    pub middleware: Vec<Literal>,
     pub span: Span,
 }
 

@@ -46,3 +46,4 @@ tmpfs
 unflagged
 SELinux
 [Pp]arameteriz(e|es|ed|ing)
+allowlist

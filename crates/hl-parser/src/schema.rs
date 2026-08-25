@@ -252,6 +252,12 @@ pub static EXPOSE: TypeSchema = TypeSchema {
 /// longer a reason to keep the two kinds apart, and
 /// [`allows_qualified_reference`] for why `path_prefix` still rejects
 /// the qualified form the merge made syntactically reachable here.
+/// `middleware` (#221) is a third reference list on the same footing,
+/// sharing the name — and the grammar — of the service-level field it
+/// overrides for this one router; see [`crate::ast::Router::middleware`]
+/// for why it replaces that list rather than extending it, and
+/// [`resolve_field`]'s own doc for why one name meaning two related
+/// things in two bodies stays unambiguous.
 /// `router` carries no `port`: `loadbalancer.server.port` is per Compose
 /// service, not per router, so it stays [`EXPOSE`]'s.
 pub static ROUTER: TypeSchema = TypeSchema {
@@ -268,6 +274,10 @@ pub static ROUTER: TypeSchema = TypeSchema {
         },
         FieldSchema {
             name: "path_prefix",
+            kind: FieldKind::ReferenceList,
+        },
+        FieldSchema {
+            name: "middleware",
             kind: FieldKind::ReferenceList,
         },
     ],
@@ -758,6 +768,17 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
         name: "raw",
         kind: FieldKind::Nested(&RAW),
     },
+    // The service-level middleware list: it attaches to every `router`
+    // block that doesn't name one of its own. Since #221 [`ROUTER`] has
+    // a `middleware` row too, and the shared name is the same
+    // two-bodies-one-identifier situation `entrypoint` is already in
+    // above — resolved the same way, through [`resolve_field`] against
+    // the enclosing type's own field list, so `middleware` written in a
+    // `service`/`template` body resolves here and `middleware` written
+    // inside a `router` body resolves against [`ROUTER`]. Unlike
+    // `entrypoint`'s two rows, these two name the *same* concept at two
+    // scopes, which is exactly why they share a spelling: see
+    // [`crate::ast::Router::middleware`].
     FieldSchema {
         name: "middleware",
         kind: FieldKind::ReferenceList,
@@ -867,8 +888,8 @@ pub fn supports_raw(schema: &'static TypeSchema) -> bool {
 /// is *semantically* legal at `field_path` — the fully-dotted canonical
 /// name every reference-shaped position uses elsewhere in this crate
 /// (`"networks"`, `"middleware"`, `"router.entrypoint"`,
-/// `"router.path_prefix"`, `"depends_on"`, or `"volume"` for a
-/// named-volume mount's host side).
+/// `"router.path_prefix"`, `"router.middleware"`, `"depends_on"`, or
+/// `"volume"` for a named-volume mount's host side).
 ///
 /// `false` for every position but the two listed here (#196). Before
 /// #196's [`crate::ast::Literal`]/`Reference` unification this question

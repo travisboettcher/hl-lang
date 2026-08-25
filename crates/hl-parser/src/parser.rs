@@ -338,7 +338,7 @@ impl<'src> Parser<'src> {
     /// `reference ::= ( key ( "." IDENT )? ) | "$" IDENT` — every
     /// reference-shaped position's own value grammar (#196):
     /// `middleware`/`networks`/`dns`/`env_file`/`router.entrypoint`/
-    /// `router.path_prefix`, a `depends_on` entry,
+    /// `router.path_prefix`/`router.middleware`, a `depends_on` entry,
     /// and a named-volume mount's host side. The trailing `.IDENT` names
     /// an import alias's declaration (`traefik.traefik-net`); only a
     /// plain `IDENT` key can be qualified this way — a `STRING` key's
@@ -2070,11 +2070,19 @@ fn lower_router(name: Option<Ident>, mut fields: StructFields, span: Span) -> Ro
         Some(FieldValue::RefList(v)) => v,
         _ => Vec::new(),
     };
+    // #221: the router's own middleware list, read from the `router`
+    // schema's own `middleware` row — not the service-level field of the
+    // same name, which `lower_service_fields` reads from its own map.
+    let middleware = match fields.remove("middleware") {
+        Some(FieldValue::RefList(v)) => v,
+        _ => Vec::new(),
+    };
     Router {
         name,
         host,
         entrypoint,
         path_prefix,
+        middleware,
         span,
     }
 }

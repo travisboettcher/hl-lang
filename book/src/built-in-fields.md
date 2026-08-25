@@ -153,6 +153,7 @@ after the keyword, so there's nowhere for a bare value to go.
 | `host` | string | *Required—a router with no host has no rule* |
 | `entrypoint` | reference list | empty—label omitted, so Traefik attaches the router to every entry point |
 | `path_prefix` | list of strings | empty—the rule matches the host alone |
+| `middleware` | reference list | empty—this router takes the service-level [`middleware`](#middleware-depends_on-networks-dns-env_file) list instead |
 
 A `router` block declares one Traefik router, and owns every field that
 only ever means anything attached to one. Write it as many times as you
@@ -260,50 +261,115 @@ two routers, it's one router described twice, with the second silently
 winning—the same reason two `volume` entries can't share one container
 path.
 
-`router` deliberately doesn't carry a port or a middleware list:
+`router` deliberately doesn't carry a port:
+`traefik.http.services.<service>.loadbalancer.server.port` is one label
+per Compose service, not per router—a container listens on one port no
+matter how many routers point at it—so it comes from
+[`expose`](#expose)'s own `port` instead. A service with at least one
+`router` block but no `expose <port>` is a compile error too: a router
+with nothing to load-balance onto used to mean Traefik silently guessed
+a port, and now means `hllc` refuses to compile.
 
-- **No port.** `traefik.http.services.<service>.loadbalancer.server.port`
-  is one label per Compose service, not per router—a container listens on
-  one port no matter how many routers point at it—so it comes from
-  [`expose`](#expose)'s own `port` instead. A service with at least one
-  `router` block but no `expose <port>` is a compile error too: a router
-  with nothing to load-balance onto used to mean Traefik silently guessed
-  a port, and now means `hllc` refuses to compile.
-
-  ```hll,ignore
-  service web {
-    image "nginx"
-    router api {
-      host: "web.example.com"
-    }
+```hll,ignore
+service web {
+  image "nginx"
+  router api {
+    host: "web.example.com"
   }
-  ```
+}
+```
 
-  ```text
-  web.hll:3:3: service `web` declares a `router` but sets no `expose <port>`, so Traefik has no port to load-balance onto — add `expose <port>` or drop the `router`
-  ```
+```text
+web.hll:3:3: service `web` declares a `router` but sets no `expose <port>`, so Traefik has no port to load-balance onto — add `expose <port>` or drop the `router`
+```
 
-- **No middleware.** [`middleware`](#middleware-depends_on-networks-dns-env_file)
-  stays a service-level field and applies to *every* router the service
-  has. Per-router middleware isn't expressible yet. `middleware` needs at
-  least one router to attach to—naming one with no `router` block
-  anywhere is a compile error, not a service quietly built without it:
+### Per-router `middleware`
 
-  ```hll,ignore
-  service web {
-    image "nginx"
-    expose 80
-    middleware forwardAuth-authentik
+A `router` block *does* carry its own `middleware` list, spelled exactly
+like the service-level [`middleware`](#middleware-depends_on-networks-dns-env_file)
+field below, and it **replaces** that list for this one router:
+
+```hll,build
+service gitea {
+  image "gitea/gitea:latest"
+  expose 3000
+  router public {
+    host: "git.example.com"
+    entrypoint: web-secure
   }
-  ```
+  router internal {
+    host: "git.internal.example.com"
+    entrypoint: web-secure
+    middleware: local-ipwhitelist
+  }
+}
+```
 
-  ```text
-  web.hll:4:14: service `web` sets `middleware` but has no `router` to attach it to — add a router (`router { host: "web.example.com" }`) or drop the `middleware`
-  ```
+```text
+traefik.http.routers.gitea-public.rule=Host(`git.example.com`)
+traefik.http.routers.gitea-public.entrypoints=web-secure
+traefik.http.routers.gitea-internal.rule=Host(`git.internal.example.com`)
+traefik.http.routers.gitea-internal.entrypoints=web-secure
+traefik.http.routers.gitea-internal.middlewares=local-ipwhitelist@file
+traefik.http.services.gitea.loadbalancer.server.port=3000
+```
 
-  Earlier versions emitted no `labels:` key at all here and exited 0, so a
-  service whose author forgot a host deployed with its authentication
-  missing and nothing said so.
+That's a public route and an internal, IP-restricted one off the same
+container—the case a single service-wide list can't express, since it
+would either put the allowlist on the public route or take it off the
+internal one.
+
+Leave `middleware` off a `router` block and that router takes the
+service-level list, so nothing written before per-router middleware
+existed changes:
+
+```hll,build
+service app {
+  image "nginx"
+  expose 80
+  middleware forwardAuth-authentik
+  router public, host: "app.example.com"
+  router lan {
+    host: "app.internal.example.com"
+    middleware: local-ipwhitelist
+  }
+}
+```
+
+```text
+traefik.http.routers.app-public.rule=Host(`app.example.com`)
+traefik.http.routers.app-public.middlewares=forwardAuth-authentik@file
+traefik.http.routers.app-lan.rule=Host(`app.internal.example.com`)
+traefik.http.routers.app-lan.middlewares=local-ipwhitelist@file
+traefik.http.services.app.loadbalancer.server.port=80
+```
+
+Because a router's own list replaces rather than extends, there's no way
+to write *everything the service named, minus one.* To give one router
+no middleware while a sibling carries some, move the list off the
+service and onto the routers that want it—the same explicitness `router`
+already asks for from `host`.
+
+The service-level field still needs at least one router to attach
+to—naming one with no `router` block anywhere is a compile error, not a
+service quietly built without it:
+
+```hll,ignore
+service web {
+  image "nginx"
+  expose 80
+  middleware forwardAuth-authentik
+}
+```
+
+```text
+web.hll:4:14: service `web` sets `middleware` but has no `router` to attach it to — add a router (`router { host: "web.example.com" }`) or drop the `middleware`
+```
+
+Earlier versions emitted no `labels:` key at all here and exited 0, so a
+service whose author forgot a host deployed with its authentication
+missing and nothing said so. A `router`'s own `middleware` needs no such
+check: it can't exist without the block it's written inside.
 
 ## `traefik`
 
@@ -782,7 +848,9 @@ env_file ["miniflux.env", "common.env"]
   attach anything to, so naming a middleware anyway is a compile error,
   as `router` describes. The field is service-level, so a service with
   several `router` blocks gets the same middleware list on every one of
-  them.
+  them. The exception is a `router` block that names a list of its own,
+  which replaces this one for that router—see
+  [Per-router `middleware`](#per-router-middleware).
 - `depends_on` names a same-file sibling `service` this one depends
   on—it's not cross-file, and doesn't accept a qualified `alias.name`.
   Each entry may optionally add a `{ condition: ... }` body naming one

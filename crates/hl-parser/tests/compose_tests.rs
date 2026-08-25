@@ -1625,7 +1625,8 @@ fn template_argument_not_scalar_is_error() {
 // substituted argument against the *field's own* schema shape: a
 // reference-shaped position (`networks`, `middleware`, `dns`,
 // `env_file`, `depends_on`, `expose.entrypoint`, `router.entrypoint`,
-// `router.path_prefix`) rejects a substituted `Literal::Number` — the
+// `router.path_prefix`, `router.middleware`) rejects a substituted
+// `Literal::Number` — the
 // one literal kind `parse_literal_reference` can never produce directly,
 // so a `Number` reaching one of these fields can only mean a template
 // caller passed a bare number where a reference belongs — while a
@@ -2490,6 +2491,10 @@ fn router_prefixes(router: &hl_parser::Router) -> Vec<&str> {
     router.path_prefix.iter().map(Literal::text).collect()
 }
 
+fn router_middleware(router: &hl_parser::Router) -> Vec<&str> {
+    router.middleware.iter().map(Literal::text).collect()
+}
+
 /// `router` merges keyed by name, then per sub-field within each name —
 /// `expose`'s own per-sub-field merge, one level deeper. This is
 /// `service_own_body_can_override_just_expose_host`'s exact scenario
@@ -2707,4 +2712,108 @@ fn a_service_without_routers_composes_to_an_empty_list() {
     );
     let service = single_service(&composed);
     assert!(service.fields.routers.is_empty());
+}
+
+// --- per-router `middleware` (#221) ---
+
+/// A router's own `middleware` merges across tiers exactly like its
+/// `entrypoint`: concatenated in tier order and deduped by name, since a
+/// repeat would be a repeated entry in the one comma-joined
+/// `middlewares=` label. The *override* against the service-level field
+/// is codegen's, not composition's — here the two simply coexist.
+#[test]
+fn router_middleware_concatenates_and_dedupes_across_tiers() {
+    let composed = compose_ok(
+        "template a {\n  router internal, middleware: local-ipwhitelist\n}\n\
+         service s {\n  with a\n  image \"x\"\n  middleware forwardAuth-authentik\n  \
+           router internal {\n    host: \"a.example.local\"\n    \
+             middleware: [local-ipwhitelist, rate-limit]\n  }\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        router_middleware(router_named(service, "internal")),
+        vec!["local-ipwhitelist", "rate-limit"]
+    );
+    // Untouched by the router's own list — the two are separate slots.
+    let service_level: Vec<&str> = service
+        .fields
+        .middleware
+        .iter()
+        .map(Literal::text)
+        .collect();
+    assert_eq!(service_level, vec!["forwardAuth-authentik"]);
+}
+
+/// Two routers off one service carry independent lists — the whole
+/// point of #221, and the shape `gitea.hll`'s public/internal pair needs.
+#[test]
+fn two_routers_keep_independent_middleware_lists() {
+    let composed = compose_ok(
+        "service gitea {\n  image \"x\"\n  \
+           router public, host: \"git.example.com\"\n  \
+           router internal {\n    host: \"git.internal.example.com\"\n    \
+             middleware: local-ipwhitelist\n  }\n}\n",
+    );
+    let service = single_service(&composed);
+    assert!(router_middleware(router_named(service, "public")).is_empty());
+    assert_eq!(
+        router_middleware(router_named(service, "internal")),
+        vec!["local-ipwhitelist"]
+    );
+}
+
+/// A `$param` in a router's `middleware` is substituted like every other
+/// literal slot — #168's bug class, which is a field added without
+/// extending `substitute_params`' walk.
+#[test]
+fn router_middleware_params_are_substituted() {
+    let composed = compose_ok(
+        "template routed(h, mw) {\n  router api { host: $h\n    middleware: [$mw] }\n}\n\
+         service s {\n  \
+           with routed { h: \"a.example.com\", mw: local-ipwhitelist }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        router_middleware(router_named(service, "api")),
+        vec!["local-ipwhitelist"]
+    );
+    assert_no_params(service);
+}
+
+/// And it's reference-shaped, so a bare number substituted into it is
+/// the same shape error every other reference position raises (#201).
+#[test]
+fn router_middleware_rejects_a_number_argument() {
+    let err = compose_err(
+        "template t(mw) {\n  router api { middleware: [$mw] }\n}\n\
+         service s {\n  with t { mw: 1000 }\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentNotReferenceShaped {
+            template, param, ..
+        } => {
+            assert_eq!(template, "t");
+            assert_eq!(param, "mw");
+        }
+        other => panic!("expected ArgumentNotReferenceShaped, got {other:?}"),
+    }
+}
+
+/// A middleware lives in the deployment's own `traefik.yml`, not in a
+/// declaration any `.hll` file exports, so a qualifier has nothing to
+/// resolve against here either — rejected under the router's own field
+/// path, so the diagnostic says which position was written.
+#[test]
+fn qualified_router_middleware_reference_is_rejected() {
+    let err = compose_err(
+        "service s {\n  image \"x\"\n  \
+           router api, host: \"a.example.com\", middleware: traefik.forwardAuth\n}\n",
+    );
+    assert!(
+        matches!(
+            err,
+            ComposeError::UnsupportedQualifiedReference { field: "router.middleware", ref alias, .. } if alias == "traefik"
+        ),
+        "got {err:?}"
+    );
 }

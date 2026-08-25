@@ -197,26 +197,63 @@ fn entrypoints_label(
     )))
 }
 
-/// The one `middlewares=` label for `id`, or `None` when the service
-/// names no middleware.
+/// The middleware list one router actually attaches: its own, when the
+/// `router` block named any, and the service-level list otherwise
+/// (#221).
 ///
-/// `middleware` is a service-level field and stays one (#184): it
-/// attaches to every router the service has, so a service with three
-/// `router` blocks and a `middleware` gets the same list on all three.
-/// Per-router middleware isn't expressible yet.
+/// The router's own list *replaces* the service-level one rather than
+/// extending it. That's the whole point of the field: a service-level
+/// `middleware` already reaches every router, so a per-router list that
+/// only added to it would leave the case #221 reports unsayable — a
+/// public router beside an internal one, where the public one must not
+/// carry the internal one's IP allowlist. See
+/// [`hl_parser::ast::Router::middleware`].
+///
+/// An empty router list means the block said nothing, so the
+/// service-level list applies unchanged and every `.hll` file written
+/// before per-router middleware existed emits exactly the labels it
+/// always did.
+///
+/// Returned alongside the field path the entries were written at, so a
+/// rejected entry's diagnostic can name the position the user actually
+/// wrote — the two always travel together, which is why one function
+/// hands back both rather than the caller re-deciding which won.
+fn effective_middleware<'a>(
+    router: &'a Router,
+    service: &'a [Literal],
+) -> (&'static str, &'a [Literal]) {
+    if router.middleware.is_empty() {
+        ("middleware", service)
+    } else {
+        ("router.middleware", &router.middleware)
+    }
+}
+
+/// The one `middlewares=` label for `id`, or `None` when the router
+/// attaches no middleware at all.
+///
+/// `field` names the position a rejected entry was written in —
+/// `"middleware"` for the service-level list, `"router.middleware"` for
+/// a router's own (#221) — so the diagnostic quotes back what the user
+/// actually wrote rather than always naming the service-level spelling.
 ///
 /// Called once per router rather than resolved once up front, so the
 /// first metacharacter rejection a service hits is still the first one
 /// in *emission* order — the convention every other diagnostic here
-/// follows. The work is a handful of string comparisons and the result
-/// is identical each time.
-fn middlewares_label(id: &str, middleware: &[Literal]) -> Result<Option<String>, CodegenError> {
+/// follows. The work is a handful of string comparisons, and for a
+/// service whose routers all fall back to the service-level list the
+/// result is identical each time.
+fn middlewares_label(
+    id: &str,
+    field: &'static str,
+    middleware: &[Literal],
+) -> Result<Option<String>, CodegenError> {
     if middleware.is_empty() {
         return Ok(None);
     }
     let mut mws = Vec::with_capacity(middleware.len());
     for r in middleware {
-        reject_metacharacters(r.text(), "middleware", MIDDLEWARE_METACHARACTERS, r.span())?;
+        reject_metacharacters(r.text(), field, MIDDLEWARE_METACHARACTERS, r.span())?;
         mws.push(format!("{}@file", r.text()));
     }
     Ok(Some(format!(
@@ -228,6 +265,9 @@ fn middlewares_label(id: &str, middleware: &[Literal]) -> Result<Option<String>,
 /// Emits one `router` block's labels — rule, then `entrypoints=`, then
 /// `middlewares=` — in the same order and the same shape `expose.host`'s
 /// own router emits them (#184).
+///
+/// `middleware` is the *service-level* list; which list this router
+/// actually attaches is [`effective_middleware`]'s decision (#221).
 fn push_router_labels(
     labels: &mut Vec<String>,
     service_name: &str,
@@ -274,7 +314,8 @@ fn push_router_labels(
     {
         labels.push(label);
     }
-    if let Some(label) = middlewares_label(&id, middleware)? {
+    let (field, mws) = effective_middleware(router, middleware);
+    if let Some(label) = middlewares_label(&id, field, mws)? {
         labels.push(label);
     }
     Ok(())
@@ -290,10 +331,12 @@ fn push_router_labels(
 /// `.entrypoints=` (if the block's `entrypoint` list is non-empty — one
 /// comma-joined label for the whole list, the same shape as
 /// `.middlewares=` below but with no `@file` suffix, which is a
-/// file-provider convention specific to middleware references), and the
-/// service-level `.middlewares=` (if any, each getting an `@file` suffix
-/// — the file provider's own reference convention, confirmed
-/// mechanical/always-on, not homelab-specific) — and finally, once, the
+/// file-provider convention specific to middleware references), and its
+/// `.middlewares=` (if any, each getting an `@file` suffix — the file
+/// provider's own reference convention, confirmed mechanical/always-on,
+/// not homelab-specific — built from the block's own `middleware` list
+/// when it named one and from the service-level `middleware` otherwise,
+/// see [`effective_middleware`]) — and finally, once, the
 /// loadbalancer port (from `expose.port`) if the service has any router
 /// at all. A service that writes no `router` block (`expose <port> as
 /// "<host>"`'s own sugared one included) reaches none of that and emits
@@ -302,7 +345,9 @@ fn push_router_labels(
 /// `middleware` only ever means anything attached to a router, so it
 /// requires at least one — any `router` block, unnamed or named. Setting
 /// it with none at all is [`CodegenError::RouterBlockWithoutHost`], not a
-/// silently label-less service (#80). A `router` block that sets no
+/// silently label-less service (#80). Only the service-level list needs
+/// that check: a `router`'s own `middleware` (#221) can't exist without
+/// the block it's written inside. A `router` block that sets no
 /// `host` at all is the same error one step in — the block that exists
 /// only to *be* a router says nothing about which requests reach it.
 /// Once every router block is confirmed to have a host, a service that
@@ -458,6 +503,7 @@ mod tests {
             host: host.map(lit),
             entrypoint: Vec::new(),
             path_prefix: Vec::new(),
+            middleware: Vec::new(),
             span: span(),
         }
     }
@@ -1349,9 +1395,10 @@ mod tests {
         );
     }
 
-    /// `middleware` stays a service-level field: one list, attached to
-    /// every router the service has. Per-router middleware isn't
-    /// expressible yet.
+    /// The service-level `middleware` attaches to every router the
+    /// service has that doesn't name one of its own — the behavior that
+    /// predates #221, and still what a file writing only the
+    /// service-level field gets.
     #[test]
     fn middleware_attaches_to_every_router() {
         let mut fields = with_routers(vec![
@@ -1517,5 +1564,153 @@ mod tests {
         };
         let labels = compute("s", &fields, None, &bindings()).unwrap();
         assert!(labels.is_empty());
+    }
+
+    // --- per-router `middleware` (#221) ---
+
+    /// #221's motivating case, byte for byte: a public router with no
+    /// middleware beside an internal one carrying the IP allowlist. What
+    /// used to force the whole label list into `raw`.
+    #[test]
+    fn two_routers_can_carry_different_middleware() {
+        let public = router(Some("public"), Some("git.example.com"));
+        let mut internal = router(Some("internal"), Some("git.internal.example.com"));
+        internal.middleware = refs(&["local-ipwhitelist"]);
+        let mut fields = with_routers(vec![public, internal]);
+        fields.expose = Some(expose_port(3000));
+        let labels = compute("gitea", &fields, None, &bindings()).unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                "traefik.http.routers.gitea-public.rule=Host(`git.example.com`)",
+                "traefik.http.routers.gitea-internal.rule=Host(`git.internal.example.com`)",
+                "traefik.http.routers.gitea-internal.middlewares=local-ipwhitelist@file",
+                "traefik.http.services.gitea.loadbalancer.server.port=3000",
+            ]
+        );
+    }
+
+    /// A router's own list *replaces* the service-level one for that
+    /// router rather than extending it — the property that makes the
+    /// case above sayable at all, since an extending list could never
+    /// drop what the service said.
+    #[test]
+    fn router_middleware_replaces_the_service_level_list() {
+        let mut r = router(Some("internal"), Some("a.example.local"));
+        r.middleware = refs(&["local-ipwhitelist"]);
+        let mut fields = with_routers(vec![r]);
+        fields.middleware = refs(&["forwardAuth-authentik"]);
+        fields.expose = Some(expose_port(80));
+        let labels = compute("app", &fields, None, &bindings()).unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                "traefik.http.routers.app-internal.rule=Host(`a.example.local`)",
+                "traefik.http.routers.app-internal.middlewares=local-ipwhitelist@file",
+                "traefik.http.services.app.loadbalancer.server.port=80",
+            ]
+        );
+    }
+
+    /// Per router, not per service: one block overriding leaves every
+    /// other block on the service-level list.
+    #[test]
+    fn one_router_overriding_leaves_its_siblings_on_the_service_list() {
+        let mut internal = router(Some("internal"), Some("a.example.local"));
+        internal.middleware = refs(&["local-ipwhitelist"]);
+        let mut fields = with_routers(vec![
+            router(Some("public"), Some("a.example.com")),
+            internal,
+        ]);
+        fields.middleware = refs(&["forwardAuth-authentik"]);
+        fields.expose = Some(expose_port(80));
+        let labels = compute("app", &fields, None, &bindings()).unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                "traefik.http.routers.app-public.rule=Host(`a.example.com`)",
+                "traefik.http.routers.app-public.middlewares=forwardAuth-authentik@file",
+                "traefik.http.routers.app-internal.rule=Host(`a.example.local`)",
+                "traefik.http.routers.app-internal.middlewares=local-ipwhitelist@file",
+                "traefik.http.services.app.loadbalancer.server.port=80",
+            ]
+        );
+    }
+
+    /// Several entries on one router comma-join into the single
+    /// `middlewares=` label, each with the file provider's `@file`
+    /// suffix — the same shape the service-level list emits, and in
+    /// written order.
+    #[test]
+    fn router_middleware_entries_join_into_one_label_in_order() {
+        let mut r = router(None, Some("a.example.com"));
+        r.middleware = refs(&["local-ipwhitelist", "forwardAuth-authentik"]);
+        let mut fields = with_routers(vec![r]);
+        fields.expose = Some(expose_port(80));
+        let labels = compute("app", &fields, None, &bindings()).unwrap();
+        assert_eq!(
+            labels[1],
+            "traefik.http.routers.app.middlewares=local-ipwhitelist@file,forwardAuth-authentik@file"
+        );
+    }
+
+    /// A router's own entry goes through the same metacharacter guard
+    /// the service-level list does — a comma would splice an extra entry
+    /// into the one comma-joined label — but the diagnostic names the
+    /// position actually written, so a user isn't sent looking at a
+    /// service-level `middleware` line that may not exist.
+    #[test]
+    fn comma_in_a_router_middleware_is_rejected_under_its_own_field_name() {
+        let mut r = router(Some("api"), Some("a.example.com"));
+        r.middleware = refs(&["a,b"]);
+        let fields = with_routers(vec![r]);
+        let err = compute("app", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodegenError::UnsafeLabelValue {
+                    field: "router.middleware",
+                    character: ',',
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// A `router`-level list needs no separate router-less check: it
+    /// can't exist without the block it's written inside. The
+    /// service-level list keeps its own (#80), and a service whose only
+    /// middleware is a router's own still passes it.
+    #[test]
+    fn a_router_only_middleware_needs_no_service_level_router_check() {
+        let mut r = router(Some("api"), Some("a.example.com"));
+        r.middleware = refs(&["forwardAuth-authentik"]);
+        let mut fields = with_routers(vec![r]);
+        fields.expose = Some(expose_port(80));
+        assert!(compute("app", &fields, None, &bindings()).is_ok());
+    }
+
+    /// A `traefik { disabled }` service is refused for the `router`
+    /// block itself before its middleware is ever read — disabling
+    /// Traefik contradicts the block's existence, whichever list it
+    /// carries.
+    #[test]
+    fn disabled_service_with_router_middleware_reports_the_router() {
+        let mut r = router(Some("api"), Some("a.example.com"));
+        r.middleware = refs(&["forwardAuth-authentik"]);
+        let mut fields = with_routers(vec![r]);
+        fields.traefik = Some(disabled_traefik());
+        let err = compute("app", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodegenError::TraefikDisabledWithRouterField {
+                    field: "router",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
     }
 }

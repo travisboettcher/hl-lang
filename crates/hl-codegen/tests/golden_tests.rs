@@ -2474,3 +2474,130 @@ fn traefik_disabled_composes_through_a_template() {
           - traefik.enable=false
     "#);
 }
+
+/// #221's motivating real service, end to end: `gitea` needs a public
+/// router with no middleware beside an internal one behind
+/// `local-ipwhitelist`. Before per-router `middleware`, the whole label
+/// list had to be hand-typed in `raw` — either both routers got the
+/// allowlist (breaking the intentionally public route) or neither did
+/// (dropping IP restriction on the internal-only one).
+#[test]
+fn gitea_public_and_internal_routers_carry_different_middleware() {
+    let yaml = generate_from(
+        "service gitea {\n  \
+           image \"gitea/gitea:latest\"\n  \
+           expose 3000\n  \
+           router public {\n    \
+             host: \"git.techdebtor.io\"\n    \
+             entrypoint: web-secure\n  \
+           }\n  \
+           router internal {\n    \
+             host: \"git.internal.techdebtor.io\"\n    \
+             entrypoint: web-secure\n    \
+             middleware: local-ipwhitelist\n  \
+           }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      gitea:
+        image: "gitea/gitea:latest"
+        expose:
+          - 3000
+        labels:
+          - "traefik.http.routers.gitea-public.rule=Host(`git.techdebtor.io`)"
+          - traefik.http.routers.gitea-public.entrypoints=web-secure
+          - "traefik.http.routers.gitea-internal.rule=Host(`git.internal.techdebtor.io`)"
+          - traefik.http.routers.gitea-internal.entrypoints=web-secure
+          - traefik.http.routers.gitea-internal.middlewares=local-ipwhitelist@file
+          - traefik.http.services.gitea.loadbalancer.server.port=3000
+    "#);
+}
+
+/// A router that names no `middleware` of its own still takes the
+/// service-level list, so a file written before #221 emits exactly the
+/// labels it always did — here alongside a sibling that overrides.
+#[test]
+fn a_router_without_its_own_middleware_still_takes_the_service_level_list() {
+    let yaml = generate_from(
+        "service app {\n  \
+           image \"nginx\"\n  \
+           expose 80\n  \
+           middleware forwardAuth-authentik\n  \
+           router public, host: \"app.techdebtor.io\"\n  \
+           router lan {\n    \
+             host: \"app.internal.techdebtor.io\"\n    \
+             middleware: local-ipwhitelist\n  \
+           }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      app:
+        image: nginx
+        expose:
+          - 80
+        labels:
+          - "traefik.http.routers.app-public.rule=Host(`app.techdebtor.io`)"
+          - traefik.http.routers.app-public.middlewares=forwardAuth-authentik@file
+          - "traefik.http.routers.app-lan.rule=Host(`app.internal.techdebtor.io`)"
+          - traefik.http.routers.app-lan.middlewares=local-ipwhitelist@file
+          - traefik.http.services.app.loadbalancer.server.port=80
+    "#);
+}
+
+/// A template can carry a router's middleware list, and the service
+/// body adds to it — the tier merge, deduped by name like `entrypoint`.
+/// The service-level field stays a separate slot, reaching only the
+/// routers that name none of their own.
+#[test]
+fn router_middleware_composes_through_a_template() {
+    let yaml = generate_from(
+        "template lan_only {\n  \
+           router lan, middleware: local-ipwhitelist\n\
+         }\n\
+         service app {\n  \
+           with lan_only\n  \
+           image \"nginx\"\n  \
+           expose 80\n  \
+           router lan {\n    \
+             host: \"app.internal.techdebtor.io\"\n    \
+             middleware: [local-ipwhitelist, forwardAuth-authentik]\n  \
+           }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      app:
+        image: nginx
+        expose:
+          - 80
+        labels:
+          - "traefik.http.routers.app-lan.rule=Host(`app.internal.techdebtor.io`)"
+          - "traefik.http.routers.app-lan.middlewares=local-ipwhitelist@file,forwardAuth-authentik@file"
+          - traefik.http.services.app.loadbalancer.server.port=80
+    "#);
+}
+
+/// A comma inside a router's own middleware name would splice an extra
+/// entry into the one comma-joined `middlewares=` label, exactly as it
+/// would in the service-level list — rejected, and named for the
+/// position the user actually wrote.
+#[test]
+fn comma_in_a_router_middleware_is_an_error() {
+    let err = generate_err(
+        "service s {\n  image \"x\"\n  expose 80\n  \
+           router api, host: \"ok.example.com\", middleware: \"a,b\"\n}\n",
+    );
+    assert!(
+        matches!(
+            err,
+            CodegenError::UnsafeLabelValue {
+                field: "router.middleware",
+                character: ',',
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}

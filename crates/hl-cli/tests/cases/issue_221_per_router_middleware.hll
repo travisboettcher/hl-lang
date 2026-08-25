@@ -1,0 +1,64 @@
+# #221: `middleware` used to be service-level only, attaching to every
+# router a service has, so a service whose routers genuinely need
+# *different* middleware couldn't be written with `router` blocks at
+# all. The real case is `gitea`: a public router on `git.techdebtor.io`
+# with no middleware, beside an internal one on
+# `git.internal.techdebtor.io` behind `local-ipwhitelist`. One
+# service-wide list gives either both routers the allowlist — breaking
+# the intentionally public route — or neither, dropping IP restriction
+# from the internal-only one, so the whole `labels` list stayed
+# hand-typed in `raw`, giving up every check `router` performs.
+#
+# What this pins, across the two services below:
+#   - `gitea`, the issue's own case: a `router` block's own `middleware`
+#     list emitted as that router's `middlewares=` label and no other's,
+#     leaving the public router with no such label at all;
+#   - `vikunja`, the mixed case: a router naming a list of its own
+#     *replaces* the service-level one for itself (`lan` carries
+#     `local-ipwhitelist` alone, with no `forwardAuth-authentik` spliced
+#     in), while a sibling naming none still takes the service-level
+#     list unchanged (`public`), so nothing written before #221 changes;
+#   - either list comma-joining into the one `middlewares=` label per
+#     router, each name suffixed `@file`.
+network traefik-net {
+  external
+  name: "docker_default"
+}
+
+service gitea {
+  image "gitea/gitea:latest"
+  expose 3000
+  networks [traefik-net]
+
+  router public {
+    host: "git.techdebtor.io"
+    entrypoint: web-secure
+  }
+
+  router internal {
+    host: "git.internal.techdebtor.io"
+    entrypoint: web-secure
+    middleware: local-ipwhitelist
+  }
+}
+
+service vikunja {
+  image "vikunja/vikunja:latest"
+  expose 3456
+  networks [traefik-net]
+
+  middleware forwardAuth-authentik
+
+  # Names no list of its own, so it takes the service-level one.
+  router public {
+    host: "vikunja.techdebtor.io"
+    entrypoint: web-secure
+  }
+
+  # Names its own, so the service-level list doesn't reach it.
+  router lan {
+    host: "vikunja.techdebtor.local"
+    entrypoint: local
+    middleware: [local-ipwhitelist, rate-limit]
+  }
+}

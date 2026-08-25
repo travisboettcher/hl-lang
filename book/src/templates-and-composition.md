@@ -257,11 +257,20 @@ Different field kinds merge differently:
   `router api { entrypoint: web-secure, path_prefix: [...] }` keeps the
   entry point and the prefixes it didn't mention. Within one name,
   `host` is a scalar and collides between two explicit templates,
-  `entrypoint` concatenates by distinct name like `middleware`, and
-  `path_prefix` concatenates keeping duplicates like `dns`, since the
-  prefixes are alternatives whose order is observable in the emitted
-  rule. A collision names the router as well as the field, since a
-  message about `router.host` alone doesn't say which router.
+  `entrypoint` and the router's own `middleware` concatenate by distinct
+  name like the service-level `middleware`, and `path_prefix`
+  concatenates keeping duplicates like `dns`, since the prefixes are
+  alternatives whose order is observable in the emitted rule. A
+  collision names the router as well as the field, since a message about
+  `router.host` alone doesn't say which router.
+
+  A router's `middleware` merging this way is between *tiers*: a
+  template supplies a base list a service body adds to. That's a
+  different axis from the override in
+  [Per-router `middleware`](./built-in-fields.md#per-router-middleware),
+  which sits between the router's merged list and the service-level
+  field and applies once composition finishes—so a router that names any
+  middleware, in any tier, takes none of the service-level list.
 
 That last point about per-sub-field merging means a service's own body
 can override just a router's `host` while still inheriting its
