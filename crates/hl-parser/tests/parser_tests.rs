@@ -968,7 +968,7 @@ fn router_entrypoints_of(router: &hl_parser::Router) -> Vec<&str> {
     router.entrypoint.iter().map(|r| r.text()).collect()
 }
 
-/// `entrypoint` is a reference list, spelled exactly like `middleware`:
+/// `entrypoint` is a reference list, spelled exactly like `networks`:
 /// a bare comma-separated list, a bracketed list, a quoted name, or a
 /// repeat of the field, all of which accumulate.
 #[test]
@@ -988,7 +988,7 @@ fn router_entrypoint_accepts_a_bracketed_list_and_a_quoted_name() {
 #[test]
 fn router_entrypoint_accepts_a_bare_comma_list() {
     // The book documents this spelling for `router`'s reference list,
-    // the same one `middleware` takes. #198 moved `entrypoint` off
+    // the same one `networks` takes. #198 moved `entrypoint` off
     // `expose`, and the deleted `expose_entrypoint_accepts_a_bare_list`
     // was the only test covering it — the replacement covers the
     // bracketed and quoted forms but not this one.
@@ -1027,7 +1027,7 @@ fn router_host_and_entrypoint_fields_in_template_body() {
         "template internal_web(port) {\n  \
            expose $port\n  \
            router {\n    host: \"{{name}}.internal.techdebtor.io\"\n    entrypoint: \"web-secure\"\n  }\n  \
-           middleware local-ipwhitelist\n\
+           dns \"192.168.50.182\"\n\
          }\n",
     );
     let template = as_template(&program.decls[0]);
@@ -1037,7 +1037,7 @@ fn router_host_and_entrypoint_fields_in_template_body() {
         "{{name}}.internal.techdebtor.io"
     );
     assert_eq!(router_entrypoints_of(router), vec!["web-secure"]);
-    assert_eq!(template.fields.middleware.len(), 1);
+    assert_eq!(template.fields.dns.len(), 1);
 }
 
 /// A bare `entrypoint` list stops at the next `key:` rather than
@@ -1058,11 +1058,11 @@ fn bare_entrypoint_list_stops_at_the_next_field_key() {
 /// The same lookahead must not over-trigger: a comma followed by a
 /// plain reference (no colon after it) still continues the list.
 #[test]
-fn bare_middleware_list_still_continues_past_a_comma() {
-    let program = parse_ok("service s {\n  middleware auth, cors\n}\n");
+fn bare_dns_list_still_continues_past_a_comma() {
+    let program = parse_ok("service s {\n  dns a, b\n}\n");
     let service = as_service(&program.decls[0]);
-    let names: Vec<&str> = service.fields.middleware.iter().map(|r| r.text()).collect();
-    assert_eq!(names, vec!["auth", "cors"]);
+    let names: Vec<&str> = service.fields.dns.iter().map(|r| r.text()).collect();
+    assert_eq!(names, vec!["a", "b"]);
 }
 
 /// Two different fields joined by a comma, with no newline between them,
@@ -1747,10 +1747,10 @@ fn raw_body_keeps_compact_comma_style() {
 // --- reference lists ---
 
 #[test]
-fn middleware_repeats_accumulate() {
-    let program = parse_ok("service s {\n  middleware a\n  middleware b\n}\n");
+fn networks_repeats_accumulate() {
+    let program = parse_ok("service s {\n  networks [a]\n  networks [b]\n}\n");
     let service = as_service(&program.decls[0]);
-    let names: Vec<&str> = service.fields.middleware.iter().map(|r| r.text()).collect();
+    let names: Vec<&str> = service.fields.networks.iter().map(|r| r.text()).collect();
     assert_eq!(names, vec!["a", "b"]);
 }
 
@@ -2610,17 +2610,16 @@ fn deeply_nested_raw_maps_are_capped_too() {
 }
 
 #[test]
-fn qualified_middleware_reference_parses() {
-    // Parsing accepts a qualified reference on any Reference-typed
-    // field, including middleware/depends_on — compose() is what
-    // rejects it as unsupported (schema-agnostic parser, per the
-    // codebase's existing "don't special-case field identity in the
-    // parser" precedent).
-    let program = parse_ok("service s {\n  image \"x\"\n  middleware common.forwardAuth\n}\n");
+fn qualified_depends_on_reference_parses() {
+    // Parsing accepts a qualified reference on any reference-shaped
+    // field, `depends_on` included — compose() is what rejects it as
+    // unsupported (schema-agnostic parser, per the codebase's existing
+    // "don't special-case field identity in the parser" precedent).
+    let program = parse_ok("service s {\n  image \"x\"\n  depends_on [other.db]\n}\n");
     let service = as_service(&program.decls[0]);
-    let r = &service.fields.middleware[0];
-    assert_eq!(r.qualifier().unwrap().name, "common");
-    assert_eq!(r.text(), "forwardAuth");
+    let r = &service.fields.depends_on[0].reference;
+    assert_eq!(r.qualifier().unwrap().name, "other");
+    assert_eq!(r.text(), "db");
 }
 
 // --- `router` blocks (#184) ---
@@ -2882,9 +2881,8 @@ fn duplicate_router_host_is_rejected() {
 // --- per-router `middleware` (#221) ---
 
 /// The field this issue asked for: a `router` block carrying its own
-/// middleware list, spelled exactly like the service-level field of the
-/// same name and resolved against `router`'s own field table rather
-/// than the service's.
+/// middleware list, resolved against `router`'s own field table — the
+/// only place `middleware` is a field at all since #221.
 #[test]
 fn router_middleware_parses_in_a_braced_body() {
     let program = parse_ok(
@@ -2896,9 +2894,6 @@ fn router_middleware_parses_in_a_braced_body() {
         router_middleware(&routers(service)[0]),
         vec!["local-ipwhitelist"]
     );
-    // The service-level field of the same name stays untouched — the two
-    // are separate slots, not one field written in two places.
-    assert!(service.fields.middleware.is_empty());
 }
 
 /// It takes the bare comma-list sugar and the bracketed form every
@@ -2959,24 +2954,68 @@ fn qualified_router_middleware_reference_parses() {
     assert_eq!(r.text(), "forwardAuth");
 }
 
-/// The service-level and router-level fields share a spelling but not a
-/// slot: one body may write both, and each lands where it was written.
+/// The old service-level spelling is refused outright rather than
+/// silently ignored, and the diagnostic says where the field went — a
+/// bare `UnknownField` here would offer `raw { middleware: ... }`,
+/// which compiles and emits a meaningless Compose key while the Traefik
+/// label the author wanted goes missing.
 #[test]
-fn service_and_router_middleware_are_separate_slots() {
-    let program = parse_ok(
-        "service s {\n  middleware forwardAuth-authentik\n  \
-         router internal, host: \"a.example.com\", middleware: local-ipwhitelist\n}\n",
+fn service_level_middleware_names_its_new_home() {
+    let err = parse("service s {\n  image \"x\"\n  middleware forwardAuth-authentik\n}\n")
+        .expect_err("expected a parse error");
+    assert!(
+        matches!(
+            err,
+            ParseError::MovedField {
+                type_name: "service",
+                ref field,
+                ..
+            } if field == "middleware"
+        ),
+        "got {err:?}"
     );
-    let service = as_service(&program.decls[0]);
-    let names: Vec<&str> = service
-        .fields
-        .middleware
-        .iter()
-        .map(Literal::text)
-        .collect();
-    assert_eq!(names, vec!["forwardAuth-authentik"]);
     assert_eq!(
-        router_middleware(&routers(service)[0]),
-        vec!["local-ipwhitelist"]
+        err.to_string(),
+        "3:3: `middleware` is no longer a `service` field — move it inside the `router` block \
+         it applies to (`router { host: \"...\", middleware: ... }`)"
+    );
+}
+
+/// A `template` body shares `service`'s field list, so it reports the
+/// move the same way — named for `template`, since that's the body the
+/// line was written in.
+#[test]
+fn template_level_middleware_names_its_new_home_too() {
+    let err = parse("template t {\n  middleware auth\n}\n").expect_err("expected a parse error");
+    assert!(
+        matches!(
+            err,
+            ParseError::MovedField {
+                type_name: "template",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// The move is reported even in the comma-continued position, where the
+/// lookahead has to decide whether `middleware` continues the preceding
+/// field's list. It doesn't: a moved name is no more a continuation
+/// than an unknown one, so the error names the enclosing body rather
+/// than the `router` the comma came from.
+#[test]
+fn service_level_middleware_after_a_comma_is_still_reported() {
+    let err = parse("service s {\n  router api, host: \"a.example.com\"\n  middleware auth\n}\n")
+        .expect_err("expected a parse error");
+    assert!(
+        matches!(
+            err,
+            ParseError::MovedField {
+                type_name: "service",
+                ..
+            }
+        ),
+        "got {err:?}"
     );
 }

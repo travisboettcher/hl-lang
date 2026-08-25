@@ -39,10 +39,10 @@ fn syncthing_example_lexes_to_expected_token_sequence() {
         Template, Ident, LParen, Ident, RParen, LBrace, // networks [traefik-net]
         Ident, LBracket, Ident, RBracket, // restart unless-stopped
         Ident, Ident, // expose $port as "{{name}}.internal.techdebtor.io"
-        Ident, Dollar, Ident, Ident, Str, // middleware local-ipwhitelist
-        Ident, Ident, RBrace,
-        // template authenticated { middleware forwardAuth-authentik }
-        Template, Ident, LBrace, Ident, Ident, RBrace,
+        Ident, Dollar, Ident, Ident, Str, // router { middleware: local-ipwhitelist }
+        Ident, LBrace, Ident, Colon, Ident, RBrace, RBrace,
+        // template authenticated { router { middleware: forwardAuth-authentik } }
+        Template, Ident, LBrace, Ident, LBrace, Ident, Colon, Ident, RBrace, RBrace,
         // template linuxserver_app(puid, pgid) {
         Template, Ident, LParen, Ident, Comma, Ident, RParen, LBrace,
         // env PUID = $puid

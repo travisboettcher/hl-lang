@@ -68,7 +68,6 @@ Program {
                     raw: RawMap {
                         entries: [],
                     },
-                    middleware: [],
                     depends_on: [],
                     networks: [],
                     dns: [],

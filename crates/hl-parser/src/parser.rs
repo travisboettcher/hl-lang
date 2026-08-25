@@ -885,9 +885,14 @@ impl<'src> Parser<'src> {
             }
             let lookahead = &self.tokens[self.pos + 1];
             let continues = match lookahead.kind {
-                TokenKind::Ident | TokenKind::Str => !matches!(
+                // Only a real field of `nested` continues the list — a
+                // name that merely *used* to be one (`FieldResolution::
+                // Moved`) is no more a continuation than an unknown key
+                // is, and letting it continue would report the move
+                // against the wrong body.
+                TokenKind::Ident | TokenKind::Str => matches!(
                     schema::resolve_field(nested, lookahead.lexeme),
-                    FieldResolution::Unknown
+                    FieldResolution::Field(_)
                 ),
                 _ => false,
             };
@@ -925,6 +930,14 @@ impl<'src> Parser<'src> {
                     type_name: schema.type_name,
                     field: key_text,
                     raw_escape_hatch: schema::supports_raw(schema),
+                    span: key_span,
+                });
+            }
+            FieldResolution::Moved(guidance) => {
+                return Err(ParseError::MovedField {
+                    type_name: schema.type_name,
+                    field: key_text,
+                    guidance,
                     span: key_span,
                 });
             }
@@ -1950,10 +1963,6 @@ fn lower_service_fields(mut fields: StructFields) -> Result<ServiceFields, Parse
         Some(FieldValue::Raw(r)) => r,
         _ => RawMap::default(),
     };
-    let middleware = match fields.remove("middleware") {
-        Some(FieldValue::RefList(v)) => v,
-        _ => Vec::new(),
-    };
     let depends_on = match fields.remove("depends_on") {
         Some(FieldValue::DependsOnEntries(v)) => v,
         _ => Vec::new(),
@@ -2008,7 +2017,6 @@ fn lower_service_fields(mut fields: StructFields) -> Result<ServiceFields, Parse
         volumes,
         env,
         raw,
-        middleware,
         depends_on,
         networks,
         dns,

@@ -768,21 +768,12 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
         name: "raw",
         kind: FieldKind::Nested(&RAW),
     },
-    // The service-level middleware list: it attaches to every `router`
-    // block that doesn't name one of its own. Since #221 [`ROUTER`] has
-    // a `middleware` row too, and the shared name is the same
-    // two-bodies-one-identifier situation `entrypoint` is already in
-    // above — resolved the same way, through [`resolve_field`] against
-    // the enclosing type's own field list, so `middleware` written in a
-    // `service`/`template` body resolves here and `middleware` written
-    // inside a `router` body resolves against [`ROUTER`]. Unlike
-    // `entrypoint`'s two rows, these two name the *same* concept at two
-    // scopes, which is exactly why they share a spelling: see
-    // [`crate::ast::Router::middleware`].
-    FieldSchema {
-        name: "middleware",
-        kind: FieldKind::ReferenceList,
-    },
+    // No `middleware` row: #221 moved it onto [`ROUTER`] outright, since
+    // a middleware only ever reaches Traefik as a label on one specific
+    // router and a service-wide list couldn't say that two routers off
+    // one container need different ones. A body that still writes it
+    // here resolves through [`moved_field`] instead of falling through
+    // to `UnknownField`.
     FieldSchema {
         name: "depends_on",
         kind: FieldKind::DependsOnList,
@@ -887,8 +878,8 @@ pub fn supports_raw(schema: &'static TypeSchema) -> bool {
 /// Whether an `alias.name`-qualified [`crate::ast::Literal::Qualified`]
 /// is *semantically* legal at `field_path` — the fully-dotted canonical
 /// name every reference-shaped position uses elsewhere in this crate
-/// (`"networks"`, `"middleware"`, `"router.entrypoint"`,
-/// `"router.path_prefix"`, `"router.middleware"`, `"depends_on"`, or
+/// (`"networks"`, `"router.entrypoint"`, `"router.path_prefix"`,
+/// `"router.middleware"`, `"dns"`, `"env_file"`, `"depends_on"`, or
 /// `"volume"` for a named-volume mount's host side).
 ///
 /// `false` for every position but the two listed here (#196). Before
@@ -908,7 +899,8 @@ pub fn supports_raw(schema: &'static TypeSchema) -> bool {
 /// qualifier against — a `network`/`volume` declaration another file
 /// can `use ... as alias` and export. Every other row names something
 /// with no `.hll`-declared existence to qualify at all (a Traefik entry
-/// point or middleware in the deployment's own `traefik.yml`, a DNS
+/// point or a router's middleware in the deployment's own
+/// `traefik.yml`, a DNS
 /// server address, an `env_file` path on disk, a same-file sibling
 /// service for `depends_on`), so a qualified entry there is rejected
 /// with [`crate::compose::ComposeError::UnsupportedQualifiedReference`]
@@ -922,7 +914,40 @@ pub enum FieldResolution {
     /// The type is schema-free (`raw`) and the key should be accepted as
     /// an arbitrary passthrough entry rather than looked up by name.
     RawPassthrough,
+    /// The key names a field this type used to have and no longer does,
+    /// carrying [`moved_field`]'s guidance on where it went. Distinct
+    /// from [`Self::Unknown`] so the diagnostic can say so — see that
+    /// function's own doc for why a bare "unknown field" is actively
+    /// misleading here.
+    Moved(&'static str),
     Unknown,
+}
+
+/// Guidance for a key that names a field `schema` used to have, or
+/// `None` for a key that was never one of its fields.
+///
+/// A removed field is not the same mistake as a typo, and on a type
+/// with a `raw` escape hatch saying so matters: [`crate::ParseError`]'s
+/// `UnknownField` offers `raw { <key>: ... }` for anything it doesn't
+/// recognize, which for a *moved* field is advice that compiles and
+/// then emits a meaningless Compose key. `middleware` is exactly that
+/// case — following the hint would write a `middleware:` key into the
+/// service and silently drop the Traefik label the author wanted, which
+/// for an authentication or IP-allowlist middleware is the "valid
+/// output, wrong service" failure #144 already closed off elsewhere.
+///
+/// One row today. It's a function rather than a `FieldSchema` flag
+/// because a moved field has no kind, no value grammar, and nothing for
+/// the parser to do with it but refuse — it exists only as a name to
+/// recognize on the way to a better error.
+pub fn moved_field(schema: &'static TypeSchema, key_text: &str) -> Option<&'static str> {
+    match (schema.type_name, key_text) {
+        // #221: `middleware` moved onto `router`. See [`ROUTER`].
+        ("service" | "template", "middleware") => Some(
+            "move it inside the `router` block it applies to (`router { host: \"...\", middleware: ... }`)",
+        ),
+        _ => None,
+    }
 }
 
 /// The single function every field-name lookup in the parser goes
@@ -934,6 +959,9 @@ pub fn resolve_field(schema: &'static TypeSchema, key_text: &str) -> FieldResolu
     }
     if schema.schema_free {
         return FieldResolution::RawPassthrough;
+    }
+    if let Some(guidance) = moved_field(schema, key_text) {
+        return FieldResolution::Moved(guidance);
     }
     FieldResolution::Unknown
 }

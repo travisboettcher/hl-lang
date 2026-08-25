@@ -47,7 +47,7 @@ the exact same grammar as a service's own top-level body.
 
 `template` is the only word in `hll` that you can never use as an
 identifier. Everything else that looks like a keyword—`service`,
-`network`, `image`, `volume`, `env`, `restart`, `expose`, `middleware`,
+`network`, `image`, `volume`, `env`, `restart`, `expose`, `router`,
 `with`, `as`, `use`, `raw`, `defaults`, and so on—is an ordinary
 identifier that only *means* something because of where it appears and
 what field it's assigned to. This is deliberate: it keeps the door open
@@ -135,7 +135,7 @@ an ordinary struct body. See [`volume`](./built-in-fields.md#volume).
 Writing any of these more than once in the same body accumulates
 entries rather than overwriting—a service can have several `volume`
 lines, several `publish` lines, and several `env` lines. The same is
-true of `middleware` and `depends_on`, which are list fields. `image`
+true of `networks` and `depends_on`, which are list fields. `image`
 and `restart`, by contrast, are scalar—writing either twice in the same
 body is a compile error, not a silent overwrite.
 
@@ -255,7 +255,8 @@ generated label means.
 A `template`'s declared parameter carries no type annotation—just a bare
 name (`template linuxserver_app(puid, pgid) { ... }`). Instead,
 composition checks a substituted argument against the field it lands in:
-a reference-shaped position such as `networks` or `middleware` rejects a
+a reference-shaped position such as `networks` or a router's
+`middleware` rejects a
 bare number, since that position's own grammar can never hold one
 directly, and a `number`-typed position such as `expose.port` rejects
 anything that isn't one, whether the value arrives through a `$param` or

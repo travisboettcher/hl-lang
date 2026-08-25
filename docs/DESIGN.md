@@ -45,7 +45,7 @@ Punctuation: { } [ ] ( ) : = -> , . $
 - `template` is the *only* reserved word in the entire language. Everything
   else that looks like a keyword (`service`, `network`, `image`, `volume`,
   `publish`, `env`, `env_file`, `restart`, `expose`, `healthcheck`,
-  `middleware`, `depends_on`, `networks`, `dns`, `devices`,
+  `depends_on`, `networks`, `dns`, `devices`,
   `container_name`, `command`, `entrypoint`, `privileged`, `with`, `as`,
   `external`, `use`, `raw`, `defaults`, and more) is an ordinary
   `IDENT`, resolved against a schema table at parse time—not a
@@ -149,7 +149,7 @@ literal        ::= STRING | NUMBER | IDENT | IDENT "." IDENT | "$" IDENT
   kind arrived, with nothing forcing the two descriptions to agree.
   Dropping the annotation and checking a substituted argument against
   the field it lands in instead needs no such vocabulary. A
-  reference-shaped position (`networks`, `middleware`, `dns`,
+  reference-shaped position (`networks`, `dns`,
   `env_file`, a `depends_on` entry's own reference, `expose.entrypoint`,
   `router.entrypoint`, `router.path_prefix`, `router.middleware`) rejects
   a substituted `Literal::Number`—the one literal kind that position's own grammar
@@ -190,9 +190,10 @@ literal        ::= STRING | NUMBER | IDENT | IDENT "." IDENT | "$" IDENT
   resolve `$name` against. This is, like the preceding newline/comma
   layout rules, a context-sensitive constraint the plain grammar can't
   express. The check is uniform across every position `literal` appears
-  in, `networks`/`middleware`/`dns`/`env_file`/an `entrypoint` list/a
+  in, `networks`/`dns`/`env_file`/an `entrypoint` or `middleware`
+  list/a
   `depends_on` entry included—a template can write `networks [$net]` or
-  `middleware $mw` exactly as freely as `restart $policy`, since there is
+  `router { middleware: $mw }` exactly as freely as `restart $policy`, since there is
   only the one grammar production for a value everywhere it's expected.
 - The `IDENT "." IDENT` form of `literal`—`alias.name`, produced only
   from a bare `IDENT` token followed by `.` `IDENT`, never from a
@@ -301,7 +302,7 @@ same two entries—see #81.
    body, where a bare comma never starts a valid statement.
 4. **Repeatable-field accumulation**—semantic, not part of the
    Context-Free Grammar (CFG)—writing `volume`, `publish`, `env`,
-   `middleware`, `depends_on`, or `router` more than once in
+   `depends_on`, or `router` more than once in
    one body appends, since those fields are list/map-kinded—subject to
    the set-like lists' distinct-name rule under "Composition" below, which
    drops a repeat of a name already present (`depends_on` instead keeps
@@ -457,7 +458,7 @@ to express.
 Through #197, `expose` also modeled exactly one Traefik router of its
 own: `host` generated the router-rule label, and `entrypoint` (a list of
 references, `entrypoint web, web-secure`, for the same reason
-`middleware` is—Traefik's `entrypoints=` label is comma-separated, and
+`router`'s own `middleware` is—Traefik's `entrypoints=` label is comma-separated, and
 modelling that as a list keeps the separator codegen's to write rather
 than the user's) restricted it to named entry points. #198 moved both
 fields onto `router` outright, leaving `expose` with the one field it
@@ -519,17 +520,16 @@ that both an explicit unnamed `router { }` and the `as` sugar's own
 unnamed router are ordinary entries in one list before composition ever
 runs.
 
-`host` is a plain scalar. `entrypoint` is a reference list, spelled and
-merged exactly like `middleware`. Since #221 `middleware` itself is a
-third reference list here, sharing both that spelling and that merge
-with the service-level field it overrides—see its own paragraph further
-down. `path_prefix` uses that same reference-list grammar too: a prefix is free text a template
+`host` is a plain scalar. `entrypoint` and, since #221, `middleware`
+are reference lists, spelled and merged the same way `networks` is—see
+`middleware`'s own paragraph further down. `path_prefix` uses that same
+reference-list grammar too: a prefix is free text a template
 legitimately fills in with a `$param`, which every reference-list field
 accepts—`entrypoint` included—since `literal` now carries `$param`
 itself rather than needing a separate grammar to hold it. The qualified
 `alias.name` form still doesn't reach `path_prefix`'s generated output,
 though: it parses there like anywhere else, but `path_prefix` rejects
-it, the same as `middleware`/`dns`/`env_file`/`entrypoint`/`depends_on`—see
+it, the same as `dns`/`env_file`/`entrypoint`/`middleware`/`depends_on`—see
 the following Imports section. With prefixes set, the rule
 becomes ``Host(`h`) && (PathPrefix(`a`) || PathPrefix(`b`))``. The
 parentheses are load-bearing, not cosmetic: `&&` binds tighter than `||`
@@ -543,39 +543,51 @@ One thing a `router` deliberately doesn't carry: a `port`. Compose's
 so it stays derived from `expose`'s own `port`, and several routers off
 one container all balance onto that one port.
 
-`middleware` used to be the second such thing—service-level only,
-attaching to every router a service has—and #221 moved it onto `router`
-as well, keeping the service-level field exactly where it was. That
-issue is what settled the shape: a real service (`gitea`) needs a public
-router on `git.techdebtor.io` with no middleware beside an internal one
-on `git.internal.techdebtor.io` behind `local-ipwhitelist`. With one
-service-wide list, either both routers get the allowlist—breaking the
-intentionally public route—or neither does, dropping IP restriction from
-the internal-only one. That isn't a style difference, so the whole
-`labels` list stayed hand-typed in `raw`, giving up every check `router`
-performs, for the one service that most needed them.
+`middleware` sits on `router` since #221, and only there—it used to be
+a service-level field instead, one list attaching to every router the
+service had. That issue is what settled the scope: a real service
+(`gitea`) needs a public router on `git.techdebtor.io` with no
+middleware beside an internal one on `git.internal.techdebtor.io` behind
+`local-ipwhitelist`. With one service-wide list, either both routers get
+the allowlist—breaking the intentionally public route—or neither does,
+dropping IP restriction from the internal-only one. That isn't a style
+difference, so the whole `labels` list stayed hand-typed in `raw`,
+giving up every check `router` performs, for the one service that most
+needed them.
 
-A router's own list *replaces* the service-level one for that router,
-rather than extending it. Extending would only re-spell the behavior
-that already exists: a service-level `middleware` already reaches every
-router, so a list that could only add to it would leave the preceding
-public router unable to shed the allowlist—exactly the gap. Replacing is
-what lets two routers off one container differ, which is the entire
-point of the field. An empty router list means the block said nothing
-rather than *attach nothing*, so a service-level `middleware` still
-reaches every router that names none of its own, and every `.hll` file
-written before #221 emits precisely the labels it always did. To give
-one router no middleware while a sibling carries some, move the list off
-the service and onto the routers that want it—the same explicitness
-`router` already asks for from `host`.
+The part worth justifying is moving the field, rather than adding a
+per-router one beside it and keeping both, which would have been the
+smaller change. Two spellings of one concept would need a precedence rule
+between
+them—override or extend, and either answer is wrong somewhere. Extend
+leaves the preceding public router unable to shed the allowlist, which
+leaves the reported gap unfixed. Override fixes that but makes the
+service-level line mean "unless a router disagrees," so one `router`
+block no longer states what that router attaches: you have to check the
+service body too, and a middleware silently added to a public route or
+silently dropped from a restricted one is a security bug that compiles
+clean. A middleware is per-router in Traefik's own model, so the field
+belongs on the router—one scope, read where it's written.
 
-The two levels merge on different axes, which is worth keeping straight.
-*Across tiers*—`defaults`, each `with` target, the service body—one
+The cost is real and accepted: routers that share a middleware each name
+it, where one service-level line used to do. Templates absorb most of
+that—a template's own `router` block carries the shared name once for
+every service that composes it—and what's left is repetition the
+compiler can see, rather than brevity that hides which routers differ.
+
+Across tiers—`defaults`, each `with` target, the service body—one
 router's `middleware` concatenates and dedupes by name, exactly like its
-`entrypoint`, so a template can supply a base list a service body adds
-to. The *override* is between that merged per-router list and the
-service-level field, and it happens in codegen once composition is
-already done, not between tiers.
+`entrypoint`, so a template supplies a base list a service body adds to.
+
+The old spelling doesn't silently vanish. `middleware` written in a
+`service`/`template` body is `ParseError::MovedField`, naming where the
+field went, rather than the generic `UnknownField`—which on these two
+types offers the `raw { ... }` escape hatch, advice that here compiles
+and then emits a meaningless `middleware:` Compose key while the Traefik
+label the author wanted goes missing. That's the same "valid output,
+wrong service" failure #144 closed off, arrived at through a helpful
+hint, so the removed name stays recognized purely to name where it went
+(`schema::moved_field`).
 
 Besides the three top-level types, `healthcheck`, `traefik`, and
 `router` are the table's struct-kind rows with no primary field.
@@ -618,7 +630,7 @@ costs nothing beyond what `healthcheck { disable }` already pays for,
 and leaves `traefik` a home a later Traefik knob can join without
 inventing a second `traefik`-prefixed field name.
 
-`middleware`, `depends_on`, `networks`, `dns`, and `env_file` aren't
+`depends_on`, `networks`, `dns`, and `env_file` aren't
 rows in this table—they're plain list-of-reference fields directly on
 `service`/`template` (`dns ["192.168.50.182"]`: a per-service Domain
 Name System (DNS) resolver override, Compose's own `dns:` key—the field
@@ -740,8 +752,8 @@ Merge priority, lowest to highest:
 3. the service's own body—always wins over everything
 
 List fields concatenate, so no collision is possible. The set-like ones
-(`middleware`—the service-level field and a `router`'s own alike—and
-`networks`) concatenate by
+(`networks` alone, since #221 moved `middleware` onto `router`, where
+`merge_routers` dedupes it by this same rule) concatenate by
 *distinct* name, keeping the first occurrence, while `dns` and
 `env_file` keep duplicates since their order is observable—resolver
 priority for `dns`, Compose's own last-file-wins precedence for
@@ -751,7 +763,7 @@ priority for `dns`, Compose's own last-file-wins precedence for
 templates only. `devices`
 used to sit in the set-like group too at #157, giving a repeated
 `"host:container"` mapping the same first-occurrence-wins treatment a
-repeated `networks`/`middleware` entry got, since there was no
+repeated `networks` entry got, since there was no
 order-dependent Compose behavior under which naming one twice meant
 anything different from naming it once. #167 moved it onto the same
 key-by-key `merge_map` path `volume`/`publish` use instead, keyed on the
@@ -805,7 +817,7 @@ gives `volume`/`publish` would silently discard it, since a `volume`
 entry has nothing inside it to keep and a router does. Within one name,
 `host` is a scalar and collides between two explicit templates, while
 `entrypoint` and `path_prefix` concatenate—`entrypoint` by distinct name
-like `middleware`, `path_prefix` keeping duplicates like `dns`, since
+like `networks`, `path_prefix` keeping duplicates like `dns`, since
 prefixes are `||` alternatives whose written order is observable in the
 emitted rule. A collision names the router as well as the field, through
 the same `MapKeyCollision` a colliding `env` key raises, since a message
@@ -909,7 +921,7 @@ use "docker.hll" as traefik
   (`networks [traefik.traefik-net]`), a named-volume mount's host side
   (`volume storage.media -> "/data"`), a `with` invocation's target
   (`with common.internal_web { ... }`)—and, syntactically, every other
-  reference-shaped position too (`middleware`, `dns`, `env_file`, an
+  reference-shaped position too (`dns`, `env_file`, an
   `entrypoint` list, `depends_on`, `router.path_prefix`,
   `router.middleware`), since `alias.`
   and `$param` are the same `literal` production wherever it's
@@ -919,7 +931,7 @@ use "docker.hll" as traefik
   against. Every other reference-shaped position rejects one outright,
   with `UnsupportedQualifiedReference`, exactly as it always has—none of
   them has a coherent cross-file meaning: `depends_on` names a same-file
-  sibling service, and `middleware`/`dns`/`env_file`/an `entrypoint`
+  sibling service, and `dns`/`env_file`/an `entrypoint`
   list/`path_prefix`/a router's own `middleware` aren't resolved against
   anything an `.hll` file declares at all—an `env_file` entry names a path on disk next to the
   generated Compose file. `devices` was never a candidate for a
@@ -990,12 +1002,14 @@ template internal_web(port) {
   router {
     host: "{{name}}.internal.techdebtor.io"
     entrypoint: web-secure
+    middleware: local-ipwhitelist
   }
-  middleware local-ipwhitelist
 }
 
 template authenticated {
-  middleware forwardAuth-authentik
+  router {
+    middleware: forwardAuth-authentik
+  }
 }
 
 template linuxserver_app(puid, pgid) {
@@ -1031,12 +1045,14 @@ template internal_web(port) {
   router {
     host: "{{name}}.internal.techdebtor.io"
     entrypoint: web-secure
+    middleware: local-ipwhitelist
   }
-  middleware local-ipwhitelist
 }
 
 template authenticated {
-  middleware forwardAuth-authentik
+  router {
+    middleware: forwardAuth-authentik
+  }
 }
 
 template linuxserver_app(puid, pgid) {
@@ -1216,29 +1232,31 @@ error, and there's no `--quiet`, `-W`, or `-A` style suppression yet.
 Warnings are a named enum per stage precisely so a later suppression
 scheme has something to filter on.
 
-The fourth construct of this shape is *not* a warning: `middleware` on a
-service with no `router` at all is a hard error—#144, redirected by #198
-from "no `expose.host`" to "no `router`" once `router` became the only
-source of a Traefik router. `middleware` only exists as a label on a
-Traefik router, and with no router anywhere there's nothing to attach it
-to, so no reading of the pair means anything. Dropping it quietly, by
-contrast, shipped a service with its forward-auth missing and nothing to
-say so. A `router` block that sets no `host` is the same mistake one
-level in—see the `router` list below—and #198 folded the two into one
-`CodegenError` variant (`RouterBlockWithoutHost`), told apart by which
-field it names (`"middleware"`, with no block to name, versus
-`"router"`, naming the specific block): the underlying question is the
-same one either way, "a Traefik-only construct with no router to attach
-to or be," so a consolidated diagnostic is more honest than two that
-happen to share a cause. A `router`'s own `middleware`, added by #221,
-needs no third shape of this check: it can't exist without the block
-it's written inside, which is the router it attaches to.
+The fourth construct of this shape is *not* a warning: a `router` block
+that sets no `host` is a hard error—#144, redirected by #198 from "no
+`expose.host`" to "no `router`" once `router` became the only source of
+a Traefik router. The block that exists only to *be* a router says
+nothing about which requests reach it, so no reading of it means
+anything, while dropping it quietly shipped a service with its
+forward-auth missing and nothing to say so.
+
+Through #220 this check had a second shape, told apart by a `field`
+discriminant on the same `CodegenError` variant: a service-level
+`middleware` with no `router` anywhere to attach it to. #221 moved
+`middleware` inside `router`, which makes that shape unwritable—the list
+only exists within the block it attaches to—so the variant collapsed to
+the one question it still answers and lost the discriminant with it
+(`RouterWithoutHost`). What used to be a router-less `middleware` is now
+either a host-less `router`, caught here, or the old spelling on a
+service body, caught one stage earlier by `ParseError::MovedField`.
 
 `traefik`'s own `disabled` flag raises the mirror-image error—see
-#159: setting a `router` block or `middleware` on a service that also
-switches Traefik off. Through #197 this list also named `expose.host`/
+#159: declaring a `router` block on a service that also switches Traefik
+off. Through #197 this list also named `expose.host`/
 `expose.entrypoint`—#198 removed both once `expose` stopped carrying
-either field. Both diagnostics share one shape, a field whose only
+either field, and #221 removed the service-level `middleware` from it
+the same way, leaving a `router` block the only construct to check. Both
+diagnostics share one shape, something whose only
 meaning depends on a router existing, contradicted by something else
 the same service says about that very router, so this gets the same
 hard-error treatment rather than a fourth warning. The router-less case
@@ -1258,7 +1276,7 @@ shape—something that can only be a Traefik router, either contradicted,
 or left incomplete—#184, #198:
 
 - A `router` block with no `host` has no rule to emit, so there is
-  nothing it could have meant—this is `RouterBlockWithoutHost`, described
+  nothing it could have meant—this is `RouterWithoutHost`, described
   in the preceding paragraph. Through #197 this was stricter than
   `expose`, which tolerated a host-less block because its `port` still
   did a second job, Compose's own `expose:` key, that had nothing to do

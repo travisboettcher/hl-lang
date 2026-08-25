@@ -12,6 +12,6 @@ service jellyfin {
   router {
     host: "jellyfin.example.com"
     entrypoint: web-secure
+    middleware: local-ipwhitelist
   }
-  middleware local-ipwhitelist
 }

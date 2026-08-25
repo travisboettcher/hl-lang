@@ -115,25 +115,17 @@ fn reject_metacharacters(
     }
 }
 
-/// The first Traefik-specific field a *disabled* service also sets, if
-/// it sets one at all (#159) — checked in the same order [`compute`]
-/// would have emitted their labels were the service not disabled
-/// (each `router` block, then `middleware`), so the field named in the
-/// diagnostic is the first one that contradicts `traefik { disabled }`.
+/// The first `router` block a *disabled* service also declares, if it
+/// declares one at all (#159) — the whole of what can contradict
+/// `traefik { disabled }` since #221 folded `middleware` inside
+/// `router`, where it can't be written without one.
 ///
 /// `expose.port` deliberately isn't checked here: it's Compose's own
 /// `expose:` key, plain container-network visibility with nothing to do
 /// with Traefik, so a disabled service may still declare it (#159) —
-/// see [`crate::CodegenError::TraefikDisabledWithRouterField`]'s doc.
-/// A `router` block leads because disabling Traefik makes even the
-/// block that would have *created* a router a contradiction, not just
-/// `middleware`, which only ever attaches to one.
-fn traefik_conflict_field(fields: &ServiceFields) -> Option<(&'static str, Span)> {
-    fields
-        .routers
-        .first()
-        .map(|r| ("router", r.span))
-        .or_else(|| fields.middleware.first().map(|r| ("middleware", r.span())))
+/// see [`crate::CodegenError::TraefikDisabledWithRouter`]'s doc.
+fn traefik_conflict_router(fields: &ServiceFields) -> Option<Span> {
+    fields.routers.first().map(|r| r.span)
 }
 
 /// The router id a `router` block's labels are keyed under: the
@@ -197,63 +189,30 @@ fn entrypoints_label(
     )))
 }
 
-/// The middleware list one router actually attaches: its own, when the
-/// `router` block named any, and the service-level list otherwise
-/// (#221).
+/// The one `middlewares=` label for `id`, or `None` when the router
+/// attaches no middleware.
 ///
-/// The router's own list *replaces* the service-level one rather than
-/// extending it. That's the whole point of the field: a service-level
-/// `middleware` already reaches every router, so a per-router list that
-/// only added to it would leave the case #221 reports unsayable — a
-/// public router beside an internal one, where the public one must not
-/// carry the internal one's IP allowlist. See
+/// `middleware` is a `router` field and only ever a `router` field
+/// (#221): a middleware reaches Traefik as a label on one specific
+/// router, so a service-wide list could not express two routers off one
+/// container needing different ones — see
 /// [`hl_parser::ast::Router::middleware`].
 ///
-/// An empty router list means the block said nothing, so the
-/// service-level list applies unchanged and every `.hll` file written
-/// before per-router middleware existed emits exactly the labels it
-/// always did.
-///
-/// Returned alongside the field path the entries were written at, so a
-/// rejected entry's diagnostic can name the position the user actually
-/// wrote — the two always travel together, which is why one function
-/// hands back both rather than the caller re-deciding which won.
-fn effective_middleware<'a>(
-    router: &'a Router,
-    service: &'a [Literal],
-) -> (&'static str, &'a [Literal]) {
-    if router.middleware.is_empty() {
-        ("middleware", service)
-    } else {
-        ("router.middleware", &router.middleware)
-    }
-}
-
-/// The one `middlewares=` label for `id`, or `None` when the router
-/// attaches no middleware at all.
-///
-/// `field` names the position a rejected entry was written in —
-/// `"middleware"` for the service-level list, `"router.middleware"` for
-/// a router's own (#221) — so the diagnostic quotes back what the user
-/// actually wrote rather than always naming the service-level spelling.
-///
-/// Called once per router rather than resolved once up front, so the
-/// first metacharacter rejection a service hits is still the first one
-/// in *emission* order — the convention every other diagnostic here
-/// follows. The work is a handful of string comparisons, and for a
-/// service whose routers all fall back to the service-level list the
-/// result is identical each time.
-fn middlewares_label(
-    id: &str,
-    field: &'static str,
-    middleware: &[Literal],
-) -> Result<Option<String>, CodegenError> {
+/// Each name gets an `@file` suffix, the file provider's own reference
+/// convention, applied unconditionally — unlike `entrypoints=` above,
+/// whose names carry no such suffix.
+fn middlewares_label(id: &str, middleware: &[Literal]) -> Result<Option<String>, CodegenError> {
     if middleware.is_empty() {
         return Ok(None);
     }
     let mut mws = Vec::with_capacity(middleware.len());
     for r in middleware {
-        reject_metacharacters(r.text(), field, MIDDLEWARE_METACHARACTERS, r.span())?;
+        reject_metacharacters(
+            r.text(),
+            "router.middleware",
+            MIDDLEWARE_METACHARACTERS,
+            r.span(),
+        )?;
         mws.push(format!("{}@file", r.text()));
     }
     Ok(Some(format!(
@@ -265,14 +224,10 @@ fn middlewares_label(
 /// Emits one `router` block's labels — rule, then `entrypoints=`, then
 /// `middlewares=` — in the same order and the same shape `expose.host`'s
 /// own router emits them (#184).
-///
-/// `middleware` is the *service-level* list; which list this router
-/// actually attaches is [`effective_middleware`]'s decision (#221).
 fn push_router_labels(
     labels: &mut Vec<String>,
     service_name: &str,
     router: &Router,
-    middleware: &[Literal],
     bindings: &HashMap<&str, &str>,
 ) -> Result<(), CodegenError> {
     if let Some(name) = router.key() {
@@ -283,9 +238,8 @@ fn push_router_labels(
     let host_lit = match &router.host {
         Some(host) => host,
         None => {
-            return Err(CodegenError::RouterBlockWithoutHost {
+            return Err(CodegenError::RouterWithoutHost {
                 service: service_name.to_string(),
-                field: "router",
                 router: router.key().map(str::to_string),
                 span: router.span,
             });
@@ -314,8 +268,7 @@ fn push_router_labels(
     {
         labels.push(label);
     }
-    let (field, mws) = effective_middleware(router, middleware);
-    if let Some(label) = middlewares_label(&id, field, mws)? {
+    if let Some(label) = middlewares_label(&id, &router.middleware)? {
         labels.push(label);
     }
     Ok(())
@@ -342,14 +295,14 @@ fn push_router_labels(
 /// "<host>"`'s own sugared one included) reaches none of that and emits
 /// only the `traefik.docker.network=` line, if any.
 ///
-/// `middleware` only ever means anything attached to a router, so it
-/// requires at least one — any `router` block, unnamed or named. Setting
-/// it with none at all is [`CodegenError::RouterBlockWithoutHost`], not a
-/// silently label-less service (#80). Only the service-level list needs
-/// that check: a `router`'s own `middleware` (#221) can't exist without
-/// the block it's written inside. A `router` block that sets no
-/// `host` at all is the same error one step in — the block that exists
-/// only to *be* a router says nothing about which requests reach it.
+/// A `router` block that sets no `host` is
+/// [`CodegenError::RouterWithoutHost`], not a silently label-less
+/// service — the block that exists only to *be* a router says nothing
+/// about which requests reach it. #80's companion check, for a
+/// `middleware` with no router to attach it to, is gone with the
+/// service-level field itself (#221): a router's own `middleware`
+/// can't be written without the block it lives in, so the mistake is
+/// no longer expressible.
 /// Once every router block is confirmed to have a host, a service that
 /// has at least one but sets no `expose <port>` is
 /// [`CodegenError::RouterWithoutPort`] (#198): a router with no port to
@@ -376,10 +329,9 @@ pub fn compute(
     if let Some(traefik) = &fields.traefik
         && let Some(disabled_span) = traefik.disabled
     {
-        if let Some((field, span)) = traefik_conflict_field(fields) {
-            return Err(CodegenError::TraefikDisabledWithRouterField {
+        if let Some(span) = traefik_conflict_router(fields) {
+            return Err(CodegenError::TraefikDisabledWithRouter {
                 service: service_name.to_string(),
-                field,
                 disabled_span,
                 span,
             });
@@ -393,22 +345,6 @@ pub fn compute(
         labels.push(format!("traefik.docker.network={net}"));
     }
 
-    // `middleware` only ever means anything attached to a router, so
-    // with no router at all there's nothing to attach it to (#80, #144,
-    // #198) — checked before any label is emitted, so a service is
-    // refused the same way whether it never wrote `router` at all or
-    // just hasn't gotten to it yet.
-    if fields.routers.is_empty()
-        && let Some(first) = fields.middleware.first()
-    {
-        return Err(CodegenError::RouterBlockWithoutHost {
-            service: service_name.to_string(),
-            field: "middleware",
-            router: None,
-            span: first.span(),
-        });
-    }
-
     // In source order (#184), which composition has already made a
     // stable function of the source — see `compose.rs`'s `merge_routers`.
     // `expose <port> as "<host>"`'s own sugared unnamed router is just
@@ -416,13 +352,7 @@ pub fn compute(
     // pushes it during parsing), so it reaches the exact same
     // `push_router_labels` call every hand-written `router` block does.
     for router in &fields.routers {
-        push_router_labels(
-            &mut labels,
-            service_name,
-            router,
-            &fields.middleware,
-            bindings,
-        )?;
+        push_router_labels(&mut labels, service_name, router, bindings)?;
     }
 
     // Per Compose *service*, not per router: a container listens on one
@@ -534,44 +464,23 @@ mod tests {
         assert!(labels.is_empty());
     }
 
-    /// #80/#198: `middleware` only ever means anything attached to a
-    /// router, so with none at all there's nothing to attach it to —
-    /// whether the service has no `expose` at all or an `expose <port>`
-    /// with nothing routing to it. A port with no router is exactly as
-    /// router-less as no `expose` at all (constraint #3: `expose <port>`
-    /// alone stays legal, it just doesn't rescue a router-less
-    /// `middleware`).
+    /// #80's router-less-`middleware` check is gone with the field it
+    /// guarded (#221): a service with no `router` has nowhere to write a
+    /// middleware at all, so the mistake it caught can't be built — the
+    /// list lives on [`Router`], and a service holds only routers. What's
+    /// left to pin is that a router-less service is still quietly legal,
+    /// emitting its non-router labels and no diagnostic.
     #[test]
-    fn middleware_without_a_router_is_rejected() {
-        let mut fields = ServiceFields {
-            middleware: refs(&["forwardAuth-authentik"]),
-            ..Default::default()
-        };
-        let err = compute("s", &fields, None, &bindings()).unwrap_err();
-        assert!(matches!(
-            err,
-            CodegenError::RouterBlockWithoutHost {
-                field: "middleware",
-                router: None,
-                ..
-            }
-        ));
+    fn a_service_with_no_router_has_nowhere_to_name_middleware() {
+        let mut fields = ServiceFields::default();
+        assert!(compute("s", &fields, None, &bindings()).unwrap().is_empty());
 
         fields.expose = Some(expose_port(80));
-        let err = compute("s", &fields, None, &bindings()).unwrap_err();
-        assert!(matches!(
-            err,
-            CodegenError::RouterBlockWithoutHost {
-                field: "middleware",
-                router: None,
-                ..
-            }
-        ));
+        assert!(compute("s", &fields, None, &bindings()).unwrap().is_empty());
     }
 
-    /// The guard is specific to router-attached fields: a service with
-    /// neither a router nor `middleware` still generates its non-router
-    /// labels and no diagnostic.
+    /// A service with neither a router nor a port still generates its
+    /// non-router labels and no diagnostic.
     #[test]
     fn an_expose_with_no_port_and_no_router_is_fine() {
         let fields = ServiceFields {
@@ -678,12 +587,12 @@ mod tests {
     #[test]
     fn newline_in_middleware_reference_is_rejected() {
         let mut fields = router_with_host("ok.example.com");
-        fields.middleware = refs(&["authentik\nsecond"]);
+        fields.routers[0].middleware = refs(&["authentik\nsecond"]);
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
             CodegenError::UnsafeLabelValue {
-                field: "middleware",
+                field: "router.middleware",
                 character: '\n',
                 ..
             }
@@ -832,12 +741,12 @@ mod tests {
     #[test]
     fn comma_in_middleware_reference_is_rejected() {
         let mut fields = router_with_host("ok.example.com");
-        fields.middleware = refs(&["a,b"]);
+        fields.routers[0].middleware = refs(&["a,b"]);
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
             CodegenError::UnsafeLabelValue {
-                field: "middleware",
+                field: "router.middleware",
                 character: ',',
                 ..
             }
@@ -865,13 +774,13 @@ mod tests {
     fn full_router_produces_all_labels_in_order() {
         let mut r = router(None, Some("syncthing.internal.techdebtor.io"));
         r.entrypoint = refs(&["web-secure"]);
+        r.middleware = vec![
+            Literal::Ident("local-ipwhitelist".to_string(), span()),
+            Literal::Ident("forwardAuth-authentik".to_string(), span()),
+        ];
         let fields = ServiceFields {
             routers: vec![r],
             expose: Some(expose_port(8384)),
-            middleware: vec![
-                Literal::Ident("local-ipwhitelist".to_string(), span()),
-                Literal::Ident("forwardAuth-authentik".to_string(), span()),
-            ],
             ..Default::default()
         };
         let labels = compute("syncthing", &fields, Some("docker_default"), &bindings()).unwrap();
@@ -924,45 +833,19 @@ mod tests {
         assert_eq!(labels, vec!["traefik.enable=false"]);
     }
 
+    /// A middleware can only be written inside a `router` since #221,
+    /// so a disabled service carrying one is refused for the block that
+    /// holds it — there is no longer a second, field-shaped way to
+    /// contradict `disabled`.
     #[test]
-    fn disabled_service_with_middleware_is_rejected() {
-        let fields = ServiceFields {
-            traefik: Some(disabled_traefik()),
-            middleware: refs(&["forwardAuth-authentik"]),
-            ..Default::default()
-        };
-        let err = compute("db", &fields, None, &bindings()).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                CodegenError::TraefikDisabledWithRouterField {
-                    field: "middleware",
-                    ..
-                }
-            ),
-            "got {err:?}"
-        );
-    }
-
-    /// When a disabled service contradicts itself on more than one
-    /// front, the `router` block is the one named — the same "first in
-    /// emission order" convention `traefik_conflict_field` documents:
-    /// a whole router is a bigger contradiction than a field that merely
-    /// attaches to one.
-    #[test]
-    fn disabled_service_with_router_and_middleware_reports_router_first() {
-        let mut fields = with_routers(vec![router(Some("api"), Some("db.example.com"))]);
+    fn disabled_service_with_router_middleware_is_rejected() {
+        let mut r = router(Some("api"), Some("db.example.com"));
+        r.middleware = refs(&["forwardAuth-authentik"]);
+        let mut fields = with_routers(vec![r]);
         fields.traefik = Some(disabled_traefik());
-        fields.middleware = refs(&["forwardAuth-authentik"]);
         let err = compute("db", &fields, None, &bindings()).unwrap_err();
         assert!(
-            matches!(
-                err,
-                CodegenError::TraefikDisabledWithRouterField {
-                    field: "router",
-                    ..
-                }
-            ),
+            matches!(err, CodegenError::TraefikDisabledWithRouter { .. }),
             "got {err:?}"
         );
     }
@@ -1160,7 +1043,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                CodegenError::RouterBlockWithoutHost { field: "router", ref router, .. } if router.as_deref() == Some("api")
+                CodegenError::RouterWithoutHost { ref router, .. } if router.as_deref() == Some("api")
             ),
             "got {err:?}"
         );
@@ -1173,14 +1056,7 @@ mod tests {
         let fields = with_routers(vec![router(None, None)]);
         let err = compute("app", &fields, None, &bindings()).unwrap_err();
         assert!(
-            matches!(
-                err,
-                CodegenError::RouterBlockWithoutHost {
-                    field: "router",
-                    router: None,
-                    ..
-                }
-            ),
+            matches!(err, CodegenError::RouterWithoutHost { router: None, .. }),
             "got {err:?}"
         );
     }
@@ -1194,13 +1070,7 @@ mod tests {
         let fields = with_routers(vec![r]);
         let err = compute("app", &fields, None, &bindings()).unwrap_err();
         assert!(
-            matches!(
-                err,
-                CodegenError::RouterBlockWithoutHost {
-                    field: "router",
-                    ..
-                }
-            ),
+            matches!(err, CodegenError::RouterWithoutHost { .. }),
             "got {err:?}"
         );
     }
@@ -1214,13 +1084,7 @@ mod tests {
         let fields = with_routers(vec![r]);
         let err = compute("app", &fields, None, &bindings()).unwrap_err();
         assert!(
-            matches!(
-                err,
-                CodegenError::RouterBlockWithoutHost {
-                    field: "router",
-                    ..
-                }
-            ),
+            matches!(err, CodegenError::RouterWithoutHost { .. }),
             "got {err:?}"
         );
     }
@@ -1395,17 +1259,18 @@ mod tests {
         );
     }
 
-    /// The service-level `middleware` attaches to every router the
-    /// service has that doesn't name one of its own — the behavior that
-    /// predates #221, and still what a file writing only the
-    /// service-level field gets.
+    /// The case the old service-level field existed for — every router
+    /// wanting the same middleware — still works since #221, spelled by
+    /// naming it on each router. That's more typing than one shared
+    /// line, and deliberately so: the shared line couldn't express the
+    /// routers that need to *differ*, which is the whole of #221.
     #[test]
-    fn middleware_attaches_to_every_router() {
-        let mut fields = with_routers(vec![
-            router(None, Some("a.example.com")),
-            router(Some("api"), Some("b.example.com")),
-        ]);
-        fields.middleware = refs(&["forwardAuth-authentik"]);
+    fn every_router_can_name_the_same_middleware() {
+        let mut unnamed = router(None, Some("a.example.com"));
+        unnamed.middleware = refs(&["forwardAuth-authentik"]);
+        let mut api = router(Some("api"), Some("b.example.com"));
+        api.middleware = refs(&["forwardAuth-authentik"]);
+        let mut fields = with_routers(vec![unnamed, api]);
         fields.expose = Some(expose_port(80));
         let labels = compute("app", &fields, None, &bindings()).unwrap();
         assert_eq!(
@@ -1414,25 +1279,6 @@ mod tests {
                 "traefik.http.routers.app.rule=Host(`a.example.com`)",
                 "traefik.http.routers.app.middlewares=forwardAuth-authentik@file",
                 "traefik.http.routers.app-api.rule=Host(`b.example.com`)",
-                "traefik.http.routers.app-api.middlewares=forwardAuth-authentik@file",
-                "traefik.http.services.app.loadbalancer.server.port=80",
-            ]
-        );
-    }
-
-    /// A `router` block is a router, so `middleware` beside one has
-    /// somewhere to attach and is no longer the router-less mistake #80
-    /// refuses.
-    #[test]
-    fn middleware_with_a_router_is_accepted() {
-        let mut fields = with_routers(vec![router(Some("api"), Some("a.example.com"))]);
-        fields.middleware = refs(&["forwardAuth-authentik"]);
-        fields.expose = Some(expose_port(80));
-        let labels = compute("app", &fields, None, &bindings()).unwrap();
-        assert_eq!(
-            labels,
-            vec![
-                "traefik.http.routers.app-api.rule=Host(`a.example.com`)",
                 "traefik.http.routers.app-api.middlewares=forwardAuth-authentik@file",
                 "traefik.http.services.app.loadbalancer.server.port=80",
             ]
@@ -1476,13 +1322,7 @@ mod tests {
         fields.traefik = Some(disabled_traefik());
         let err = compute("app", &fields, None, &bindings()).unwrap_err();
         assert!(
-            matches!(
-                err,
-                CodegenError::TraefikDisabledWithRouterField {
-                    field: "router",
-                    ..
-                }
-            ),
+            matches!(err, CodegenError::TraefikDisabledWithRouter { .. }),
             "got {err:?}"
         );
     }
@@ -1496,13 +1336,7 @@ mod tests {
         fields.traefik = Some(disabled_traefik());
         let err = compute("app", &fields, None, &bindings()).unwrap_err();
         assert!(
-            matches!(
-                err,
-                CodegenError::TraefikDisabledWithRouterField {
-                    field: "router",
-                    ..
-                }
-            ),
+            matches!(err, CodegenError::TraefikDisabledWithRouter { .. }),
             "got {err:?}"
         );
     }
@@ -1517,10 +1351,10 @@ mod tests {
     fn sugared_expose_as_router_emits_exactly_what_expose_host_always_did() {
         let mut r = router(None, Some("{{name}}.internal.techdebtor.io"));
         r.entrypoint = refs(&["web-secure"]);
+        r.middleware = refs(&["local-ipwhitelist", "forwardAuth-authentik"]);
         let fields = ServiceFields {
             routers: vec![r],
             expose: Some(expose_port(8384)),
-            middleware: refs(&["local-ipwhitelist", "forwardAuth-authentik"]),
             ..Default::default()
         };
         let labels = compute("syncthing", &fields, Some("docker_default"), &bindings()).unwrap();
@@ -1590,46 +1424,23 @@ mod tests {
         );
     }
 
-    /// A router's own list *replaces* the service-level one for that
-    /// router rather than extending it — the property that makes the
-    /// case above sayable at all, since an extending list could never
-    /// drop what the service said.
+    /// A router that names none emits no `middlewares=` label at all,
+    /// exactly as an empty `entrypoint` emits no `entrypoints=` — and
+    /// nothing on a *sibling* router leaks onto it.
     #[test]
-    fn router_middleware_replaces_the_service_level_list() {
-        let mut r = router(Some("internal"), Some("a.example.local"));
-        r.middleware = refs(&["local-ipwhitelist"]);
-        let mut fields = with_routers(vec![r]);
-        fields.middleware = refs(&["forwardAuth-authentik"]);
-        fields.expose = Some(expose_port(80));
-        let labels = compute("app", &fields, None, &bindings()).unwrap();
-        assert_eq!(
-            labels,
-            vec![
-                "traefik.http.routers.app-internal.rule=Host(`a.example.local`)",
-                "traefik.http.routers.app-internal.middlewares=local-ipwhitelist@file",
-                "traefik.http.services.app.loadbalancer.server.port=80",
-            ]
-        );
-    }
-
-    /// Per router, not per service: one block overriding leaves every
-    /// other block on the service-level list.
-    #[test]
-    fn one_router_overriding_leaves_its_siblings_on_the_service_list() {
+    fn a_router_naming_no_middleware_emits_no_label() {
         let mut internal = router(Some("internal"), Some("a.example.local"));
         internal.middleware = refs(&["local-ipwhitelist"]);
         let mut fields = with_routers(vec![
             router(Some("public"), Some("a.example.com")),
             internal,
         ]);
-        fields.middleware = refs(&["forwardAuth-authentik"]);
         fields.expose = Some(expose_port(80));
         let labels = compute("app", &fields, None, &bindings()).unwrap();
         assert_eq!(
             labels,
             vec![
                 "traefik.http.routers.app-public.rule=Host(`a.example.com`)",
-                "traefik.http.routers.app-public.middlewares=forwardAuth-authentik@file",
                 "traefik.http.routers.app-internal.rule=Host(`a.example.local`)",
                 "traefik.http.routers.app-internal.middlewares=local-ipwhitelist@file",
                 "traefik.http.services.app.loadbalancer.server.port=80",
@@ -1639,8 +1450,7 @@ mod tests {
 
     /// Several entries on one router comma-join into the single
     /// `middlewares=` label, each with the file provider's `@file`
-    /// suffix — the same shape the service-level list emits, and in
-    /// written order.
+    /// suffix, in written order.
     #[test]
     fn router_middleware_entries_join_into_one_label_in_order() {
         let mut r = router(None, Some("a.example.com"));
@@ -1654,11 +1464,9 @@ mod tests {
         );
     }
 
-    /// A router's own entry goes through the same metacharacter guard
-    /// the service-level list does — a comma would splice an extra entry
-    /// into the one comma-joined label — but the diagnostic names the
-    /// position actually written, so a user isn't sent looking at a
-    /// service-level `middleware` line that may not exist.
+    /// A comma inside one middleware name would splice an extra entry
+    /// into the one comma-joined label, so it's refused — under
+    /// `router.middleware`, the position it's actually written at.
     #[test]
     fn comma_in_a_router_middleware_is_rejected_under_its_own_field_name() {
         let mut r = router(Some("api"), Some("a.example.com"));
@@ -1678,37 +1486,23 @@ mod tests {
         );
     }
 
-    /// A `router`-level list needs no separate router-less check: it
-    /// can't exist without the block it's written inside. The
-    /// service-level list keeps its own (#80), and a service whose only
-    /// middleware is a router's own still passes it.
+    /// A middleware needs a *host* as much as it needs a block: a
+    /// `router` naming one but setting no host is the ordinary
+    /// host-less-router error, reported before the middleware is read.
+    /// This is what #80's router-less check turned into once the field
+    /// moved inside the block (#221).
     #[test]
-    fn a_router_only_middleware_needs_no_service_level_router_check() {
-        let mut r = router(Some("api"), Some("a.example.com"));
+    fn a_hostless_router_with_middleware_is_still_a_hostless_router() {
+        let mut r = router(Some("api"), None);
         r.middleware = refs(&["forwardAuth-authentik"]);
         let mut fields = with_routers(vec![r]);
         fields.expose = Some(expose_port(80));
-        assert!(compute("app", &fields, None, &bindings()).is_ok());
-    }
-
-    /// A `traefik { disabled }` service is refused for the `router`
-    /// block itself before its middleware is ever read — disabling
-    /// Traefik contradicts the block's existence, whichever list it
-    /// carries.
-    #[test]
-    fn disabled_service_with_router_middleware_reports_the_router() {
-        let mut r = router(Some("api"), Some("a.example.com"));
-        r.middleware = refs(&["forwardAuth-authentik"]);
-        let mut fields = with_routers(vec![r]);
-        fields.traefik = Some(disabled_traefik());
         let err = compute("app", &fields, None, &bindings()).unwrap_err();
         assert!(
             matches!(
                 err,
-                CodegenError::TraefikDisabledWithRouterField {
-                    field: "router",
-                    ..
-                }
+                CodegenError::RouterWithoutHost { ref router, .. }
+                    if router.as_deref() == Some("api")
             ),
             "got {err:?}"
         );

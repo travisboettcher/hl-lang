@@ -42,7 +42,7 @@ fn jellyfin_fixture_parses_to_expected_ast() {
     assert_eq!(restart.policy.as_ref().unwrap().text(), "unless-stopped");
 
     assert!(service.fields.raw.entries.is_empty());
-    assert!(service.fields.middleware.is_empty());
+    assert!(service.fields.dns.is_empty());
     assert!(service.fields.depends_on.is_empty());
     assert!(service.fields.networks.is_empty());
     assert!(service.fields.with.is_empty());
@@ -110,10 +110,17 @@ fn syncthing_fixture_composes_to_expected_service() {
         vec!["traefik-net"]
     );
 
-    // `internal_web` then `authenticated`, left-to-right.
+    // `internal_web` then `authenticated`, left-to-right — both
+    // contribute to the same unnamed router, so their `middleware`
+    // lists concatenate in tier order under that one key (#221).
+    let unnamed = service
+        .fields
+        .routers
+        .iter()
+        .find(|r| r.key().is_none())
+        .expect("the unnamed router internal_web declares");
     assert_eq!(
-        service
-            .fields
+        unnamed
             .middleware
             .iter()
             .map(|r| r.text())

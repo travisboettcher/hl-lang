@@ -1122,9 +1122,10 @@ fn build_emits_a_declared_volumes_options_in_the_top_level_section() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// #80's one hard error: `middleware` with no `expose.host` used to
-/// build a service with the middleware silently missing. It now fails
-/// the build.
+/// #80's one hard error: a Traefik-only construct with no router to
+/// attach it to used to build a service with its middleware silently
+/// missing. It now fails the build — since #221 as a host-less `router`,
+/// the one shape of that mistake still writable.
 ///
 /// The message itself lives in `tests/cmd/cross-file-diagnostics.trycmd`.
 /// What stays here is the half a transcript can't see: a failed build
@@ -1137,7 +1138,8 @@ fn build_fails_on_middleware_without_a_host() {
     let entry = dir.join("svc.hll");
     fs::write(
         &entry,
-        "service web {\n  image \"nginx\"\n  expose 80\n  middleware forwardAuth-authentik\n}\n",
+        "service web {\n  image \"nginx\"\n  expose 80\n  \
+           router { middleware: forwardAuth-authentik }\n}\n",
     )
     .unwrap();
     let out = dir.join("docker-compose.yml");

@@ -153,7 +153,7 @@ after the keyword, so there's nowhere for a bare value to go.
 | `host` | string | *Required—a router with no host has no rule* |
 | `entrypoint` | reference list | empty—label omitted, so Traefik attaches the router to every entry point |
 | `path_prefix` | list of strings | empty—the rule matches the host alone |
-| `middleware` | reference list | empty—this router takes the service-level [`middleware`](#middleware-depends_on-networks-dns-env_file) list instead |
+| `middleware` | reference list | empty—no `middlewares=` label for this router |
 
 A `router` block declares one Traefik router, and owns every field that
 only ever means anything attached to one. Write it as many times as you
@@ -283,11 +283,10 @@ service web {
 web.hll:3:3: service `web` declares a `router` but sets no `expose <port>`, so Traefik has no port to load-balance onto — add `expose <port>` or drop the `router`
 ```
 
-### Per-router `middleware`
+### `middleware`
 
-A `router` block *does* carry its own `middleware` list, spelled exactly
-like the service-level [`middleware`](#middleware-depends_on-networks-dns-env_file)
-field below, and it **replaces** that list for this one router:
+`middleware` is a `router` field, and only a `router` field. Each block
+names the Traefik middleware that router attaches:
 
 ```hll,build
 service gitea {
@@ -314,24 +313,35 @@ traefik.http.routers.gitea-internal.middlewares=local-ipwhitelist@file
 traefik.http.services.gitea.loadbalancer.server.port=3000
 ```
 
-That's a public route and an internal, IP-restricted one off the same
-container—the case a single service-wide list can't express, since it
-would either put the allowlist on the public route or take it off the
-internal one.
+That's a public route beside an internal, IP-restricted one off the same
+container. Earlier versions put `middleware` on the *service* instead,
+where one list reached every router the service had—which couldn't
+express this at all: the allowlist went onto the public route or came
+off the internal one, and both readings are wrong.
 
-Leave `middleware` off a `router` block and that router takes the
-service-level list, so nothing written before per-router middleware
-existed changes:
+However many you name, they produce **one** label per router, not one
+per item: `traefik.http.routers.<id>.middlewares=` with the names
+comma-joined. Every name also gets an `@file` suffix appended
+(`middlewares=local-ipwhitelist@file,forwardAuth-authentik@file`)—that's
+Traefik's file-provider reference convention, applied unconditionally,
+so write the bare middleware name and let `hllc` add it. `entrypoint`
+joins its own list the same way, just without the `@file` suffix. Leave
+`middleware` off a block and that router simply gets no `middlewares=`
+label, exactly as an absent `entrypoint` produces no `entrypoints=`.
+
+Routers that *should* share a middleware each name it:
 
 ```hll,build
 service app {
   image "nginx"
   expose 80
-  middleware forwardAuth-authentik
-  router public, host: "app.example.com"
+  router public {
+    host: "app.example.com"
+    middleware: forwardAuth-authentik
+  }
   router lan {
     host: "app.internal.example.com"
-    middleware: local-ipwhitelist
+    middleware: [forwardAuth-authentik, local-ipwhitelist]
   }
 }
 ```
@@ -340,19 +350,20 @@ service app {
 traefik.http.routers.app-public.rule=Host(`app.example.com`)
 traefik.http.routers.app-public.middlewares=forwardAuth-authentik@file
 traefik.http.routers.app-lan.rule=Host(`app.internal.example.com`)
-traefik.http.routers.app-lan.middlewares=local-ipwhitelist@file
+traefik.http.routers.app-lan.middlewares=forwardAuth-authentik@file,local-ipwhitelist@file
 traefik.http.services.app.loadbalancer.server.port=80
 ```
 
-Because a router's own list replaces rather than extends, there's no way
-to write *everything the service named, minus one.* To give one router
-no middleware while a sibling carries some, move the list off the
-service and onto the routers that want it—the same explicitness `router`
-already asks for from `host`.
+That repeats the shared name, which one service-level line wouldn't—and
+that's the trade this field makes on purpose. The shared line couldn't
+say which routers differ, and differing is the case that matters: a
+middleware silently attached to a route meant to be public, or silently
+missing from one meant to keep traffic out, is a security bug that
+compiles clean. A template can still carry the shared part once—see
+[Templates & composition](./templates-and-composition.md).
 
-The service-level field still needs at least one router to attach
-to—naming one with no `router` block anywhere is a compile error, not a
-service quietly built without it:
+Writing `middleware` on a `service` or `template` body is a compile
+error naming where it went, rather than a line quietly ignored:
 
 ```hll,ignore
 service web {
@@ -363,13 +374,8 @@ service web {
 ```
 
 ```text
-web.hll:4:14: service `web` sets `middleware` but has no `router` to attach it to — add a router (`router { host: "web.example.com" }`) or drop the `middleware`
+web.hll:4:3: `middleware` is no longer a `service` field — move it inside the `router` block it applies to (`router { host: "...", middleware: ... }`)
 ```
-
-Earlier versions emitted no `labels:` key at all here and exited 0, so a
-service whose author forgot a host deployed with its authentication
-missing and nothing said so. A `router`'s own `middleware` needs no such
-check: it can't exist without the block it's written inside.
 
 ## `traefik`
 
@@ -813,18 +819,16 @@ Writing `healthcheck` more than once in the same body is a compile
 error, same as `image`/`restart`/`expose`—it's a struct-kind field, not
 repeatable.
 
-## `middleware`, `depends_on`, `networks`, `dns`, `env_file`
+## `depends_on`, `networks`, `dns`, `env_file`
 
-All five are plain list fields directly on `service`/`template`, not
+All four are plain list fields directly on `service`/`template`, not
 nested struct types, so there's no primary-field shorthand to learn for
 them. Write a bare identifier or string, a bracketed list, or repeat the
 field:
 
 ```hll,fragment
-middleware local-ipwhitelist
-middleware forwardAuth-authentik   # repeating accumulates
-
 depends_on database
+depends_on cache                   # repeating accumulates
 depends_on [database { condition: service_healthy }]
 
 networks [traefik-net]
@@ -835,22 +839,11 @@ env_file "miniflux.env"
 env_file ["miniflux.env", "common.env"]
 ```
 
-- `middleware` names a Traefik middleware to attach to this service's
-  routers. However many you list, they produce **one** label per router,
-  not one per item: `traefik.http.routers.<router>.middlewares=` with the
-  names comma-joined. Every name also gets an `@file` suffix appended
-  (`middlewares=local-ipwhitelist@file,forwardAuth-authentik@file`)—that's
-  Traefik's file-provider reference convention, applied unconditionally,
-  so write the bare middleware name and let `hllc` add it. Like a
-  [`router`](#router)'s own `entrypoint`—which joins its own list the
-  same way, just without the `@file` suffix—`middleware` needs a router
-  to attach to: with no `router` block anywhere there's nothing to
-  attach anything to, so naming a middleware anyway is a compile error,
-  as `router` describes. The field is service-level, so a service with
-  several `router` blocks gets the same middleware list on every one of
-  them. The exception is a `router` block that names a list of its own,
-  which replaces this one for that router—see
-  [Per-router `middleware`](#per-router-middleware).
+`middleware` used to belong to this group and no longer does: it's a
+[`router`](#middleware) field, since a middleware only ever reaches
+Traefik as a label on one specific router. Writing it here is a compile
+error that says so.
+
 - `depends_on` names a same-file sibling `service` this one depends
   on—it's not cross-file, and doesn't accept a qualified `alias.name`.
   Each entry may optionally add a `{ condition: ... }` body naming one

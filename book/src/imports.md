@@ -18,13 +18,12 @@ use "docker.hll" as traefik
   bare identifier: a `networks [...]` entry (`networks
   [traefik.traefik-net]`), a named-volume mount's host side, or a `with`
   invocation's target (`with common.internal_web { ... }`).
-- `middleware`, `dns`, `env_file`, `depends_on`, and an `entrypoint` list
-  don't support a qualified form. None has a coherent cross-file
-  meaning: `depends_on` names a same-file sibling service, `dns` and
-  `env_file` name an IP address and a path on disk, an entry point
-  belongs to the deployment's own `traefik.yml`, and `middleware` isn't
-  resolved against anything at all—each is just text passed through
-  verbatim. Only `networks` and a named-volume mount's host side resolve
+- `dns`, `env_file`, `depends_on`, and a router's own `entrypoint` and
+  `middleware` lists don't support a qualified form. None has a coherent
+  cross-file meaning: `depends_on` names a same-file sibling service,
+  `dns` and `env_file` name an IP address and a path on disk, and an
+  entry point or a middleware belongs to the deployment's own
+  `traefik.yml`—each is just text passed through verbatim. Only `networks` and a named-volume mount's host side resolve
   a qualifier, since only they name something another `.hll` file
   actually declares.
 
@@ -53,12 +52,14 @@ template internal_web(port) {
   router {
     host: "{{name}}.internal.example.com"
     entrypoint: web-secure
+    middleware: local-ipwhitelist
   }
-  middleware local-ipwhitelist
 }
 
 template authenticated {
-  middleware forwardAuth-authentik
+  router {
+    middleware: forwardAuth-authentik
+  }
 }
 
 template linuxserver_app(puid, pgid) {

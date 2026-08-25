@@ -7,8 +7,14 @@
 # same `UnsupportedQualifiedReference` diagnostic. No real `use` import
 # is needed for this: the rejection fires on the qualifier's own shape,
 # before anything would resolve the alias `shared` against.
+#
+# `middleware` sits inside `router` since #221, so the diagnostic names
+# `router.middleware` — the position the qualifier was written at.
 service app {
   image "nginx:alpine"
-  middleware shared.forwardAuth
-  expose 80 as "app.example.com"
+  expose 80
+  router {
+    host: "app.example.com"
+    middleware: shared.forwardAuth
+  }
 }

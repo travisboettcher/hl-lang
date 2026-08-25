@@ -20,8 +20,8 @@ template internal_web(port) {
   router {
     host: "{{name}}.internal.example.com"
     entrypoint: web-secure
+    middleware: local-ipwhitelist
   }
-  middleware local-ipwhitelist
 }
 ```
 
@@ -46,9 +46,15 @@ A template with no parameters just omits the parameter list:
 
 ```hll
 template authenticated {
-  middleware forwardAuth-authentik
+  router {
+    middleware: forwardAuth-authentik
+  }
 }
 ```
+
+Both templates name the *unnamed* router, so composing them merges the
+two blocks under that one key and their `middleware` lists concatenate
+in tier order—see [`router`](#the-merge-rules-field-by-field) below.
 
 ## Applying a template with `with`
 
@@ -264,13 +270,10 @@ Different field kinds merge differently:
   collision names the router as well as the field, since a message about
   `router.host` alone doesn't say which router.
 
-  A router's `middleware` merging this way is between *tiers*: a
-  template supplies a base list a service body adds to. That's a
-  different axis from the override in
-  [Per-router `middleware`](./built-in-fields.md#per-router-middleware),
-  which sits between the router's merged list and the service-level
-  field and applies once composition finishes—so a router that names any
-  middleware, in any tier, takes none of the service-level list.
+  A shared middleware is exactly what a template is for: name it once
+  in a template's `router` block and every service that composes that
+  template gets it, with each service free to add its own on top—see
+  [`middleware`](./built-in-fields.md#middleware).
 
 That last point about per-sub-field merging means a service's own body
 can override just a router's `host` while still inheriting its
@@ -306,12 +309,14 @@ template internal_web(port) {
   router {
     host: "{{name}}.internal.example.com"
     entrypoint: web-secure
+    middleware: local-ipwhitelist
   }
-  middleware local-ipwhitelist
 }
 
 template authenticated {
-  middleware forwardAuth-authentik
+  router {
+    middleware: forwardAuth-authentik
+  }
 }
 
 template linuxserver_app(puid, pgid) {
@@ -331,7 +336,8 @@ service syncthing {
 - a network reference and `restart` from `internal_web`
 - an `expose` block built from `internal_web`'s `port` parameter, and an
   unnamed `router` block with its `{{name}}`-interpolated host
-- a middleware entry each from `internal_web` and `authenticated`
+- a middleware entry each from `internal_web` and `authenticated`, both
+  landing on that same unnamed router
 - two `env` entries from `linuxserver_app`
 - its own `image` and `volume`, which no template sets
 

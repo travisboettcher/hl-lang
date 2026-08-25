@@ -45,13 +45,14 @@ interpolating-template.hll:2:18: unknown interpolation `{{nmae}}`
 
 ```
 
-`middleware` with no `router` has no Traefik router to attach itself
-to. This used to build a service with the middleware silently missing;
-it now fails, and the message carries the fix.
+A `router` with a `middleware` but no `host` has no rule for Traefik to
+match, so the middleware would attach to nothing. This used to build a
+service with the middleware silently missing; it now fails, and the
+message carries the fix.
 
 ```console
 $ hllc --build router-less-middleware.hll --out docker-compose.yml
 ? 1
-router-less-middleware.hll:4:14: service `web` sets `middleware` but has no `router` to attach it to — add a router (`router { host: "web.example.com" }`) or drop the `middleware`
+router-less-middleware.hll:4:3: service `web` declares an unnamed `router` with no `host`, so there is no rule for Traefik to match — add a host (`host: "web.example.com"`) or drop the `router`
 
 ```
