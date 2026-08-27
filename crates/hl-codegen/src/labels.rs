@@ -139,6 +139,65 @@ fn router_id(service_name: &str, router: &Router) -> String {
     }
 }
 
+/// Which of Traefik's two label namespaces a router lives in (#225).
+///
+/// Not a cosmetic prefix swap: the two namespaces have different rule
+/// grammars, since a TCP router matches on the TLS handshake's server
+/// name rather than on an HTTP request it never sees. [`Self::keyword`]
+/// is what encodes that difference — everything else about a router's
+/// labels is spelled identically either side, which is why one
+/// `push_router_labels` serves both.
+#[derive(Clone, Copy, PartialEq)]
+enum Protocol {
+    Http,
+    Tcp,
+}
+
+impl Protocol {
+    /// The label-namespace segment: `traefik.<segment>.routers.*` and
+    /// `traefik.<segment>.services.*`.
+    fn segment(self) -> &'static str {
+        match self {
+            Protocol::Http => "http",
+            Protocol::Tcp => "tcp",
+        }
+    }
+
+    /// The rule matcher a host goes inside. Traefik's TCP routers have
+    /// no `Host()` — there is no Host header at that layer — and match
+    /// `HostSNI()` against the TLS server name instead, for which `*`
+    /// is the legal "any" wildcard that `Host()` has no equivalent of.
+    fn host_matcher(self) -> &'static str {
+        match self {
+            Protocol::Http => "Host",
+            Protocol::Tcp => "HostSNI",
+        }
+    }
+}
+
+/// Reads a router's `protocol` (#225), defaulting to HTTP.
+///
+/// Validated here rather than at parse time so a template can write
+/// `protocol: $proto`: substitution runs after parsing, and an
+/// unresolved `$proto` rejected as an unknown protocol would be a
+/// diagnostic about the wrong thing. By the time codegen runs, every
+/// `$param` is resolved (see [`hl_parser::Literal::Param`]), so what
+/// reaches here is what the user actually meant.
+fn router_protocol(service_name: &str, router: &Router) -> Result<Protocol, CodegenError> {
+    let Some(lit) = router.protocol.as_ref() else {
+        return Ok(Protocol::Http);
+    };
+    match lit.text() {
+        "http" => Ok(Protocol::Http),
+        "tcp" => Ok(Protocol::Tcp),
+        other => Err(CodegenError::UnknownRouterProtocol {
+            service: service_name.to_string(),
+            protocol: other.to_string(),
+            span: lit.span(),
+        }),
+    }
+}
+
 /// The ``Host(`h`)`` rule, with `path_prefix`'s alternatives `&&`-ed on
 /// as one parenthesized `||` group when there are any (#184).
 ///
@@ -148,15 +207,16 @@ fn router_id(service_name: &str, router: &Router) -> String {
 /// for a single prefix too, where they change nothing, because a rule
 /// whose shape depends on how many prefixes it happens to have is a rule
 /// nobody can read off the source.
-fn rule_value(host: &str, path_prefixes: &[String]) -> String {
+fn rule_value(protocol: Protocol, host: &str, path_prefixes: &[String]) -> String {
+    let matcher = protocol.host_matcher();
     if path_prefixes.is_empty() {
-        return format!("Host(`{host}`)");
+        return format!("{matcher}(`{host}`)");
     }
     let alternatives: Vec<String> = path_prefixes
         .iter()
         .map(|p| format!("PathPrefix(`{p}`)"))
         .collect();
-    format!("Host(`{host}`) && ({})", alternatives.join(" || "))
+    format!("{matcher}(`{host}`) && ({})", alternatives.join(" || "))
 }
 
 /// The one `entrypoints=` label for `entrypoint`, or `None` when the
@@ -169,6 +229,7 @@ fn rule_value(host: &str, path_prefixes: &[String]) -> String {
 /// has to inspect. An entry point spelled as a string (`entrypoint
 /// "{{name}}-secure"`) is the case that makes this observable.
 fn entrypoints_label(
+    ns: &str,
     id: &str,
     field: &'static str,
     entrypoint: &[Literal],
@@ -184,7 +245,7 @@ fn entrypoints_label(
         eps.push(resolved);
     }
     Ok(Some(format!(
-        "traefik.http.routers.{id}.entrypoints={}",
+        "traefik.{ns}.routers.{id}.entrypoints={}",
         eps.join(",")
     )))
 }
@@ -201,7 +262,11 @@ fn entrypoints_label(
 /// Each name gets an `@file` suffix, the file provider's own reference
 /// convention, applied unconditionally — unlike `entrypoints=` above,
 /// whose names carry no such suffix.
-fn middlewares_label(id: &str, middleware: &[Literal]) -> Result<Option<String>, CodegenError> {
+fn middlewares_label(
+    ns: &str,
+    id: &str,
+    middleware: &[Literal],
+) -> Result<Option<String>, CodegenError> {
     if middleware.is_empty() {
         return Ok(None);
     }
@@ -216,7 +281,7 @@ fn middlewares_label(id: &str, middleware: &[Literal]) -> Result<Option<String>,
         mws.push(format!("{}@file", r.text()));
     }
     Ok(Some(format!(
-        "traefik.http.routers.{id}.middlewares={}",
+        "traefik.{ns}.routers.{id}.middlewares={}",
         mws.join(",")
     )))
 }
@@ -234,6 +299,8 @@ fn push_router_labels(
         reject_unsafe_router_name(service_name, name, router.span)?;
     }
     let id = router_id(service_name, router);
+    let protocol = router_protocol(service_name, router)?;
+    let ns = protocol.segment();
 
     let host_lit = match &router.host {
         Some(host) => host,
@@ -248,6 +315,20 @@ fn push_router_labels(
     let host = interp::resolve(host_lit.text(), bindings, host_lit.span())?;
     reject_metacharacters(&host, "router.host", LABEL_METACHARACTERS, host_lit.span())?;
 
+    // A TCP router has no paths to match on — there is no request URI at
+    // that layer — so a `path_prefix` beside one is a contradiction
+    // rather than something to silently drop (#225).
+    if protocol == Protocol::Tcp
+        && let Some(first) = router.path_prefix.first()
+    {
+        return Err(CodegenError::TcpRouterWithHttpOnlyField {
+            service: service_name.to_string(),
+            router: router.key().map(str::to_string),
+            field: "path_prefix",
+            span: first.span(),
+        });
+    }
+
     let mut prefixes = Vec::with_capacity(router.path_prefix.len());
     for prefix in &router.path_prefix {
         let resolved = interp::resolve(prefix.text(), bindings, prefix.span())?;
@@ -261,15 +342,48 @@ fn push_router_labels(
     }
 
     labels.push(format!(
-        "traefik.http.routers.{id}.rule={}",
-        rule_value(&host, &prefixes)
+        "traefik.{ns}.routers.{id}.rule={}",
+        rule_value(protocol, &host, &prefixes)
     ));
-    if let Some(label) = entrypoints_label(&id, "router.entrypoint", &router.entrypoint, bindings)?
+    if let Some(label) =
+        entrypoints_label(ns, &id, "router.entrypoint", &router.entrypoint, bindings)?
     {
         labels.push(label);
     }
-    if let Some(label) = middlewares_label(&id, &router.middleware)? {
+    if let Some(label) = middlewares_label(ns, &id, &router.middleware)? {
         labels.push(label);
+    }
+    if let Some(priority) = &router.priority {
+        labels.push(format!(
+            "traefik.{ns}.routers.{id}.priority={}",
+            priority.text()
+        ));
+    }
+
+    // A router naming its own port gets a Traefik *service* of its own,
+    // keyed by the router's id, and says so with a `.service=` label
+    // (#225). Without one it falls through to the single service-wide
+    // target `compute` emits from `expose.port`, which is what every
+    // router shared before #225 and what a file written against that
+    // model still gets.
+    match &router.port {
+        Some(port) => {
+            labels.push(format!("traefik.{ns}.routers.{id}.service={id}"));
+            labels.push(format!(
+                "traefik.{ns}.services.{id}.loadbalancer.server.port={}",
+                port.text()
+            ));
+        }
+        None if protocol == Protocol::Tcp => {
+            // The fallback target is an *HTTP* service, so there is
+            // nothing for a TCP router to fall back to.
+            return Err(CodegenError::TcpRouterWithoutPort {
+                service: service_name.to_string(),
+                router: router.key().map(str::to_string),
+                span: router.span,
+            });
+        }
+        None => {}
     }
     Ok(())
 }
@@ -355,15 +469,25 @@ pub fn compute(
         push_router_labels(&mut labels, service_name, router, bindings)?;
     }
 
-    // Per Compose *service*, not per router: a container listens on one
-    // port however many routers point at it, so this is emitted once,
-    // only when the service has a router for it to serve — and, since
-    // #198 left `expose.port` the one remaining source of a port, a
-    // router with none at all is refused rather than left for Traefik to
-    // guess (the live defect #198 closes: a service routed only by
-    // `router` blocks with no `expose` used to emit no
-    // `loadbalancer.server.port` label at all, silently).
-    if !fields.routers.is_empty() {
+    // The one service-wide load-balancer target, from `expose.port` —
+    // emitted only for the routers that actually fall back to it.
+    //
+    // Through #224 that was every router: a container was assumed to
+    // listen on one port however many routers pointed at it, so the
+    // label went out whenever the service had any router at all. #225
+    // let a router name its own port, which splits the question in two.
+    // A service whose routers all name their own needs no shared target
+    // and no `expose` either, since there is no longer one port that is
+    // "the" port. A service with even one router still falling back
+    // needs both, and a missing `expose` there is still
+    // `RouterWithoutPort` — the live defect #198 closed, where a routed
+    // service silently emitted no `loadbalancer.server.port` at all.
+    // Every router still lacking a port at this point is an HTTP one:
+    // the loop above has already refused a portless TCP router, which
+    // has nothing to fall back to (`TcpRouterWithoutPort`). So the scan
+    // asks about the port alone rather than re-deriving the protocol.
+    let fallback = fields.routers.iter().find(|r| r.port.is_none());
+    if let Some(router) = fallback {
         match fields.expose.as_ref().and_then(|e| e.port.as_ref()) {
             Some(port) => labels.push(format!(
                 "traefik.http.services.{service_name}.loadbalancer.server.port={}",
@@ -372,7 +496,7 @@ pub fn compute(
             None => {
                 return Err(CodegenError::RouterWithoutPort {
                     service: service_name.to_string(),
-                    span: fields.routers[0].span,
+                    span: router.span,
                 });
             }
         }
@@ -412,6 +536,16 @@ mod tests {
             .collect()
     }
 
+    /// A numeric literal, for the router sub-fields #225 gave numbers
+    /// (`priority`, `port`) — the shape `expose.port` already had.
+    fn num(value: u64) -> Literal {
+        Literal::Number {
+            text: value.to_string(),
+            value,
+            span: span(),
+        }
+    }
+
     /// `expose { port }` (#198) — the one field left on `Expose`.
     fn expose_port(value: u64) -> Expose {
         Expose {
@@ -434,6 +568,9 @@ mod tests {
             entrypoint: Vec::new(),
             path_prefix: Vec::new(),
             middleware: Vec::new(),
+            priority: None,
+            port: None,
+            protocol: None,
             span: span(),
         }
     }
@@ -1505,6 +1642,233 @@ mod tests {
                     if router.as_deref() == Some("api")
             ),
             "got {err:?}"
+        );
+    }
+
+    // --- `priority`, per-router `port`, and TCP routers (#225) ---
+
+    /// #225's motivating label set, byte for byte: two HTTP routers
+    /// sharing a host and separated only by `priority`, each pointing at
+    /// its own port through its own Traefik service, beside a TCP router
+    /// in the other namespace entirely. No `expose` anywhere — with
+    /// every router naming its own port there is no "the" port for one
+    /// to name.
+    #[test]
+    fn sftpgo_emits_two_http_services_and_one_tcp_router() {
+        let mut web = router(Some("web"), Some("sftp.internal.techdebtor.io"));
+        web.priority = Some(num(100));
+        web.port = Some(num(2222));
+        let mut webdav = router(Some("webdav"), Some("sftp.internal.techdebtor.io"));
+        webdav.priority = Some(num(90));
+        webdav.port = Some(num(4444));
+        let mut sftp = router(Some("sftp"), Some("*"));
+        sftp.protocol = Some(lit("tcp"));
+        sftp.port = Some(num(1111));
+
+        let fields = with_routers(vec![web, webdav, sftp]);
+        let labels = compute("sftpgo", &fields, None, &bindings()).unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                "traefik.http.routers.sftpgo-web.rule=Host(`sftp.internal.techdebtor.io`)",
+                "traefik.http.routers.sftpgo-web.priority=100",
+                "traefik.http.routers.sftpgo-web.service=sftpgo-web",
+                "traefik.http.services.sftpgo-web.loadbalancer.server.port=2222",
+                "traefik.http.routers.sftpgo-webdav.rule=Host(`sftp.internal.techdebtor.io`)",
+                "traefik.http.routers.sftpgo-webdav.priority=90",
+                "traefik.http.routers.sftpgo-webdav.service=sftpgo-webdav",
+                "traefik.http.services.sftpgo-webdav.loadbalancer.server.port=4444",
+                "traefik.tcp.routers.sftpgo-sftp.rule=HostSNI(`*`)",
+                "traefik.tcp.routers.sftpgo-sftp.service=sftpgo-sftp",
+                "traefik.tcp.services.sftpgo-sftp.loadbalancer.server.port=1111",
+            ]
+        );
+    }
+
+    /// A router naming no port still falls back to the one service-wide
+    /// target, so a file written before #225 emits exactly what it did.
+    #[test]
+    fn a_router_without_its_own_port_still_uses_the_shared_target() {
+        let mut fields = with_routers(vec![router(None, Some("a.example.com"))]);
+        fields.expose = Some(expose_port(80));
+        let labels = compute("app", &fields, None, &bindings()).unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                "traefik.http.routers.app.rule=Host(`a.example.com`)",
+                "traefik.http.services.app.loadbalancer.server.port=80",
+            ]
+        );
+    }
+
+    /// One router naming its own port leaves a sibling that doesn't on
+    /// the shared target — the two coexist rather than one mode winning.
+    #[test]
+    fn own_port_and_shared_target_coexist() {
+        let mut own = router(Some("api"), Some("a.example.com"));
+        own.port = Some(num(9000));
+        let mut fields = with_routers(vec![router(Some("web"), Some("b.example.com")), own]);
+        fields.expose = Some(expose_port(80));
+        let labels = compute("app", &fields, None, &bindings()).unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                "traefik.http.routers.app-web.rule=Host(`b.example.com`)",
+                "traefik.http.routers.app-api.rule=Host(`a.example.com`)",
+                "traefik.http.routers.app-api.service=app-api",
+                "traefik.http.services.app-api.loadbalancer.server.port=9000",
+                "traefik.http.services.app.loadbalancer.server.port=80",
+            ]
+        );
+    }
+
+    /// With every router naming its own port there is nothing to fall
+    /// back to, so `expose` stops being required — the state #225
+    /// describes, where no one port is "the" port.
+    #[test]
+    fn every_router_naming_a_port_needs_no_expose() {
+        let mut r = router(Some("api"), Some("a.example.com"));
+        r.port = Some(num(9000));
+        let fields = with_routers(vec![r]);
+        let labels = compute("app", &fields, None, &bindings()).unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                "traefik.http.routers.app-api.rule=Host(`a.example.com`)",
+                "traefik.http.routers.app-api.service=app-api",
+                "traefik.http.services.app-api.loadbalancer.server.port=9000",
+            ]
+        );
+    }
+
+    /// ...but one router still falling back keeps `expose` required,
+    /// and the diagnostic points at *that* router rather than the first.
+    #[test]
+    fn a_single_falling_back_router_still_requires_expose() {
+        let mut own = router(Some("api"), Some("a.example.com"));
+        own.port = Some(num(9000));
+        let fields = with_routers(vec![own, router(Some("web"), Some("b.example.com"))]);
+        let err = compute("app", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(err, CodegenError::RouterWithoutPort { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// A TCP router's whole label group lives in the other namespace —
+    /// `entrypoints` and `middlewares` included, which Traefik spells
+    /// the same way under `traefik.tcp.*`.
+    #[test]
+    fn a_tcp_router_puts_every_label_in_the_tcp_namespace() {
+        let mut r = router(Some("sftp"), Some("*"));
+        r.protocol = Some(lit("tcp"));
+        r.port = Some(num(1111));
+        r.entrypoint = refs(&["sftp"]);
+        r.middleware = refs(&["inflightconn"]);
+        let fields = with_routers(vec![r]);
+        let labels = compute("app", &fields, None, &bindings()).unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                "traefik.tcp.routers.app-sftp.rule=HostSNI(`*`)",
+                "traefik.tcp.routers.app-sftp.entrypoints=sftp",
+                "traefik.tcp.routers.app-sftp.middlewares=inflightconn@file",
+                "traefik.tcp.routers.app-sftp.service=app-sftp",
+                "traefik.tcp.services.app-sftp.loadbalancer.server.port=1111",
+            ]
+        );
+    }
+
+    /// An explicit `protocol: http` is the default said out loud, and
+    /// changes nothing about the emitted labels.
+    #[test]
+    fn an_explicit_http_protocol_matches_the_default() {
+        let mut explicit = router(None, Some("a.example.com"));
+        explicit.protocol = Some(lit("http"));
+        let mut with_explicit = with_routers(vec![explicit]);
+        with_explicit.expose = Some(expose_port(80));
+        let mut default = with_routers(vec![router(None, Some("a.example.com"))]);
+        default.expose = Some(expose_port(80));
+        assert_eq!(
+            compute("app", &with_explicit, None, &bindings()).unwrap(),
+            compute("app", &default, None, &bindings()).unwrap()
+        );
+    }
+
+    /// A TCP router has no request path to match, so a `path_prefix`
+    /// beside one is refused rather than silently dropped.
+    #[test]
+    fn a_tcp_router_rejects_path_prefix() {
+        let mut r = router(Some("sftp"), Some("*"));
+        r.protocol = Some(lit("tcp"));
+        r.port = Some(num(1111));
+        r.path_prefix = prefixes(&["/api"]);
+        let fields = with_routers(vec![r]);
+        let err = compute("app", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodegenError::TcpRouterWithHttpOnlyField {
+                    field: "path_prefix",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// The shared fallback target is an HTTP service, so a TCP router
+    /// can't reach it — it must name its own port even when the service
+    /// has an `expose`.
+    #[test]
+    fn a_tcp_router_without_a_port_is_rejected_even_with_expose() {
+        let mut r = router(Some("sftp"), Some("*"));
+        r.protocol = Some(lit("tcp"));
+        let mut fields = with_routers(vec![r]);
+        fields.expose = Some(expose_port(80));
+        let err = compute("app", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(err, CodegenError::TcpRouterWithoutPort { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// Anything but `http`/`tcp` is refused, naming both.
+    #[test]
+    fn an_unknown_protocol_is_rejected() {
+        let mut r = router(Some("x"), Some("a.example.com"));
+        r.protocol = Some(lit("udp"));
+        r.port = Some(num(1));
+        let fields = with_routers(vec![r]);
+        let err = compute("app", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodegenError::UnknownRouterProtocol { ref protocol, .. } if protocol == "udp"
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// `priority` rides between the middlewares and the service target,
+    /// and is emitted verbatim — it's a number, checked as one during
+    /// composition rather than reformatted here.
+    #[test]
+    fn priority_is_emitted_between_middlewares_and_the_service_target() {
+        let mut r = router(Some("api"), Some("a.example.com"));
+        r.middleware = refs(&["auth"]);
+        r.priority = Some(num(100));
+        let mut fields = with_routers(vec![r]);
+        fields.expose = Some(expose_port(80));
+        let labels = compute("app", &fields, None, &bindings()).unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                "traefik.http.routers.app-api.rule=Host(`a.example.com`)",
+                "traefik.http.routers.app-api.middlewares=auth@file",
+                "traefik.http.routers.app-api.priority=100",
+                "traefik.http.services.app.loadbalancer.server.port=80",
+            ]
         );
     }
 }

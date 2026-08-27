@@ -240,6 +240,39 @@ pub enum CodegenError {
         disabled_span: Span,
         span: Span,
     },
+    /// A `router` block's `protocol` names something other than `http`
+    /// or `tcp` (#225) — Traefik's only two router label namespaces.
+    ///
+    /// Reported from codegen rather than the parser so a template can
+    /// write `protocol: $proto`: substitution runs after parsing, and
+    /// an unresolved `$proto` rejected here as an unknown protocol
+    /// would name the wrong problem.
+    UnknownRouterProtocol {
+        service: String,
+        protocol: String,
+        span: Span,
+    },
+    /// A TCP `router` sets a field only an HTTP router has (#225) —
+    /// today only `path_prefix`, since a TCP router matches on the TLS
+    /// handshake's server name and never sees a request URI to take a
+    /// path from. Refused rather than dropped: silently ignoring it
+    /// would route traffic the block plainly meant to narrow.
+    TcpRouterWithHttpOnlyField {
+        service: String,
+        router: Option<String>,
+        field: &'static str,
+        span: Span,
+    },
+    /// A TCP `router` names no `port` (#225). An HTTP router with no
+    /// port of its own falls back to the one service-wide target
+    /// `expose.port` supplies, but that target is an *HTTP* service —
+    /// `traefik.http.services.<service>` — so a TCP router has nothing
+    /// to fall back to and must name its own.
+    TcpRouterWithoutPort {
+        service: String,
+        router: Option<String>,
+        span: Span,
+    },
     /// A `router` block's name contains a character that can't appear in
     /// a Traefik label *key* (#184).
     ///
@@ -276,6 +309,9 @@ impl CodegenError {
             | CodegenError::BuildWithoutContext { span, .. }
             | CodegenError::UnsubstitutedParameter { span, .. }
             | CodegenError::UnsafeLabelValue { span, .. }
+            | CodegenError::UnknownRouterProtocol { span, .. }
+            | CodegenError::TcpRouterWithHttpOnlyField { span, .. }
+            | CodegenError::TcpRouterWithoutPort { span, .. }
             | CodegenError::RouterWithoutHost { span, .. }
             | CodegenError::RouterWithoutPort { span, .. }
             | CodegenError::TraefikDisabledWithRouter { span, .. }
@@ -372,16 +408,34 @@ impl CodegenError {
             }
             CodegenError::RouterWithoutHost {
                 service, router, ..
-            } => {
-                let named = match router {
-                    Some(name) => format!("`router {name}`"),
-                    None => "an unnamed `router`".to_string(),
-                };
-                write!(
-                    f,
-                    "{at}: service `{service}` declares {named} with no `host`, so there is no rule for Traefik to match — add a host (`host: \"{service}.example.com\"`) or drop the `router`"
-                )
-            }
+            } => write!(
+                f,
+                "{at}: service `{service}` declares {} with no `host`, so there is no rule for Traefik to match — add a host (`host: \"{service}.example.com\"`) or drop the `router`",
+                named_router(router)
+            ),
+            CodegenError::UnknownRouterProtocol {
+                service, protocol, ..
+            } => write!(
+                f,
+                "{at}: service `{service}` declares a `router` with `protocol: {protocol}` — the only Traefik router protocols are `http` (the default) and `tcp`"
+            ),
+            CodegenError::TcpRouterWithHttpOnlyField {
+                service,
+                router,
+                field,
+                ..
+            } => write!(
+                f,
+                "{at}: service `{service}` sets `{field}` on {}, but a TCP router matches on the TLS server name and never sees a request path — drop the `{field}` or the `protocol: tcp`",
+                named_router(router)
+            ),
+            CodegenError::TcpRouterWithoutPort {
+                service, router, ..
+            } => write!(
+                f,
+                "{at}: service `{service}` declares {} with `protocol: tcp` but no `port`, and a TCP router can't fall back to `expose <port>`, which serves an HTTP router — add a port (`port: 1111`)",
+                named_router(router)
+            ),
             CodegenError::RouterWithoutPort { service, .. } => write!(
                 f,
                 "{at}: service `{service}` declares a `router` but sets no `expose <port>`, so Traefik has no port to load-balance onto — add `expose <port>` or drop the `router`"
@@ -413,6 +467,16 @@ impl CodegenError {
 struct DisplayCodegenError<'a> {
     error: &'a CodegenError,
     files: Option<&'a SourceMap>,
+}
+
+/// How a diagnostic names one `router` block: quoted by name, or
+/// described for what it is when the block is the unnamed form and has
+/// no name to quote.
+fn named_router(router: &Option<String>) -> String {
+    match router {
+        Some(name) => format!("`router {name}`"),
+        None => "an unnamed `router`".to_string(),
+    }
 }
 
 impl fmt::Display for DisplayCodegenError<'_> {

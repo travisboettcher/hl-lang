@@ -3103,3 +3103,53 @@ fn duplicate_build_is_rejected() {
         "got {err:?}"
     );
 }
+
+// --- `priority`, `port`, `protocol` on a router (#225) ---
+
+/// All three parse as plain scalars in the braced body, beside the
+/// fields `router` already had.
+#[test]
+fn router_priority_port_and_protocol_parse() {
+    let program = parse_ok(
+        "service s {\n  router web {\n    host: \"a.example.com\"\n    \
+         priority: 100\n    port: 2222\n    protocol: http\n  }\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let router = &routers(service)[0];
+    assert_eq!(router.priority.as_ref().unwrap().text(), "100");
+    assert_eq!(router.port.as_ref().unwrap().text(), "2222");
+    assert_eq!(router.protocol.as_ref().unwrap().text(), "http");
+}
+
+/// And in the comma-continued form, like every other `router`
+/// sub-field.
+#[test]
+fn router_new_fields_parse_in_comma_shorthand() {
+    let program =
+        parse_ok("service s {\n  router sftp, protocol: tcp, host: \"*\", port: 1111\n}\n");
+    let service = as_service(&program.decls[0]);
+    let router = &routers(service)[0];
+    assert_eq!(router.protocol.as_ref().unwrap().text(), "tcp");
+    assert_eq!(router.port.as_ref().unwrap().text(), "1111");
+}
+
+/// A router that names none of the three leaves all three `None`, so a
+/// file written before #225 parses to exactly the AST it always did.
+#[test]
+fn router_without_the_new_fields_leaves_them_unset() {
+    let program = parse_ok("service s {\n  router { host: \"a.example.com\" }\n}\n");
+    let router = &routers(as_service(&program.decls[0]))[0];
+    assert!(router.priority.is_none());
+    assert!(router.port.is_none());
+    assert!(router.protocol.is_none());
+}
+
+/// `protocol` accepts a `$param` — it's validated in codegen, not here,
+/// precisely so a template can parameterize it.
+#[test]
+fn router_protocol_accepts_a_param() {
+    let program = parse_ok("template t(p) {\n  router r { protocol: $p }\n}\n");
+    let template = as_template(&program.decls[0]);
+    let router = &template.fields.routers[0];
+    assert!(matches!(router.protocol.as_ref().unwrap(), Literal::Param(n, _) if n == "p"));
+}

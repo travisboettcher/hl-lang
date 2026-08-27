@@ -1,0 +1,28 @@
+--- compose ---
+services:
+  sftpgo:
+    image: drakkan/sftpgo:latest
+    networks:
+    - default
+    labels:
+    - traefik.http.routers.sftpgo-web.rule=Host(`sftp.internal.techdebtor.io`)
+    - traefik.http.routers.sftpgo-web.priority=100
+    - traefik.http.routers.sftpgo-web.service=sftpgo-web
+    - traefik.http.services.sftpgo-web.loadbalancer.server.port=2222
+    - traefik.http.routers.sftpgo-webdav.rule=Host(`sftp.internal.techdebtor.io`)
+    - traefik.http.routers.sftpgo-webdav.priority=90
+    - traefik.http.routers.sftpgo-webdav.service=sftpgo-webdav
+    - traefik.http.services.sftpgo-webdav.loadbalancer.server.port=4444
+    - traefik.tcp.routers.sftpgo-sftp.rule=HostSNI(`*`)
+    - traefik.tcp.routers.sftpgo-sftp.service=sftpgo-sftp
+    - traefik.tcp.services.sftpgo-sftp.loadbalancer.server.port=1111
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    networks:
+    - default
+    expose:
+    - 8096
+    labels:
+    - traefik.http.routers.jellyfin.rule=Host(`media.techdebtor.io`)
+    - traefik.http.routers.jellyfin.entrypoints=web-secure
+    - traefik.http.services.jellyfin.loadbalancer.server.port=8096

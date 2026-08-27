@@ -311,6 +311,22 @@ pub static ROUTER: TypeSchema = TypeSchema {
             name: "middleware",
             kind: FieldKind::ReferenceList,
         },
+        // #225's three additions. `priority` and `port` are plain
+        // numbers; `protocol` names one of Traefik's two router
+        // namespaces and is checked in codegen, not here, so a template
+        // can still parameterize it — see [`crate::ast::Router`].
+        FieldSchema {
+            name: "priority",
+            kind: FieldKind::Scalar,
+        },
+        FieldSchema {
+            name: "port",
+            kind: FieldKind::Scalar,
+        },
+        FieldSchema {
+            name: "protocol",
+            kind: FieldKind::Scalar,
+        },
     ],
     primary_field: None,
     map_separator: None,

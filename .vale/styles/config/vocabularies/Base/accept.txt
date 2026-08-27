@@ -47,3 +47,7 @@ unflagged
 SELinux
 [Pp]arameteriz(e|es|ed|ing)
 allowlist
+namespaces?
+SFTP
+TLS
+WebDAV

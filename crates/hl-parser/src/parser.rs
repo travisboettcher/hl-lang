@@ -2091,12 +2091,28 @@ fn lower_router(name: Option<Ident>, mut fields: StructFields, span: Span) -> Ro
         Some(FieldValue::RefList(v)) => v,
         _ => Vec::new(),
     };
+    // #225's three scalars, all plain `Scalar` rows like `host`.
+    let priority = match fields.remove("priority") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
+    let port = match fields.remove("port") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
+    let protocol = match fields.remove("protocol") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
     Router {
         name,
         host,
         entrypoint,
         path_prefix,
         middleware,
+        priority,
+        port,
+        protocol,
         span,
     }
 }
