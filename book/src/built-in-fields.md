@@ -90,8 +90,80 @@ Primary field: `ref`.
 image "jellyfin/jellyfin:latest"
 ```
 
-Every service needs an `image`—either directly or inherited from a
-template—`hllc --build` fails if one is missing.
+Every service needs an `image` or a [`build`](#build)—either directly or
+inherited from a template—and `hllc --build` fails when it would emit
+neither.
+
+That check reads the *generated document*, not the `image` field, so a
+[`raw`](#raw) entry supplying the key by hand counts:
+
+```hll,build
+service foo {
+  raw {
+    image: "test:latest"
+  }
+}
+```
+
+## `build`
+
+Primary field: `context`.
+
+| Field | Accepts | Default |
+|---|---|---|
+| `context` | string | *Required—a build with no context has nothing to build* |
+| `dockerfile` | string | unset—Compose looks for `Dockerfile` inside the context |
+
+Compose's own `build:` key, for a service built from a local Dockerfile
+rather than pulled from a registry:
+
+```hll,build
+service vault-git-sync {
+  build "./vault-git-sync"
+  restart unless-stopped
+  traefik {
+    disabled
+  }
+}
+```
+
+```text
+services:
+  vault-git-sync:
+    build: ./vault-git-sync
+    restart: unless-stopped
+```
+
+Name a `dockerfile` and `hllc` switches to Compose's long form, since
+the short one has nowhere to put it. `{{name}}` resolves in both halves,
+the same as in `image`:
+
+```hll,build
+service app {
+  build {
+    context: "./{{name}}"
+    dockerfile: "Dockerfile.prod"
+  }
+  traefik {
+    disabled
+  }
+}
+```
+
+```text
+services:
+  app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile.prod
+```
+
+`image` and `build` are independent—set either, or both. Compose reads
+the pair as *build this context, then tag the result as that image.*
+
+`build` deliberately has no `args`. It's a map, unlike the two plain
+strings here, and nothing has needed one yet. `raw { build: { ... } }`
+overrides the whole key for a service that does.
 
 ## `expose`
 

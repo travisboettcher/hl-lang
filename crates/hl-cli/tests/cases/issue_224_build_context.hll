@@ -1,0 +1,54 @@
+# #224: a service built from a local Dockerfile had no spelling at all
+# before this — not "needs `raw`", but genuinely inexpressible. The
+# image requirement was checked against the structured `image` field,
+# which a locally-built service has no reason to set, and a `raw`
+# entry supplying one by hand didn't satisfy it either.
+#
+# What this pins, across the three services below:
+#   - `build "./ctx"`, Compose's short form, as the whole of what a
+#     locally-built service needs — `vault-git-sync` is the real
+#     `node-red` sidecar from the issue, verbatim;
+#   - the long form, emitted only when a `dockerfile` forces it, with
+#     `{{name}}` resolving in both halves the way it does in `image`;
+#   - `image` and `build` set together, which Compose reads as "build
+#     this context, then tag the result as that";
+#   - the requirement being checked against the *emitted document*, so
+#     `raw`-supplied keys count and a `raw` one overrides the structured
+#     field rather than emitting the key twice (#68's rule).
+service vault-git-sync {
+  build "./vault-git-sync"
+  restart unless-stopped
+  env_file "vault-git-sync.env"
+  volume "/home/boettcherta/obsidian-vault" -> "/vault"
+  traefik {
+    disabled
+  }
+
+  # Neither `build`'s own sub-fields nor `user` overlap, so this stays
+  # a plain passthrough rather than an override.
+  raw {
+    user: "1000:100"
+  }
+}
+
+service app {
+  image "app:latest"
+  build {
+    context: "./{{name}}"
+    dockerfile: "Dockerfile.prod"
+  }
+  traefik {
+    disabled
+  }
+}
+
+service foo {
+  build "./structured"
+  raw {
+    image: "test:latest"
+    build: "./raw"
+  }
+  traefik {
+    disabled
+  }
+}

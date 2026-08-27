@@ -51,6 +51,7 @@ Program {
                             },
                         },
                     ),
+                    build: None,
                     expose: None,
                     routers: [],
                     traefik: None,

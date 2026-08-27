@@ -43,7 +43,8 @@ Punctuation: { } [ ] ( ) : = -> , . $
 ```
 
 - `template` is the *only* reserved word in the entire language. Everything
-  else that looks like a keyword (`service`, `network`, `image`, `volume`,
+  else that looks like a keyword (`service`, `network`, `image`, `build`,
+  `volume`,
   `publish`, `env`, `env_file`, `restart`, `expose`, `healthcheck`,
   `depends_on`, `networks`, `dns`, `devices`,
   `container_name`, `command`, `entrypoint`, `privileged`, `with`, `as`,
@@ -441,6 +442,46 @@ their own. `privileged`/`devices` are the most recent pair to graduate
 out of it—see #157—following `dns`/`env_file`/`healthcheck` before them,
 leaving keys like `security_opt` as the kind of entry that stays in
 `raw` for good.
+
+`build` is the newest row, added by #224, and the one that graduated
+out of `raw` for a reason none of the preceding ones had. The others were
+promotions of convenience. `raw` could already write
+`dns`/`env_file`/`healthcheck`/`privileged`/`devices` perfectly well,
+and each got a row because a generic Compose key deserves validation and
+a spelling of its own. `build` had no spelling at all. Codegen demanded
+an `image`, and checked that against the structured `image` field, so a
+service built from a local Dockerfile, which has no `image` and no
+reason to invent one, failed to compile whatever it wrote, `raw`
+included. That made `build`'s absence a hole in the language rather than
+a gap in its convenience, which is what moved it ahead of the rest of
+the long tail.
+
+The fix has two halves, and the second matters as much as the first.
+Adding the row is the obvious half. The other is that "does this service
+have an image" stopped being a question about a *field* and became one
+about the emitted *document*: codegen now asks whether the finished
+service block carries an `image:` or a `build:` key, from any source,
+once `raw` overrides have had their say. Those two questions had quietly
+come apart in two directions. A `raw { image: "..." }` that supplies the
+key by hand drew a refusal even though the key it writes is exactly the
+key codegen demands, and a service built from a local context drew one
+for lacking a key it correctly never sets. Asking the document answers
+both at once, and it's the question codegen actually cares about: what
+matters is that Compose gets something to run, not which `.hll`
+construct produced it. `apply_raw_overrides` already assumed `raw`
+stands in for a built-in field, and this makes the image requirement
+assume the same thing.
+
+`build` carries `context` plus `dockerfile`. `context` is the primary
+field for `image`'s `ref` reason: one bare value stands in for the whole
+struct, and Compose has its own short form spelling exactly that.
+`build` emits whichever of Compose's two shapes the source implies, the
+bare context string unless a `dockerfile` forces the mapping. `args` is deliberately absent,
+being a map that would need the merge machinery `env` has rather than
+the two plain scalars here, with nothing yet needing one. A `build`
+block with no `context` is a hard error rather than a silent default to
+`.`, for `router`-without-`host`'s reason one level over: a wrong
+default here builds the wrong directory rather than nothing.
 
 `publish` and `expose` are separate rows on purpose, not two spellings
 of one concept. `publish` is Compose's `ports:` key, which puts the port

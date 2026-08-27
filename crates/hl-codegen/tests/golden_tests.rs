@@ -1566,11 +1566,11 @@ fn interpolation_reaches_a_bind_mount_path() {
 }
 
 #[test]
-fn missing_image_is_error() {
+fn missing_image_and_build_is_error() {
     let err = generate_err("service s {\n}\n");
     assert!(matches!(
         err,
-        CodegenError::MissingImage { service, .. } if service == "s"
+        CodegenError::MissingImageOrBuild { service, .. } if service == "s"
     ));
 }
 
@@ -2555,6 +2555,104 @@ fn comma_in_a_router_middleware_is_an_error() {
                 character: ',',
                 ..
             }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// #224's motivating real service: `node-red`'s `vault-git-sync`
+/// sidecar, built from a local Dockerfile rather than pulled. Before
+/// #224 this was not expressible at all — `raw` included — because the
+/// image requirement was checked against the structured `image` field,
+/// which a locally-built service has no reason to set.
+#[test]
+fn vault_git_sync_builds_from_a_local_context() {
+    let yaml = generate_from(
+        "service vault-git-sync {\n  \
+           build \"./vault-git-sync\"\n  \
+           restart unless-stopped\n  \
+           env_file \"vault-git-sync.env\"\n  \
+           volume \"/home/boettcherta/obsidian-vault\" -> \"/vault\"\n  \
+           traefik { disabled }\n  \
+           raw {\n    user: \"1000:100\"\n  }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      vault-git-sync:
+        build: "./vault-git-sync"
+        restart: unless-stopped
+        env_file:
+          - vault-git-sync.env
+        volumes:
+          - "/home/boettcherta/obsidian-vault:/vault"
+        labels:
+          - traefik.enable=false
+        user: "1000:100"
+    "#);
+}
+
+/// A `dockerfile` switches `build:` from Compose's short form to its
+/// long one, and `{{name}}` resolves in both halves.
+#[test]
+fn build_with_a_dockerfile_emits_the_long_form() {
+    let yaml = generate_from(
+        "service app {\n  \
+           image \"app:latest\"\n  \
+           build {\n    context: \"./{{name}}\"\n    dockerfile: \"Dockerfile.prod\"\n  }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      app:
+        image: "app:latest"
+        build:
+          context: "./app"
+          dockerfile: Dockerfile.prod
+    "#);
+}
+
+/// The second half of #224: the requirement is checked against the
+/// emitted document, so a hand-written `raw { image: ... }` satisfies
+/// it. The issue reported this rejected even though the key it writes
+/// is exactly the key being demanded.
+#[test]
+fn a_raw_supplied_image_satisfies_the_requirement() {
+    let yaml = generate_from(
+        "service foo {\n  raw {\n    image: \"test:latest\"\n    build: \"./foo\"\n  }\n}\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      foo:
+        image: "test:latest"
+        build: "./foo"
+    "#);
+}
+
+/// A `raw` `build:` alone satisfies it too, and overrides a structured
+/// one rather than emitting the key twice (#68's rule, applied to the
+/// new field).
+#[test]
+fn a_raw_build_overrides_the_structured_one() {
+    let yaml = generate_from(
+        "service foo {\n  build \"./structured\"\n  raw {\n    build: \"./raw\"\n  }\n}\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      foo:
+        build: "./raw"
+    "#);
+}
+
+/// A `build` block with no `context` is refused: the context is the
+/// whole of what there is to build.
+#[test]
+fn build_without_a_context_is_an_error() {
+    let err = generate_err("service app {\n  build {\n    dockerfile: \"Dockerfile\"\n  }\n}\n");
+    assert!(
+        matches!(
+            &err,
+            CodegenError::BuildWithoutContext { service, .. } if service == "app"
         ),
         "got {err:?}"
     );

@@ -345,6 +345,41 @@ pub struct Image {
     pub span: Span,
 }
 
+/// A parsed `build` field (#224) — Compose's own `build:` key, naming a
+/// local build context instead of (or beside) a registry `image`.
+///
+/// Promoted out of `raw` for the reason `healthcheck`/`dns`/`env_file`
+/// already were: it's a plain generic Compose key, homelab-specific in
+/// none of its own fields. What forced it rather than merely suggesting
+/// it is that `build` is the one such key a service can't do without —
+/// Compose requires `image` *or* `build`, and before #224 `hllc`
+/// required `image` unconditionally, so a locally-built service was not
+/// expressible at all, `raw` included (see
+/// [`crate::schema::BUILD`] and `hl_codegen`'s own image-or-build
+/// check).
+///
+/// `context` is `Option` for the same reason as [`Image::reference`] —
+/// the parser enforces no required fields — but a `build` reaching
+/// codegen with no context at all is an error there, since the context
+/// is the whole of what there is to build.
+///
+/// No `args` field this milestone. It's a map, needing the merge
+/// machinery `env` has rather than the two plain scalars here, and
+/// nothing yet needs one; `raw { build: { ... } }` still overrides the
+/// whole key for a service that does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Build {
+    pub context: Option<Literal>,
+    /// A Dockerfile path relative to [`Self::context`], Compose's own
+    /// `build.dockerfile`. `None` leaves it to Compose's default
+    /// (`Dockerfile` inside the context), and is what decides the
+    /// emitted shape: with no `dockerfile`, `build:` serializes as the
+    /// bare context string Compose's short form spells, rather than a
+    /// one-key mapping saying the same thing.
+    pub dockerfile: Option<Literal>,
+    pub span: Span,
+}
+
 /// A parsed `expose` field. `port` is `Option` for the same reason as
 /// [`Image::reference`] — see that doc.
 ///
@@ -830,6 +865,12 @@ pub struct TemplateInvocation {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ServiceFields {
     pub image: Option<Image>,
+    /// Compose's own `build:` key (#224). Independent of
+    /// [`Self::image`]: Compose accepts either, or both (build the
+    /// context, then tag the result as `image`), and `hl_codegen`
+    /// requires only that the emitted service ends up with at least one
+    /// of them.
+    pub build: Option<Build>,
     pub expose: Option<Expose>,
     /// `router <name> { ... }` blocks (#184), in source order — every
     /// Traefik router this service computes, `expose <port> as

@@ -23,10 +23,10 @@ use std::fmt;
 use hl_lexer::{SourceMap, Span};
 
 use crate::ast::{
-    ArrowMap, ArrowMapEntry, ArrowMapHost, Command, DependsOnEntry, Entrypoint, EnvEntry, EnvMap,
-    Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Program, RawEntry,
-    RawMap, RawValue, Restart, Router, Service, ServiceFields, TemplateDecl, TemplateInvocation,
-    TopDecl, Traefik, Volume,
+    ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnEntry, Entrypoint, EnvEntry,
+    EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Program,
+    RawEntry, RawMap, RawValue, Restart, Router, Service, ServiceFields, TemplateDecl,
+    TemplateInvocation, TopDecl, Traefik, Volume,
 };
 use crate::schema::{self, MapSide};
 
@@ -1642,6 +1642,19 @@ fn substitute_params(
     {
         substitute_literal(r, args, template_name)?;
     }
+    // `build`'s own literal slots (#224) — both plain free-text paths,
+    // so both take an ordinary `substitute_literal`. Missing either
+    // would reproduce #168's live bug class: the `Literal::Param`
+    // survives to codegen, which writes the parameter's own name into
+    // the generated `build:` key and exits 0.
+    if let Some(b) = &mut fields.build {
+        if let Some(c) = &mut b.context {
+            substitute_literal(c, args, template_name)?;
+        }
+        if let Some(d) = &mut b.dockerfile {
+            substitute_literal(d, args, template_name)?;
+        }
+    }
     if let Some(e) = &mut fields.expose
         && let Some(p) = &mut e.port
     {
@@ -2406,6 +2419,38 @@ static SCALAR_FIELDS: &[ScalarField] = &[
             });
         },
     },
+    // `build`'s two scalars (#224). `context` sorts before `dockerfile`
+    // for [`SCALAR_FIELDS`]' span-preference reason: a `get_or_insert`
+    // that has to materialize `Build` from scratch stamps its span from
+    // the context, the field that names what's being built.
+    ScalarField {
+        key: "build.context",
+        take: |f| {
+            f.build
+                .as_mut()
+                .and_then(|b| b.context.take())
+                .map(ScalarValue::Literal)
+        },
+        set: |f, v| {
+            let v = expect_literal(v, "build.context");
+            let span = v.span();
+            f.build.get_or_insert(empty_build(span)).context = Some(v);
+        },
+    },
+    ScalarField {
+        key: "build.dockerfile",
+        take: |f| {
+            f.build
+                .as_mut()
+                .and_then(|b| b.dockerfile.take())
+                .map(ScalarValue::Literal)
+        },
+        set: |f, v| {
+            let v = expect_literal(v, "build.dockerfile");
+            let span = v.span();
+            f.build.get_or_insert(empty_build(span)).dockerfile = Some(v);
+        },
+    },
     ScalarField {
         key: "expose.port",
         take: |f| {
@@ -2660,6 +2705,17 @@ static SCALAR_FIELDS: &[ScalarField] = &[
 /// for the `get_or_insert` calls [`SCALAR_FIELDS`]'s `healthcheck.*`
 /// rows share — factored out once so a future `Healthcheck` sub-field
 /// doesn't have to be added to seven near-identical struct literals.
+/// A [`Build`] with every sub-field unset, for a [`SCALAR_FIELDS`] row
+/// that has to materialize one before writing its own slot — the same
+/// job [`empty_healthcheck`] does for `healthcheck`.
+fn empty_build(span: Span) -> Build {
+    Build {
+        context: None,
+        dockerfile: None,
+        span,
+    }
+}
+
 fn empty_healthcheck(span: Span) -> Healthcheck {
     Healthcheck {
         test: None,

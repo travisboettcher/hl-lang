@@ -2077,6 +2077,14 @@ fn assert_no_params(service: &Service) {
     {
         assert_not_param(r);
     }
+    if let Some(b) = &fields.build {
+        if let Some(c) = &b.context {
+            assert_not_param(c);
+        }
+        if let Some(d) = &b.dockerfile {
+            assert_not_param(d);
+        }
+    }
     if let Some(e) = &fields.expose
         && let Some(p) = &e.port
     {
@@ -2815,4 +2823,68 @@ fn qualified_router_middleware_reference_is_rejected() {
         ),
         "got {err:?}"
     );
+}
+
+// --- `build` (#224) ---
+
+/// `build`'s two sub-fields merge per sub-field like `healthcheck`'s,
+/// not as one whole struct: a service body setting only `context` keeps
+/// the `dockerfile` its template supplied.
+#[test]
+fn service_body_can_override_just_one_build_subfield() {
+    let composed = compose_ok(
+        "template built {\n  build {\n    context: \"./placeholder\"\n    \
+           dockerfile: \"Dockerfile.prod\"\n  }\n}\n\
+         service s {\n  with built\n  build \"./real\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let build = service.fields.build.as_ref().expect("build set");
+    assert_eq!(build.context.as_ref().unwrap().text(), "./real");
+    assert_eq!(build.dockerfile.as_ref().unwrap().text(), "Dockerfile.prod");
+}
+
+/// Two explicit templates disagreeing on `build.context` collide, the
+/// same as any other scalar slot.
+#[test]
+fn explicit_templates_setting_the_same_build_context_collide() {
+    let err = compose_err(
+        "template a {\n  build \"./a\"\n}\n\
+         template b {\n  build \"./b\"\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    assert!(
+        matches!(
+            err,
+            ComposeError::FieldCollision {
+                field: "build.context",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// A `$param` in either sub-field is substituted like every other
+/// literal slot — #168's bug class, which is a field added without
+/// extending `substitute_params`' walk.
+#[test]
+fn build_params_are_substituted() {
+    let composed = compose_ok(
+        "template built(c, d) {\n  build {\n    context: $c\n    dockerfile: $d\n  }\n}\n\
+         service s {\n  \
+           with built { c: \"./app\", d: \"Dockerfile.prod\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let build = service.fields.build.as_ref().expect("build set");
+    assert_eq!(build.context.as_ref().unwrap().text(), "./app");
+    assert_eq!(build.dockerfile.as_ref().unwrap().text(), "Dockerfile.prod");
+    assert_no_params(service);
+}
+
+/// A service that never mentions `build` composes to `None`, so every
+/// file written before the field existed reaches codegen unchanged.
+#[test]
+fn a_service_without_build_composes_to_none() {
+    let composed = compose_ok("service s {\n  image \"x\"\n}\n");
+    assert!(single_service(&composed).fields.build.is_none());
 }

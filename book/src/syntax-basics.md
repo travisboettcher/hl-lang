@@ -47,7 +47,8 @@ the exact same grammar as a service's own top-level body.
 
 `template` is the only word in `hll` that you can never use as an
 identifier. Everything else that looks like a keyword—`service`,
-`network`, `image`, `volume`, `env`, `restart`, `expose`, `router`,
+`network`, `image`, `build`, `volume`, `env`, `restart`, `expose`,
+`router`,
 `with`, `as`, `use`, `raw`, `defaults`, and so on—is an ordinary
 identifier that only *means* something because of where it appears and
 what field it's assigned to. This is deliberate: it keeps the door open

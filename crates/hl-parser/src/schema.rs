@@ -190,6 +190,37 @@ pub static IMAGE: TypeSchema = TypeSchema {
     schema_free: false,
 };
 
+/// `build "./vault-git-sync"` / `build { context: "...", dockerfile:
+/// "..." }` — Compose's own `build:` key (#224).
+///
+/// `context` is the primary field, for [`IMAGE`]'s exact reason: one
+/// bare value stands in for the whole struct, since a build with a
+/// context and nothing else is the overwhelmingly common case and
+/// Compose has its own short form (`build: ./dir`) saying precisely
+/// that. `dockerfile` is the one other plain scalar Compose's long form
+/// takes that a service realistically needs; `args` is deliberately
+/// absent — see [`crate::ast::Build`]'s doc.
+pub static BUILD: TypeSchema = TypeSchema {
+    type_name: "build",
+    kind: SchemaKind::Struct,
+    fields: &[
+        FieldSchema {
+            name: "context",
+            kind: FieldKind::Scalar,
+        },
+        FieldSchema {
+            name: "dockerfile",
+            kind: FieldKind::Scalar,
+        },
+    ],
+    primary_field: Some("context"),
+    map_separator: None,
+    uniqueness: None,
+    key_may_be_reference: false,
+    needs_name: false,
+    schema_free: false,
+};
+
 /// `expose 8096` / `expose { port: 8096 }` — Compose's own `expose:` key
 /// (container-network visibility) plus the
 /// `traefik.http.services.<svc>.loadbalancer.server.port` label. Nothing
@@ -722,6 +753,13 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
     FieldSchema {
         name: "entrypoint",
         kind: FieldKind::ScalarOrList,
+    },
+    // `build` sits beside `image` because the two answer one question
+    // between them — where this service's container image comes from —
+    // and `hl_codegen` checks them together (#224).
+    FieldSchema {
+        name: "build",
+        kind: FieldKind::Nested(&BUILD),
     },
     FieldSchema {
         name: "expose",
