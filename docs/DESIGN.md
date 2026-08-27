@@ -43,7 +43,8 @@ Punctuation: { } [ ] ( ) : = -> , . $
 ```
 
 - `template` is the *only* reserved word in the entire language. Everything
-  else that looks like a keyword (`service`, `network`, `image`, `volume`,
+  else that looks like a keyword (`service`, `network`, `image`, `build`,
+  `volume`,
   `publish`, `env`, `env_file`, `restart`, `expose`, `healthcheck`,
   `depends_on`, `networks`, `dns`, `devices`,
   `container_name`, `command`, `entrypoint`, `privileged`, `with`, `as`,
@@ -442,6 +443,46 @@ out of it—see #157—following `dns`/`env_file`/`healthcheck` before them,
 leaving keys like `security_opt` as the kind of entry that stays in
 `raw` for good.
 
+`build` is the newest row, added by #224, and the one that graduated
+out of `raw` for a reason none of the preceding ones had. The others were
+promotions of convenience. `raw` could already write
+`dns`/`env_file`/`healthcheck`/`privileged`/`devices` perfectly well,
+and each got a row because a generic Compose key deserves validation and
+a spelling of its own. `build` had no spelling at all. Codegen demanded
+an `image`, and checked that against the structured `image` field, so a
+service built from a local Dockerfile, which has no `image` and no
+reason to invent one, failed to compile whatever it wrote, `raw`
+included. That made `build`'s absence a hole in the language rather than
+a gap in its convenience, which is what moved it ahead of the rest of
+the long tail.
+
+The fix has two halves, and the second matters as much as the first.
+Adding the row is the obvious half. The other is that "does this service
+have an image" stopped being a question about a *field* and became one
+about the emitted *document*: codegen now asks whether the finished
+service block carries an `image:` or a `build:` key, from any source,
+once `raw` overrides have had their say. Those two questions had quietly
+come apart in two directions. A `raw { image: "..." }` that supplies the
+key by hand drew a refusal even though the key it writes is exactly the
+key codegen demands, and a service built from a local context drew one
+for lacking a key it correctly never sets. Asking the document answers
+both at once, and it's the question codegen actually cares about: what
+matters is that Compose gets something to run, not which `.hll`
+construct produced it. `apply_raw_overrides` already assumed `raw`
+stands in for a built-in field, and this makes the image requirement
+assume the same thing.
+
+`build` carries `context` plus `dockerfile`. `context` is the primary
+field for `image`'s `ref` reason: one bare value stands in for the whole
+struct, and Compose has its own short form spelling exactly that.
+`build` emits whichever of Compose's two shapes the source implies, the
+bare context string unless a `dockerfile` forces the mapping. `args` is deliberately absent,
+being a map that would need the merge machinery `env` has rather than
+the two plain scalars here, with nothing yet needing one. A `build`
+block with no `context` is a hard error rather than a silent default to
+`.`, for `router`-without-`host`'s reason one level over: a wrong
+default here builds the wrong directory rather than nothing.
+
 `publish` and `expose` are separate rows on purpose, not two spellings
 of one concept. `publish` is Compose's `ports:` key, which puts the port
 on the Docker host where the local network can reach it, and `expose` is
@@ -538,10 +579,61 @@ host under the last prefix. They're emitted for a single prefix too,
 where they change nothing, so the rule's shape doesn't depend on how many
 prefixes it happens to have.
 
-One thing a `router` deliberately doesn't carry: a `port`. Compose's
-`loadbalancer.server.port` label is per Compose service, not per router,
-so it stays derived from `expose`'s own `port`, and several routers off
-one container all balance onto that one port.
+`router` carried no `port` through #224, on the reasoning that
+Compose's `loadbalancer.server.port` label is per Compose service rather
+than per router: a container listens on one port however many routers
+point at it. That's true of nearly every service, and false of
+`sftpgo`, which serves a web UI on 2222, WebDAV on 4444, and raw SFTP on
+1111 off one container. #225 added the `port` sub-field for that case.
+A router naming one gets a Traefik *service* of its own, keyed by the
+router's own id, and says so with a `.service=` label. A router naming
+none still falls through to the single service-wide target `expose`
+supplies, which is what keeps every file written against the older model
+emitting exactly what it always did.
+
+That splits the "a routed service needs a port" rule in two, and the
+split is the interesting part. `expose` is now required only while at
+least one router actually falls back to it. A service whose routers all
+name their own needs no `expose` at all, and demanding one would mean
+inventing a "the" port that `sftpgo` genuinely doesn't have, the very
+reason its `expose:` key stayed in `raw` alongside its labels. The
+diagnostic points at the falling-back router rather than the first one,
+since that's the block the fix belongs to.
+
+`priority` is the smallest of #225's three additions and needs least
+justification: a plain generic Traefik router setting, emitted verbatim
+as a number, absent by default so Traefik keeps its own rule-length
+heuristic rather than one `hllc` invented. What makes it necessary
+rather than merely nice is that two routers sharing a host have nothing
+else to tell them apart, which is exactly `sftpgo`'s `web`/`webdav`
+pair.
+
+`protocol` is the largest, since a TCP router isn't an HTTP router with
+a flag on it. It emits `traefik.tcp.routers.*`/`traefik.tcp.services.*`,
+a separate namespace, and matches ``HostSNI(`...`)`` rather than
+``Host(`...`)``. At that layer there is no HTTP request to read a
+`Host` header from, only the TLS handshake's server name, which is also
+why `HostSNI` accepts a `*` wildcard that `Host` has no equivalent of.
+Every other label a router emits keeps its spelling either side, which
+is why one code path emits both, parameterized by the namespace segment
+and the host matcher.
+
+Two constraints follow, both hard errors rather than silent drops. A TCP
+router can't take a `path_prefix`, having no request URI to match a path
+against, and ignoring one would route traffic the block plainly meant to
+narrow. And a TCP router must name its own `port`: the shared fallback
+target is an *HTTP* service (`traefik.http.services.<service>`), so
+there is nothing there for it to fall back to.
+
+Codegen validates `protocol` rather than the parser, unlike
+`depends_on`'s condition. The reason is `$param`: substitution runs
+after parsing, so a parse-time check would see `$proto` unresolved and
+reject it as an unknown protocol, which names the wrong problem
+entirely. By the time codegen runs, composition has bound every
+parameter, so what reaches the check is what the user actually wrote. `priority` and `port`
+are numbers and ride the same `check_numeric_fields` backstop
+`expose.port` already had, catching a hand-written mismatch that never
+passes through substitution for the argument-side check to see.
 
 `middleware` sits on `router` since #221, and only there—it used to be
 a service-level field instead, one list attaching to every router the

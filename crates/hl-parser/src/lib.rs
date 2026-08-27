@@ -60,10 +60,11 @@ mod parser;
 pub mod schema;
 
 pub use ast::{
-    ArrowMap, ArrowMapEntry, ArrowMapHost, Command, DependsOnCondition, DependsOnEntry, Entrypoint,
-    EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Param,
-    Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart, Router, Service, ServiceFields,
-    TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume, VolumeDriverOpt,
+    ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnCondition, DependsOnEntry,
+    Entrypoint, EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal,
+    Network, Param, Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart, Router, Service,
+    ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
+    VolumeDriverOpt,
 };
 pub use compose::{
     ComposeError, ComposedProgram, MAX_TEMPLATE_DEPTH, MapKeyCollision, SymbolResolver, compose,

@@ -1,0 +1,53 @@
+# #225: `router`/`expose` assumed "one container, one port, one
+# protocol, HTTP only". `sftpgo` fits none of that — it serves a web UI,
+# WebDAV, and raw SFTP off one container, on three ports across two
+# Traefik namespaces — so its whole `labels` list (and its `expose:`,
+# since no one port is "the" port) stayed hand-typed in `raw`.
+#
+# This pins the three gaps the issue names, in the one service that has
+# all three, against the label list it quotes verbatim:
+#   - `priority`, the only thing separating `web` from `webdav`, which
+#     share a host and would otherwise match the same request;
+#   - a per-router `port`, giving each router a Traefik *service* of its
+#     own (`.service=` plus its own `loadbalancer.server.port`) instead
+#     of the single service-wide target every router used to share;
+#   - `protocol: tcp`, which moves a router into the `traefik.tcp.*`
+#     namespace and switches its rule from `Host()` to `HostSNI()` —
+#     raw SFTP isn't HTTP, so there's no Host header to match on.
+#
+# No `expose` anywhere, deliberately: with every router naming its own
+# port there is nothing left to fall back to, and requiring one would
+# mean inventing a "the" port this container doesn't have.
+service sftpgo {
+  image "drakkan/sftpgo:latest"
+
+  router web {
+    host: "sftp.internal.techdebtor.io"
+    priority: 100
+    port: 2222
+  }
+
+  router webdav {
+    host: "sftp.internal.techdebtor.io"
+    priority: 90
+    port: 4444
+  }
+
+  router sftp {
+    protocol: tcp
+    host: "*"
+    port: 1111
+  }
+}
+
+# The pre-#225 shape, unchanged: one router, no port of its own, falling
+# back to the single service-wide target `expose` supplies. Pinned
+# beside `sftpgo` so the two models are visibly side by side.
+service jellyfin {
+  image "jellyfin/jellyfin:latest"
+  expose 8096
+  router {
+    host: "media.techdebtor.io"
+    entrypoint: web-secure
+  }
+}

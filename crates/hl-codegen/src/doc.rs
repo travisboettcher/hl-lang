@@ -164,10 +164,33 @@ pub(crate) struct DependsOnConditionDoc {
     pub condition: String,
 }
 
+/// Compose's own `build:` key (#224), in whichever of its two shapes
+/// the `.hll` source implies.
+///
+/// Untagged so each arm serializes as itself: [`Self::Context`] as the
+/// bare string Compose's short form spells (`build: ./vault-git-sync`),
+/// [`Self::Long`] as the mapping its long form needs. Picking between
+/// them rather than always emitting the long form keeps the generated
+/// file reading the way a hand-written one would — the same reasoning
+/// [`DependsOnDoc`] follows for its own short/long switch, and
+/// [`HealthcheckDoc::test`] for shell versus exec.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(crate) enum BuildDoc {
+    Context(String),
+    Long { context: String, dockerfile: String },
+}
+
 #[derive(Serialize, Default)]
 pub(crate) struct ComposeServiceDoc {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// Emitted beside [`Self::image`], not instead of it: Compose takes
+    /// either or both, and `hl_codegen` requires only that at least one
+    /// of the two reaches the output — see `generate_service`'s own
+    /// image-or-build check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildDoc>,
     /// Only emitted when `.hll` sets `container_name` explicitly (#90).
     /// Compose's own default naming (`<project>_<service>_1`) is scoped
     /// per project and is what most people want; an explicit
@@ -315,6 +338,7 @@ impl ComposeServiceDoc {
         // duplicate key for that field.
         let Self {
             image,
+            build,
             container_name,
             entrypoint,
             command,
@@ -338,6 +362,9 @@ impl ComposeServiceDoc {
         // its Rust field names — there is no `#[serde(rename)]` above.
         if raw.contains_key("image") {
             *image = None;
+        }
+        if raw.contains_key("build") {
+            *build = None;
         }
         if raw.contains_key("container_name") {
             *container_name = None;

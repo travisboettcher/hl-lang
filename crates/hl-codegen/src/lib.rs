@@ -40,8 +40,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use hl_parser::{
-    ArrowMap, ArrowMapHost, Command, ComposedProgram, DependsOnEntry, Entrypoint, Healthcheck,
-    HealthcheckTest, Literal, Network, Service, SourceMap, Span, Volume,
+    ArrowMap, ArrowMapHost, Build, Command, ComposedProgram, DependsOnEntry, Entrypoint,
+    Healthcheck, HealthcheckTest, Literal, Network, Service, SourceMap, Span, Volume,
 };
 use indexmap::IndexMap;
 
@@ -133,10 +133,30 @@ pub enum CodegenError {
     /// A `{{binding}}` interpolation used a name codegen doesn't
     /// recognize (today, the only valid one is `name`).
     UnknownInterpolation { binding: String, span: Span },
-    /// A service has no `image` set — required for a valid Compose
-    /// service block. The parser doesn't enforce this (see
-    /// [`hl_parser::Service`]'s doc); codegen must.
-    MissingImage { service: String, span: Span },
+    /// A service would emit neither an `image:` nor a `build:` key —
+    /// Compose requires at least one, since between them they're the
+    /// whole of where a container's image comes from. The parser
+    /// doesn't enforce this (see [`hl_parser::Service`]'s doc);
+    /// codegen must.
+    ///
+    /// Checked against the *emitted document*, after `raw` overrides
+    /// have been applied, rather than against the structured
+    /// [`hl_parser::ServiceFields::image`] slot alone (#224). Those two
+    /// questions came apart in two ways, both of which made a
+    /// perfectly valid service impossible to write: a locally-built
+    /// service has no `image` at all and never did, and a `raw { image:
+    /// "..." }` that supplies one by hand was refused even though the
+    /// key it emits is exactly the key being demanded. Asking the
+    /// document rather than the field answers both at once, and matches
+    /// what `apply_raw_overrides` already assumes about `raw` standing
+    /// in for a built-in field.
+    MissingImageOrBuild { service: String, span: Span },
+    /// A `build` block sets no `context` (#224). The context is the
+    /// whole of what there is to build, so the block says nothing —
+    /// exactly the shape [`Self::RouterWithoutHost`] refuses one level
+    /// over, and refused rather than defaulted to `.` because a silent
+    /// default here builds the wrong directory rather than none.
+    BuildWithoutContext { service: String, span: Span },
     /// A `$param` reference survived composition and reached codegen.
     /// Composition is supposed to substitute every one of them (see
     /// [`hl_parser::Literal::Param`]'s doc), so this is a compiler
@@ -220,6 +240,39 @@ pub enum CodegenError {
         disabled_span: Span,
         span: Span,
     },
+    /// A `router` block's `protocol` names something other than `http`
+    /// or `tcp` (#225) — Traefik's only two router label namespaces.
+    ///
+    /// Reported from codegen rather than the parser so a template can
+    /// write `protocol: $proto`: substitution runs after parsing, and
+    /// an unresolved `$proto` rejected here as an unknown protocol
+    /// would name the wrong problem.
+    UnknownRouterProtocol {
+        service: String,
+        protocol: String,
+        span: Span,
+    },
+    /// A TCP `router` sets a field only an HTTP router has (#225) —
+    /// today only `path_prefix`, since a TCP router matches on the TLS
+    /// handshake's server name and never sees a request URI to take a
+    /// path from. Refused rather than dropped: silently ignoring it
+    /// would route traffic the block plainly meant to narrow.
+    TcpRouterWithHttpOnlyField {
+        service: String,
+        router: Option<String>,
+        field: &'static str,
+        span: Span,
+    },
+    /// A TCP `router` names no `port` (#225). An HTTP router with no
+    /// port of its own falls back to the one service-wide target
+    /// `expose.port` supplies, but that target is an *HTTP* service —
+    /// `traefik.http.services.<service>` — so a TCP router has nothing
+    /// to fall back to and must name its own.
+    TcpRouterWithoutPort {
+        service: String,
+        router: Option<String>,
+        span: Span,
+    },
     /// A `router` block's name contains a character that can't appear in
     /// a Traefik label *key* (#184).
     ///
@@ -252,9 +305,13 @@ impl CodegenError {
             | CodegenError::UnknownVolume { span, .. }
             | CodegenError::AmbiguousExternalNetwork { span, .. }
             | CodegenError::UnknownInterpolation { span, .. }
-            | CodegenError::MissingImage { span, .. }
+            | CodegenError::MissingImageOrBuild { span, .. }
+            | CodegenError::BuildWithoutContext { span, .. }
             | CodegenError::UnsubstitutedParameter { span, .. }
             | CodegenError::UnsafeLabelValue { span, .. }
+            | CodegenError::UnknownRouterProtocol { span, .. }
+            | CodegenError::TcpRouterWithHttpOnlyField { span, .. }
+            | CodegenError::TcpRouterWithoutPort { span, .. }
             | CodegenError::RouterWithoutHost { span, .. }
             | CodegenError::RouterWithoutPort { span, .. }
             | CodegenError::TraefikDisabledWithRouter { span, .. }
@@ -308,9 +365,14 @@ impl CodegenError {
             CodegenError::UnknownInterpolation { binding, .. } => {
                 write!(f, "{at}: unknown interpolation `{{{{{binding}}}}}`")
             }
-            CodegenError::MissingImage { service, .. } => {
-                write!(f, "{at}: service `{service}` has no `image` set")
-            }
+            CodegenError::MissingImageOrBuild { service, .. } => write!(
+                f,
+                "{at}: service `{service}` sets neither `image` nor `build`, so there is nothing to run — add an image (`image \"nginx\"`) or a build context (`build \"./{service}\"`)"
+            ),
+            CodegenError::BuildWithoutContext { service, .. } => write!(
+                f,
+                "{at}: service `{service}` declares a `build` with no `context`, so there is nothing to build — add a context (`build \"./{service}\"`) or drop the `build`"
+            ),
             CodegenError::UnsubstitutedParameter { param, .. } => write!(
                 f,
                 "{at}: template parameter `${param}` was never bound to an argument"
@@ -346,16 +408,34 @@ impl CodegenError {
             }
             CodegenError::RouterWithoutHost {
                 service, router, ..
-            } => {
-                let named = match router {
-                    Some(name) => format!("`router {name}`"),
-                    None => "an unnamed `router`".to_string(),
-                };
-                write!(
-                    f,
-                    "{at}: service `{service}` declares {named} with no `host`, so there is no rule for Traefik to match — add a host (`host: \"{service}.example.com\"`) or drop the `router`"
-                )
-            }
+            } => write!(
+                f,
+                "{at}: service `{service}` declares {} with no `host`, so there is no rule for Traefik to match — add a host (`host: \"{service}.example.com\"`) or drop the `router`",
+                named_router(router)
+            ),
+            CodegenError::UnknownRouterProtocol {
+                service, protocol, ..
+            } => write!(
+                f,
+                "{at}: service `{service}` declares a `router` with `protocol: {protocol}` — the only Traefik router protocols are `http` (the default) and `tcp`"
+            ),
+            CodegenError::TcpRouterWithHttpOnlyField {
+                service,
+                router,
+                field,
+                ..
+            } => write!(
+                f,
+                "{at}: service `{service}` sets `{field}` on {}, but a TCP router matches on the TLS server name and never sees a request path — drop the `{field}` or the `protocol: tcp`",
+                named_router(router)
+            ),
+            CodegenError::TcpRouterWithoutPort {
+                service, router, ..
+            } => write!(
+                f,
+                "{at}: service `{service}` declares {} with `protocol: tcp` but no `port`, and a TCP router can't fall back to `expose <port>`, which serves an HTTP router — add a port (`port: 1111`)",
+                named_router(router)
+            ),
             CodegenError::RouterWithoutPort { service, .. } => write!(
                 f,
                 "{at}: service `{service}` declares a `router` but sets no `expose <port>`, so Traefik has no port to load-balance onto — add `expose <port>` or drop the `router`"
@@ -387,6 +467,16 @@ impl CodegenError {
 struct DisplayCodegenError<'a> {
     error: &'a CodegenError,
     files: Option<&'a SourceMap>,
+}
+
+/// How a diagnostic names one `router` block: quoted by name, or
+/// described for what it is when the block is the unnamed form and has
+/// no name to quote.
+fn named_router(router: &Option<String>) -> String {
+    match router {
+        Some(name) => format!("`router {name}`"),
+        None => "an unnamed `router`".to_string(),
+    }
 }
 
 impl fmt::Display for DisplayCodegenError<'_> {
@@ -493,15 +583,17 @@ fn generate_service(
     let fields = &service.fields;
     let bindings: HashMap<&str, &str> = HashMap::from([("name", name.as_str())]);
 
-    let image_lit = fields
+    // Neither `image` nor `build` is required *here* — the pair is
+    // checked together once the document is assembled and `raw` has had
+    // its say, so a `raw`-supplied key counts (#224). See
+    // `CodegenError::MissingImageOrBuild`.
+    let image = fields
         .image
         .as_ref()
         .and_then(|i| i.reference.as_ref())
-        .ok_or_else(|| CodegenError::MissingImage {
-            service: name.clone(),
-            span: service.span,
-        })?;
-    let image = interp::resolve(image_lit.text(), &bindings, image_lit.span())?;
+        .map(|lit| interp::resolve(lit.text(), &bindings, lit.span()))
+        .transpose()?;
+    let build = generate_build(name, fields.build.as_ref(), &bindings)?;
 
     let container_name = fields
         .container_name
@@ -598,7 +690,8 @@ fn generate_service(
     }
 
     let mut service_doc = doc::ComposeServiceDoc {
-        image: Some(image),
+        image,
+        build,
         container_name,
         entrypoint,
         command,
@@ -621,7 +714,59 @@ fn generate_service(
     // shadows a built-in field emits the key twice (#68).
     service_doc.apply_raw_overrides();
 
+    // After the overrides, deliberately: `apply_raw_overrides` clears a
+    // structured field a `raw` entry replaces, so asking the document
+    // now is what lets a hand-written `raw { image: ... }` satisfy the
+    // requirement its own emitted key plainly meets (#224).
+    if service_doc.image.is_none()
+        && service_doc.build.is_none()
+        && !service_doc.raw.contains_key("image")
+        && !service_doc.raw.contains_key("build")
+    {
+        return Err(CodegenError::MissingImageOrBuild {
+            service: name.clone(),
+            span: service.span,
+        });
+    }
+
     Ok((service_doc, network_docs, volume_docs))
+}
+
+/// Builds a service's `build:` doc (#224), picking Compose's short form
+/// (a bare context string) unless a `dockerfile` forces the long one —
+/// see [`doc::BuildDoc`].
+///
+/// `context` and `dockerfile` are both `{{name}}`-interpolated, like
+/// `image` beside them and unlike the reference-list fields: both are
+/// free-text paths, and `build "./{{name}}"` is the same convenience
+/// `image "{{name}}:latest"` already offers.
+///
+/// A `build` block with no `context` at all is
+/// [`CodegenError::BuildWithoutContext`]: the context is the whole of
+/// what there is to build, exactly as a `router`'s `host` is the whole
+/// of what creates a router.
+fn generate_build(
+    service: &str,
+    build: Option<&Build>,
+    bindings: &HashMap<&str, &str>,
+) -> Result<Option<doc::BuildDoc>, CodegenError> {
+    let Some(build) = build else {
+        return Ok(None);
+    };
+    let Some(context_lit) = build.context.as_ref() else {
+        return Err(CodegenError::BuildWithoutContext {
+            service: service.to_string(),
+            span: build.span,
+        });
+    };
+    let context = interp::resolve(context_lit.text(), bindings, context_lit.span())?;
+    Ok(Some(match build.dockerfile.as_ref() {
+        Some(lit) => doc::BuildDoc::Long {
+            context,
+            dockerfile: interp::resolve(lit.text(), bindings, lit.span())?,
+        },
+        None => doc::BuildDoc::Context(context),
+    }))
 }
 
 /// Builds a service's `depends_on:` doc from its parsed
@@ -1084,13 +1229,14 @@ mod error_display_tests {
     fn display_with_a_source_map_falls_back_for_anonymous_spans() {
         let mut files = SourceMap::default();
         files.intern("entry.hll");
-        let err = CodegenError::MissingImage {
+        let err = CodegenError::MissingImageOrBuild {
             service: "web".to_string(),
             span: span(),
         };
         assert_eq!(
             err.display(&files).to_string(),
-            "3:5: service `web` has no `image` set"
+            "3:5: service `web` sets neither `image` nor `build`, so there is nothing to run — \
+             add an image (`image \"nginx\"`) or a build context (`build \"./web\"`)"
         );
     }
 
@@ -1169,12 +1315,32 @@ mod error_display_tests {
     }
 
     #[test]
-    fn missing_image_display() {
-        let err = CodegenError::MissingImage {
+    fn missing_image_or_build_display() {
+        let err = CodegenError::MissingImageOrBuild {
             service: "web".to_string(),
             span: span(),
         };
-        assert_eq!(err.to_string(), "3:5: service `web` has no `image` set");
+        assert_eq!(
+            err.to_string(),
+            "3:5: service `web` sets neither `image` nor `build`, so there is nothing to run — \
+             add an image (`image \"nginx\"`) or a build context (`build \"./web\"`)"
+        );
+    }
+
+    /// #224's second shape: a `build` block that says nothing about
+    /// what to build. Named for the service, like every other
+    /// service-scoped diagnostic here.
+    #[test]
+    fn build_without_context_display() {
+        let err = CodegenError::BuildWithoutContext {
+            service: "web".to_string(),
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: service `web` declares a `build` with no `context`, so there is nothing to \
+             build — add a context (`build \"./web\"`) or drop the `build`"
+        );
     }
 
     #[test]

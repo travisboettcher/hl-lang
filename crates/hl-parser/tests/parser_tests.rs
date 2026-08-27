@@ -3019,3 +3019,137 @@ fn service_level_middleware_after_a_comma_is_still_reported() {
         "got {err:?}"
     );
 }
+
+// --- `build` (#224) ---
+
+/// The bare-context form, Compose's own short spelling — `build`'s
+/// primary field, exactly as `ref` is `image`'s.
+#[test]
+fn build_primary_shorthand_parses() {
+    let program = parse_ok("service s {\n  build \"./vault-git-sync\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    let build = service.fields.build.as_ref().expect("build set");
+    assert_eq!(build.context.as_ref().unwrap().text(), "./vault-git-sync");
+    assert!(build.dockerfile.is_none());
+}
+
+/// The braced form, for a build that names a `dockerfile` too.
+#[test]
+fn build_braced_body_parses() {
+    let program = parse_ok(
+        "service s {\n  build {\n    context: \"./app\"\n    \
+         dockerfile: \"Dockerfile.prod\"\n  }\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let build = service.fields.build.as_ref().expect("build set");
+    assert_eq!(build.context.as_ref().unwrap().text(), "./app");
+    assert_eq!(build.dockerfile.as_ref().unwrap().text(), "Dockerfile.prod");
+}
+
+/// `build` and `image` are independent fields, both settable — Compose
+/// takes the pair to mean "build this context, then tag it as that".
+#[test]
+fn build_and_image_can_both_be_set() {
+    let program = parse_ok("service s {\n  image \"app:latest\"\n  build \"./app\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(service.fields.image.is_some());
+    assert!(service.fields.build.is_some());
+}
+
+/// A `$param` reaches both sub-fields, so a template can parameterize
+/// which context it builds.
+#[test]
+fn build_accepts_params() {
+    let program =
+        parse_ok("template t(c, d) {\n  build {\n    context: $c\n    dockerfile: $d\n  }\n}\n");
+    let template = as_template(&program.decls[0]);
+    let build = template.fields.build.as_ref().expect("build set");
+    assert!(matches!(build.context.as_ref().unwrap(), Literal::Param(n, _) if n == "c"));
+    assert!(matches!(build.dockerfile.as_ref().unwrap(), Literal::Param(n, _) if n == "d"));
+}
+
+/// An unknown sub-field is refused against `build`'s own field list.
+#[test]
+fn unknown_build_field_is_rejected() {
+    let err = parse("service s {\n  build { args: 1 }\n}\n").expect_err("expected an error");
+    assert!(
+        matches!(
+            err,
+            ParseError::UnknownField {
+                type_name: "build",
+                ref field,
+                ..
+            } if field == "args"
+        ),
+        "got {err:?}"
+    );
+}
+
+/// `build` is struct-kind, so writing it twice in one body is the
+/// ordinary duplicate-field error, not an accumulation.
+#[test]
+fn duplicate_build_is_rejected() {
+    let err = parse("service s {\n  build \"./a\"\n  build \"./b\"\n}\n")
+        .expect_err("expected a parse error");
+    assert!(
+        matches!(
+            err,
+            ParseError::DuplicateField {
+                type_name: "service",
+                field: "build",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+// --- `priority`, `port`, `protocol` on a router (#225) ---
+
+/// All three parse as plain scalars in the braced body, beside the
+/// fields `router` already had.
+#[test]
+fn router_priority_port_and_protocol_parse() {
+    let program = parse_ok(
+        "service s {\n  router web {\n    host: \"a.example.com\"\n    \
+         priority: 100\n    port: 2222\n    protocol: http\n  }\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let router = &routers(service)[0];
+    assert_eq!(router.priority.as_ref().unwrap().text(), "100");
+    assert_eq!(router.port.as_ref().unwrap().text(), "2222");
+    assert_eq!(router.protocol.as_ref().unwrap().text(), "http");
+}
+
+/// And in the comma-continued form, like every other `router`
+/// sub-field.
+#[test]
+fn router_new_fields_parse_in_comma_shorthand() {
+    let program =
+        parse_ok("service s {\n  router sftp, protocol: tcp, host: \"*\", port: 1111\n}\n");
+    let service = as_service(&program.decls[0]);
+    let router = &routers(service)[0];
+    assert_eq!(router.protocol.as_ref().unwrap().text(), "tcp");
+    assert_eq!(router.port.as_ref().unwrap().text(), "1111");
+}
+
+/// A router that names none of the three leaves all three `None`, so a
+/// file written before #225 parses to exactly the AST it always did.
+#[test]
+fn router_without_the_new_fields_leaves_them_unset() {
+    let program = parse_ok("service s {\n  router { host: \"a.example.com\" }\n}\n");
+    let router = &routers(as_service(&program.decls[0]))[0];
+    assert!(router.priority.is_none());
+    assert!(router.port.is_none());
+    assert!(router.protocol.is_none());
+}
+
+/// `protocol` accepts a `$param` — it's validated in codegen, not here,
+/// precisely so a template can parameterize it.
+#[test]
+fn router_protocol_accepts_a_param() {
+    let program = parse_ok("template t(p) {\n  router r { protocol: $p }\n}\n");
+    let template = as_template(&program.decls[0]);
+    let router = &template.fields.routers[0];
+    assert!(matches!(router.protocol.as_ref().unwrap(), Literal::Param(n, _) if n == "p"));
+}

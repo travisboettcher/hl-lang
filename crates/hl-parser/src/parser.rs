@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
-    ArrowMap, ArrowMapEntry, ArrowMapHost, Command, DependsOnCondition, DependsOnEntry, Entrypoint,
-    EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Param,
-    Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart, Router, Service, ServiceFields,
-    TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume, VolumeDriverOpt,
+    ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnCondition, DependsOnEntry,
+    Entrypoint, EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal,
+    Network, Param, Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart, Router, Service,
+    ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
+    VolumeDriverOpt,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -1870,6 +1871,10 @@ fn lower_service_fields(mut fields: StructFields) -> Result<ServiceFields, Parse
         Some(FieldValue::Struct(f, s)) => Some(lower_image(f, s)),
         _ => None,
     };
+    let build = match fields.remove("build") {
+        Some(FieldValue::Struct(f, s)) => Some(lower_build(f, s)),
+        _ => None,
+    };
     let expose = match fields.remove("expose") {
         Some(FieldValue::Struct(f, s)) => Some(lower_expose(f, s)),
         _ => None,
@@ -2008,6 +2013,7 @@ fn lower_service_fields(mut fields: StructFields) -> Result<ServiceFields, Parse
     };
     Ok(ServiceFields {
         image,
+        build,
         expose,
         routers,
         traefik,
@@ -2085,12 +2091,28 @@ fn lower_router(name: Option<Ident>, mut fields: StructFields, span: Span) -> Ro
         Some(FieldValue::RefList(v)) => v,
         _ => Vec::new(),
     };
+    // #225's three scalars, all plain `Scalar` rows like `host`.
+    let priority = match fields.remove("priority") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
+    let port = match fields.remove("port") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
+    let protocol = match fields.remove("protocol") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
     Router {
         name,
         host,
         entrypoint,
         path_prefix,
         middleware,
+        priority,
+        port,
+        protocol,
         span,
     }
 }
@@ -2109,6 +2131,22 @@ fn lower_image(mut fields: StructFields, span: Span) -> Image {
         _ => None,
     };
     Image { reference, span }
+}
+
+fn lower_build(mut fields: StructFields, span: Span) -> Build {
+    let context = match fields.remove("context") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
+    let dockerfile = match fields.remove("dockerfile") {
+        Some(FieldValue::Scalar(lit)) => Some(lit),
+        _ => None,
+    };
+    Build {
+        context,
+        dockerfile,
+        span,
+    }
 }
 
 fn lower_expose(mut fields: StructFields, span: Span) -> Expose {

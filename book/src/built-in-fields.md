@@ -90,8 +90,80 @@ Primary field: `ref`.
 image "jellyfin/jellyfin:latest"
 ```
 
-Every service needs an `image`—either directly or inherited from a
-template—`hllc --build` fails if one is missing.
+Every service needs an `image` or a [`build`](#build)—either directly or
+inherited from a template—and `hllc --build` fails when it would emit
+neither.
+
+That check reads the *generated document*, not the `image` field, so a
+[`raw`](#raw) entry supplying the key by hand counts:
+
+```hll,build
+service foo {
+  raw {
+    image: "test:latest"
+  }
+}
+```
+
+## `build`
+
+Primary field: `context`.
+
+| Field | Accepts | Default |
+|---|---|---|
+| `context` | string | *Required—a build with no context has nothing to build* |
+| `dockerfile` | string | unset—Compose looks for `Dockerfile` inside the context |
+
+Compose's own `build:` key, for a service built from a local Dockerfile
+rather than pulled from a registry:
+
+```hll,build
+service vault-git-sync {
+  build "./vault-git-sync"
+  restart unless-stopped
+  traefik {
+    disabled
+  }
+}
+```
+
+```text
+services:
+  vault-git-sync:
+    build: ./vault-git-sync
+    restart: unless-stopped
+```
+
+Name a `dockerfile` and `hllc` switches to Compose's long form, since
+the short one has nowhere to put it. `{{name}}` resolves in both halves,
+the same as in `image`:
+
+```hll,build
+service app {
+  build {
+    context: "./{{name}}"
+    dockerfile: "Dockerfile.prod"
+  }
+  traefik {
+    disabled
+  }
+}
+```
+
+```text
+services:
+  app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile.prod
+```
+
+`image` and `build` are independent—set either, or both. Compose reads
+the pair as *build this context, then tag the result as that image.*
+
+`build` deliberately has no `args`. It's a map, unlike the two plain
+strings here, and nothing has needed one yet. `raw { build: { ... } }`
+overrides the whole key for a service that does.
 
 ## `expose`
 
@@ -154,6 +226,9 @@ after the keyword, so there's nowhere for a bare value to go.
 | `entrypoint` | reference list | empty—label omitted, so Traefik attaches the router to every entry point |
 | `path_prefix` | list of strings | empty—the rule matches the host alone |
 | `middleware` | reference list | empty—no `middlewares=` label for this router |
+| `priority` | number | unset—label omitted, so Traefik derives a priority from the rule's length |
+| `port` | number | unset—this router shares the one service-wide target [`expose`](#expose) supplies |
+| `protocol` | `http` or `tcp` | `http` |
 
 A `router` block declares one Traefik router, and owns every field that
 only ever means anything attached to one. Write it as many times as you
@@ -261,14 +336,16 @@ two routers, it's one router described twice, with the second silently
 winning—the same reason two `volume` entries can't share one container
 path.
 
-`router` deliberately doesn't carry a port:
-`traefik.http.services.<service>.loadbalancer.server.port` is one label
-per Compose service, not per router—a container listens on one port no
-matter how many routers point at it—so it comes from
-[`expose`](#expose)'s own `port` instead. A service with at least one
-`router` block but no `expose <port>` is a compile error too: a router
-with nothing to load-balance onto used to mean Traefik silently guessed
-a port, and now means `hllc` refuses to compile.
+### `port`, and the shared load-balancer target
+
+A router with no `port` of its own load-balances onto the one
+service-wide target
+`traefik.http.services.<service>.loadbalancer.server.port`, which comes
+from [`expose`](#expose). That's the common case: a container listens on
+one port however many routers point at it. A service with such a router
+but no `expose <port>` is a compile error—a router with nothing to
+load-balance onto used to mean Traefik silently guessed a port, and now
+means `hllc` refuses to compile:
 
 ```hll,ignore
 service web {
@@ -282,6 +359,85 @@ service web {
 ```text
 web.hll:3:3: service `web` declares a `router` but sets no `expose <port>`, so Traefik has no port to load-balance onto — add `expose <port>` or drop the `router`
 ```
+
+Name a `port` on the block and that router gets a Traefik **service** of
+its own instead, keyed by the router's own id:
+
+```hll,build
+service sftpgo {
+  image "drakkan/sftpgo:latest"
+  router web {
+    host: "sftp.example.com"
+    priority: 100
+    port: 2222
+  }
+  router webdav {
+    host: "sftp.example.com"
+    priority: 90
+    port: 4444
+  }
+}
+```
+
+```text
+traefik.http.routers.sftpgo-web.rule=Host(`sftp.example.com`)
+traefik.http.routers.sftpgo-web.priority=100
+traefik.http.routers.sftpgo-web.service=sftpgo-web
+traefik.http.services.sftpgo-web.loadbalancer.server.port=2222
+traefik.http.routers.sftpgo-webdav.rule=Host(`sftp.example.com`)
+traefik.http.routers.sftpgo-webdav.priority=90
+traefik.http.routers.sftpgo-webdav.service=sftpgo-webdav
+traefik.http.services.sftpgo-webdav.loadbalancer.server.port=4444
+```
+
+That's a container serving two things on two ports behind one host.
+Note there's no `expose` here and none needed: with every router naming
+its own port, no one port is "the" port to fall back to. Mix the two
+freely—a router without a `port` still falls back, and `expose` matters
+only while at least one does.
+
+`priority` is what separates those two routers. Both match the same
+host, so without it Traefik picks between them by rule length. Higher
+wins. Leave it off and `hllc` emits no `priority=` label at all, which
+is Traefik's own default rather than a number `hllc` invented.
+
+### `protocol`
+
+Traefik has two router namespaces, and `protocol` picks between them.
+`http` is the default, and everything preceding this describes it.
+`tcp` moves the whole label group to
+`traefik.tcp.routers.*`/`traefik.tcp.services.*` and switches the rule
+from ``Host(`...`)`` to ``HostSNI(`...`)``:
+
+```hll,build
+service sftpgo {
+  image "drakkan/sftpgo:latest"
+  router sftp {
+    protocol: tcp
+    host: "*"
+    port: 1111
+  }
+}
+```
+
+```text
+traefik.tcp.routers.sftpgo-sftp.rule=HostSNI(`*`)
+traefik.tcp.routers.sftpgo-sftp.service=sftpgo-sftp
+traefik.tcp.services.sftpgo-sftp.loadbalancer.server.port=1111
+```
+
+A TCP router matches on the TLS handshake's server name, since at that
+layer there's no HTTP request to read a `Host` header from—which is
+also why `HostSNI` takes `*` as a wildcard and `Host` has no equivalent.
+Raw SFTP isn't HTTP at all, which is what this is for.
+
+Two rules follow from that, both compile errors rather than silent
+drops:
+
+- A TCP router can't take a `path_prefix`. There's no request URI at
+  that layer to match a path against.
+- A TCP router must name its own `port`. The shared fallback target is
+  an *HTTP* service, so there's nothing there for it to fall back to.
 
 ### `middleware`
 

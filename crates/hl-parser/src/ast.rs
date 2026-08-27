@@ -345,6 +345,41 @@ pub struct Image {
     pub span: Span,
 }
 
+/// A parsed `build` field (#224) — Compose's own `build:` key, naming a
+/// local build context instead of (or beside) a registry `image`.
+///
+/// Promoted out of `raw` for the reason `healthcheck`/`dns`/`env_file`
+/// already were: it's a plain generic Compose key, homelab-specific in
+/// none of its own fields. What forced it rather than merely suggesting
+/// it is that `build` is the one such key a service can't do without —
+/// Compose requires `image` *or* `build`, and before #224 `hllc`
+/// required `image` unconditionally, so a locally-built service was not
+/// expressible at all, `raw` included (see
+/// [`crate::schema::BUILD`] and `hl_codegen`'s own image-or-build
+/// check).
+///
+/// `context` is `Option` for the same reason as [`Image::reference`] —
+/// the parser enforces no required fields — but a `build` reaching
+/// codegen with no context at all is an error there, since the context
+/// is the whole of what there is to build.
+///
+/// No `args` field this milestone. It's a map, needing the merge
+/// machinery `env` has rather than the two plain scalars here, and
+/// nothing yet needs one; `raw { build: { ... } }` still overrides the
+/// whole key for a service that does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Build {
+    pub context: Option<Literal>,
+    /// A Dockerfile path relative to [`Self::context`], Compose's own
+    /// `build.dockerfile`. `None` leaves it to Compose's default
+    /// (`Dockerfile` inside the context), and is what decides the
+    /// emitted shape: with no `dockerfile`, `build:` serializes as the
+    /// bare context string Compose's short form spells, rather than a
+    /// one-key mapping saying the same thing.
+    pub dockerfile: Option<Literal>,
+    pub span: Span,
+}
+
 /// A parsed `expose` field. `port` is `Option` for the same reason as
 /// [`Image::reference`] — see that doc.
 ///
@@ -459,6 +494,44 @@ pub struct Router {
     /// empty [`Self::entrypoint`] means it names no entry point: a plain
     /// `Vec`, with "unset" and "set to nothing" deliberately identical.
     pub middleware: Vec<Literal>,
+    /// Traefik's own router `priority=` (#225). Higher wins, and it's
+    /// the only thing separating two routers that match the same
+    /// request — `sftpgo`'s `web` and `webdav` share one host and are
+    /// disambiguated purely by this.
+    ///
+    /// A number, checked as one by `compose::check_numeric_fields`
+    /// alongside `expose.port`. `None` leaves the label off entirely,
+    /// which is Traefik's own default of deriving a priority from the
+    /// rule's length rather than a value `hllc` would be guessing.
+    pub priority: Option<Literal>,
+    /// The port this router load-balances onto (#225), giving it a
+    /// Traefik *service* of its own named after the router's own id.
+    ///
+    /// `None` falls back to [`ServiceFields::expose`]'s single `port`
+    /// and the one service-wide `loadbalancer.server.port` label that
+    /// every router shared before #225 — which is what keeps a file
+    /// written against the older model emitting exactly what it always
+    /// did. `Some` is for the container listening on more than one
+    /// port, where "the" port doesn't exist: `sftpgo` serves its web UI
+    /// on 2222, WebDAV on 4444, and SFTP on 1111, and each router has
+    /// to name which one it means.
+    pub port: Option<Literal>,
+    /// `http` (the default) or `tcp` (#225) — which of Traefik's two
+    /// label namespaces this router lives in.
+    ///
+    /// A TCP router is not an HTTP router with a flag: it emits
+    /// `traefik.tcp.routers.*`/`traefik.tcp.services.*` instead of
+    /// `traefik.http.*`, and matches on `HostSNI()` rather than
+    /// `Host()`, since at that layer there is no request to read a Host
+    /// header from — only the TLS handshake's server name. Raw SFTP
+    /// isn't HTTP at all, which is why `sftpgo` needs one.
+    ///
+    /// Validated in codegen rather than at parse time, so a template can
+    /// still write `protocol: $proto`: parameter substitution runs after
+    /// parsing, and rejecting an unresolved `$proto` as an unknown
+    /// protocol would be a diagnostic about the wrong thing. See
+    /// `hl_codegen`'s `CodegenError::UnknownRouterProtocol`.
+    pub protocol: Option<Literal>,
     pub span: Span,
 }
 
@@ -830,6 +903,12 @@ pub struct TemplateInvocation {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ServiceFields {
     pub image: Option<Image>,
+    /// Compose's own `build:` key (#224). Independent of
+    /// [`Self::image`]: Compose accepts either, or both (build the
+    /// context, then tag the result as `image`), and `hl_codegen`
+    /// requires only that the emitted service ends up with at least one
+    /// of them.
+    pub build: Option<Build>,
     pub expose: Option<Expose>,
     /// `router <name> { ... }` blocks (#184), in source order — every
     /// Traefik router this service computes, `expose <port> as

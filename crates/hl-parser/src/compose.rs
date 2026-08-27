@@ -23,10 +23,10 @@ use std::fmt;
 use hl_lexer::{SourceMap, Span};
 
 use crate::ast::{
-    ArrowMap, ArrowMapEntry, ArrowMapHost, Command, DependsOnEntry, Entrypoint, EnvEntry, EnvMap,
-    Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Program, RawEntry,
-    RawMap, RawValue, Restart, Router, Service, ServiceFields, TemplateDecl, TemplateInvocation,
-    TopDecl, Traefik, Volume,
+    ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnEntry, Entrypoint, EnvEntry,
+    EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Program,
+    RawEntry, RawMap, RawValue, Restart, Router, Service, ServiceFields, TemplateDecl,
+    TemplateInvocation, TopDecl, Traefik, Volume,
 };
 use crate::schema::{self, MapSide};
 
@@ -1642,6 +1642,19 @@ fn substitute_params(
     {
         substitute_literal(r, args, template_name)?;
     }
+    // `build`'s own literal slots (#224) — both plain free-text paths,
+    // so both take an ordinary `substitute_literal`. Missing either
+    // would reproduce #168's live bug class: the `Literal::Param`
+    // survives to codegen, which writes the parameter's own name into
+    // the generated `build:` key and exits 0.
+    if let Some(b) = &mut fields.build {
+        if let Some(c) = &mut b.context {
+            substitute_literal(c, args, template_name)?;
+        }
+        if let Some(d) = &mut b.dockerfile {
+            substitute_literal(d, args, template_name)?;
+        }
+    }
     if let Some(e) = &mut fields.expose
         && let Some(p) = &mut e.port
     {
@@ -1665,6 +1678,19 @@ fn substitute_params(
         }
         for mw in &mut router.middleware {
             substitute_reference_literal(mw, args, template_name)?;
+        }
+        // #225: `priority`/`port` are numbers, so they take the same
+        // numeric-checked substitution `expose.port` does; `protocol`
+        // is a plain literal, validated in codegen rather than here so
+        // an unresolved `$proto` never reaches that check.
+        if let Some(p) = &mut router.priority {
+            substitute_numeric_literal(p, args, template_name)?;
+        }
+        if let Some(p) = &mut router.port {
+            substitute_numeric_literal(p, args, template_name)?;
+        }
+        if let Some(p) = &mut router.protocol {
+            substitute_literal(p, args, template_name)?;
         }
     }
     if let Some(r) = &mut fields.restart
@@ -2004,6 +2030,26 @@ fn check_numeric_fields(fields: &ServiceFields) -> Result<(), ComposeError> {
             span: retries.span(),
         });
     }
+    // A router's own `priority`/`port` (#225) — both numbers, both
+    // checked here for the hand-written case exactly as `expose.port`
+    // is, since a mismatch written directly never passes through
+    // substitution for `substitute_numeric_literal` to catch.
+    for router in &fields.routers {
+        for (field, slot) in [
+            ("router.priority", router.priority.as_ref()),
+            ("router.port", router.port.as_ref()),
+        ] {
+            if let Some(lit) = slot
+                && let Some(found) = numeric_mismatch(lit)
+            {
+                return Err(ComposeError::FieldNotNumeric {
+                    field,
+                    found,
+                    span: lit.span(),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2206,13 +2252,19 @@ struct MergeAcc {
 ///
 /// `entrypoint`, `path_prefix`, and `middleware` carry no `Tier`: like
 /// every other list in the language they concatenate unconditionally, so
-/// there's no collision to attribute to a tier.
+/// there's no collision to attribute to a tier. The scalars all do, for
+/// the reason [`MergeAcc::scalars`] tracks its own.
 struct RouterAcc {
     name: Option<Ident>,
     host: Option<(Literal, Tier)>,
     entrypoint: Vec<Literal>,
     path_prefix: Vec<Literal>,
     middleware: Vec<Literal>,
+    /// #225's three scalars, each tier-tracked exactly like `host` and
+    /// merged through the same [`merge_router_scalar`].
+    priority: Option<(Literal, Tier)>,
+    port: Option<(Literal, Tier)>,
+    protocol: Option<(Literal, Tier)>,
     span: Span,
 }
 
@@ -2293,6 +2345,9 @@ impl MergeAcc {
                 entrypoint: r.entrypoint,
                 path_prefix: r.path_prefix,
                 middleware: r.middleware,
+                priority: r.priority.map(|(lit, _)| lit),
+                port: r.port.map(|(lit, _)| lit),
+                protocol: r.protocol.map(|(lit, _)| lit),
                 span: r.span,
             })
             .collect();
@@ -2404,6 +2459,38 @@ static SCALAR_FIELDS: &[ScalarField] = &[
                 span: v.span(),
                 reference: Some(v),
             });
+        },
+    },
+    // `build`'s two scalars (#224). `context` sorts before `dockerfile`
+    // for [`SCALAR_FIELDS`]' span-preference reason: a `get_or_insert`
+    // that has to materialize `Build` from scratch stamps its span from
+    // the context, the field that names what's being built.
+    ScalarField {
+        key: "build.context",
+        take: |f| {
+            f.build
+                .as_mut()
+                .and_then(|b| b.context.take())
+                .map(ScalarValue::Literal)
+        },
+        set: |f, v| {
+            let v = expect_literal(v, "build.context");
+            let span = v.span();
+            f.build.get_or_insert(empty_build(span)).context = Some(v);
+        },
+    },
+    ScalarField {
+        key: "build.dockerfile",
+        take: |f| {
+            f.build
+                .as_mut()
+                .and_then(|b| b.dockerfile.take())
+                .map(ScalarValue::Literal)
+        },
+        set: |f, v| {
+            let v = expect_literal(v, "build.dockerfile");
+            let span = v.span();
+            f.build.get_or_insert(empty_build(span)).dockerfile = Some(v);
         },
     },
     ScalarField {
@@ -2660,6 +2747,17 @@ static SCALAR_FIELDS: &[ScalarField] = &[
 /// for the `get_or_insert` calls [`SCALAR_FIELDS`]'s `healthcheck.*`
 /// rows share — factored out once so a future `Healthcheck` sub-field
 /// doesn't have to be added to seven near-identical struct literals.
+/// A [`Build`] with every sub-field unset, for a [`SCALAR_FIELDS`] row
+/// that has to materialize one before writing its own slot — the same
+/// job [`empty_healthcheck`] does for `healthcheck`.
+fn empty_build(span: Span) -> Build {
+    Build {
+        context: None,
+        dockerfile: None,
+        span,
+    }
+}
+
 fn empty_healthcheck(span: Span) -> Healthcheck {
     Healthcheck {
         test: None,
@@ -2971,12 +3069,50 @@ fn merge_routers(
                 entrypoint: router.entrypoint,
                 path_prefix: router.path_prefix,
                 middleware: router.middleware,
+                priority: router.priority.map(|p| (p, tier.clone())),
+                port: router.port.map(|p| (p, tier.clone())),
+                protocol: router.protocol.map(|p| (p, tier.clone())),
                 span: router.span,
             });
             continue;
         };
         if let Some(host) = router.host {
-            merge_router_host(&mut acc[pos], key.as_deref(), host, tier)?;
+            merge_router_scalar(
+                &mut acc[pos].host,
+                "router.host",
+                key.as_deref(),
+                host,
+                tier,
+            )?;
+        }
+        // #225's three scalars follow `host`'s rule exactly, keyed the
+        // same way so a collision still says *which* router.
+        if let Some(priority) = router.priority {
+            merge_router_scalar(
+                &mut acc[pos].priority,
+                "router.priority",
+                key.as_deref(),
+                priority,
+                tier,
+            )?;
+        }
+        if let Some(port) = router.port {
+            merge_router_scalar(
+                &mut acc[pos].port,
+                "router.port",
+                key.as_deref(),
+                port,
+                tier,
+            )?;
+        }
+        if let Some(protocol) = router.protocol {
+            merge_router_scalar(
+                &mut acc[pos].protocol,
+                "router.protocol",
+                key.as_deref(),
+                protocol,
+                tier,
+            )?;
         }
         // First occurrence wins, so accumulated order stays tier order
         // with later repeats dropped — the same dedupe-by-name rule
@@ -3014,31 +3150,38 @@ fn merge_routers(
     Ok(())
 }
 
-/// [`merge_scalar`]'s rule applied to one router's `host`, reported as a
-/// [`ComposeError::MapKeyCollision`] rather than a
-/// [`ComposeError::FieldCollision`] because the field alone
+/// [`merge_scalar`]'s rule applied to one of a router's own scalar
+/// sub-fields, reported as a [`ComposeError::MapKeyCollision`] rather
+/// than a [`ComposeError::FieldCollision`] because the field alone
 /// (`router.host`) doesn't say *which* router collided — the key does,
 /// and `MapKeyCollision` is the variant that already carries one.
-fn merge_router_host(
-    acc: &mut RouterAcc,
+///
+/// Generic over the slot rather than written once per sub-field: `host`
+/// was the only one until #225 added `priority`/`port`/`protocol`, and
+/// all four want the identical Own-wins / `defaults`-loses /
+/// two-explicit-templates-collide rule. `slot` is the [`RouterAcc`]
+/// field to merge into and `field` the dotted name a collision reports.
+fn merge_router_scalar(
+    slot: &mut Option<(Literal, Tier)>,
+    field: &'static str,
     key: Option<&str>,
-    host: Literal,
+    value: Literal,
     tier: &Tier,
 ) -> Result<(), ComposeError> {
-    match acc.host.take() {
-        None => acc.host = Some((host, tier.clone())),
+    match slot.take() {
+        None => *slot = Some((value, tier.clone())),
         Some((existing, existing_tier)) => match (&existing_tier, tier) {
-            (_, Tier::Own) => acc.host = Some((host, Tier::Own)),
-            (Tier::Defaults, _) => acc.host = Some((host, tier.clone())),
+            (_, Tier::Own) => *slot = Some((value, Tier::Own)),
+            (Tier::Defaults, _) => *slot = Some((value, tier.clone())),
             (Tier::Explicit(first), Tier::Explicit(second)) => {
                 return Err(ComposeError::MapKeyCollision(Box::new(MapKeyCollision {
-                    field: "router.host",
+                    field,
                     side: MapSide::Key,
                     key: router_key_display(key),
                     first_template: first.clone(),
                     second_template: second.clone(),
                     first: existing.span(),
-                    second: host.span(),
+                    second: value.span(),
                 })));
             }
             _ => unreachable!("Own is always merged last; Defaults is always merged first"),

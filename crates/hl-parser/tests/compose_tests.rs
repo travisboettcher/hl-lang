@@ -2077,6 +2077,14 @@ fn assert_no_params(service: &Service) {
     {
         assert_not_param(r);
     }
+    if let Some(b) = &fields.build {
+        if let Some(c) = &b.context {
+            assert_not_param(c);
+        }
+        if let Some(d) = &b.dockerfile {
+            assert_not_param(d);
+        }
+    }
     if let Some(e) = &fields.expose
         && let Some(p) = &e.port
     {
@@ -2815,4 +2823,173 @@ fn qualified_router_middleware_reference_is_rejected() {
         ),
         "got {err:?}"
     );
+}
+
+// --- `build` (#224) ---
+
+/// `build`'s two sub-fields merge per sub-field like `healthcheck`'s,
+/// not as one whole struct: a service body setting only `context` keeps
+/// the `dockerfile` its template supplied.
+#[test]
+fn service_body_can_override_just_one_build_subfield() {
+    let composed = compose_ok(
+        "template built {\n  build {\n    context: \"./placeholder\"\n    \
+           dockerfile: \"Dockerfile.prod\"\n  }\n}\n\
+         service s {\n  with built\n  build \"./real\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let build = service.fields.build.as_ref().expect("build set");
+    assert_eq!(build.context.as_ref().unwrap().text(), "./real");
+    assert_eq!(build.dockerfile.as_ref().unwrap().text(), "Dockerfile.prod");
+}
+
+/// Two explicit templates disagreeing on `build.context` collide, the
+/// same as any other scalar slot.
+#[test]
+fn explicit_templates_setting_the_same_build_context_collide() {
+    let err = compose_err(
+        "template a {\n  build \"./a\"\n}\n\
+         template b {\n  build \"./b\"\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    assert!(
+        matches!(
+            err,
+            ComposeError::FieldCollision {
+                field: "build.context",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// A `$param` in either sub-field is substituted like every other
+/// literal slot — #168's bug class, which is a field added without
+/// extending `substitute_params`' walk.
+#[test]
+fn build_params_are_substituted() {
+    let composed = compose_ok(
+        "template built(c, d) {\n  build {\n    context: $c\n    dockerfile: $d\n  }\n}\n\
+         service s {\n  \
+           with built { c: \"./app\", d: \"Dockerfile.prod\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let build = service.fields.build.as_ref().expect("build set");
+    assert_eq!(build.context.as_ref().unwrap().text(), "./app");
+    assert_eq!(build.dockerfile.as_ref().unwrap().text(), "Dockerfile.prod");
+    assert_no_params(service);
+}
+
+/// A service that never mentions `build` composes to `None`, so every
+/// file written before the field existed reaches codegen unchanged.
+#[test]
+fn a_service_without_build_composes_to_none() {
+    let composed = compose_ok("service s {\n  image \"x\"\n}\n");
+    assert!(single_service(&composed).fields.build.is_none());
+}
+
+// --- `priority`, `port`, `protocol` on a router (#225) ---
+
+/// The three new scalars merge on `host`'s rule: own wins, `defaults`
+/// loses, and a service body overriding one keeps the rest its template
+/// supplied.
+#[test]
+fn service_body_can_override_just_one_new_router_subfield() {
+    let composed = compose_ok(
+        "template api {\n  router web {\n    host: \"placeholder\"\n    \
+           priority: 10\n    port: 8080\n  }\n}\n\
+         service s {\n  with api\n  image \"x\"\n  \
+           router web { priority: 100 }\n}\n",
+    );
+    let service = single_service(&composed);
+    let web = router_named(service, "web");
+    assert_eq!(web.priority.as_ref().unwrap().text(), "100");
+    assert_eq!(web.port.as_ref().unwrap().text(), "8080");
+    assert_eq!(web.host.as_ref().unwrap().text(), "placeholder");
+}
+
+/// Two explicit templates disagreeing on one collide, keyed by router
+/// name so the message says which router — the same `MapKeyCollision`
+/// `router.host` already raises.
+#[test]
+fn explicit_templates_setting_the_same_router_priority_collide() {
+    let err = compose_err(
+        "template a {\n  router web, priority: 10\n}\n\
+         template b {\n  router web, priority: 20\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::MapKeyCollision(details) => {
+            assert_eq!(details.field, "router.priority");
+            assert_eq!(details.key, "web");
+        }
+        other => panic!("expected MapKeyCollision on router.priority, got {other:?}"),
+    }
+}
+
+/// `priority` and `port` are numbers, so a hand-written non-number is
+/// caught by the same backstop `expose.port` has.
+#[test]
+fn router_priority_must_be_a_number() {
+    let err =
+        compose_err("service s {\n  image \"x\"\n  router web, host: \"a\", priority: high\n}\n");
+    assert!(
+        matches!(
+            err,
+            ComposeError::FieldNotNumeric {
+                field: "router.priority",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn router_port_must_be_a_number() {
+    let err =
+        compose_err("service s {\n  image \"x\"\n  router web, host: \"a\", port: eighty\n}\n");
+    assert!(
+        matches!(
+            err,
+            ComposeError::FieldNotNumeric {
+                field: "router.port",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// And a substituted one is caught on the way in, naming the argument
+/// rather than the `$param` use site.
+#[test]
+fn router_port_rejects_a_non_numeric_argument() {
+    let err = compose_err(
+        "template t(p) {\n  router web { host: \"a\"\n    port: $p }\n}\n\
+         service s {\n  with t { p: \"eighty\" }\n  image \"x\"\n}\n",
+    );
+    assert!(
+        matches!(err, ComposeError::ArgumentNotNumeric { .. }),
+        "got {err:?}"
+    );
+}
+
+/// All three take a `$param` and are substituted like every other
+/// literal slot — #168's bug class in three new positions.
+#[test]
+fn router_new_field_params_are_substituted() {
+    let composed = compose_ok(
+        "template t(pri, prt, proto) {\n  \
+           router web { host: \"a.example.com\"\n    priority: $pri\n    \
+             port: $prt\n    protocol: $proto }\n}\n\
+         service s {\n  with t { pri: 100, prt: 2222, proto: tcp }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let web = router_named(service, "web");
+    assert_eq!(web.priority.as_ref().unwrap().text(), "100");
+    assert_eq!(web.port.as_ref().unwrap().text(), "2222");
+    assert_eq!(web.protocol.as_ref().unwrap().text(), "tcp");
+    assert_no_params(service);
 }

@@ -1,0 +1,30 @@
+--- compose ---
+services:
+  vault-git-sync:
+    build: ./vault-git-sync
+    restart: unless-stopped
+    env_file:
+    - vault-git-sync.env
+    volumes:
+    - /home/boettcherta/obsidian-vault:/vault
+    networks:
+    - default
+    labels:
+    - traefik.enable=false
+    user: 1000:100
+  app:
+    image: app:latest
+    build:
+      context: ./app
+      dockerfile: Dockerfile.prod
+    networks:
+    - default
+    labels:
+    - traefik.enable=false
+  foo:
+    networks:
+    - default
+    labels:
+    - traefik.enable=false
+    image: test:latest
+    build: ./raw
