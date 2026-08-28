@@ -51,3 +51,12 @@ namespaces?
 SFTP
 TLS
 WebDAV
+AND'd
+OR'd
+arity
+embedder
+matcher(s|'s)?
+parenthesization
+parser's
+reparses
+snake_case

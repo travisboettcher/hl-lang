@@ -1,0 +1,2 @@
+--- error ---
+issue_228_matcher_wrong_protocol.hll:11:27: service `sftpgo` uses the rule matcher `PathPrefix` on `router sftp`, which routes `tcp`, and `PathPrefix` is not a `tcp` matcher — drop the matcher or the `protocol: tcp`

@@ -1,0 +1,13 @@
+# #228: a TCP router matches on the TLS handshake, where there is no
+# request URI to take a path from — so `PathPrefix` inside its `rule` is
+# a contradiction, the same one `path_prefix` beside `protocol: tcp`
+# already was (#225). The message names the matcher, which is the part
+# of the rule that has to change.
+service sftpgo {
+  image "drakkan/sftpgo:latest"
+  router sftp {
+    protocol: tcp
+    port: 1111
+    rule: HostSNI("*") && PathPrefix("/files")
+  }
+}

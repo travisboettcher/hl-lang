@@ -5,8 +5,8 @@ use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 use crate::ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnCondition, DependsOnEntry,
     Entrypoint, EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal,
-    Network, Param, Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart, Router, Service,
-    ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
+    MatchExpr, Network, Param, Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart, Router,
+    Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
     VolumeDriverOpt,
 };
 use crate::error::{Expected, ParseError};
@@ -93,6 +93,9 @@ fn str_literal(tok: Token<'_>) -> Result<Literal, ParseError> {
 /// before lowering it into a concrete AST struct once the body finishes.
 enum FieldValue {
     Scalar(Literal),
+    /// A `router`'s `rule` expression (#228) — single-occurrence like
+    /// [`Self::Scalar`], since a router has one rule.
+    Match(MatchExpr),
     /// Span of the bare flag token that set it.
     Flag(Span),
     /// A single-occurrence nested struct-kind field (image/expose/restart).
@@ -165,6 +168,7 @@ impl FieldValue {
     fn span(&self) -> Span {
         match self {
             FieldValue::Scalar(lit) => lit.span(),
+            FieldValue::Match(expr) => expr.span(),
             FieldValue::Flag(span) => *span,
             FieldValue::Struct(_, span) => *span,
             FieldValue::ScalarOrList(v) => v.span(),
@@ -183,7 +187,7 @@ impl FieldValue {
 
 type StructFields = HashMap<&'static str, FieldValue>;
 
-struct Parser<'src> {
+pub(crate) struct Parser<'src> {
     tokens: Vec<Token<'src>>,
     pos: usize,
     /// `Some(params)` while parsing a `template`'s own body (including
@@ -209,14 +213,14 @@ impl<'src> Parser<'src> {
 
     // ---- token primitives ----
 
-    fn peek(&self) -> &Token<'src> {
+    pub(crate) fn peek(&self) -> &Token<'src> {
         // `tokens` always ends with Eof (Lexer::tokenize guarantees this),
         // and `bump` refuses to advance past it, so this never runs off
         // the end.
         &self.tokens[self.pos]
     }
 
-    fn bump(&mut self) -> Token<'src> {
+    pub(crate) fn bump(&mut self) -> Token<'src> {
         let tok = self.tokens[self.pos];
         if self.tokens[self.pos].kind != TokenKind::Eof {
             self.pos += 1;
@@ -224,7 +228,7 @@ impl<'src> Parser<'src> {
         tok
     }
 
-    fn expect(&mut self, kind: TokenKind) -> Result<Token<'src>, ParseError> {
+    pub(crate) fn expect(&mut self, kind: TokenKind) -> Result<Token<'src>, ParseError> {
         let tok = *self.peek();
         if tok.kind == kind {
             self.bump();
@@ -234,7 +238,7 @@ impl<'src> Parser<'src> {
         }
     }
 
-    fn unexpected(&self, expected: Expected) -> ParseError {
+    pub(crate) fn unexpected(&self, expected: Expected) -> ParseError {
         let tok = *self.peek();
         ParseError::UnexpectedToken {
             expected,
@@ -365,7 +369,7 @@ impl<'src> Parser<'src> {
     /// `compose::reject_qualified` (driven by
     /// [`schema::allows_qualified_reference`]) rejects it afterward,
     /// post-parse, everywhere but `networks` and a named-volume host.
-    fn parse_literal_reference(&mut self) -> Result<Literal, ParseError> {
+    pub(crate) fn parse_literal_reference(&mut self) -> Result<Literal, ParseError> {
         if self.peek().kind == TokenKind::Dollar {
             let dollar = *self.peek();
             return self.parse_param_reference(dollar);
@@ -1007,6 +1011,10 @@ impl<'src> Parser<'src> {
             }
             FieldKind::NamedNested(nested) => {
                 self.parse_named_nested_into(field, nested, key_span, fields)
+            }
+            FieldKind::MatchExpr => {
+                let expr = self.parse_match_expr_value()?;
+                self.insert_single(schema, fields, field.name, FieldValue::Match(expr))
             }
         }
     }
@@ -2104,6 +2112,12 @@ fn lower_router(name: Option<Ident>, mut fields: StructFields, span: Span) -> Ro
         Some(FieldValue::Scalar(lit)) => Some(lit),
         _ => None,
     };
+    // #228's whole-rule spelling, the one field whose value is an
+    // expression rather than a literal.
+    let rule = match fields.remove("rule") {
+        Some(FieldValue::Match(expr)) => Some(expr),
+        _ => None,
+    };
     Router {
         name,
         host,
@@ -2113,6 +2127,7 @@ fn lower_router(name: Option<Ident>, mut fields: StructFields, span: Span) -> Ro
         priority,
         port,
         protocol,
+        rule,
         span,
     }
 }

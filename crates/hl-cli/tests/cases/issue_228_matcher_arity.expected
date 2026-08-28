@@ -1,0 +1,2 @@
+--- error ---
+issue_228_matcher_arity.hll: 8:38: rule matcher `Header` takes 2 arguments, but 1 was given

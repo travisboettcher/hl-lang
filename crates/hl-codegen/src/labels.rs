@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use hl_parser::{Literal, Router, ServiceFields, Span};
+use hl_parser::{Ident, Literal, MatchExpr, Router, ServiceFields, Span, matchers};
 
 use crate::{CodegenError, interp};
 
@@ -198,25 +198,174 @@ fn router_protocol(service_name: &str, router: &Router) -> Result<Protocol, Code
     }
 }
 
-/// The ``Host(`h`)`` rule, with `path_prefix`'s alternatives `&&`-ed on
-/// as one parenthesized `||` group when there are any (#184).
+/// Lowers the `host`/`path_prefix` sugar into the [`MatchExpr`] a
+/// written-out `rule` would have produced (#228).
 ///
-/// The parentheses are not optional and not cosmetic: `&&` binds tighter
-/// than `||` in Traefik's rule grammar, so ``Host(`h`) && PathPrefix(`a`)
-/// || PathPrefix(`b`)`` matches *any* host under `/b`. They're emitted
-/// for a single prefix too, where they change nothing, because a rule
-/// whose shape depends on how many prefixes it happens to have is a rule
-/// nobody can read off the source.
-fn rule_value(protocol: Protocol, host: &str, path_prefixes: &[String]) -> String {
-    let matcher = protocol.host_matcher();
-    if path_prefixes.is_empty() {
-        return format!("{matcher}(`{host}`)");
+/// Those two fields say one thing: a host match, with `path_prefix`'s
+/// alternatives `&&`-ed on as one parenthesized `||` group when there
+/// are any (#184). Building that as an expression rather than as a
+/// string is what leaves [`render_rule`] the single rule-rendering path
+/// — the sugar and the whole-rule spelling can't drift apart into two
+/// slightly different ideas of how a rule is escaped, interpolated, or
+/// parenthesized, because after this function there is only one of them.
+///
+/// The [`MatchExpr::Group`] around the prefixes is not optional and not
+/// cosmetic: `&&` binds tighter than `||` in Traefik's rule grammar, so
+/// ``Host(`h`) && PathPrefix(`a`) || PathPrefix(`b`)`` matches *any*
+/// host under `/b`. It's emitted for a single prefix too, where it
+/// changes nothing, because a rule whose shape depends on how many
+/// prefixes it happens to have is a rule nobody can read off the source
+/// — and keeping it a real node here is what preserves that, since
+/// [`render_rule`] would otherwise drop a parenthesis precedence doesn't
+/// require.
+fn sugar_expr(protocol: Protocol, host: &Literal, path_prefixes: &[Literal]) -> MatchExpr {
+    let host_match = matcher_node(protocol.host_matcher(), host);
+    let Some((first, rest)) = path_prefixes.split_first() else {
+        return host_match;
+    };
+    let mut prefixes = matcher_node("PathPrefix", first);
+    for prefix in rest {
+        let rhs = matcher_node("PathPrefix", prefix);
+        let span = joined(prefixes.span(), rhs.span());
+        prefixes = MatchExpr::Or {
+            lhs: Box::new(prefixes),
+            rhs: Box::new(rhs),
+            span,
+        };
     }
-    let alternatives: Vec<String> = path_prefixes
-        .iter()
-        .map(|p| format!("PathPrefix(`{p}`)"))
-        .collect();
-    format!("{matcher}(`{host}`) && ({})", alternatives.join(" || "))
+    let group_span = prefixes.span();
+    let group = MatchExpr::Group {
+        inner: Box::new(prefixes),
+        span: group_span,
+    };
+    let span = joined(host_match.span(), group.span());
+    MatchExpr::And {
+        lhs: Box::new(host_match),
+        rhs: Box::new(group),
+        span,
+    }
+}
+
+/// One synthesized `Name(arg)` node for [`sugar_expr`], borrowing the
+/// argument's own span so a diagnostic about it still points at the
+/// `host`/`path_prefix` entry the user actually wrote.
+fn matcher_node(name: &'static str, arg: &Literal) -> MatchExpr {
+    MatchExpr::Matcher {
+        name: Ident {
+            name: name.to_string(),
+            span: arg.span(),
+        },
+        args: vec![arg.clone()],
+        span: arg.span(),
+    }
+}
+
+fn joined(start: Span, end: Span) -> Span {
+    Span {
+        end: end.end,
+        ..start
+    }
+}
+
+/// How tightly a node binds, for [`render_rule`]'s parenthesization.
+/// Traefik's own precedence: `!` tightest, then `&&`, then `||`.
+fn precedence(expr: &MatchExpr) -> u8 {
+    match expr {
+        MatchExpr::Or { .. } => 0,
+        MatchExpr::And { .. } => 1,
+        MatchExpr::Not { .. } => 2,
+        MatchExpr::Matcher { .. } | MatchExpr::Group { .. } => 3,
+    }
+}
+
+/// Renders a rule expression into the text of a `.rule=` label (#228).
+///
+/// Parentheses are emitted in exactly two cases: where a
+/// [`MatchExpr::Group`] says the source wrote them, and where precedence
+/// would otherwise change what the rule means (an `||` under an `&&`, or
+/// either under a `!`). Everything else is left bare, so an expression
+/// written without parentheses renders without them and reparses in
+/// Traefik as the same tree it parsed as here.
+///
+/// Each argument is interpolated and then checked, in that order and for
+/// the reason every other label value is: `{{name}}` resolves to the text
+/// that actually reaches the label, so the resolved text is what the
+/// metacharacter guard has to inspect. That guard is the whole of what
+/// stops rule injection here — Traefik delimits a matcher argument with a
+/// backtick and offers no escape for one, so an argument holding a
+/// backtick doesn't corrupt this matcher, it closes it and writes a
+/// second (#65).
+fn render_rule(
+    expr: &MatchExpr,
+    protocol: Protocol,
+    service_name: &str,
+    router: &Router,
+    bindings: &HashMap<&str, &str>,
+) -> Result<String, CodegenError> {
+    match expr {
+        MatchExpr::Matcher { name, args, .. } => {
+            let allowed = match matchers::lookup(&name.name) {
+                // A matcher the parser accepted is in the table by
+                // construction; the sugar's own synthesized nodes are
+                // too. `None` is therefore unreachable through any real
+                // path, and is treated as "not legal here" rather than
+                // panicking, on the same reasoning
+                // `CodegenError::UnsubstitutedParameter` carries: a gap
+                // in a compiler invariant should degrade to a located
+                // message, never take the process down.
+                Some(m) => match protocol {
+                    Protocol::Http => m.http,
+                    Protocol::Tcp => m.tcp,
+                },
+                None => false,
+            };
+            if !allowed {
+                return Err(CodegenError::MatcherWrongProtocol {
+                    service: service_name.to_string(),
+                    router: router.key().map(str::to_string),
+                    matcher: name.name.clone(),
+                    protocol: protocol.segment(),
+                    span: name.span,
+                });
+            }
+            let mut rendered = Vec::with_capacity(args.len());
+            for arg in args {
+                let resolved = interp::resolve(arg.text(), bindings, arg.span())?;
+                reject_metacharacters(&resolved, "router.rule", LABEL_METACHARACTERS, arg.span())?;
+                rendered.push(format!("`{resolved}`"));
+            }
+            Ok(format!("{}({})", name.name, rendered.join(", ")))
+        }
+        MatchExpr::Group { inner, .. } => Ok(format!(
+            "({})",
+            render_rule(inner, protocol, service_name, router, bindings)?
+        )),
+        MatchExpr::Not { operand, .. } => {
+            let inner = render_rule(operand, protocol, service_name, router, bindings)?;
+            if precedence(operand) < precedence(expr) {
+                Ok(format!("!({inner})"))
+            } else {
+                Ok(format!("!{inner}"))
+            }
+        }
+        MatchExpr::And { lhs, rhs, .. } | MatchExpr::Or { lhs, rhs, .. } => {
+            let op = if matches!(expr, MatchExpr::And { .. }) {
+                "&&"
+            } else {
+                "||"
+            };
+            let mut parts = Vec::with_capacity(2);
+            for side in [lhs, rhs] {
+                let text = render_rule(side, protocol, service_name, router, bindings)?;
+                if precedence(side) < precedence(expr) {
+                    parts.push(format!("({text})"));
+                } else {
+                    parts.push(text);
+                }
+            }
+            Ok(format!("{} {op} {}", parts[0], parts[1]))
+        }
+    }
 }
 
 /// The one `entrypoints=` label for `entrypoint`, or `None` when the
@@ -286,38 +435,74 @@ fn middlewares_label(
     )))
 }
 
-/// Emits one `router` block's labels — rule, then `entrypoints=`, then
-/// `middlewares=` — in the same order and the same shape `expose.host`'s
-/// own router emits them (#184).
-fn push_router_labels(
-    labels: &mut Vec<String>,
+/// The one [`MatchExpr`] a router's rule comes from, whichever of the
+/// two spellings wrote it (#228).
+///
+/// `rule` is used as written. `host`/`path_prefix` are lowered by
+/// [`sugar_expr`] into the expression they have always meant. Writing
+/// both is [`CodegenError::RouterRuleAndHost`]: two descriptions of one
+/// rule, with nothing in the language to say which wins, and no reading
+/// of "match this, and also match that instead" a user could have meant.
+/// Writing neither is [`CodegenError::RouterWithoutHost`] — the block
+/// that exists only to *be* a router saying nothing about which requests
+/// reach it.
+///
+/// The sugar's own literals are resolved and checked here, under the
+/// field names the user actually wrote (`router.host`,
+/// `router.path_prefix`), rather than being left for [`render_rule`]'s
+/// identical guard to catch under `router.rule`. A diagnostic about a
+/// backtick in a `host` should say `host`. [`render_rule`] then re-runs
+/// both on text that has already passed them, which is a no-op by
+/// construction: interpolation can't reappear in resolved text (`{` is
+/// itself a rejected metacharacter), and a value that cleared the guard
+/// clears it again.
+fn router_rule_expr(
     service_name: &str,
     router: &Router,
+    protocol: Protocol,
     bindings: &HashMap<&str, &str>,
-) -> Result<(), CodegenError> {
-    if let Some(name) = router.key() {
-        reject_unsafe_router_name(service_name, name, router.span)?;
-    }
-    let id = router_id(service_name, router);
-    let protocol = router_protocol(service_name, router)?;
-    let ns = protocol.segment();
-
-    let host_lit = match &router.host {
-        Some(host) => host,
-        None => {
-            return Err(CodegenError::RouterWithoutHost {
+) -> Result<MatchExpr, CodegenError> {
+    if let Some(rule) = &router.rule {
+        // `host` first when a block wrote both, since it's the half a
+        // reader is likelier to have meant to keep.
+        let sugar = router
+            .host
+            .as_ref()
+            .map(|h| ("host", h.span()))
+            .or_else(|| {
+                router
+                    .path_prefix
+                    .first()
+                    .map(|p| ("path_prefix", p.span()))
+            });
+        if let Some((field, span)) = sugar {
+            return Err(CodegenError::RouterRuleAndHost {
                 service: service_name.to_string(),
                 router: router.key().map(str::to_string),
-                span: router.span,
+                field,
+                span,
+                rule_span: rule.span(),
             });
         }
+        return Ok(rule.clone());
+    }
+
+    let Some(host_lit) = &router.host else {
+        return Err(CodegenError::RouterWithoutHost {
+            service: service_name.to_string(),
+            router: router.key().map(str::to_string),
+            span: router.span,
+        });
     };
     let host = interp::resolve(host_lit.text(), bindings, host_lit.span())?;
     reject_metacharacters(&host, "router.host", LABEL_METACHARACTERS, host_lit.span())?;
 
     // A TCP router has no paths to match on — there is no request URI at
     // that layer — so a `path_prefix` beside one is a contradiction
-    // rather than something to silently drop (#225).
+    // rather than something to silently drop (#225). The `rule` spelling
+    // reaches the same conclusion through
+    // [`CodegenError::MatcherWrongProtocol`], which can name the matcher;
+    // here the field is the more useful thing to point at.
     if protocol == Protocol::Tcp
         && let Some(first) = router.path_prefix.first()
     {
@@ -338,12 +523,36 @@ fn push_router_labels(
             LABEL_METACHARACTERS,
             prefix.span(),
         )?;
-        prefixes.push(resolved);
+        prefixes.push(Literal::Str(resolved, prefix.span()));
     }
 
+    Ok(sugar_expr(
+        protocol,
+        &Literal::Str(host, host_lit.span()),
+        &prefixes,
+    ))
+}
+
+/// Emits one `router` block's labels — rule, then `entrypoints=`, then
+/// `middlewares=` — in the same order and the same shape `expose.host`'s
+/// own router emits them (#184).
+fn push_router_labels(
+    labels: &mut Vec<String>,
+    service_name: &str,
+    router: &Router,
+    bindings: &HashMap<&str, &str>,
+) -> Result<(), CodegenError> {
+    if let Some(name) = router.key() {
+        reject_unsafe_router_name(service_name, name, router.span)?;
+    }
+    let id = router_id(service_name, router);
+    let protocol = router_protocol(service_name, router)?;
+    let ns = protocol.segment();
+
+    let expr = router_rule_expr(service_name, router, protocol, bindings)?;
     labels.push(format!(
         "traefik.{ns}.routers.{id}.rule={}",
-        rule_value(protocol, &host, &prefixes)
+        render_rule(&expr, protocol, service_name, router, bindings)?
     ));
     if let Some(label) =
         entrypoints_label(ns, &id, "router.entrypoint", &router.entrypoint, bindings)?
@@ -571,6 +780,7 @@ mod tests {
             priority: None,
             port: None,
             protocol: None,
+            rule: None,
             span: span(),
         }
     }
@@ -1869,6 +2079,293 @@ mod tests {
                 "traefik.http.routers.app-api.priority=100",
                 "traefik.http.services.app.loadbalancer.server.port=80",
             ]
+        );
+    }
+    // --- `router { rule: ... }` (#228) ---
+
+    /// A matcher node, for building a rule by hand the way a `.hll`
+    /// file's own `rule` would parse into one.
+    fn matcher(name: &str, args: &[&str]) -> MatchExpr {
+        MatchExpr::Matcher {
+            name: Ident {
+                name: name.to_string(),
+                span: span(),
+            },
+            args: args.iter().map(|a| lit(a)).collect(),
+            span: span(),
+        }
+    }
+
+    fn and(lhs: MatchExpr, rhs: MatchExpr) -> MatchExpr {
+        MatchExpr::And {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+            span: span(),
+        }
+    }
+
+    fn or(lhs: MatchExpr, rhs: MatchExpr) -> MatchExpr {
+        MatchExpr::Or {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+            span: span(),
+        }
+    }
+
+    fn not(inner: MatchExpr) -> MatchExpr {
+        MatchExpr::Not {
+            operand: Box::new(inner),
+            span: span(),
+        }
+    }
+
+    fn group(inner: MatchExpr) -> MatchExpr {
+        MatchExpr::Group {
+            inner: Box::new(inner),
+            span: span(),
+        }
+    }
+
+    /// A router whose rule is written out rather than sugared.
+    fn ruled(name: Option<&str>, rule: MatchExpr) -> Router {
+        let mut r = router(name, None);
+        r.rule = Some(rule);
+        r
+    }
+
+    fn rule_of(r: Router) -> String {
+        let mut fields = with_routers(vec![r]);
+        fields.expose = Some(expose_port(80));
+        let labels = compute("app", &fields, None, &bindings()).unwrap();
+        labels[0]
+            .split_once(".rule=")
+            .expect("the first label is the rule")
+            .1
+            .to_string()
+    }
+
+    /// #228's own case: the negation `path_prefix` could never express.
+    #[test]
+    fn a_negated_prefix_group_renders_as_the_issue_quotes_it() {
+        let rule = and(
+            matcher("Host", &["travel.internal.techdebtor.io"]),
+            not(group(or(
+                or(
+                    or(
+                        matcher("PathPrefix", &["/media"]),
+                        matcher("PathPrefix", &["/admin"]),
+                    ),
+                    matcher("PathPrefix", &["/static"]),
+                ),
+                matcher("PathPrefix", &["/accounts"]),
+            ))),
+        );
+        assert_eq!(
+            rule_of(ruled(None, rule)),
+            "Host(`travel.internal.techdebtor.io`) && !(PathPrefix(`/media`) || \
+             PathPrefix(`/admin`) || PathPrefix(`/static`) || PathPrefix(`/accounts`))"
+        );
+    }
+
+    /// Parentheses the source wrote survive; parentheses it didn't are
+    /// not invented, since `&&` already binds tighter than `||`.
+    #[test]
+    fn precedence_alone_needs_no_parentheses() {
+        let rule = or(
+            matcher("Host", &["a.example.com"]),
+            and(
+                matcher("Host", &["b.example.com"]),
+                matcher("Method", &["GET"]),
+            ),
+        );
+        assert_eq!(
+            rule_of(ruled(None, rule)),
+            "Host(`a.example.com`) || Host(`b.example.com`) && Method(`GET`)"
+        );
+    }
+
+    /// The other direction: an `||` under an `&&` *does* need them, or
+    /// the rule would match every host under the last alternative — the
+    /// exact bug `path_prefix`'s own group exists to prevent. The parser
+    /// can't build this tree without a `Group` node, so this is the
+    /// renderer being correct for an AST built any other way, the same
+    /// belt-and-braces `reject_unsafe_router_name` applies to a router
+    /// name the grammar already constrains.
+    #[test]
+    fn a_lower_precedence_child_is_parenthesized_even_without_a_group() {
+        let rule = and(
+            matcher("Host", &["a.example.com"]),
+            or(
+                matcher("PathPrefix", &["/api"]),
+                matcher("PathPrefix", &["/dav"]),
+            ),
+        );
+        assert_eq!(
+            rule_of(ruled(None, rule)),
+            "Host(`a.example.com`) && (PathPrefix(`/api`) || PathPrefix(`/dav`))"
+        );
+    }
+
+    /// `!` binds tighter than both, so negating a binary node needs
+    /// parentheses whether or not one was written.
+    #[test]
+    fn negating_a_binary_node_parenthesizes_it() {
+        let rule = not(or(
+            matcher("PathPrefix", &["/api"]),
+            matcher("PathPrefix", &["/dav"]),
+        ));
+        assert_eq!(
+            rule_of(ruled(None, rule)),
+            "!(PathPrefix(`/api`) || PathPrefix(`/dav`))"
+        );
+    }
+
+    /// Negating a single matcher needs none.
+    #[test]
+    fn negating_a_matcher_needs_no_parentheses() {
+        let rule = not(matcher("PathPrefix", &["/admin"]));
+        assert_eq!(rule_of(ruled(None, rule)), "!PathPrefix(`/admin`)");
+    }
+
+    /// A two-argument matcher joins its arguments the way Traefik writes
+    /// them, each in its own backticks.
+    #[test]
+    fn a_two_argument_matcher_backticks_each_argument() {
+        let rule = matcher("Header", &["X-Env", "prod"]);
+        assert_eq!(rule_of(ruled(None, rule)), "Header(`X-Env`, `prod`)");
+    }
+
+    /// `{{name}}` resolves inside a matcher argument, exactly as it does
+    /// in a `host` — the resolved text is what reaches the label.
+    #[test]
+    fn a_matcher_argument_resolves_interpolation() {
+        let rule = matcher("Host", &["{{name}}.internal.example.com"]);
+        assert_eq!(
+            rule_of(ruled(None, rule)),
+            "Host(`syncthing.internal.example.com`)"
+        );
+    }
+
+    /// And the metacharacter guard runs on that resolved text, since a
+    /// backtick would close the matcher and write a second one (#65).
+    #[test]
+    fn a_backtick_in_a_matcher_argument_is_rejected() {
+        let rule = matcher("Host", &["ok.example.com`) || HostRegexp(`{any:.+}"]);
+        let mut fields = with_routers(vec![ruled(None, rule)]);
+        fields.expose = Some(expose_port(80));
+        let err = compute("app", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodegenError::UnsafeLabelValue {
+                    field: "router.rule",
+                    character: '`',
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// A TCP router's rule may not use an HTTP-only matcher — there is
+    /// no request URI at that layer to match a path against.
+    #[test]
+    fn a_tcp_rule_rejects_an_http_only_matcher() {
+        let mut r = ruled(Some("sftp"), matcher("PathPrefix", &["/files"]));
+        r.protocol = Some(lit("tcp"));
+        r.port = Some(num(1111));
+        let fields = with_routers(vec![r]);
+        let err = compute("app", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodegenError::MatcherWrongProtocol {
+                    protocol: "tcp",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// And the mirror image: `HostSNI` reads a TLS server name, which an
+    /// HTTP router never sees.
+    #[test]
+    fn an_http_rule_rejects_a_tcp_only_matcher() {
+        let mut fields = with_routers(vec![ruled(None, matcher("HostSNI", &["*"]))]);
+        fields.expose = Some(expose_port(80));
+        let err = compute("app", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodegenError::MatcherWrongProtocol {
+                    protocol: "http",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// `ClientIP` is the one matcher both namespaces have, so it works
+    /// either side rather than being arbitrarily assigned to one.
+    #[test]
+    fn client_ip_is_legal_in_both_namespaces() {
+        let mut fields = with_routers(vec![ruled(None, matcher("ClientIP", &["10.0.0.0/8"]))]);
+        fields.expose = Some(expose_port(80));
+        assert!(compute("app", &fields, None, &bindings()).is_ok());
+
+        let mut r = ruled(Some("raw"), matcher("ClientIP", &["10.0.0.0/8"]));
+        r.protocol = Some(lit("tcp"));
+        r.port = Some(num(1111));
+        let fields = with_routers(vec![r]);
+        assert!(compute("app", &fields, None, &bindings()).is_ok());
+    }
+
+    /// A `rule` beside the sugar it replaces describes one rule twice,
+    /// with nothing to say which wins.
+    #[test]
+    fn a_rule_beside_a_host_is_rejected() {
+        let mut r = ruled(None, matcher("Host", &["a.example.com"]));
+        r.host = Some(lit("b.example.com"));
+        let mut fields = with_routers(vec![r]);
+        fields.expose = Some(expose_port(80));
+        let err = compute("app", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(err, CodegenError::RouterRuleAndHost { field: "host", .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_rule_beside_a_path_prefix_is_rejected() {
+        let mut r = ruled(None, matcher("Host", &["a.example.com"]));
+        r.path_prefix = prefixes(&["/api"]);
+        let mut fields = with_routers(vec![r]);
+        fields.expose = Some(expose_port(80));
+        let err = compute("app", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodegenError::RouterRuleAndHost {
+                    field: "path_prefix",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// A router with neither spelling still has no rule to emit, and the
+    /// message now names both ways to give it one.
+    #[test]
+    fn a_router_with_neither_host_nor_rule_is_rejected() {
+        let mut fields = with_routers(vec![router(Some("api"), None)]);
+        fields.expose = Some(expose_port(80));
+        let err = compute("app", &fields, None, &bindings()).unwrap_err();
+        assert!(
+            matches!(err, CodegenError::RouterWithoutHost { .. }),
+            "got {err:?}"
         );
     }
 }

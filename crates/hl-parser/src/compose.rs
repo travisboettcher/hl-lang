@@ -24,8 +24,8 @@ use hl_lexer::{SourceMap, Span};
 
 use crate::ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnEntry, Entrypoint, EnvEntry,
-    EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, Network, Program,
-    RawEntry, RawMap, RawValue, Restart, Router, Service, ServiceFields, TemplateDecl,
+    EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, MatchExpr, Network,
+    Program, RawEntry, RawMap, RawValue, Restart, Router, Service, ServiceFields, TemplateDecl,
     TemplateInvocation, TopDecl, Traefik, Volume,
 };
 use crate::schema::{self, MapSide};
@@ -1599,10 +1599,17 @@ fn resolve_qualified_references<R: SymbolResolver>(
     // `router.middleware` (#221) names a middleware in that same
     // `traefik.yml`, so it rejects a qualifier for exactly the reason
     // `entrypoint` beside it does.
+    // A `rule` matcher's arguments (#228) are the same kind of free
+    // text `path_prefix` holds — a hostname, a path, a header value —
+    // and land in a Traefik rule the same way, so a qualifier there has
+    // nothing to resolve against either.
     for router in &fields.routers {
         reject_qualified(&router.entrypoint, "router.entrypoint")?;
         reject_qualified(&router.path_prefix, "router.path_prefix")?;
         reject_qualified(&router.middleware, "router.middleware")?;
+        if let Some(rule) = &router.rule {
+            reject_qualified(rule.args(), "router.rule")?;
+        }
     }
     Ok(())
 }
@@ -1691,6 +1698,16 @@ fn substitute_params(
         }
         if let Some(p) = &mut router.protocol {
             substitute_literal(p, args, template_name)?;
+        }
+        // #228: every matcher argument in a `rule`, reached through the
+        // one walk `reject_qualified` above uses, so the two can't
+        // disagree about which slots a rule has. Reference-shaped for
+        // the reason `path_prefix` beside it is — a matcher argument is
+        // free text, never a number.
+        if let Some(rule) = &mut router.rule {
+            for arg in rule.args_mut() {
+                substitute_reference_literal(arg, args, template_name)?;
+            }
         }
     }
     if let Some(r) = &mut fields.restart
@@ -2265,6 +2282,12 @@ struct RouterAcc {
     priority: Option<(Literal, Tier)>,
     port: Option<(Literal, Tier)>,
     protocol: Option<(Literal, Tier)>,
+    /// #228's whole-rule spelling. Tier-tracked like the scalars beside
+    /// it and merged through the same [`merge_router_scalar`]: a rule is
+    /// one whole record, so two of them are two answers to one question
+    /// rather than two halves of one, and concatenating them the way the
+    /// lists above concatenate would mean nothing.
+    rule: Option<(MatchExpr, Tier)>,
     span: Span,
 }
 
@@ -2348,6 +2371,7 @@ impl MergeAcc {
                 priority: r.priority.map(|(lit, _)| lit),
                 port: r.port.map(|(lit, _)| lit),
                 protocol: r.protocol.map(|(lit, _)| lit),
+                rule: r.rule.map(|(expr, _)| expr),
                 span: r.span,
             })
             .collect();
@@ -3072,6 +3096,7 @@ fn merge_routers(
                 priority: router.priority.map(|p| (p, tier.clone())),
                 port: router.port.map(|p| (p, tier.clone())),
                 protocol: router.protocol.map(|p| (p, tier.clone())),
+                rule: router.rule.map(|r| (r, tier.clone())),
                 span: router.span,
             });
             continue;
@@ -3111,6 +3136,16 @@ fn merge_routers(
                 "router.protocol",
                 key.as_deref(),
                 protocol,
+                tier,
+            )?;
+        }
+        // #228: a whole rule, merged by the same rule the scalars are.
+        if let Some(rule) = router.rule {
+            merge_router_scalar(
+                &mut acc[pos].rule,
+                "router.rule",
+                key.as_deref(),
+                rule,
                 tier,
             )?;
         }
@@ -3161,11 +3196,11 @@ fn merge_routers(
 /// all four want the identical Own-wins / `defaults`-loses /
 /// two-explicit-templates-collide rule. `slot` is the [`RouterAcc`]
 /// field to merge into and `field` the dotted name a collision reports.
-fn merge_router_scalar(
-    slot: &mut Option<(Literal, Tier)>,
+fn merge_router_scalar<T: RouterScalar>(
+    slot: &mut Option<(T, Tier)>,
     field: &'static str,
     key: Option<&str>,
-    value: Literal,
+    value: T,
     tier: &Tier,
 ) -> Result<(), ComposeError> {
     match slot.take() {
@@ -3188,6 +3223,30 @@ fn merge_router_scalar(
         },
     }
     Ok(())
+}
+
+/// A single-occurrence `router` field [`merge_router_scalar`] can merge.
+///
+/// The merge itself is the same for every one of them — Own always wins,
+/// `defaults` always loses, two explicit templates collide — and the
+/// only thing it needs from the value is where it was written, for the
+/// collision diagnostic to name both sides. Six of the seven rows are
+/// [`Literal`]s; `rule` (#228) is a whole [`MatchExpr`], which is the
+/// only reason this is a trait rather than a concrete type.
+trait RouterScalar {
+    fn span(&self) -> Span;
+}
+
+impl RouterScalar for Literal {
+    fn span(&self) -> Span {
+        Literal::span(self)
+    }
+}
+
+impl RouterScalar for MatchExpr {
+    fn span(&self) -> Span {
+        MatchExpr::span(self)
+    }
 }
 
 /// Merges `depends_on` entries into `acc`, keyed on the referenced

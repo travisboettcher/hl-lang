@@ -1,0 +1,12 @@
+# #228: a misspelled rule matcher is caught where it's written, not left
+# to Traefik to reject at load time — where it surfaces as a router that
+# silently never matches, hours later and nowhere near this file. The
+# diagnostic lists the whole legal set rather than guessing at a
+# spelling, which answers "what can I write here?" as well.
+service web {
+  image "nginx"
+  expose 80
+  router {
+    rule: PathPrefx("/api")
+  }
+}

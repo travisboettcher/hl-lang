@@ -1,0 +1,75 @@
+# #228: `router.path_prefix` could only ever OR prefixes together, so
+# the *inverse* — "this host except these prefixes" — had no
+# representation at all. `adventure_log` splits one host across two
+# containers by path: the backend catches four prefixes, the frontend
+# catches everything else. The backend half converted cleanly; the
+# frontend half's whole `labels` list stayed hand-typed in `raw`,
+# giving up every check `router` performs.
+#
+# This pins both halves against the two Traefik rules the issue quotes
+# verbatim, deliberately written in the two different spellings so they
+# sit side by side:
+#   - `server` keeps the `path_prefix` sugar, which is exactly the
+#     OR'd-together shape it has always produced;
+#   - `web` writes the negation out as a `rule`, which is what #228 had
+#     no way to say.
+#
+# The two rules being visibly each other's negation is the point: the
+# sugar lowers into the same expression type the `rule` parses into
+# (`labels::sugar_expr`), so one renderer produces both and the
+# parentheses line up on their own rather than by coincidence.
+service adventure_log_server {
+  image "adventure-log/server:latest"
+  expose 8000
+
+  router {
+    host: "travel.internal.techdebtor.io"
+    path_prefix: ["/media", "/admin", "/static", "/accounts"]
+    entrypoint: web-secure
+  }
+}
+
+service adventure_log_web {
+  image "adventure-log/web:latest"
+  expose 3000
+
+  router {
+    rule: Host("travel.internal.techdebtor.io")
+       && !(PathPrefix("/media") || PathPrefix("/admin")
+         || PathPrefix("/static") || PathPrefix("/accounts"))
+    entrypoint: web-secure
+  }
+}
+
+# The matchers `host`/`path_prefix` never reached, and the operator
+# precedence that decides where parentheses are needed. `&&` binds
+# tighter than `||`, so the `||` here has to be parenthesized in the
+# output and the `&&` must not be — a rule that reparses in Traefik as
+# the tree it parsed as here.
+service gitea {
+  image "gitea/gitea:latest"
+  expose 3000
+
+  router public {
+    rule: Host("git.techdebtor.io") && (Method("GET") || Method("HEAD"))
+    entrypoint: web-secure
+  }
+
+  router internal {
+    rule: Host("git.internal.techdebtor.io") || ClientIP("10.0.0.0/8")
+    entrypoint: web-secure
+  }
+}
+
+# A TCP router's own namespace, where `HostSNI` is the host matcher and
+# `Host` doesn't exist. Written as a `rule` rather than through `host`,
+# which is the sugar for whichever of the two the protocol picks.
+service sftpgo {
+  image "drakkan/sftpgo:latest"
+
+  router sftp {
+    protocol: tcp
+    port: 1111
+    rule: HostSNI("*")
+  }
+}

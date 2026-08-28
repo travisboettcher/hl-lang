@@ -53,6 +53,6 @@ message carries the fix.
 ```console
 $ hllc --build router-less-middleware.hll --out docker-compose.yml
 ? 1
-router-less-middleware.hll:4:3: service `web` declares an unnamed `router` with no `host`, so there is no rule for Traefik to match — add a host (`host: "web.example.com"`) or drop the `router`
+router-less-middleware.hll:4:3: service `web` declares an unnamed `router` with no `host` and no `rule`, so there is no rule for Traefik to match — add a host (`host: "web.example.com"`), write a `rule`, or drop the `router`
 
 ```
