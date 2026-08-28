@@ -218,6 +218,15 @@ fn router_protocol(service_name: &str, router: &Router) -> Result<Protocol, Code
 /// — and keeping it a real node here is what preserves that, since
 /// [`render_rule`] would otherwise drop a parenthesis precedence doesn't
 /// require.
+///
+/// Every composite node here carries the span of the field it was built
+/// from rather than a computed range over its children, because nothing
+/// ever reads it: a diagnostic about a synthesized rule reports on the
+/// matcher *argument's* span — the `host` or `path_prefix` entry the user
+/// actually wrote — and [`CodegenError::RouterRuleAndHost`]'s own
+/// `rule_span` only ever comes from a parsed `rule`, never from sugar.
+/// Computing a range no diagnostic can quote would be unobservable work,
+/// and unobservable work is untestable by definition.
 fn sugar_expr(protocol: Protocol, host: &Literal, path_prefixes: &[Literal]) -> MatchExpr {
     let host_match = matcher_node(protocol.host_matcher(), host);
     let Some((first, rest)) = path_prefixes.split_first() else {
@@ -225,24 +234,20 @@ fn sugar_expr(protocol: Protocol, host: &Literal, path_prefixes: &[Literal]) -> 
     };
     let mut prefixes = matcher_node("PathPrefix", first);
     for prefix in rest {
-        let rhs = matcher_node("PathPrefix", prefix);
-        let span = joined(prefixes.span(), rhs.span());
         prefixes = MatchExpr::Or {
             lhs: Box::new(prefixes),
-            rhs: Box::new(rhs),
-            span,
+            rhs: Box::new(matcher_node("PathPrefix", prefix)),
+            span: prefix.span(),
         };
     }
-    let group_span = prefixes.span();
     let group = MatchExpr::Group {
         inner: Box::new(prefixes),
-        span: group_span,
+        span: first.span(),
     };
-    let span = joined(host_match.span(), group.span());
     MatchExpr::And {
         lhs: Box::new(host_match),
         rhs: Box::new(group),
-        span,
+        span: host.span(),
     }
 }
 
@@ -257,13 +262,6 @@ fn matcher_node(name: &'static str, arg: &Literal) -> MatchExpr {
         },
         args: vec![arg.clone()],
         span: arg.span(),
-    }
-}
-
-fn joined(start: Span, end: Span) -> Span {
-    Span {
-        end: end.end,
-        ..start
     }
 }
 
@@ -2225,6 +2223,42 @@ mod tests {
     fn negating_a_matcher_needs_no_parentheses() {
         let rule = not(matcher("PathPrefix", &["/admin"]));
         assert_eq!(rule_of(ruled(None, rule)), "!PathPrefix(`/admin`)");
+    }
+
+    /// Nor does negating another negation. `!` binds tighter than
+    /// itself, so `!!x` is the one shape that tells "parenthesize a
+    /// *lower*-precedence child" apart from "parenthesize an
+    /// equal-or-lower one" — every other operand of a `!` is a matcher
+    /// or a group, which binds tighter either way.
+    #[test]
+    fn negating_a_negation_needs_no_parentheses() {
+        let rule = not(not(matcher("PathPrefix", &["/admin"])));
+        assert_eq!(rule_of(ruled(None, rule)), "!!PathPrefix(`/admin`)");
+    }
+
+    /// The same distinction one level over, for the binary operators: a
+    /// chain of one operator nests same-precedence nodes, and those need
+    /// no parentheses either — only a genuinely lower-precedence child
+    /// does.
+    #[test]
+    fn a_chain_of_one_operator_needs_no_parentheses() {
+        let rule = and(
+            and(matcher("Host", &["a"]), matcher("Method", &["GET"])),
+            matcher("PathPrefix", &["/x"]),
+        );
+        assert_eq!(
+            rule_of(ruled(None, rule)),
+            "Host(`a`) && Method(`GET`) && PathPrefix(`/x`)"
+        );
+
+        let rule = or(
+            or(matcher("Host", &["a"]), matcher("Host", &["b"])),
+            matcher("Host", &["c"]),
+        );
+        assert_eq!(
+            rule_of(ruled(None, rule)),
+            "Host(`a`) || Host(`b`) || Host(`c`)"
+        );
     }
 
     /// A two-argument matcher joins its arguments the way Traefik writes

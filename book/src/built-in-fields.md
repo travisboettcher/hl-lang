@@ -411,8 +411,8 @@ is Traefik's own default rather than a number `hllc` invented.
 ### `rule`
 
 `host` and `path_prefix` between them say one thing: a host match, with
-the prefixes OR'd together and AND'd onto it. That covers most routers
-and nothing else. `rule` is the whole Traefik rule written out, so a
+the prefixes joined by `||` and hung off the host with `&&`. That covers
+most routers and nothing else. `rule` is the whole Traefik rule written out, so a
 router can say anything Traefik can express:
 
 ```hll,build
@@ -477,18 +477,18 @@ emitted label reads the way the source does.
 A matcher `hllc` doesn't recognize is a compile error naming every one it
 does, and so is a matcher given the wrong number of arguments. A matcher
 belonging to the other namespace is one too—see
-[`protocol`](#protocol)—so a `PathPrefix` on a TCP router, which has no
-request path to match, is caught rather than emitted.
+[`protocol`](#protocol)—so `hllc` catches a `PathPrefix` on a TCP
+router, which has no request path to match, rather than emitting it.
 
 Each argument goes through the same checks a `host` does: `{{name}}`
-resolves inside one, and a rule metacharacter—most of all a
-backtick—is rejected, since a rule that can close its own matcher can
-write a second one.
+resolves inside one, and `hllc` refuses a rule metacharacter—most of
+all a backtick—since a rule that can close its own matcher can write a
+second one.
 
 `host` and `path_prefix` are sugar for part of a rule. `host: "a"` is
-`Host("a")`, and `path_prefix: ["/x", "/y"]` is `(PathPrefix("/x") ||
-PathPrefix("/y"))` AND'd onto it—the same expression `rule` would build,
-so both spellings run through one code path. Writing `rule` beside
+`Host("a")`, and `path_prefix: ["/x", "/y"]` hangs `(PathPrefix("/x") ||
+PathPrefix("/y"))` off it with `&&`—the same expression `rule` would
+build, so both spellings run through one code path. Writing `rule` beside
 either is a compile error, since that describes one rule twice:
 
 ```hll

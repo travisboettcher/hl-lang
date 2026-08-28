@@ -1549,6 +1549,83 @@ mod error_display_tests {
         );
     }
 
+    /// A matcher used in the wrong namespace names its counterpart
+    /// where one exists (#228). The four counterpart pairs are the whole
+    /// point of the hint — "not a `tcp` matcher" alone leaves a reader
+    /// to go find that `HostSNI` is the thing they wanted — so each is
+    /// pinned separately rather than as one representative case.
+    #[test]
+    fn matcher_wrong_protocol_display_names_the_counterpart() {
+        for (matcher, protocol, counterpart) in [
+            ("Host", "tcp", "HostSNI"),
+            ("HostRegexp", "tcp", "HostSNIRegexp"),
+            ("HostSNI", "http", "Host"),
+            ("HostSNIRegexp", "http", "HostRegexp"),
+        ] {
+            let err = CodegenError::MatcherWrongProtocol {
+                service: "sftpgo".to_string(),
+                router: Some("sftp".to_string()),
+                matcher: matcher.to_string(),
+                protocol,
+                span: span(),
+            };
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "3:5: service `sftpgo` uses the rule matcher `{matcher}` on `router sftp`, \
+                     which routes `{protocol}`, and `{matcher}` is not a `{protocol}` matcher — \
+                     use `{counterpart}` instead"
+                )
+            );
+        }
+    }
+
+    /// A matcher with no counterpart says so instead of inventing one:
+    /// a TCP router genuinely has no request path, so there is nothing
+    /// to suggest and the honest advice is that the matcher and the
+    /// `protocol` can't both be right.
+    #[test]
+    fn matcher_wrong_protocol_display_without_a_counterpart() {
+        let err = CodegenError::MatcherWrongProtocol {
+            service: "sftpgo".to_string(),
+            router: None,
+            matcher: "PathPrefix".to_string(),
+            protocol: "tcp",
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: service `sftpgo` uses the rule matcher `PathPrefix` on an unnamed `router`, \
+             which routes `tcp`, and `PathPrefix` is not a `tcp` matcher — drop the matcher or \
+             the `protocol: tcp`"
+        );
+    }
+
+    /// Both spellings of a rule on one router (#228), naming the line
+    /// each sits on — the reader has to see both to pick one.
+    #[test]
+    fn router_rule_and_host_display_names_both_locations() {
+        let err = CodegenError::RouterRuleAndHost {
+            service: "web".to_string(),
+            router: Some("api".to_string()),
+            field: "path_prefix",
+            span: span(),
+            rule_span: Span {
+                start: 0,
+                end: 0,
+                line: 2,
+                col: 7,
+                file: FileId::ANONYMOUS,
+            },
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: service `web` sets `path_prefix` on `router api`, which already has a `rule` \
+             (at 2:7) — `path_prefix` is sugar for part of a rule, so writing both describes one \
+             rule twice; drop the `path_prefix` or fold it into the `rule`"
+        );
+    }
+
     /// A router with no port to balance onto (#198): the follow-up
     /// diagnostic that falls out once `router` is the only source of
     /// Traefik routers and `expose` the only source of ports.

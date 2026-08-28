@@ -51,8 +51,6 @@ namespaces?
 SFTP
 TLS
 WebDAV
-AND'd
-OR'd
 arity
 embedder
 matcher(s|'s)?

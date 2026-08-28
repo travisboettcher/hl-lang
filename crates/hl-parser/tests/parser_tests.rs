@@ -3295,39 +3295,86 @@ fn two_rules_in_one_router_is_a_duplicate_field() {
     );
 }
 
+/// A composite node's span covers the whole expression — from the first
+/// matcher's own start to the closing `)` of the last — rather than just
+/// the operator or the left operand. That's the property the parser's
+/// span-joining exists to provide, and the reason a diagnostic about a
+/// rule can underline the rule.
+#[test]
+fn a_composite_node_spans_the_whole_expression() {
+    let rule_text = "Host(\"a\") && PathPrefix(\"/b\")";
+    let source = format!("service s {{\n  router {{ rule: {rule_text} }}\n}}\n");
+    let program = parse_ok(&source);
+    let span = routers(as_service(&program.decls[0]))[0]
+        .rule
+        .as_ref()
+        .unwrap()
+        .span();
+    let start = source.find("Host(").expect("the rule is in the source");
+    assert_eq!(span.start as usize, start);
+    assert_eq!(span.end as usize, start + rule_text.len());
+}
+
+/// Builds a `service` whose one router carries `rule`.
+fn rule_source(rule: &str) -> String {
+    format!("service s {{\n  router {{ rule: {rule} }}\n}}\n")
+}
+
+fn parses(rule: &str) -> bool {
+    parse(&rule_source(rule)).is_ok()
+}
+
+fn too_deep(rule: &str) -> bool {
+    matches!(
+        parse(&rule_source(rule)),
+        Err(ParseError::MatchExprTooDeep { .. })
+    )
+}
+
 /// The self-recursive half of the grammar is depth-capped for
 /// `MAX_RAW_VALUE_DEPTH`'s reason: unbounded, it overflows the stack,
 /// and a stack overflow aborts the process rather than returning an
 /// error a caller can catch.
+///
+/// Each of the four nesting constructs gets its limit pinned from *both*
+/// sides. A one-sided "far past the limit is rejected" test can't tell a
+/// correct cap from one that's off by one, and off-by-one is exactly
+/// what an accounting mistake here looks like. The two constructs that
+/// recurse (`(`, `!`) reach one level per token, so `MAX` of them is the
+/// last that fits; the two that fold left (`&&`, `||`) reach one level
+/// per *operator*, so `MAX + 1` operands are.
 #[test]
-fn a_deeply_nested_rule_is_rejected_rather_than_overflowing() {
-    let depth = MAX_MATCH_EXPR_DEPTH + 10;
-    let source = format!(
-        "service s {{\n  router {{ rule: {}Host(\"a\"){} }}\n}}\n",
-        "(".repeat(depth),
-        ")".repeat(depth)
-    );
-    assert!(
-        matches!(
-            parse(&source).unwrap_err(),
-            ParseError::MatchExprTooDeep { .. }
-        ),
-        "expected a depth error"
-    );
+fn nested_parentheses_are_capped_at_exactly_the_limit() {
+    let nest = |n: usize| format!("{}Host(\"a\"){}", "(".repeat(n), ")".repeat(n));
+    assert!(parses(&nest(MAX_MATCH_EXPR_DEPTH)));
+    assert!(too_deep(&nest(MAX_MATCH_EXPR_DEPTH + 1)));
+}
+
+#[test]
+fn nested_negations_are_capped_at_exactly_the_limit() {
+    let nest = |n: usize| format!("{}Host(\"a\")", "!".repeat(n));
+    assert!(parses(&nest(MAX_MATCH_EXPR_DEPTH)));
+    assert!(too_deep(&nest(MAX_MATCH_EXPR_DEPTH + 1)));
 }
 
 /// A long `&&` chain counts against the same cap: `&&` folds left, so
 /// each extra operand is one more level of `Box` for drop glue to walk,
-/// exactly as an extra `(` would be.
+/// exactly as an extra `(` would be. `n` operands nest `n - 1` deep,
+/// which is why the limit lands one operand later than it does for a
+/// construct that recurses.
 #[test]
-fn a_long_operator_chain_counts_against_the_depth_cap() {
-    let terms = vec!["Host(\"a\")"; MAX_MATCH_EXPR_DEPTH + 10].join(" && ");
-    let source = format!("service s {{\n  router {{ rule: {terms} }}\n}}\n");
-    assert!(
-        matches!(
-            parse(&source).unwrap_err(),
-            ParseError::MatchExprTooDeep { .. }
-        ),
-        "expected a depth error"
-    );
+fn a_long_and_chain_is_capped_at_exactly_the_limit() {
+    let chain = |n: usize| vec!["Host(\"a\")"; n].join(" && ");
+    assert!(parses(&chain(MAX_MATCH_EXPR_DEPTH + 1)));
+    assert!(too_deep(&chain(MAX_MATCH_EXPR_DEPTH + 2)));
+}
+
+/// And an `||` chain the same way — the two fold identically, so a cap
+/// that holds for one and not the other is an accounting bug rather than
+/// a design decision.
+#[test]
+fn a_long_or_chain_is_capped_at_exactly_the_limit() {
+    let chain = |n: usize| vec!["Host(\"a\")"; n].join(" || ");
+    assert!(parses(&chain(MAX_MATCH_EXPR_DEPTH + 1)));
+    assert!(too_deep(&chain(MAX_MATCH_EXPR_DEPTH + 2)));
 }

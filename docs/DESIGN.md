@@ -131,8 +131,8 @@ matcher        ::= IDENT "(" ( literal ( "," literal )* )? ")"
 ```
 
 - `rule_expr` is reachable from exactly one place: `router`'s own `rule`
-  field, whose schema row (`schema::FieldKind::MatchExpr`) is what tells
-  the generic engine to parse a value this way rather than as a
+  field, whose schema row `schema::FieldKind::MatchExpr` is the switch
+  that routes the generic engine into this grammar rather than into
   `value`. It's the only field kind whose value is neither a literal, a
   list of them, nor a nested body, and the only one with an operator
   grammar. Precedence is Traefik's own—`!` tightest, then `&&`, then
@@ -142,20 +142,20 @@ matcher        ::= IDENT "(" ( literal ( "," literal )* )? ")"
 
   It's also the language's **second** self-recursive production, after
   `raw`'s schema-free value grammar, so it carries a depth ceiling for
-  that one's reason (#72): unbounded, a few kilobytes of `((((...))))`
+  that one's reason, per #72: unbounded, a few kilobytes of `((((...))))`
   overflows the stack, and a stack overflow aborts the process rather
   than returning an error a library embedder can catch. The two
   constants sit beside each other, `MAX_MATCH_EXPR_DEPTH` and
   `MAX_RAW_VALUE_DEPTH`, and the second's own rustdoc carries the
-  measurement both are set against. The depth
+  measurement behind both numbers. The depth
   counted is the parsed *tree*'s rather than the parser's call chain, so
   a long `a && b && c && ...` chain counts against it as well as a stack
   of `(`: `&&` folds left, so each extra operand is one more `Box` level
   for drop glue to walk.
 
-  Where a `rule` expression *ends* is settled by lookahead alone, since
-  the lexer emits no newline token. It stops as soon as the next token
-  is neither `&&` nor `||`, and a `,` is consumed only between a
+  One token of lookahead decides where a `rule` expression *ends*, since
+  the lexer emits no newline token. It stops the moment the next token
+  is neither `&&` nor `||`, and the parser takes a `,` only between a
   matcher's own parentheses—never at the top level—so in the
   comma-continued form `router api, rule: Host("x"), entrypoint: web`
   the second comma starts a sibling field of `router`, exactly as it
@@ -726,13 +726,13 @@ wrong service" failure #144 closed off, arrived at through a helpful
 hint, so the removed name stays recognized purely to name where it went
 (`schema::moved_field`).
 
-`rule` (#228) is the field that stopped `router` being able to express
-only one shape of rule. `host` and `path_prefix` between them say
-exactly one thing—a host match, with the prefixes OR'd together and
-AND'd onto it—and #228 needed that shape's *inverse*: `adventure_log`
+`rule` is the field that stopped `router` being able to express
+only one shape of rule, per #228. `host` and `path_prefix` between them say
+exactly one thing—a host match, with the prefixes joined by `||` and
+hung off the host with `&&`—and #228 needed that shape's *inverse*: `adventure_log`
 splits one host across two containers by path, the backend catching
 four prefixes and the frontend catching everything else. The backend
-half is the OR'd shape `path_prefix` already produces. The frontend half
+half is the `||` shape `path_prefix` already produces. The frontend half
 had no representation at all, so its whole `labels` list stayed in
 `raw`, which is the same failure `middleware` had one paragraph up: the
 one service that most needed `router`'s checks was the one that couldn't
@@ -746,8 +746,8 @@ after that a third, each with its own interaction with the others to
 specify. An expression buys all of them at once and specifies nothing
 extra, because Traefik has already specified it.
 
-A raw rule *string* would have been simpler still and was rejected for
-what it gives up. Splicing user text straight into the label loses the
+A raw rule *string* would have been simpler still, and it loses too
+much. Splicing user text straight into the label loses the
 backtick guard #65 put on `host`—a backtick has no escape inside
 ``Host(`...`)``, so one in a rule closes the matcher and writes a
 second—and loses `{{name}}` resolution, matcher and arity checking, and
@@ -755,18 +755,18 @@ any span inside the rule to point a diagnostic at. Parsing the
 expression is what buys all four, and anyone who genuinely wants
 unchecked passthrough already has `raw`.
 
-The matcher names are Traefik's own, spelling and capitalization
-included, against the rest of the language's snake_case. A rule is a
+The matcher names are Traefik's own, spelling, capitalization, and all,
+against the rest of the language's snake_case. A rule is a
 thing users copy out of a Traefik label or the Traefik documentation, so
 a renamed vocabulary would put a translation step in front of the one
 operation this field exists to make easy. `hll`'s contribution is the
 quoting: Traefik delimits an argument with a backtick, `hllc` writes
 those, and the user writes an ordinary `"..."` string.
 
-`host`/`path_prefix` stay rather than being replaced, since the
+`host`/`path_prefix` survive rather than giving way to it, since the
 single-host router is the overwhelmingly common case and deserves its
-one-liner—but they stay as *sugar*, lowered by `labels::sugar_expr` into
-the same `MatchExpr` a written-out `rule` parses to. One rule-rendering
+one-liner—but they survive as *sugar*, which `labels::sugar_expr` lowers
+into the same `MatchExpr` a written-out `rule` parses to. One rule-rendering
 path, not two that could disagree about escaping, interpolation, or
 parenthesization. Writing both on one router is a hard error rather than
 a precedence rule, for the reason the `middleware` move rejected one:
@@ -778,16 +778,15 @@ byte-identical to what it always was. `path_prefix` deliberately
 parenthesizes even a single prefix—where the parentheses change
 nothing—so that a rule's shape doesn't depend on how many prefixes it
 happens to have, and a precedence-only renderer would drop exactly
-those. Keeping written parentheses also means a rule renders as it was
-written, so the emitted label can be read straight off the source.
+those. Keeping written parentheses also means a rule renders the way
+someone typed it, so the source spells out the emitted label.
 
 The parse-time/codegen-time split follows `protocol`'s own reasoning
 rather than contradicting it. Which matchers exist and how many
 arguments each takes can't depend on anything composition does—a
 matcher name is an `IDENT`, which no `$param` can be, and substitution
 replaces one literal with one literal rather than expanding a list—so
-both are checked in the parser, where the span is the matcher as
-written. Which *namespace* a matcher is legal in does depend on
+the parser checks both, where the span covers the matcher itself. Which *namespace* a matcher is legal in does depend on
 `protocol`, so that check sits in codegen beside the rest of the
 protocol-dependent ones, and runs both ways: `PathPrefix` under
 `protocol: tcp` has no request URI, and `HostSNI` under `http` has no
