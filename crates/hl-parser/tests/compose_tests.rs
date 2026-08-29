@@ -6,7 +6,7 @@
 use hl_parser::schema::MapSide;
 use hl_parser::{
     ArrowMapHost, Command, ComposeError, ComposedProgram, Entrypoint, Healthcheck, HealthcheckTest,
-    Literal, RawValue, Service, compose, parse,
+    Literal, MatchExpr, RawValue, Service, compose, parse,
 };
 
 fn compose_ok(source: &str) -> ComposedProgram {
@@ -2992,4 +2992,90 @@ fn router_new_field_params_are_substituted() {
     assert_eq!(web.port.as_ref().unwrap().text(), "2222");
     assert_eq!(web.protocol.as_ref().unwrap().text(), "tcp");
     assert_no_params(service);
+}
+
+// --- `router { rule: ... }` (#228) ---
+
+/// A rule merges on `host`'s rule — own wins over a template's — rather
+/// than concatenating. A rule is one whole record: two of them are two
+/// answers to one question, not two halves of one.
+#[test]
+fn a_service_body_rule_overrides_its_template_s() {
+    let composed = compose_ok(
+        "template api {\n  router web { rule: Host(\"placeholder\") }\n}\n\
+         service s {\n  with api\n  image \"x\"\n  \
+           router web { rule: Host(\"real.example.com\") }\n}\n",
+    );
+    let service = single_service(&composed);
+    let rule = router_named(service, "web").rule.as_ref().unwrap();
+    let MatchExpr::Matcher { args, .. } = rule else {
+        panic!("expected one matcher, got {rule:?}");
+    };
+    assert_eq!(args[0].text(), "real.example.com");
+}
+
+/// Two explicit templates disagreeing collide, keyed by router name so
+/// the message says which router — the same `MapKeyCollision` every
+/// other single-occurrence `router` field raises.
+#[test]
+fn explicit_templates_setting_the_same_router_rule_collide() {
+    let err = compose_err(
+        "template a {\n  router web { rule: Host(\"a\") }\n}\n\
+         template b {\n  router web { rule: Host(\"b\") }\n}\n\
+         service s {\n  with a, b\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::MapKeyCollision(details) => {
+            assert_eq!(details.field, "router.rule");
+            assert_eq!(details.key, "web");
+        }
+        other => panic!("expected MapKeyCollision on router.rule, got {other:?}"),
+    }
+}
+
+/// A `$param` inside a matcher argument is substituted like every other
+/// literal slot. Missing this walk would let the parameter's own name
+/// reach codegen and land in a Traefik rule (#168's bug class).
+#[test]
+fn a_param_inside_a_matcher_argument_is_substituted() {
+    let composed = compose_ok(
+        "template api(h) {\n  router web { rule: Host($h) && !PathPrefix(\"/admin\") }\n}\n\
+         service s {\n  with api { h: \"a.example.com\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let rule = router_named(service, "web").rule.as_ref().unwrap();
+    let args = rule.args();
+    assert_eq!(args[0].text(), "a.example.com");
+    assert_eq!(args[1].text(), "/admin");
+}
+
+/// A matcher argument is reference-shaped free text, exactly as a
+/// `path_prefix` entry is, so a substituted bare number is rejected at
+/// the call site that passed it.
+#[test]
+fn a_numeric_argument_to_a_matcher_is_rejected() {
+    let err = compose_err(
+        "template api(h) {\n  router web { rule: Host($h) }\n}\n\
+         service s {\n  with api { h: 8080 }\n  image \"x\"\n}\n",
+    );
+    assert!(
+        matches!(err, ComposeError::ArgumentNotReferenceShaped { .. }),
+        "got {err:?}"
+    );
+}
+
+/// An `alias.name` qualifier has nothing to resolve against inside a
+/// Traefik rule, the same way it has nothing inside a `path_prefix`.
+#[test]
+fn a_qualified_matcher_argument_is_rejected() {
+    let err = compose_err(
+        "use \"other.hll\" as other\n\
+         service s {\n  image \"x\"\n  router web { rule: Host(other.thing) }\n}\n",
+    );
+    match err {
+        ComposeError::UnsupportedQualifiedReference { field, .. } => {
+            assert_eq!(field, "router.rule");
+        }
+        other => panic!("expected UnsupportedQualifiedReference, got {other:?}"),
+    }
 }

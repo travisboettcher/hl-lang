@@ -1,0 +1,13 @@
+# #228: `host`/`path_prefix` are sugar that lowers into a `rule`, so a
+# router writing both has described one rule twice. Refused rather than
+# guessed at: honoring the `rule` silently drops a host the block plainly
+# meant to match on, and honoring the sugar silently drops the whole
+# expression.
+service web {
+  image "nginx"
+  expose 80
+  router {
+    rule: Host("web.example.com") && !PathPrefix("/admin")
+    path_prefix: ["/api"]
+  }
+}

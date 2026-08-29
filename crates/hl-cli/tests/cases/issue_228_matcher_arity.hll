@@ -1,0 +1,10 @@
+# #228: Traefik states one exact signature per rule matcher, so a wrong
+# argument count is a mistake rather than a shorter legal form.
+# `Header` takes a key *and* a value.
+service web {
+  image "nginx"
+  expose 80
+  router {
+    rule: Host("web.example.com") && Header("X-Env")
+  }
+}

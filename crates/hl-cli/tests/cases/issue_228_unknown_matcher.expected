@@ -1,0 +1,2 @@
+--- error ---
+issue_228_unknown_matcher.hll: 10:11: unknown rule matcher `PathPrefx` — the rule matchers are `ALPN`, `ClientIP`, `Header`, `HeaderRegexp`, `Host`, `HostRegexp`, `HostSNI`, `HostSNIRegexp`, `Method`, `Path`, `PathPrefix`, `PathRegexp`, `Query`, `QueryRegexp`

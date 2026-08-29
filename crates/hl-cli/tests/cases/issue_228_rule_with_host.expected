@@ -1,0 +1,2 @@
+--- error ---
+issue_228_rule_with_host.hll:11:19: service `web` sets `path_prefix` on an unnamed `router`, which already has a `rule` (at issue_228_rule_with_host.hll:10:11) — `path_prefix` is sugar for part of a rule, so writing both describes one rule twice; drop the `path_prefix` or fold it into the `rule`

@@ -222,9 +222,10 @@ after the keyword, so there's nowhere for a bare value to go.
 
 | Field | Accepts | Default |
 |---|---|---|
-| `host` | string | *Required—a router with no host has no rule* |
+| `host` | string | *Required, unless the router sets [`rule`](#rule)—a router with neither has no rule* |
 | `entrypoint` | reference list | empty—label omitted, so Traefik attaches the router to every entry point |
 | `path_prefix` | list of strings | empty—the rule matches the host alone |
+| `rule` | match expression | unset—the rule comes from `host` and `path_prefix` instead |
 | `middleware` | reference list | empty—no `middlewares=` label for this router |
 | `priority` | number | unset—label omitted, so Traefik derives a priority from the rule's length |
 | `port` | number | unset—this router shares the one service-wide target [`expose`](#expose) supplies |
@@ -308,6 +309,8 @@ entry into the label. (`entrypoint "web,web-secure"` is therefore an
 error—write `entrypoint web, web-secure`.) `hllc` rejects a comma in a
 `middleware` name for the same reason, and resolves `{{name}}` in `host`
 too, so the `"{{name}}.internal.example.com"` template idiom works here.
+Every argument of a [`rule`](#rule) matcher gets both, for the reason
+`host` does: it lands in the same rule, inside the same backticks.
 
 All three reject a control character too, such as the newline a string
 literal writes as `\n` (see
@@ -315,8 +318,12 @@ literal writes as `\n` (see
 an entry point name, and a middleware name have no use for one, and a
 label carrying one no longer means what it reads as.
 
-A `router` with no `host` is a compile error, not a router quietly
-missing from the output:
+`path_prefix` can only ever OR its entries together. For anything
+else—a negation, a header match, an `||` at the top level—write the
+whole rule out with [`rule`](#rule) instead.
+
+A `router` with no `host` and no `rule` is a compile error, not a router
+quietly missing from the output:
 
 ```hll
 service web {
@@ -328,7 +335,7 @@ service web {
 ```
 
 ```text
-web.hll:3:3: service `web` declares `router api` with no `host`, so there is no rule for Traefik to match — add a host (`host: "web.example.com"`) or drop the `router`
+web.hll:3:3: service `web` declares `router api` with no `host` and no `rule`, so there is no rule for Traefik to match — add a host (`host: "web.example.com"`), write a `rule`, or drop the `router`
 ```
 
 Two `router` blocks with the same name are an error as well. That's not
@@ -400,6 +407,108 @@ only while at least one does.
 host, so without it Traefik picks between them by rule length. Higher
 wins. Leave it off and `hllc` emits no `priority=` label at all, which
 is Traefik's own default rather than a number `hllc` invented.
+
+### `rule`
+
+`host` and `path_prefix` between them say one thing: a host match, with
+the prefixes joined by `||` and hung off the host with `&&`. That covers
+most routers and nothing else. `rule` is the whole Traefik rule written out, so a
+router can say anything Traefik can express:
+
+```hll,build
+service adventure-log-web {
+  image "adventure-log/web:latest"
+  expose 3000
+  router {
+    rule: Host("travel.example.com")
+       && !(PathPrefix("/media") || PathPrefix("/admin"))
+    entrypoint: web-secure
+  }
+}
+```
+
+```text
+traefik.http.routers.adventure-log-web.rule=Host(`travel.example.com`) && !(PathPrefix(`/media`) || PathPrefix(`/admin`))
+traefik.http.routers.adventure-log-web.entrypoints=web-secure
+```
+
+That's the frontend half of a host split across two containers by
+path—the backend catching those prefixes is the same list without the
+`!`, which is exactly what `path_prefix` already produces:
+
+```hll,fragment
+router {
+  host: "travel.example.com"
+  path_prefix: ["/media", "/admin"]
+  entrypoint: web-secure
+}
+```
+
+The matcher names are Traefik's own, so a rule copied out of a Traefik
+label or the Traefik documentation transfers as-is. The one difference
+is quoting: Traefik delimits a matcher argument with a backtick, which
+has no escape sequence, so `hllc` writes the backticks and you write
+`"..."`.
+
+The matchers, with the exact arguments each takes:
+
+| matcher | routes |
+|---|---|
+| `Host(domain)` | `http` |
+| `HostRegexp(regexp)` | `http` |
+| `Path(path)` | `http` |
+| `PathPrefix(prefix)` | `http` |
+| `PathRegexp(regexp)` | `http` |
+| `Method(method)` | `http` |
+| `Header(key, value)` | `http` |
+| `HeaderRegexp(key, regexp)` | `http` |
+| `Query(key, value)` | `http` |
+| `QueryRegexp(key, regexp)` | `http` |
+| `ClientIP(ip)` | `http` and `tcp` |
+| `HostSNI(domain)` | `tcp` |
+| `HostSNIRegexp(regexp)` | `tcp` |
+| `ALPN(protocol)` | `tcp` |
+
+Combine them with `&&`, `||`, and `!`, and group them with parentheses.
+Precedence is Traefik's: `!` binds tightest, then `&&`, then `||`. `hllc`
+writes the parentheses a rule needs and keeps the ones you wrote, so the
+emitted label reads the way the source does.
+
+A matcher `hllc` doesn't recognize is a compile error naming every one it
+does, and so is a matcher given the wrong number of arguments. A matcher
+belonging to the other namespace is one too—see
+[`protocol`](#protocol)—so `hllc` catches a `PathPrefix` on a TCP
+router, which has no request path to match, rather than emitting it.
+
+Each argument goes through the same checks a `host` does: `{{name}}`
+resolves inside one, and `hllc` refuses a rule metacharacter—most of
+all a backtick—since a rule that can close its own matcher can write a
+second one.
+
+`host` and `path_prefix` are sugar for part of a rule. `host: "a"` is
+`Host("a")`, and `path_prefix: ["/x", "/y"]` hangs `(PathPrefix("/x") ||
+PathPrefix("/y"))` off it with `&&`—the same expression `rule` would
+build, so both spellings run through one code path. Writing `rule` beside
+either is a compile error, since that describes one rule twice:
+
+```hll
+service web {
+  image "nginx"
+  expose 80
+  router web {
+    rule: Host("web.example.com") && !PathPrefix("/admin")
+    path_prefix: ["/api"]
+  }
+}
+```
+
+```text
+web.hll:6:19: service `web` sets `path_prefix` on `router web`, which already has a `rule` (at web.hll:5:11) — `path_prefix` is sugar for part of a rule, so writing both describes one rule twice; drop the `path_prefix` or fold it into the `rule`
+```
+
+Reach for `rule` when the sugar can't say what you mean, and leave the
+sugar alone when it can—`router { host: "media.example.com" }` is
+shorter and says the same thing as its `rule` spelling.
 
 ### `protocol`
 

@@ -1,0 +1,13 @@
+# #228: the rule-injection guard #65 put on `host` covers a `rule`
+# matcher's arguments too. Traefik delimits an argument with a backtick
+# and has no escape for one, so a backtick doesn't corrupt this matcher —
+# it closes it and writes a second, here a `HostRegexp` matching every
+# host. Rejected on the *resolved* value, after `{{name}}` interpolation,
+# since that is the text that reaches the label.
+service web {
+  image "nginx"
+  expose 80
+  router {
+    rule: Host("ok.example.com`) || HostRegexp(`{any:.+}")
+  }
+}

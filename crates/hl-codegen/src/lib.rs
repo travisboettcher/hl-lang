@@ -195,6 +195,12 @@ pub enum CodegenError {
     /// question with one answer, so the discriminant is gone with it.
     ///
     /// `span` points at the router block itself.
+    ///
+    /// Since #228 there are two ways to give a router a rule — `host`
+    /// (with its optional `path_prefix`) and the whole-rule `rule`
+    /// expression — so this fires only when the block wrote *neither*,
+    /// and the message names both. Writing both is
+    /// [`Self::RouterRuleAndHost`], the opposite mistake.
     RouterWithoutHost {
         service: String,
         router: Option<String>,
@@ -273,6 +279,51 @@ pub enum CodegenError {
         router: Option<String>,
         span: Span,
     },
+    /// A `router`'s `rule` names a matcher that isn't legal in the label
+    /// namespace its `protocol` picked (#228).
+    ///
+    /// [`Self::TcpRouterWithHttpOnlyField`]'s counterpart for the
+    /// whole-rule spelling, and it runs both directions: `PathPrefix`
+    /// under `protocol: tcp` has no request URI to match against, and
+    /// `HostSNI` under the default `http` has no TLS handshake to read a
+    /// server name from. Checked here rather than at parse time because
+    /// the answer depends on `protocol`, which is itself only resolved
+    /// here — see [`Self::UnknownRouterProtocol`]. Which matchers exist
+    /// and how many arguments each takes doesn't depend on anything, and
+    /// is checked in the parser instead.
+    MatcherWrongProtocol {
+        service: String,
+        router: Option<String>,
+        matcher: String,
+        /// `"http"` or `"tcp"` — the namespace segment the router landed
+        /// in, so the message can name it as the user's `protocol` does.
+        protocol: &'static str,
+        span: Span,
+    },
+    /// A `router` writes both `rule` and the `host`/`path_prefix` sugar
+    /// it replaces (#228).
+    ///
+    /// The sugar lowers into a `rule` of its own (`labels::sugar_expr`),
+    /// so a block writing both has described one rule twice, and nothing
+    /// in the language says which description wins. Neither reading is
+    /// safe to guess: honoring `rule` silently drops a host the block
+    /// plainly meant to match on, and honoring the sugar silently drops
+    /// the whole expression. Refused for the reason
+    /// [`Self::TraefikDisabledWithRouter`] refuses its own contradiction
+    /// — a service saying two incompatible things about one router.
+    ///
+    /// `span` points at the `host` or `path_prefix` entry;
+    /// `rule_span` at the expression it contradicts, so the rendered
+    /// message can name both lines.
+    RouterRuleAndHost {
+        service: String,
+        router: Option<String>,
+        /// `"host"` or `"path_prefix"` — whichever of the two the block
+        /// wrote beside its `rule`.
+        field: &'static str,
+        span: Span,
+        rule_span: Span,
+    },
     /// A `router` block's name contains a character that can't appear in
     /// a Traefik label *key* (#184).
     ///
@@ -312,6 +363,8 @@ impl CodegenError {
             | CodegenError::UnknownRouterProtocol { span, .. }
             | CodegenError::TcpRouterWithHttpOnlyField { span, .. }
             | CodegenError::TcpRouterWithoutPort { span, .. }
+            | CodegenError::MatcherWrongProtocol { span, .. }
+            | CodegenError::RouterRuleAndHost { span, .. }
             | CodegenError::RouterWithoutHost { span, .. }
             | CodegenError::RouterWithoutPort { span, .. }
             | CodegenError::TraefikDisabledWithRouter { span, .. }
@@ -410,7 +463,7 @@ impl CodegenError {
                 service, router, ..
             } => write!(
                 f,
-                "{at}: service `{service}` declares {} with no `host`, so there is no rule for Traefik to match — add a host (`host: \"{service}.example.com\"`) or drop the `router`",
+                "{at}: service `{service}` declares {} with no `host` and no `rule`, so there is no rule for Traefik to match — add a host (`host: \"{service}.example.com\"`), write a `rule`, or drop the `router`",
                 named_router(router)
             ),
             CodegenError::UnknownRouterProtocol {
@@ -428,6 +481,30 @@ impl CodegenError {
                 f,
                 "{at}: service `{service}` sets `{field}` on {}, but a TCP router matches on the TLS server name and never sees a request path — drop the `{field}` or the `protocol: tcp`",
                 named_router(router)
+            ),
+            CodegenError::MatcherWrongProtocol {
+                service,
+                router,
+                matcher,
+                protocol,
+                ..
+            } => write!(
+                f,
+                "{at}: service `{service}` uses the rule matcher `{matcher}` on {}, which routes `{protocol}`, and `{matcher}` is not a `{protocol}` matcher — {}",
+                named_router(router),
+                matcher_protocol_hint(matcher, protocol)
+            ),
+            CodegenError::RouterRuleAndHost {
+                service,
+                router,
+                field,
+                rule_span,
+                ..
+            } => write!(
+                f,
+                "{at}: service `{service}` sets `{field}` on {}, which already has a `rule` (at {}) — `{field}` is sugar for part of a rule, so writing both describes one rule twice; drop the `{field}` or fold it into the `rule`",
+                named_router(router),
+                rule_span.locate(files)
             ),
             CodegenError::TcpRouterWithoutPort {
                 service, router, ..
@@ -472,6 +549,29 @@ struct DisplayCodegenError<'a> {
 /// How a diagnostic names one `router` block: quoted by name, or
 /// described for what it is when the block is the unnamed form and has
 /// no name to quote.
+/// What to try instead of a matcher used in the wrong namespace.
+///
+/// The two namespaces have near-equivalents for the one thing both care
+/// about — a name to route by — so a `Host` written on a TCP router is
+/// almost always a `HostSNI` and vice versa, and saying so is more
+/// useful than restating the table. Everything else has no counterpart
+/// at all: a TCP router genuinely has no path or header to match on, so
+/// the honest advice there is that the matcher and the `protocol` can't
+/// both be right.
+fn matcher_protocol_hint(matcher: &str, protocol: &'static str) -> String {
+    let counterpart = match (matcher, protocol) {
+        ("Host", "tcp") => Some("HostSNI"),
+        ("HostRegexp", "tcp") => Some("HostSNIRegexp"),
+        ("HostSNI", "http") => Some("Host"),
+        ("HostSNIRegexp", "http") => Some("HostRegexp"),
+        _ => None,
+    };
+    match counterpart {
+        Some(other) => format!("use `{other}` instead"),
+        None => format!("drop the matcher or the `protocol: {protocol}`"),
+    }
+}
+
 fn named_router(router: &Option<String>) -> String {
     match router {
         Some(name) => format!("`router {name}`"),
@@ -1426,9 +1526,9 @@ mod error_display_tests {
         };
         assert_eq!(
             err.to_string(),
-            "3:5: service `vikunja` declares `router api` with no `host`, so there is no rule \
-             for Traefik to match — add a host (`host: \"vikunja.example.com\"`) or drop the \
-             `router`"
+            "3:5: service `vikunja` declares `router api` with no `host` and no `rule`, so \
+             there is no rule for Traefik to match — add a host \
+             (`host: \"vikunja.example.com\"`), write a `rule`, or drop the `router`"
         );
     }
 
@@ -1443,8 +1543,86 @@ mod error_display_tests {
         };
         assert_eq!(
             err.to_string(),
-            "3:5: service `web` declares an unnamed `router` with no `host`, so there is no rule \
-             for Traefik to match — add a host (`host: \"web.example.com\"`) or drop the `router`"
+            "3:5: service `web` declares an unnamed `router` with no `host` and no `rule`, so \
+             there is no rule for Traefik to match — add a host \
+             (`host: \"web.example.com\"`), write a `rule`, or drop the `router`"
+        );
+    }
+
+    /// A matcher used in the wrong namespace names its counterpart
+    /// where one exists (#228). The four counterpart pairs are the whole
+    /// point of the hint — "not a `tcp` matcher" alone leaves a reader
+    /// to go find that `HostSNI` is the thing they wanted — so each is
+    /// pinned separately rather than as one representative case.
+    #[test]
+    fn matcher_wrong_protocol_display_names_the_counterpart() {
+        for (matcher, protocol, counterpart) in [
+            ("Host", "tcp", "HostSNI"),
+            ("HostRegexp", "tcp", "HostSNIRegexp"),
+            ("HostSNI", "http", "Host"),
+            ("HostSNIRegexp", "http", "HostRegexp"),
+        ] {
+            let err = CodegenError::MatcherWrongProtocol {
+                service: "sftpgo".to_string(),
+                router: Some("sftp".to_string()),
+                matcher: matcher.to_string(),
+                protocol,
+                span: span(),
+            };
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "3:5: service `sftpgo` uses the rule matcher `{matcher}` on `router sftp`, \
+                     which routes `{protocol}`, and `{matcher}` is not a `{protocol}` matcher — \
+                     use `{counterpart}` instead"
+                )
+            );
+        }
+    }
+
+    /// A matcher with no counterpart says so instead of inventing one:
+    /// a TCP router genuinely has no request path, so there is nothing
+    /// to suggest and the honest advice is that the matcher and the
+    /// `protocol` can't both be right.
+    #[test]
+    fn matcher_wrong_protocol_display_without_a_counterpart() {
+        let err = CodegenError::MatcherWrongProtocol {
+            service: "sftpgo".to_string(),
+            router: None,
+            matcher: "PathPrefix".to_string(),
+            protocol: "tcp",
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: service `sftpgo` uses the rule matcher `PathPrefix` on an unnamed `router`, \
+             which routes `tcp`, and `PathPrefix` is not a `tcp` matcher — drop the matcher or \
+             the `protocol: tcp`"
+        );
+    }
+
+    /// Both spellings of a rule on one router (#228), naming the line
+    /// each sits on — the reader has to see both to pick one.
+    #[test]
+    fn router_rule_and_host_display_names_both_locations() {
+        let err = CodegenError::RouterRuleAndHost {
+            service: "web".to_string(),
+            router: Some("api".to_string()),
+            field: "path_prefix",
+            span: span(),
+            rule_span: Span {
+                start: 0,
+                end: 0,
+                line: 2,
+                col: 7,
+                file: FileId::ANONYMOUS,
+            },
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: service `web` sets `path_prefix` on `router api`, which already has a `rule` \
+             (at 2:7) — `path_prefix` is sugar for part of a rule, so writing both describes one \
+             rule twice; drop the `path_prefix` or fold it into the `rule`"
         );
     }
 

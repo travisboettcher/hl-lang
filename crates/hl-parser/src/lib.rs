@@ -56,14 +56,16 @@
 mod ast;
 pub mod compose;
 mod error;
+mod match_expr;
+pub mod matchers;
 mod parser;
 pub mod schema;
 
 pub use ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnCondition, DependsOnEntry,
     Entrypoint, EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal,
-    Network, Param, Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart, Router, Service,
-    ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
+    MatchExpr, Network, Param, Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart, Router,
+    Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
     VolumeDriverOpt,
 };
 pub use compose::{
@@ -72,4 +74,5 @@ pub use compose::{
 };
 pub use error::{Expected, ParseError};
 pub use hl_lexer::{FileId, Location, SourceMap, Span};
+pub use match_expr::MAX_MATCH_EXPR_DEPTH;
 pub use parser::{MAX_RAW_VALUE_DEPTH, parse, parse_in_file};

@@ -2,7 +2,7 @@ use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
 use hl_parser::{
     ArrowMapHost, Command, DependsOnCondition, Entrypoint, Expected, HealthcheckTest, Literal,
-    ParseError, TemplateDecl, TopDecl, UseDecl, parse,
+    MAX_MATCH_EXPR_DEPTH, MatchExpr, ParseError, TemplateDecl, TopDecl, UseDecl, parse,
 };
 
 fn parse_ok(source: &str) -> hl_parser::Program {
@@ -3152,4 +3152,229 @@ fn router_protocol_accepts_a_param() {
     let template = as_template(&program.decls[0]);
     let router = &template.fields.routers[0];
     assert!(matches!(router.protocol.as_ref().unwrap(), Literal::Param(n, _) if n == "p"));
+}
+
+// --- `router { rule: ... }` (#228) ---
+
+/// The whole expression grammar in one shape, checked as a tree rather
+/// than as text: `&&` binds tighter than `||`, `!` tighter than either,
+/// and the parentheses the source wrote survive as their own node.
+#[test]
+fn router_rule_parses_with_traefik_precedence() {
+    let program = parse_ok(
+        "service s {\n  router {\n    rule: Host(\"a\") && !(PathPrefix(\"/b\") || PathPrefix(\"/c\"))\n  }\n}\n",
+    );
+    let rule = routers(as_service(&program.decls[0]))[0]
+        .rule
+        .as_ref()
+        .expect("the router set a rule");
+    let MatchExpr::And { lhs, rhs, .. } = rule else {
+        panic!("`&&` is the root, not {rule:?}");
+    };
+    assert!(matches!(**lhs, MatchExpr::Matcher { .. }));
+    let MatchExpr::Not { operand, .. } = &**rhs else {
+        panic!("`!` sits under the `&&`, not {rhs:?}");
+    };
+    let MatchExpr::Group { inner, .. } = &**operand else {
+        panic!("the written parentheses survive as a Group, not {operand:?}");
+    };
+    assert!(matches!(**inner, MatchExpr::Or { .. }));
+}
+
+/// Without parentheses, `&&` still binds tighter — so `a || b && c` is
+/// an `||` of `a` and `(b && c)`, exactly as Traefik reads it.
+#[test]
+fn and_binds_tighter_than_or() {
+    let program = parse_ok(
+        "service s {\n  router {\n    rule: Host(\"a\") || Host(\"b\") && Host(\"c\")\n  }\n}\n",
+    );
+    let rule = routers(as_service(&program.decls[0]))[0]
+        .rule
+        .as_ref()
+        .unwrap();
+    let MatchExpr::Or { lhs, rhs, .. } = rule else {
+        panic!("`||` is the root, not {rule:?}");
+    };
+    assert!(matches!(**lhs, MatchExpr::Matcher { .. }));
+    assert!(matches!(**rhs, MatchExpr::And { .. }));
+}
+
+/// The property the comma-continued form rests on: a `rule` expression
+/// consumes a `,` only inside a matcher's own parentheses, never at the
+/// top level, so the comma after it starts a sibling `router` field
+/// rather than being swallowed as more rule.
+#[test]
+fn a_rule_in_comma_shorthand_ends_at_the_next_field() {
+    let program = parse_ok(
+        "service s {\n  router api, rule: Header(\"X-Env\", \"prod\"), entrypoint: web-secure\n}\n",
+    );
+    let router = &routers(as_service(&program.decls[0]))[0];
+    assert_eq!(router.key(), Some("api"));
+    assert_eq!(router.entrypoint.len(), 1);
+    assert_eq!(router.entrypoint[0].text(), "web-secure");
+    let MatchExpr::Matcher { args, .. } = router.rule.as_ref().unwrap() else {
+        panic!("expected one matcher");
+    };
+    assert_eq!(args.len(), 2);
+}
+
+/// A matcher argument is an ordinary literal slot, so a template can
+/// parameterize one the way it can parameterize a `path_prefix`.
+#[test]
+fn a_matcher_argument_accepts_a_param() {
+    let program = parse_ok("template t(h) {\n  router r { rule: Host($h) }\n}\n");
+    let rule = as_template(&program.decls[0]).fields.routers[0]
+        .rule
+        .as_ref()
+        .unwrap();
+    let MatchExpr::Matcher { args, .. } = rule else {
+        panic!("expected one matcher");
+    };
+    assert!(matches!(&args[0], Literal::Param(n, _) if n == "h"));
+}
+
+#[test]
+fn an_unknown_matcher_is_rejected_with_the_legal_set() {
+    let err = parse("service s {\n  router { rule: PathPrefx(\"/a\") }\n}\n").unwrap_err();
+    assert!(
+        matches!(&err, ParseError::UnknownMatcher { name, .. } if name == "PathPrefx"),
+        "{err:?}"
+    );
+    let rendered = err.to_string();
+    assert!(rendered.contains("`PathPrefix`"), "{rendered}");
+}
+
+#[test]
+fn a_matcher_with_the_wrong_argument_count_is_rejected() {
+    let err = parse("service s {\n  router { rule: Header(\"X-Env\") }\n}\n").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::MatcherArity {
+                name: "Header",
+                expected: 2,
+                found: 1,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+/// A bare identifier where a matcher belongs is an error rather than a
+/// literal, and it's reported at the name — not at whatever token
+/// happens to follow it, which is usually on a later line.
+#[test]
+fn a_matcher_name_without_an_argument_list_is_rejected_at_the_name() {
+    let source = "service s {\n  router {\n    rule: web-secure\n  }\n}\n";
+    let err = parse(source).unwrap_err();
+    assert_eq!(err.span().line, 3);
+    assert!(
+        matches!(&err, ParseError::UnexpectedToken { found_lexeme, .. } if found_lexeme == "web-secure"),
+        "{err:?}"
+    );
+}
+
+/// Two `rule`s in one body is the ordinary duplicate-scalar error: a
+/// router has one rule, and two say nothing about which wins.
+#[test]
+fn two_rules_in_one_router_is_a_duplicate_field() {
+    let err =
+        parse("service s {\n  router {\n    rule: Host(\"a\")\n    rule: Host(\"b\")\n  }\n}\n")
+            .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::DuplicateField {
+                type_name: "router",
+                field: "rule",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+/// A composite node's span covers the whole expression — from the first
+/// matcher's own start to the closing `)` of the last — rather than just
+/// the operator or the left operand. That's the property the parser's
+/// span-joining exists to provide, and the reason a diagnostic about a
+/// rule can underline the rule.
+#[test]
+fn a_composite_node_spans_the_whole_expression() {
+    let rule_text = "Host(\"a\") && PathPrefix(\"/b\")";
+    let source = format!("service s {{\n  router {{ rule: {rule_text} }}\n}}\n");
+    let program = parse_ok(&source);
+    let span = routers(as_service(&program.decls[0]))[0]
+        .rule
+        .as_ref()
+        .unwrap()
+        .span();
+    let start = source.find("Host(").expect("the rule is in the source");
+    assert_eq!(span.start as usize, start);
+    assert_eq!(span.end as usize, start + rule_text.len());
+}
+
+/// Builds a `service` whose one router carries `rule`.
+fn rule_source(rule: &str) -> String {
+    format!("service s {{\n  router {{ rule: {rule} }}\n}}\n")
+}
+
+fn parses(rule: &str) -> bool {
+    parse(&rule_source(rule)).is_ok()
+}
+
+fn too_deep(rule: &str) -> bool {
+    matches!(
+        parse(&rule_source(rule)),
+        Err(ParseError::MatchExprTooDeep { .. })
+    )
+}
+
+/// The self-recursive half of the grammar is depth-capped for
+/// `MAX_RAW_VALUE_DEPTH`'s reason: unbounded, it overflows the stack,
+/// and a stack overflow aborts the process rather than returning an
+/// error a caller can catch.
+///
+/// Each of the four nesting constructs gets its limit pinned from *both*
+/// sides. A one-sided "far past the limit is rejected" test can't tell a
+/// correct cap from one that's off by one, and off-by-one is exactly
+/// what an accounting mistake here looks like. The two constructs that
+/// recurse (`(`, `!`) reach one level per token, so `MAX` of them is the
+/// last that fits; the two that fold left (`&&`, `||`) reach one level
+/// per *operator*, so `MAX + 1` operands are.
+#[test]
+fn nested_parentheses_are_capped_at_exactly_the_limit() {
+    let nest = |n: usize| format!("{}Host(\"a\"){}", "(".repeat(n), ")".repeat(n));
+    assert!(parses(&nest(MAX_MATCH_EXPR_DEPTH)));
+    assert!(too_deep(&nest(MAX_MATCH_EXPR_DEPTH + 1)));
+}
+
+#[test]
+fn nested_negations_are_capped_at_exactly_the_limit() {
+    let nest = |n: usize| format!("{}Host(\"a\")", "!".repeat(n));
+    assert!(parses(&nest(MAX_MATCH_EXPR_DEPTH)));
+    assert!(too_deep(&nest(MAX_MATCH_EXPR_DEPTH + 1)));
+}
+
+/// A long `&&` chain counts against the same cap: `&&` folds left, so
+/// each extra operand is one more level of `Box` for drop glue to walk,
+/// exactly as an extra `(` would be. `n` operands nest `n - 1` deep,
+/// which is why the limit lands one operand later than it does for a
+/// construct that recurses.
+#[test]
+fn a_long_and_chain_is_capped_at_exactly_the_limit() {
+    let chain = |n: usize| vec!["Host(\"a\")"; n].join(" && ");
+    assert!(parses(&chain(MAX_MATCH_EXPR_DEPTH + 1)));
+    assert!(too_deep(&chain(MAX_MATCH_EXPR_DEPTH + 2)));
+}
+
+/// And an `||` chain the same way — the two fold identically, so a cap
+/// that holds for one and not the other is an accounting bug rather than
+/// a design decision.
+#[test]
+fn a_long_or_chain_is_capped_at_exactly_the_limit() {
+    let chain = |n: usize| vec!["Host(\"a\")"; n].join(" || ");
+    assert!(parses(&chain(MAX_MATCH_EXPR_DEPTH + 1)));
+    assert!(too_deep(&chain(MAX_MATCH_EXPR_DEPTH + 2)));
 }

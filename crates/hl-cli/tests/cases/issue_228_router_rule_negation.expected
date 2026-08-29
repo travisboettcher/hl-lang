@@ -1,0 +1,42 @@
+--- compose ---
+services:
+  adventure_log_server:
+    image: adventure-log/server:latest
+    networks:
+    - default
+    expose:
+    - 8000
+    labels:
+    - traefik.http.routers.adventure_log_server.rule=Host(`travel.internal.techdebtor.io`) && (PathPrefix(`/media`) || PathPrefix(`/admin`) || PathPrefix(`/static`) || PathPrefix(`/accounts`))
+    - traefik.http.routers.adventure_log_server.entrypoints=web-secure
+    - traefik.http.services.adventure_log_server.loadbalancer.server.port=8000
+  adventure_log_web:
+    image: adventure-log/web:latest
+    networks:
+    - default
+    expose:
+    - 3000
+    labels:
+    - traefik.http.routers.adventure_log_web.rule=Host(`travel.internal.techdebtor.io`) && !(PathPrefix(`/media`) || PathPrefix(`/admin`) || PathPrefix(`/static`) || PathPrefix(`/accounts`))
+    - traefik.http.routers.adventure_log_web.entrypoints=web-secure
+    - traefik.http.services.adventure_log_web.loadbalancer.server.port=3000
+  gitea:
+    image: gitea/gitea:latest
+    networks:
+    - default
+    expose:
+    - 3000
+    labels:
+    - traefik.http.routers.gitea-public.rule=Host(`git.techdebtor.io`) && (Method(`GET`) || Method(`HEAD`))
+    - traefik.http.routers.gitea-public.entrypoints=web-secure
+    - traefik.http.routers.gitea-internal.rule=Host(`git.internal.techdebtor.io`) || ClientIP(`10.0.0.0/8`)
+    - traefik.http.routers.gitea-internal.entrypoints=web-secure
+    - traefik.http.services.gitea.loadbalancer.server.port=3000
+  sftpgo:
+    image: drakkan/sftpgo:latest
+    networks:
+    - default
+    labels:
+    - traefik.tcp.routers.sftpgo-sftp.rule=HostSNI(`*`)
+    - traefik.tcp.routers.sftpgo-sftp.service=sftpgo-sftp
+    - traefik.tcp.services.sftpgo-sftp.loadbalancer.server.port=1111

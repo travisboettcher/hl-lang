@@ -140,6 +140,38 @@ pub enum ParseError {
     /// resulting `RawValue` tree safe — dropping is the other recursion
     /// here, and it can't return an error at all.
     RawValueTooDeep { limit: usize, span: Span },
+    /// A `router`'s `rule` expression nested deeper than
+    /// [`crate::MAX_MATCH_EXPR_DEPTH`] (#228).
+    ///
+    /// [`Self::RawValueTooDeep`]'s counterpart for the language's second
+    /// self-recursive production, and it exists for exactly that
+    /// variant's reasons — see its doc. The depth counted is the parsed
+    /// *tree*'s, so a long `a && b && c && ...` chain counts against it
+    /// as well as a stack of `(`: `&&` folds left, so each extra operand
+    /// is another level for drop glue to walk.
+    MatchExprTooDeep { limit: usize, span: Span },
+    /// A `rule` expression named a matcher Traefik has no such thing as
+    /// (#228) — a typo, or a matcher newer than this `hllc`.
+    ///
+    /// Rejected rather than passed through verbatim: an unknown name
+    /// compiles to a rule Traefik refuses at load time, which surfaces
+    /// as a router that silently never matches, hours later and nowhere
+    /// near the file that caused it. The diagnostic lists the whole
+    /// legal set — see [`crate::matchers::known_names`] for why the
+    /// list, rather than a spelling guess.
+    UnknownMatcher { name: String, span: Span },
+    /// A `rule` matcher was given the wrong number of arguments (#228).
+    ///
+    /// Traefik states one exact signature per matcher, so this is a
+    /// count, not a minimum: `Header` takes a key *and* a value, and
+    /// `Header("X-Env")` is missing half of what it needs rather than
+    /// being a shorter legal form.
+    MatcherArity {
+        name: &'static str,
+        expected: usize,
+        found: usize,
+        span: Span,
+    },
     /// A `volume`/`env` bare entry's first value had neither `:` nor the
     /// type's own bare-entry separator after it. `span` is the entry's
     /// own first value, not wherever parsing next stumbled (often the
@@ -200,6 +232,9 @@ impl ParseError {
             | ParseError::ParamReferenceOutsideTemplate { span, .. }
             | ParseError::UnknownTemplateParam { span, .. }
             | ParseError::RawValueTooDeep { span, .. }
+            | ParseError::MatchExprTooDeep { span, .. }
+            | ParseError::UnknownMatcher { span, .. }
+            | ParseError::MatcherArity { span, .. }
             | ParseError::MapEntryMissingSeparator { span, .. }
             | ParseError::InvalidDependsOnCondition { span, .. }
             | ParseError::DuplicateRouterName { second: span, .. } => *span,
@@ -339,6 +374,31 @@ impl fmt::Display for ParseError {
                 f,
                 "{}:{}: `raw` value nested more than {limit} levels deep",
                 span.line, span.col
+            ),
+            ParseError::MatchExprTooDeep { limit, .. } => write!(
+                f,
+                "{}:{}: `rule` expression nested more than {limit} levels deep",
+                span.line, span.col
+            ),
+            ParseError::UnknownMatcher { name, .. } => write!(
+                f,
+                "{}:{}: unknown rule matcher `{name}` — the rule matchers are {}",
+                span.line,
+                span.col,
+                crate::matchers::known_names()
+            ),
+            ParseError::MatcherArity {
+                name,
+                expected,
+                found,
+                ..
+            } => write!(
+                f,
+                "{}:{}: rule matcher `{name}` takes {expected} argument{}, but {found} {} given",
+                span.line,
+                span.col,
+                if *expected == 1 { "" } else { "s" },
+                if *found == 1 { "was" } else { "were" }
             ),
             ParseError::MapEntryMissingSeparator {
                 type_name,

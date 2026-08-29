@@ -532,7 +532,139 @@ pub struct Router {
     /// protocol would be a diagnostic about the wrong thing. See
     /// `hl_codegen`'s `CodegenError::UnknownRouterProtocol`.
     pub protocol: Option<Literal>,
+    /// The whole Traefik rule, written out (#228) — `rule: Host("a") &&
+    /// !PathPrefix("/b")` — instead of assembled from [`Self::host`] and
+    /// [`Self::path_prefix`].
+    ///
+    /// Those two fields could only ever produce one shape: a host match,
+    /// optionally `&&`-ed onto a `||`-joined group of path prefixes.
+    /// #228 wanted that shape's *inverse* — "this host except these
+    /// prefixes" — for a frontend/backend pair splitting one host by
+    /// path, and there was no way to say it, so half the pair kept its
+    /// whole label list in `raw`.
+    ///
+    /// The issue asked for a `negate` flag beside `path_prefix`. A flag
+    /// buys exactly one more rule: the next router wanting a header
+    /// split, a method match, or an `||` at the top level needs a second
+    /// flag, and the one after that a third. An expression buys all of
+    /// them at once, and buys them in the spelling a user already has in
+    /// front of them, since a rule is something copied out of a Traefik
+    /// label.
+    ///
+    /// `host`/`path_prefix` survive as sugar rather than being replaced
+    /// by it: the single-host router is the overwhelmingly common case
+    /// and deserves its one-liner. Codegen lowers them into this very
+    /// type before rendering (`labels::sugar_expr`), so there is one
+    /// rule-rendering path rather than two that could disagree. Writing
+    /// both spellings on one router is a codegen error — two descriptions
+    /// of one rule, with nothing to say which wins.
+    pub rule: Option<MatchExpr>,
     pub span: Span,
+}
+
+/// One node of a [`Router::rule`] expression (#228) — a boolean
+/// expression over Traefik's own rule matchers.
+///
+/// Matcher arguments are [`Literal`]s, the same type [`Router::path_prefix`]
+/// carries, so `$param` substitution and `{{name}}` interpolation reach
+/// them through the machinery every other literal slot already goes
+/// through, rather than needing a second copy of it.
+///
+/// [`Self::Group`] is a node rather than something the renderer infers
+/// from precedence. Two things pay for it. A rendered rule is then
+/// exactly the expression that was written, parentheses included, so the
+/// emitted label can be read straight off the source. And it lets the
+/// `host`/`path_prefix` sugar lower to `And(Host, Group(prefixes))` and
+/// keep emitting the parentheses it always has around a *single*
+/// prefix — where they change nothing semantically, and exist so that a
+/// rule's shape doesn't depend on how many prefixes it happens to have.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MatchExpr {
+    /// `Host("a")` — a matcher name and its arguments. The name is an
+    /// [`Ident`], never a [`Literal`], so it can't be a `$param`: which
+    /// matcher this is has to be knowable at parse time, since that's
+    /// where the name and its argument count are checked.
+    Matcher {
+        name: Ident,
+        args: Vec<Literal>,
+        span: Span,
+    },
+    /// `!expr`.
+    Not { operand: Box<MatchExpr>, span: Span },
+    /// `lhs && rhs`.
+    And {
+        lhs: Box<MatchExpr>,
+        rhs: Box<MatchExpr>,
+        span: Span,
+    },
+    /// `lhs || rhs`.
+    Or {
+        lhs: Box<MatchExpr>,
+        rhs: Box<MatchExpr>,
+        span: Span,
+    },
+    /// `( expr )` — parentheses the source actually wrote, kept so the
+    /// rendered rule keeps them too.
+    Group { inner: Box<MatchExpr>, span: Span },
+}
+
+impl MatchExpr {
+    /// Where this node was written.
+    pub fn span(&self) -> Span {
+        match self {
+            MatchExpr::Matcher { span, .. }
+            | MatchExpr::Not { span, .. }
+            | MatchExpr::And { span, .. }
+            | MatchExpr::Or { span, .. }
+            | MatchExpr::Group { span, .. } => *span,
+        }
+    }
+
+    /// Every matcher argument in this expression, in source order.
+    ///
+    /// The one walk composition's passes over a rule share — the
+    /// qualified-reference rejection reads them, `$param` substitution
+    /// rewrites them through [`Self::args_mut`] — so a node kind added
+    /// here can't be visited by one of them and missed by the other.
+    pub fn args(&self) -> Vec<&Literal> {
+        let mut out = Vec::new();
+        self.collect_args(&mut out);
+        out
+    }
+
+    fn collect_args<'a>(&'a self, out: &mut Vec<&'a Literal>) {
+        match self {
+            MatchExpr::Matcher { args, .. } => out.extend(args.iter()),
+            MatchExpr::Not { operand, .. } | MatchExpr::Group { inner: operand, .. } => {
+                operand.collect_args(out)
+            }
+            MatchExpr::And { lhs, rhs, .. } | MatchExpr::Or { lhs, rhs, .. } => {
+                lhs.collect_args(out);
+                rhs.collect_args(out);
+            }
+        }
+    }
+
+    /// [`Self::args`], for the passes that rewrite each argument in
+    /// place.
+    pub fn args_mut(&mut self) -> Vec<&mut Literal> {
+        let mut out = Vec::new();
+        self.collect_args_mut(&mut out);
+        out
+    }
+
+    fn collect_args_mut<'a>(&'a mut self, out: &mut Vec<&'a mut Literal>) {
+        match self {
+            MatchExpr::Matcher { args, .. } => out.extend(args.iter_mut()),
+            MatchExpr::Not { operand, .. } | MatchExpr::Group { inner: operand, .. } => {
+                operand.collect_args_mut(out)
+            }
+            MatchExpr::And { lhs, rhs, .. } | MatchExpr::Or { lhs, rhs, .. } => {
+                lhs.collect_args_mut(out);
+                rhs.collect_args_mut(out);
+            }
+        }
+    }
 }
 
 impl Router {

@@ -122,6 +122,23 @@ pub enum FieldKind {
     /// [`crate::ast::Router`]'s doc for why a label *key* can't take
     /// arbitrary string content.
     NamedNested(&'static TypeSchema),
+    /// `router`'s `rule` (#228) — a boolean expression over Traefik's
+    /// rule matchers, `Host("a") && !PathPrefix("/b")`, parsed by
+    /// this crate's own `match_expr` module rather than by any of the
+    /// generic value productions above.
+    ///
+    /// The only field kind whose value isn't a literal, a list of them,
+    /// or a nested body, and the only one with its own operator grammar.
+    /// It gets a kind rather than reusing [`Self::Scalar`] over a string
+    /// because a string would make the rule opaque: no spans inside it,
+    /// no matcher or arity checking, and no way to reject the backtick
+    /// that would let a rule forge a second matcher. Parsing it is what
+    /// buys all three.
+    ///
+    /// Single-occurrence like [`Self::Scalar`] — a second `rule` in one
+    /// body is a [`crate::ParseError::DuplicateField`], since a router
+    /// has one rule and two of them say nothing about which wins.
+    MatchExpr,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -306,6 +323,13 @@ pub static ROUTER: TypeSchema = TypeSchema {
         FieldSchema {
             name: "path_prefix",
             kind: FieldKind::ReferenceList,
+        },
+        // #228's whole-rule spelling, which `host`/`path_prefix` above
+        // are the sugar for. Mutually exclusive with them, checked in
+        // codegen where the rule is actually assembled.
+        FieldSchema {
+            name: "rule",
+            kind: FieldKind::MatchExpr,
         },
         FieldSchema {
             name: "middleware",
@@ -933,7 +957,8 @@ pub fn supports_raw(schema: &'static TypeSchema) -> bool {
 /// is *semantically* legal at `field_path` — the fully-dotted canonical
 /// name every reference-shaped position uses elsewhere in this crate
 /// (`"networks"`, `"router.entrypoint"`, `"router.path_prefix"`,
-/// `"router.middleware"`, `"dns"`, `"env_file"`, `"depends_on"`, or
+/// `"router.middleware"`, `"router.rule"` for a matcher argument,
+/// `"dns"`, `"env_file"`, `"depends_on"`, or
 /// `"volume"` for a named-volume mount's host side).
 ///
 /// `false` for every position but the two listed here (#196). Before

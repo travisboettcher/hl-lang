@@ -245,6 +245,40 @@ impl<'src> Lexer<'src> {
             }};
         }
 
+        // `&&`/`||` (#228), which exist only doubled: a lone `&` or `|`
+        // is [`LexError::DanglingHalfOperator`], the same treatment `-`
+        // gets below for not being the `->` it started to spell.
+        macro_rules! doubled {
+            ($kind:expr) => {{
+                if self.peek_char() == Some(ch) {
+                    let (idx, c) = self.bump().expect("peeked char must be consumable");
+                    let end = idx + c.len_utf8();
+                    Ok(Token {
+                        kind: $kind,
+                        lexeme: &self.source[start..end],
+                        span: Span {
+                            start: offset(start),
+                            end: offset(end),
+                            line,
+                            col,
+                            file: self.file,
+                        },
+                    })
+                } else {
+                    Err(LexError::DanglingHalfOperator {
+                        ch,
+                        span: Span {
+                            start: offset(start),
+                            end: offset(first_end),
+                            line,
+                            col,
+                            file: self.file,
+                        },
+                    })
+                }
+            }};
+        }
+
         match ch {
             '{' => single!(TokenKind::LBrace),
             '}' => single!(TokenKind::RBrace),
@@ -257,6 +291,9 @@ impl<'src> Lexer<'src> {
             '=' => single!(TokenKind::Equals),
             '.' => single!(TokenKind::Dot),
             '$' => single!(TokenKind::Dollar),
+            '!' => single!(TokenKind::Bang),
+            '&' => doubled!(TokenKind::AmpAmp),
+            '|' => doubled!(TokenKind::PipePipe),
             '-' => {
                 if self.peek_char() == Some('>') {
                     let (idx, c) = self.bump().expect("peeked '>' must be consumable");

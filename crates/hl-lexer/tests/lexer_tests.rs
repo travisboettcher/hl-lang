@@ -312,9 +312,9 @@ fn all_punctuation_sequence() {
     use TokenKind::*;
     let expected = vec![
         LBrace, RBrace, LBracket, RBracket, LParen, RParen, Colon, Equals, Arrow, Comma, Dot,
-        Dollar, Eof,
+        Dollar, Bang, AmpAmp, PipePipe, Eof,
     ];
-    assert_eq!(kinds("{ } [ ] ( ) : = -> , . $"), expected);
+    assert_eq!(kinds("{ } [ ] ( ) : = -> , . $ ! && ||"), expected);
 }
 
 #[test]
@@ -411,6 +411,81 @@ fn dash_before_number_is_error() {
     ));
 }
 
+// --- rule operators (#228) ---
+
+#[test]
+fn and_or_are_one_token_not_two() {
+    let tok = single_token("&&");
+    assert_eq!(tok.kind, TokenKind::AmpAmp);
+    assert_eq!(tok.lexeme, "&&");
+    let tok = single_token("||");
+    assert_eq!(tok.kind, TokenKind::PipePipe);
+    assert_eq!(tok.lexeme, "||");
+}
+
+#[test]
+fn bang_token() {
+    let tok = single_token("!");
+    assert_eq!(tok.kind, TokenKind::Bang);
+    assert_eq!(tok.lexeme, "!");
+}
+
+#[test]
+fn lone_ampersand_is_error() {
+    let mut lexer = Lexer::new("&");
+    assert!(matches!(
+        lexer.next_token(),
+        Err(LexError::DanglingHalfOperator { ch: '&', .. })
+    ));
+}
+
+#[test]
+fn lone_pipe_is_error() {
+    let mut lexer = Lexer::new("| ");
+    assert!(matches!(
+        lexer.next_token(),
+        Err(LexError::DanglingHalfOperator { ch: '|', .. })
+    ));
+}
+
+/// `&|` is two halves of two different operators, not one of either —
+/// the second character has to match the first for the pair to be a
+/// token at all.
+#[test]
+fn mismatched_halves_are_an_error() {
+    let mut lexer = Lexer::new("&|");
+    assert!(matches!(
+        lexer.next_token(),
+        Err(LexError::DanglingHalfOperator { ch: '&', .. })
+    ));
+}
+
+/// A third `&` starts a fresh scan rather than extending the operator,
+/// so `&&&` is `&&` followed by a dangling half.
+#[test]
+fn a_third_half_dangles_after_the_operator() {
+    let mut lexer = Lexer::new("&&&");
+    assert_eq!(lexer.next_token().unwrap().kind, TokenKind::AmpAmp);
+    assert!(matches!(
+        lexer.next_token(),
+        Err(LexError::DanglingHalfOperator { ch: '&', .. })
+    ));
+}
+
+/// The whole of a `rule` expression's punctuation, lexed as the parser
+/// will see it.
+#[test]
+fn a_rule_expression_lexes_into_its_operators_and_matchers() {
+    use TokenKind::*;
+    assert_eq!(
+        kinds(r#"Host("a") && !(PathPrefix("/b") || PathPrefix("/c"))"#),
+        vec![
+            Ident, LParen, Str, RParen, AmpAmp, Bang, LParen, Ident, LParen, Str, RParen, PipePipe,
+            Ident, LParen, Str, RParen, RParen, Eof,
+        ]
+    );
+}
+
 // --- template keyword ---
 
 #[test]
@@ -468,7 +543,9 @@ fn crlf_line_endings() {
 
 #[test]
 fn unexpected_char_errors() {
-    for ch in ['@', '%', '!', ';', '\\'] {
+    // `!` used to belong here and no longer does — it's `TokenKind::Bang`
+    // since #228 gave `router` a `rule` expression to negate matchers in.
+    for ch in ['@', '%', ';', '\\'] {
         let text = ch.to_string();
         let mut lexer = Lexer::new(&text);
         match lexer.next_token() {

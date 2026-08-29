@@ -1,0 +1,2 @@
+--- error ---
+issue_228_rule_backtick_injection.hll:11:16: `router.rule` must not contain '`' — it would change the meaning of the generated Traefik label
