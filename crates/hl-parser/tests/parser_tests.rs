@@ -1662,12 +1662,117 @@ fn raw_preserves_nested_structure() {
     }
 }
 
+/// #206: `raw` was the last map field where a key repeated inside one
+/// body silently dropped a value — the same shape on `env` has always
+/// named both spans. Both spans are asserted, not just the variant: what
+/// makes this diagnostic worth anything is that it points at the second
+/// occurrence *and* back at the first.
 #[test]
-fn raw_no_uniqueness_check() {
+fn raw_duplicate_key_in_one_body_is_error() {
+    let err = parse("service s {\n  raw { user: \"1000\", user: \"2000\" }\n}\n").unwrap_err();
+    match err {
+        ParseError::DuplicateMapKey {
+            type_name: "raw",
+            side: MapSide::Key,
+            value,
+            first,
+            second,
+        } => {
+            assert_eq!(value, "user");
+            assert_eq!((first.line, first.col), (2, 9));
+            assert_eq!((second.line, second.col), (2, 23));
+        }
+        other => panic!("expected DuplicateMapKey on the raw key, got {other:?}"),
+    }
+}
+
+/// Two `raw { }` blocks in one body accumulate into one map, so they
+/// collide the same way two `env` statements already do
+/// (`env_duplicate_key_is_error`) — the body is what scopes the check,
+/// not the block. Before #206 this parsed, and the generated document
+/// kept only the second value.
+#[test]
+fn raw_duplicate_key_across_two_blocks_in_one_body_is_error() {
+    let err = parse("service s {\n  raw {\n    key: \"a\"\n  }\n  raw {\n    key: \"b\"\n  }\n}\n")
+        .unwrap_err();
+    match err {
+        ParseError::DuplicateMapKey {
+            type_name: "raw",
+            side: MapSide::Key,
+            value,
+            ..
+        } => assert_eq!(value, "key"),
+        other => panic!("expected DuplicateMapKey across two raw blocks, got {other:?}"),
+    }
+}
+
+/// Two `raw` blocks that don't collide still accumulate, which is what
+/// #206's check must not disturb.
+#[test]
+fn raw_distinct_keys_across_two_blocks_still_accumulate() {
     let program =
-        parse_ok("service s {\n  raw {\n    key: \"a\"\n  }\n  raw {\n    key: \"b\"\n  }\n}\n");
+        parse_ok("service s {\n  raw {\n    a: \"1\"\n  }\n  raw {\n    b: \"2\"\n  }\n}\n");
     let service = as_service(&program.decls[0]);
     assert_eq!(service.fields.raw.entries.len(), 2);
+}
+
+/// #206's "worth deciding first": duplicate-key-ness is a property of one
+/// mapping, exactly as in YAML. Two sibling nested maps may each hold an
+/// `x` — they're two mappings, not one — so this compiles.
+#[test]
+fn raw_sibling_nested_maps_may_each_repeat_a_key() {
+    let program = parse_ok("service s {\n  raw { a: { x: 1 }, b: { x: 2 } }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.raw.entries.len(), 2);
+}
+
+/// The other half of the same rule: a nested map may reuse a key its
+/// *enclosing* mapping already claims, since the two keys land in
+/// different YAML mappings.
+#[test]
+fn raw_nested_map_may_reuse_an_enclosing_key() {
+    let program = parse_ok("service s {\n  raw { x: 1, a: { x: 2 } }\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.raw.entries.len(), 2);
+}
+
+/// And each nested map is checked on its own: a key repeated *within* one
+/// of them is the same error the top level raises.
+#[test]
+fn raw_duplicate_key_inside_one_nested_map_is_error() {
+    let err = parse("service s {\n  raw { opts: { a: 1, a: 2 } }\n}\n").unwrap_err();
+    match err {
+        ParseError::DuplicateMapKey {
+            type_name: "raw",
+            side: MapSide::Key,
+            value,
+            first,
+            second,
+        } => {
+            assert_eq!(value, "a");
+            assert_eq!((first.line, first.col), (2, 17));
+            assert_eq!((second.line, second.col), (2, 23));
+        }
+        other => panic!("expected DuplicateMapKey inside the nested map, got {other:?}"),
+    }
+}
+
+/// A `raw` key is a plain literal, so the quoted and bare spellings of
+/// one name the same key — and collide.
+#[test]
+fn raw_quoted_and_bare_spellings_of_one_key_collide() {
+    let err = parse("service s {\n  raw { user: \"a\", \"user\": \"b\" }\n}\n").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::DuplicateMapKey {
+                type_name: "raw",
+                ref value,
+                ..
+            } if value == "user"
+        ),
+        "expected DuplicateMapKey across the two spellings, got {err:?}"
+    );
 }
 
 // --- statement separation: newline between struct-body fields ---

@@ -462,11 +462,26 @@ same `MapKeyCollision` a repeated `env` key does, rather than the second
 template's value silently overwriting the first's. Before #193, `raw`
 was the one field the merge concatenated outright at every tier, with no
 uniqueness check at all—the escape hatch was, ironically, the one place
-composing two templates could lose a value in silence. This check is a
-*composition*-level statement, not a parser one: the parser still never
-checks a `raw` body's own entries against each other, so a key repeated
-within one body—one `raw { }` block or two in the same `service`/
-`template`—stays unchecked, exactly as before #193.
+composing two templates could lose a value in silence.
+
+#193 was a *composition*-level statement, and #206 completed it with the
+parser-level one it implied. The parser checks a `raw` body's own entries
+against each other now, so a key repeated within one body—one `raw { }`
+block or two in the same `service`/`template`—raises the same
+`DuplicateMapKey` a repeated `env` key in one body always did, naming
+both spans. `raw` is no longer the one map field where a repeat inside a
+single body quietly loses a value.
+
+That check covers one mapping and nothing outside it, which is the only
+scoping `raw` admits: it's schema-free, and its values recurse, so a
+`raw` body holds a tree of mappings rather than one flat list of keys.
+The rule follows YAML's own—a duplicate key belongs to a single mapping
+and says nothing about any other—so the parser checks each nested map on
+its own, against the keys in that one mapping and nothing else.
+`raw { a: { x: 1 }, b: { x: 2 } }` holds two mappings that each happen to
+carry an `x`, so it compiles. So does a nested map that reuses a key its
+enclosing mapping already claims. Only a mapping that names one key twice
+draws an error.
 
 Codegen has a separate rule about `raw` keys, unaffected by #193, because
 YAML forces the issue—two keys spelled the same in one mapping is

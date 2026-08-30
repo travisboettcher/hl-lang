@@ -103,6 +103,11 @@ pub enum ParseError {
     },
     /// Two entries in the same map-kind field (`volume`/`env`) collided
     /// on their schema-configured uniqueness side.
+    ///
+    /// `raw` reaches this too as of #206, on the key side, with one
+    /// wrinkle the other fields don't have: `raw`'s values recurse, so
+    /// "the same map" means one mapping in that tree — the body's own top
+    /// level, or one nested map — never the tree as a whole.
     DuplicateMapKey {
         type_name: &'static str,
         side: MapSide,
