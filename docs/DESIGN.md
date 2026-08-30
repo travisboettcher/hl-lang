@@ -1539,6 +1539,16 @@ nothing left for it to catch that `DuplicateRouterName` doesn't already.
   fill-in-the-blanks placeholder (DNS provider/credentials, domain, IP
   ranges)—see the preceding section, "Design principle: generic core,
   specific templates."
+- **Compose coverage**—[`COMPOSE_SURVEY.md`](COMPOSE_SURVEY.md)
+  measures this schema against 824 Compose files sampled from public
+  repositories and ranks the keys it lacks by how much applicability
+  each one buys. Its first tier—`user`, `hostname`,
+  `cap_add`/`cap_drop`, `security_opt`, `init`, `network_mode`, a `gpu`
+  sugar over `deploy`, a merging `labels` field, `stop_grace_period`,
+  and `shm_size`—takes file-level coverage from 34% to roughly 90%.
+  Not yet designed: each field's own spelling, and whether `gpu` earns
+  sugar status the way `router` did or `deploy` gets a generic struct
+  instead.
 - **`hllfmt`**—an auto-formatter that would wrap a long `with` list past
   some line length (see the preceding multiline `with` example) with
   consistent indentation, instead of that being a manual per-file
