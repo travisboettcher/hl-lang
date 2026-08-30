@@ -218,7 +218,7 @@ pub enum CodegenError {
     /// `span` points at the first `router` block, which is the one that
     /// needs either a sibling `expose <port>` or removing.
     RouterWithoutPort { service: String, span: Span },
-    /// A service sets `traefik { disabled }` (#159) and also declares a
+    /// A service sets `traefik { disable }` (#159) and also declares a
     /// `router` block — the one construct that flag exists to turn off.
     /// Plain `expose <port>` doesn't conflict — it's Compose's own
     /// `expose:` key, container-network visibility with no Traefik
@@ -239,7 +239,7 @@ pub enum CodegenError {
     /// the router-less case, just from the opposite direction.
     ///
     /// `span` points at the offending `router` block; `disabled_span`
-    /// points at the `disabled` flag it contradicts, so the rendered
+    /// points at the `disable` flag it contradicts, so the rendered
     /// message can name both lines.
     TraefikDisabledWithRouter {
         service: String,
@@ -438,10 +438,10 @@ impl CodegenError {
             CodegenError::UnsafeLabelValue {
                 field, character, ..
             } => {
-                // A comma in `router.entrypoint` gets an extra sentence.
+                // A comma in `router.entrypoints` gets an extra sentence.
                 // It's the one rejection here that used to be *accepted*
                 // — `entrypoint "web,websecure"` was how you attached a
-                // router to several entry points before `entrypoint`
+                // router to several entry points before `entrypoints`
                 // became a list — so it's the one a user is likely to
                 // hit by writing something that was correct yesterday,
                 // or by pasting a value straight out of Traefik's own
@@ -449,8 +449,8 @@ impl CodegenError {
                 // a one-line fix. Note this is a diagnostic affordance,
                 // not a semantic carve-out: the value is still rejected,
                 // exactly like every other metacharacter.
-                let hint = if *field == "router.entrypoint" && *character == ',' {
-                    " — `entrypoint` is a list, so write the entry points as separate items (`entrypoint web, websecure`) and let `hllc` join them"
+                let hint = if *field == "router.entrypoints" && *character == ',' {
+                    " — `entrypoints` is a list, so write the entry points as separate items (`entrypoints web, websecure`) and let `hllc` join them"
                 } else {
                     ""
                 };
@@ -523,7 +523,7 @@ impl CodegenError {
                 ..
             } => write!(
                 f,
-                "{at}: service `{service}` declares a `router`, but `traefik` is disabled (at {}), so there is nothing for it to route — drop the `router` or remove `disabled`",
+                "{at}: service `{service}` declares a `router`, but `traefik` is disabled (at {}), so there is nothing for it to route — drop the `router` or remove `disable`",
                 disabled_span.locate(files)
             ),
             CodegenError::UnsafeRouterName {
@@ -1468,18 +1468,18 @@ mod error_display_tests {
         );
     }
 
-    /// A comma in `router.entrypoint` — and only that pairing — gets the
+    /// A comma in `router.entrypoints` — and only that pairing — gets the
     /// migration hint appended.
     #[test]
     fn comma_in_entrypoint_display_adds_a_list_hint() {
         let err = CodegenError::UnsafeLabelValue {
-            field: "router.entrypoint",
+            field: "router.entrypoints",
             character: ',',
             span: span(),
         };
         assert_eq!(
             err.to_string(),
-            "3:5: `router.entrypoint` must not contain ',' — it would change the meaning of the generated Traefik label — `entrypoint` is a list, so write the entry points as separate items (`entrypoint web, websecure`) and let `hllc` join them"
+            "3:5: `router.entrypoints` must not contain ',' — it would change the meaning of the generated Traefik label — `entrypoints` is a list, so write the entry points as separate items (`entrypoints web, websecure`) and let `hllc` join them"
         );
     }
 
@@ -1489,13 +1489,13 @@ mod error_display_tests {
     #[test]
     fn non_comma_in_entrypoint_display_has_no_list_hint() {
         let err = CodegenError::UnsafeLabelValue {
-            field: "router.entrypoint",
+            field: "router.entrypoints",
             character: '`',
             span: span(),
         };
         assert_eq!(
             err.to_string(),
-            "3:5: `router.entrypoint` must not contain '`' — it would change the meaning of the generated Traefik label"
+            "3:5: `router.entrypoints` must not contain '`' — it would change the meaning of the generated Traefik label"
         );
     }
 

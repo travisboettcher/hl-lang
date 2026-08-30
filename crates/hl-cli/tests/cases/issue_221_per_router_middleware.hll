@@ -32,12 +32,12 @@ service gitea {
 
   router public {
     host: "git.techdebtor.io"
-    entrypoint: web-secure
+    entrypoints: web-secure
   }
 
   router internal {
     host: "git.internal.techdebtor.io"
-    entrypoint: web-secure
+    entrypoints: web-secure
     middleware: local-ipwhitelist
   }
 }
@@ -52,13 +52,13 @@ service vikunja {
   # Names no list of its own, so it takes the service-level one.
   router public {
     host: "vikunja.techdebtor.io"
-    entrypoint: web-secure
+    entrypoints: web-secure
   }
 
   # Names its own, so the service-level list doesn't reach it.
   router lan {
     host: "vikunja.techdebtor.local"
-    entrypoint: local
+    entrypoints: local
     middleware: [local-ipwhitelist, rate-limit]
   }
 }

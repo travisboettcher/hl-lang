@@ -11,7 +11,7 @@ service jellyfin {
   expose 8096
   router {
     host: "jellyfin.example.com"
-    entrypoint: web-secure
+    entrypoints: web-secure
     middleware: local-ipwhitelist
   }
 }

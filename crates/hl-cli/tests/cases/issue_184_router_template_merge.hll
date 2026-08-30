@@ -10,7 +10,7 @@
 #     the service's own name.
 #   - the keyed, per-sub-field merge: `api-docs` below is supplied whole
 #     by a template, and the service replaces only its `host` while still
-#     inheriting `entrypoint` and `path_prefix` — `expose`'s own
+#     inheriting `entrypoints` and `path_prefix` — `expose`'s own
 #     per-sub-field merge, one level deeper because a router's sub-fields
 #     sit under a name.
 #
@@ -19,11 +19,11 @@
 template public_api(prefix) {
   router api-docs {
     host: "placeholder.example.com"
-    entrypoint: web-secure
+    entrypoints: web-secure
     path_prefix: [$prefix, "/openapi.json"]
   }
   router lan {
-    entrypoint: local
+    entrypoints: local
   }
 }
 
@@ -32,7 +32,7 @@ service docs {
   expose 8080
   with public_api { prefix: "/api/v1" }
 
-  # Overrides just this router's `host`; `entrypoint` and both
+  # Overrides just this router's `host`; `entrypoints` and both
   # `path_prefix` entries still come from `public_api` above.
   router api-docs { host: "docs.techdebtor.io" }
 

@@ -684,39 +684,39 @@ fn no_healthcheck_anywhere_leaves_it_unset() {
 }
 // --- traefik (#159) ---
 
-/// A template carrying `traefik { disabled }` composes onto a service
+/// A template carrying `traefik { disable }` composes onto a service
 /// through `with`, exactly like `healthcheck { disable }` does — the
 /// same `merge_scalar_like`-routed collision point, just for `traefik`'s
 /// own `MergeAcc` slot instead of `healthcheck`'s.
 #[test]
-fn traefik_disabled_composes_through_with() {
+fn traefik_disable_composes_through_with() {
     let composed = compose_ok(
-        "template backend_only {\n  traefik { disabled }\n}\n\
+        "template backend_only {\n  traefik { disable }\n}\n\
          service db {\n  with backend_only\n  image \"postgres:15\"\n}\n",
     );
     let service = single_service(&composed);
     let traefik = service.fields.traefik.as_ref().expect("traefik set");
-    assert!(traefik.disabled.is_some());
+    assert!(traefik.disable.is_some());
 }
 
-/// Two explicit templates both writing `traefik { disabled }` still
+/// Two explicit templates both writing `traefik { disable }` still
 /// collide — the `traefik` analogue of
 /// `explicit_templates_setting_same_healthcheck_disable_still_collide`:
 /// `merge_scalar_like`'s `Explicit`-vs-`Explicit` arm always errors, even
 /// though the two agree, because nothing about the merge engine can tell
 /// "genuinely agree" apart from "coincidentally wrote the same thing."
 #[test]
-fn explicit_templates_setting_same_traefik_disabled_still_collide() {
+fn explicit_templates_setting_same_traefik_disable_still_collide() {
     let err = compose_err(
-        "template a {\n  traefik { disabled }\n}\n\
-         template b {\n  traefik { disabled }\n}\n\
+        "template a {\n  traefik { disable }\n}\n\
+         template b {\n  traefik { disable }\n}\n\
          service s {\n  with a, b\n  image \"x\"\n}\n",
     );
     assert!(
         matches!(
             err,
             ComposeError::FieldCollision {
-                field: "traefik.disabled",
+                field: "traefik.disable",
                 ..
             }
         ),
@@ -724,56 +724,56 @@ fn explicit_templates_setting_same_traefik_disabled_still_collide() {
     );
 }
 
-/// A `defaults` template's `traefik { disabled }` survives untouched
+/// A `defaults` template's `traefik { disable }` survives untouched
 /// when nothing else in the composition names `traefik` at all — the
 /// `traefik` analogue of `defaults_map_entries_survive_untouched_but_service_body_overrides_others`:
 /// `Tier::Defaults` only ever loses to a *competing* value for the same
 /// field, and an unset field from a later tier is never that.
 #[test]
-fn defaults_traefik_disabled_survives_when_unchallenged() {
+fn defaults_traefik_disable_survives_when_unchallenged() {
     let composed = compose_ok(
-        "template defaults {\n  traefik { disabled }\n}\n\
+        "template defaults {\n  traefik { disable }\n}\n\
          service s {\n  image \"x\"\n}\n",
     );
     let service = single_service(&composed);
     let traefik = service.fields.traefik.as_ref().expect("traefik set");
-    assert!(traefik.disabled.is_some());
+    assert!(traefik.disable.is_some());
 }
 
-/// A `defaults` template's `traefik { disabled }` is silently overridden
+/// A `defaults` template's `traefik { disable }` is silently overridden
 /// once an *explicit* template also sets it — the `Tier::Defaults` arm
 /// of `merge_scalar_like`, the same rule
 /// `defaults_healthcheck_test_loses_to_an_explicit_templates_test`
 /// exercises for `healthcheck.test`. The visible value can't actually
-/// differ (`disabled` has no `false` form), so what this pins down is
+/// differ (`disable` has no `false` form), so what this pins down is
 /// that the *explicit* tier's own span — not the `defaults` one — is
 /// what survives the merge.
 #[test]
-fn defaults_traefik_disabled_loses_its_span_to_an_explicit_templates_disabled() {
+fn defaults_traefik_disable_loses_its_span_to_an_explicit_templates_disable() {
     let composed = compose_ok(
-        "template defaults {\n  traefik { disabled }\n}\n\
-         template real {\n  traefik { disabled }\n}\n\
+        "template defaults {\n  traefik { disable }\n}\n\
+         template real {\n  traefik { disable }\n}\n\
          service s {\n  with real\n  image \"x\"\n}\n",
     );
     let service = single_service(&composed);
     let traefik = service.fields.traefik.as_ref().expect("traefik set");
-    assert!(traefik.disabled.is_some());
+    assert!(traefik.disable.is_some());
 }
 
-/// A service's own `traefik { disabled }` beats an explicit `with`
+/// A service's own `traefik { disable }` beats an explicit `with`
 /// template that leaves `traefik` unset — `merge_scalar_like`'s `(_,
 /// Tier::Own)` arm, the same one
 /// `service_own_healthcheck_test_beats_an_explicit_templates_test`
 /// exercises for `healthcheck.test`.
 #[test]
-fn service_own_traefik_disabled_survives_with_no_competing_template_value() {
+fn service_own_traefik_disable_survives_with_no_competing_template_value() {
     let composed = compose_ok(
         "template pg {\n  restart unless-stopped\n}\n\
-         service db {\n  with pg\n  image \"postgres:15\"\n  traefik { disabled }\n}\n",
+         service db {\n  with pg\n  image \"postgres:15\"\n  traefik { disable }\n}\n",
     );
     let service = single_service(&composed);
     let traefik = service.fields.traefik.as_ref().expect("traefik set");
-    assert!(traefik.disabled.is_some());
+    assert!(traefik.disable.is_some());
 }
 
 // --- command merge (#156) ---
@@ -1625,7 +1625,7 @@ fn template_argument_not_scalar_is_error() {
 // #201 dropped `: Number`/`: String` annotations in favor of checking a
 // substituted argument against the *field's own* schema shape: a
 // reference-shaped position (`networks`, `dns`,
-// `env_file`, `depends_on`, `expose.entrypoint`, `router.entrypoint`,
+// `env_file`, `depends_on`, `expose.entrypoint`, `router.entrypoints`,
 // `router.path_prefix`, `router.middleware`) rejects a substituted
 // `Literal::Number` — the
 // one literal kind `parse_literal_reference` can never produce directly,
@@ -2163,7 +2163,7 @@ fn assert_no_params(service: &Service) {
         if let Some(host) = &router.host {
             assert_not_param(host);
         }
-        for entry in &router.entrypoint {
+        for entry in &router.entrypoints {
             assert_not_param(entry);
         }
         for prefix in &router.path_prefix {
@@ -2479,7 +2479,7 @@ fn router_named<'a>(service: &'a Service, name: &str) -> &'a hl_parser::Router {
 }
 
 fn router_entrypoints(router: &hl_parser::Router) -> Vec<&str> {
-    router.entrypoint.iter().map(|r| r.text()).collect()
+    router.entrypoints.iter().map(|r| r.text()).collect()
 }
 
 fn router_prefixes(router: &hl_parser::Router) -> Vec<&str> {
@@ -2494,14 +2494,14 @@ fn router_middleware(router: &hl_parser::Router) -> Vec<&str> {
 /// `expose`'s own per-sub-field merge, one level deeper. This is
 /// `service_own_body_can_override_just_expose_host`'s exact scenario
 /// applied to a router: the service replaces just `host` and still
-/// inherits the template's `entrypoint` and `path_prefix` without
+/// inherits the template's `entrypoints` and `path_prefix` without
 /// repeating them.
 #[test]
 fn service_own_body_can_override_just_one_router_subfield() {
     let composed = compose_ok(
         "template api_router {\n  \
            router api {\n    host: \"placeholder.example.com\"\n    \
-             entrypoint: web-secure\n    path_prefix: [\"/api/v1\"]\n  }\n\
+             entrypoints: web-secure\n    path_prefix: [\"/api/v1\"]\n  }\n\
          }\n\
          service vikunja {\n  \
            with api_router\n  image \"vikunja/vikunja\"\n  \
@@ -2558,7 +2558,7 @@ fn explicit_templates_setting_the_same_router_host_collide() {
 fn explicit_templates_setting_different_router_subfields_do_not_collide() {
     let composed = compose_ok(
         "template a {\n  router api, host: \"a.example.com\"\n}\n\
-         template b {\n  router api, entrypoint: web-secure\n}\n\
+         template b {\n  router api, entrypoints: web-secure\n}\n\
          service s {\n  with a, b\n  image \"x\"\n}\n",
     );
     let service = single_service(&composed);
@@ -2567,16 +2567,16 @@ fn explicit_templates_setting_different_router_subfields_do_not_collide() {
     assert_eq!(router_entrypoints(api), vec!["web-secure"]);
 }
 
-/// A router's `entrypoint` is set-like, so two tiers naming the same one
+/// A router's `entrypoints` is set-like, so two tiers naming the same one
 /// yield a router attached to it once — `expose.entrypoint`'s own
 /// distinct-name rule.
 #[test]
 fn router_entrypoints_concatenate_and_dedupe() {
     let composed = compose_ok(
-        "template a {\n  router api, entrypoint: web\n}\n\
-         template b {\n  router api, entrypoint: web-secure\n}\n\
+        "template a {\n  router api, entrypoints: web\n}\n\
+         template b {\n  router api, entrypoints: web-secure\n}\n\
          service s {\n  with a, b\n  image \"x\"\n  \
-           router api {\n    host: \"a.example.com\"\n    entrypoint: web-secure\n  }\n}\n",
+           router api {\n    host: \"a.example.com\"\n    entrypoints: web-secure\n  }\n}\n",
     );
     let service = single_service(&composed);
     assert_eq!(
@@ -2585,7 +2585,7 @@ fn router_entrypoints_concatenate_and_dedupe() {
     );
 }
 
-/// `path_prefix` concatenates *without* deduping, unlike `entrypoint`:
+/// `path_prefix` concatenates *without* deduping, unlike `entrypoints`:
 /// the entries are `||` alternatives whose written order is observable
 /// in the emitted rule, the same reasoning that keeps `dns` and
 /// `env_file` order-preserving.
@@ -2662,14 +2662,14 @@ fn router_path_prefix_params_are_substituted() {
 /// `expose.entrypoint`'s is, rather than silently dropped on the way to
 /// the label.
 #[test]
-fn qualified_router_entrypoint_reference_is_rejected() {
+fn qualified_router_entrypoints_reference_is_rejected() {
     let err = compose_err(
-        "service s {\n  image \"x\"\n  router api, host: \"a.example.com\", entrypoint: traefik.web\n}\n",
+        "service s {\n  image \"x\"\n  router api, host: \"a.example.com\", entrypoints: traefik.web\n}\n",
     );
     assert!(
         matches!(
             err,
-            ComposeError::UnsupportedQualifiedReference { field: "router.entrypoint", ref alias, .. } if alias == "traefik"
+            ComposeError::UnsupportedQualifiedReference { field: "router.entrypoints", ref alias, .. } if alias == "traefik"
         ),
         "got {err:?}"
     );
@@ -2680,7 +2680,7 @@ fn qualified_router_entrypoint_reference_is_rejected() {
 #[test]
 fn unnamed_router_merges_under_its_own_key() {
     let composed = compose_ok(
-        "template a {\n  router { entrypoint: web-secure }\n}\n\
+        "template a {\n  router { entrypoints: web-secure }\n}\n\
          service s {\n  with a\n  image \"x\"\n  \
            router { host: \"a.example.com\" }\n  router api, host: \"b.example.com\"\n}\n",
     );
@@ -2712,7 +2712,7 @@ fn a_service_without_routers_composes_to_an_empty_list() {
 // --- per-router `middleware` (#221) ---
 
 /// A router's own `middleware` merges across tiers exactly like its
-/// `entrypoint`: concatenated in tier order and deduped by name, since a
+/// `entrypoints`: concatenated in tier order and deduped by name, since a
 /// repeat would be a repeated entry in the one comma-joined
 /// `middlewares=` label. A template supplies a base list; the service
 /// body adds to it.

@@ -737,18 +737,18 @@ fn raw_entrypoint_overrides_the_built_in_entrypoint() {
     ");
 }
 
-/// The service-level `entrypoint` field and `router`'s own `entrypoint`
-/// sub-field name two unrelated things, and a service setting both
-/// emits both: a Compose `entrypoint:` key for the first and a Traefik
-/// `entrypoints=` label for the second.
+/// The service-level `entrypoint` field and `router`'s own
+/// `entrypoints` sub-field are two unrelated things, and a service
+/// setting both emits both: a Compose `entrypoint:` key for the first
+/// and a Traefik `entrypoints=` label for the second.
 #[test]
-fn service_entrypoint_and_router_entrypoint_reach_different_output() {
+fn service_entrypoint_and_router_entrypoints_reach_different_output() {
     let yaml = generate_from(
         "service web {\n  \
            image \"nginx\"\n  \
            entrypoint \"/bin/sh -c 'do-a-thing'\"\n  \
            expose 8080\n  \
-           router {\n    host: \"web.example.com\"\n    entrypoint: web-secure\n  }\n\
+           router {\n    host: \"web.example.com\"\n    entrypoints: web-secure\n  }\n\
          }\n",
     );
     assert_yaml_snapshot!(yaml_value(&yaml), @r#"
@@ -1608,7 +1608,7 @@ fn backtick_in_expose_host_is_error() {
 #[test]
 fn several_entrypoints_join_into_one_label() {
     let yaml = generate_from(
-        "service s {\n  image \"x\"\n  expose 80\n  router {\n    host: \"ok.example.com\"\n    entrypoint: web, web-secure\n  }\n}\n",
+        "service s {\n  image \"x\"\n  expose 80\n  router {\n    host: \"ok.example.com\"\n    entrypoints: web, web-secure\n  }\n}\n",
     );
     assert!(
         yaml.contains("traefik.http.routers.s.entrypoints=web,web-secure"),
@@ -1616,25 +1616,25 @@ fn several_entrypoints_join_into_one_label() {
     );
 }
 
-/// hl-lang#73: the flip side — `entrypoint` used to be a scalar where
+/// hl-lang#73: the flip side — `entrypoints` used to be a scalar where
 /// `"web,web-secure"` was the *only* way to name two entry points, so
 /// this exact spelling used to compile. It's rejected now, and the
 /// message says to use the list instead.
 #[test]
-fn comma_inside_one_entrypoint_is_error_with_a_list_hint() {
+fn comma_inside_one_entrypoints_entry_is_error_with_a_list_hint() {
     let err = generate_err(
-        "service s {\n  image \"x\"\n  expose 80\n  router {\n    host: \"ok.example.com\"\n    entrypoint: \"web,web-secure\"\n  }\n}\n",
+        "service s {\n  image \"x\"\n  expose 80\n  router {\n    host: \"ok.example.com\"\n    entrypoints: \"web,web-secure\"\n  }\n}\n",
     );
     assert!(matches!(
         err,
         CodegenError::UnsafeLabelValue {
-            field: "router.entrypoint",
+            field: "router.entrypoints",
             character: ',',
             ..
         }
     ));
     assert!(
-        err.to_string().contains("`entrypoint` is a list"),
+        err.to_string().contains("`entrypoints` is a list"),
         "expected a list hint, got: {err}"
     );
 }
@@ -2150,10 +2150,10 @@ fn service_level_middleware_is_a_parse_error_naming_its_new_home() {
 /// refused before its own `middleware` is even looked at, since the
 /// block itself has nothing to attach that middleware to.
 #[test]
-fn router_entrypoint_without_a_host_is_an_error() {
+fn router_entrypoints_without_a_host_is_an_error() {
     let err = generate_err(
         "service w {\n  image \"n\"\n  expose 80\n  \
-           router { entrypoint: web-secure\n    middleware: auth }\n}\n",
+           router { entrypoints: web-secure\n    middleware: auth }\n}\n",
     );
     assert!(
         matches!(err, CodegenError::RouterWithoutHost { router: None, .. }),
@@ -2246,10 +2246,10 @@ fn named_volume_read_only_flag_emits_ro_suffix_alongside_an_unflagged_entry() {
     "#);
 }
 
-// --- `traefik { disabled }` (#159) ---
+// --- `traefik { disable }` (#159) ---
 
 /// The issue's own worked example, end to end: `miniflux`'s `db` backing
-/// service opts out of every Traefik label with `traefik { disabled }`
+/// service opts out of every Traefik label with `traefik { disable }`
 /// instead of replacing the whole computed `labels:` list through `raw`.
 /// `miniflux` itself is an ordinary Traefik-facing service, unaffected —
 /// this is the "one backend-only service in an otherwise
@@ -2264,7 +2264,7 @@ fn miniflux_db_disables_traefik_end_to_end() {
          }\n\
          service db {\n  \
            image \"postgres:15\"\n  \
-           traefik {\n    disabled\n  }\n\
+           traefik {\n    disable\n  }\n\
          }\n",
     );
     assert_yaml_snapshot!(yaml_value(&yaml), @r#"
@@ -2296,7 +2296,7 @@ fn miniflux_db_disables_traefik_end_to_end() {
 /// the guarantee at stake.
 #[test]
 fn disabled_service_emits_exactly_one_label() {
-    let yaml = generate_from("service db {\n  image \"postgres:15\"\n  traefik { disabled }\n}\n");
+    let yaml = generate_from("service db {\n  image \"postgres:15\"\n  traefik { disable }\n}\n");
     let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
     let labels = parsed["services"]["db"]["labels"]
         .as_sequence()
@@ -2342,13 +2342,13 @@ fn a_service_without_traefik_field_is_unaffected() {
     "#);
 }
 
-/// `expose.port` alone doesn't conflict with `disabled` — it's Compose's
+/// `expose.port` alone doesn't conflict with `disable` — it's Compose's
 /// own `expose:` key, plain container-network visibility, nothing to do
 /// with Traefik. `db`'s own `expose 5432` from the issue's real shape.
 #[test]
 fn disabled_service_may_still_declare_expose_port() {
     let yaml = generate_from(
-        "service db {\n  image \"postgres:15\"\n  expose 5432\n  traefik { disabled }\n}\n",
+        "service db {\n  image \"postgres:15\"\n  expose 5432\n  traefik { disable }\n}\n",
     );
     assert_yaml_snapshot!(yaml_value(&yaml), @r#"
     services:
@@ -2364,7 +2364,7 @@ fn disabled_service_may_still_declare_expose_port() {
 #[test]
 fn traefik_disabled_with_expose_host_is_an_error() {
     let err = generate_err(
-        "service db {\n  image \"postgres:15\"\n  expose 5432 as \"db.example.com\"\n  traefik { disabled }\n}\n",
+        "service db {\n  image \"postgres:15\"\n  expose 5432 as \"db.example.com\"\n  traefik { disable }\n}\n",
     );
     assert!(
         matches!(
@@ -2376,7 +2376,7 @@ fn traefik_disabled_with_expose_host_is_an_error() {
     assert_eq!(
         err.to_string(),
         "3:15: service `db` declares a `router`, but `traefik` is disabled (at 4:13), so there \
-         is nothing for it to route — drop the `router` or remove `disabled`"
+         is nothing for it to route — drop the `router` or remove `disable`"
     );
 }
 
@@ -2386,8 +2386,8 @@ fn traefik_disabled_with_router_block_is_an_error() {
         "service db {\n  \
            image \"postgres:15\"\n  \
            expose 5432\n  \
-           router { entrypoint: web-secure }\n  \
-           traefik { disabled }\n\
+           router { entrypoints: web-secure }\n  \
+           traefik { disable }\n\
          }\n",
     );
     assert!(
@@ -2404,7 +2404,7 @@ fn raw_labels_override_a_disabled_services_label_too() {
     let yaml = generate_from(
         "service db {\n  \
            image \"postgres:15\"\n  \
-           traefik { disabled }\n  \
+           traefik { disable }\n  \
            raw {\n    labels: [\"only.this=1\"]\n  }\n\
          }\n",
     );
@@ -2417,13 +2417,13 @@ fn raw_labels_override_a_disabled_services_label_too() {
     "#);
 }
 
-/// `traefik { disabled }` composes through `with` just like any other
+/// `traefik { disable }` composes through `with` just like any other
 /// nested field — a template can carry the "no Traefik" shape for every
 /// backend-only service that reuses it.
 #[test]
 fn traefik_disabled_composes_through_a_template() {
     let yaml = generate_from(
-        "template backend_only {\n  traefik { disabled }\n}\n\
+        "template backend_only {\n  traefik { disable }\n}\n\
          service db {\n  with backend_only\n  image \"postgres:15\"\n}\n",
     );
     assert_yaml_snapshot!(yaml_value(&yaml), @r#"
@@ -2449,11 +2449,11 @@ fn gitea_public_and_internal_routers_carry_different_middleware() {
            expose 3000\n  \
            router public {\n    \
              host: \"git.techdebtor.io\"\n    \
-             entrypoint: web-secure\n  \
+             entrypoints: web-secure\n  \
            }\n  \
            router internal {\n    \
              host: \"git.internal.techdebtor.io\"\n    \
-             entrypoint: web-secure\n    \
+             entrypoints: web-secure\n    \
              middleware: local-ipwhitelist\n  \
            }\n\
          }\n",
@@ -2505,7 +2505,7 @@ fn a_router_naming_no_middleware_emits_no_middlewares_label() {
 }
 
 /// A template can carry a router's middleware list, and the service
-/// body adds to it — the tier merge, deduped by name like `entrypoint`.
+/// body adds to it — the tier merge, deduped by name like `entrypoints`.
 /// The service-level field stays a separate slot, reaching only the
 /// routers that name none of their own.
 #[test]
@@ -2573,7 +2573,7 @@ fn vault_git_sync_builds_from_a_local_context() {
            restart unless-stopped\n  \
            env_file \"vault-git-sync.env\"\n  \
            volume \"/home/boettcherta/obsidian-vault\" -> \"/vault\"\n  \
-           traefik { disabled }\n  \
+           traefik { disable }\n  \
            raw {\n    user: \"1000:100\"\n  }\n\
          }\n",
     );

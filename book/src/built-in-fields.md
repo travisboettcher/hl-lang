@@ -122,7 +122,7 @@ service vault-git-sync {
   build "./vault-git-sync"
   restart unless-stopped
   traefik {
-    disabled
+    disable
   }
 }
 ```
@@ -145,7 +145,7 @@ service app {
     dockerfile: "Dockerfile.prod"
   }
   traefik {
-    disabled
+    disable
   }
 }
 ```
@@ -207,13 +207,19 @@ second router writes `router` out explicitly instead:
 expose 8096
 router {
   host: "media.example.com"
-  entrypoint: web-secure
+  entrypoints: web-secure
 }
 ```
 
 **Migrating from an older `hll` file:** `expose 80, host: "h",
 entrypoint: web`—a pre-#198 spelling—becomes `expose 80` plus a
-`router` block naming the same `host`/`entrypoint` pair.
+`router` block naming the same host and entry points, with the list
+spelled `entrypoints`. A `router` writing the old singular no longer
+parses, and says so:
+
+```text
+web.hll:4:5: `entrypoint` is no longer a `router` field — it's spelled `entrypoints` now, a list matching Traefik's own `entrypoints=` label
+```
 
 ## `router`
 
@@ -223,7 +229,7 @@ after the keyword, so there's nowhere for a bare value to go.
 | Field | Accepts | Default |
 |---|---|---|
 | `host` | string | *Required, unless the router sets [`rule`](#rule)—a router with neither has no rule* |
-| `entrypoint` | reference list | empty—label omitted, so Traefik attaches the router to every entry point |
+| `entrypoints` | reference list | empty—label omitted, so Traefik attaches the router to every entry point |
 | `path_prefix` | list of strings | empty—the rule matches the host alone |
 | `rule` | match expression | unset—the rule comes from `host` and `path_prefix` instead |
 | `middleware` | reference list | empty—no `middlewares=` label for this router |
@@ -238,12 +244,12 @@ need, each block naming its own router:
 ```hll,fragment
 router api {
   host: "vikunja.example.com"
-  entrypoint: web-secure
+  entrypoints: web-secure
   path_prefix: ["/api/v1", "/dav/", "/.well-known/"]
 }
 router frontend {
   host: "vikunja.example.com"
-  entrypoint: web-secure
+  entrypoints: web-secure
 }
 ```
 
@@ -274,22 +280,22 @@ The comma form works here too, the same shorthand a nested struct field
 takes when it has more than one field:
 
 ```hll,fragment
-router api, host: "vikunja.example.com", entrypoint: web-secure
+router api, host: "vikunja.example.com", entrypoints: web-secure
 ```
 
-`entrypoint` is a **reference list**, spelled exactly like `middleware`
+`entrypoints` is a **reference list**, spelled exactly like `middleware`
 below—a bare name, several comma-separated names, or a bracketed list.
 However many you name, they produce **one** label:
 `traefik.http.routers.<id>.entrypoints=` with the names comma-joined
 (`entrypoints=web,web-secure`)—`hllc` writes the commas, you write the
-names. Leave `entrypoint` off entirely and `hllc` emits no
+names. Leave `entrypoints` off entirely and `hllc` emits no
 `entrypoints=` label at all, which is Traefik's own way of saying
 "attach this router to every entry point."
 
 One caveat if you write a bare list in the preceding comma-shorthand
-form: the list ends at the next `field:`, so `router api, entrypoint: web,
+form: the list ends at the next `field:`, so `router api, entrypoints: web,
 host: "vikunja.example.com"` sets one entry point and a host, not two
-entry points. Put `entrypoint` last, use brackets (`entrypoint: [web,
+entry points. Put `entrypoints` last, use brackets (`entrypoints: [web,
 web-secure]`), or use the braced `router { ... }` body if you want a
 bare list in the middle.
 
@@ -302,11 +308,11 @@ prefix keeps its parentheses too, so the rule reads the same either way.
 Because `hllc` splices `host` directly into the router rule
 (``Host(`...`)``, which has no escape for its own backtick delimiter), it
 rejects a `host` containing any rule metacharacter, most notably a
-backtick, plus `` ( ) { } | & , " ' \ ``. `hllc` checks each `entrypoint`
+backtick, plus `` ( ) { } | & , " ' \ ``. `hllc` checks each `entrypoints`
 entry against that same set, comma included: it owns the comma that
 joins entry points, so a comma inside one name would splice an extra
-entry into the label. (`entrypoint "web,web-secure"` is therefore an
-error—write `entrypoint web, web-secure`.) `hllc` rejects a comma in a
+entry into the label. (`entrypoints "web,web-secure"` is therefore an
+error—write `entrypoints web, web-secure`.) `hllc` rejects a comma in a
 `middleware` name for the same reason, and resolves `{{name}}` in `host`
 too, so the `"{{name}}.internal.example.com"` template idiom works here.
 Every argument of a [`rule`](#rule) matcher gets both, for the reason
@@ -329,7 +335,7 @@ quietly missing from the output:
 service web {
   image "nginx"
   router api {
-    entrypoint: web-secure
+    entrypoints: web-secure
   }
 }
 ```
@@ -422,7 +428,7 @@ service adventure-log-web {
   router {
     rule: Host("travel.example.com")
        && !(PathPrefix("/media") || PathPrefix("/admin"))
-    entrypoint: web-secure
+    entrypoints: web-secure
   }
 }
 ```
@@ -440,7 +446,7 @@ path—the backend catching those prefixes is the same list without the
 router {
   host: "travel.example.com"
   path_prefix: ["/media", "/admin"]
-  entrypoint: web-secure
+  entrypoints: web-secure
 }
 ```
 
@@ -559,11 +565,11 @@ service gitea {
   expose 3000
   router public {
     host: "git.example.com"
-    entrypoint: web-secure
+    entrypoints: web-secure
   }
   router internal {
     host: "git.internal.example.com"
-    entrypoint: web-secure
+    entrypoints: web-secure
     middleware: local-ipwhitelist
   }
 }
@@ -589,10 +595,10 @@ per item: `traefik.http.routers.<id>.middlewares=` with the names
 comma-joined. Every name also gets an `@file` suffix appended
 (`middlewares=local-ipwhitelist@file,forwardAuth-authentik@file`)—that's
 Traefik's file-provider reference convention, applied unconditionally,
-so write the bare middleware name and let `hllc` add it. `entrypoint`
+so write the bare middleware name and let `hllc` add it. `entrypoints`
 joins its own list the same way, just without the `@file` suffix. Leave
 `middleware` off a block and that router simply gets no `middlewares=`
-label, exactly as an absent `entrypoint` produces no `entrypoints=`.
+label, exactly as an absent `entrypoints` produces no `entrypoints=`.
 
 Routers that *should* share a middleware each name it:
 
@@ -651,20 +657,20 @@ whole struct, so `traefik { ... }` requires the braced body.
 `traefik.docker.network=`, each [`router`](#router) block's rule and its
 `entrypoints=`/`middlewares=` labels, and the load-balancer port.
 
-The `disabled` flag switches all of that off for one service and emits
+The `disable` flag switches all of that off for one service and emits
 `traefik.enable=false` in its place, nothing else, not even
 `traefik.docker.network=`, since Traefik's Docker provider never acts on
 a service that turns it off, so that label would have nothing to do.
 
 | Field | Accepts | Default |
 |---|---|---|
-| `disabled` | bare flag, no value | unset, Traefik labels computed normally |
+| `disable` | bare flag, no value | unset, Traefik labels computed normally |
 
 ```hll,build
 service db {
   image "postgres:15"
   traefik {
-    disabled
+    disable
   }
 }
 ```
@@ -694,7 +700,7 @@ instrument for a one-label change, and it silently stops tracking
 whatever `traefik.docker.network=`/router labels a future edit to the
 service would otherwise have added.
 
-Only a `router` block and `middleware` conflict with `disabled`. Plain
+Only a `router` block and `middleware` conflict with `disable`. Plain
 `expose <port>` doesn't—it's Compose's own `expose:` key,
 container-network visibility with no Traefik involvement at all, so a
 service that turns Traefik off can still declare one:
@@ -704,7 +710,7 @@ service db {
   image "postgres:15"
   expose 5432
   traefik {
-    disabled
+    disable
   }
 }
 ```
@@ -729,22 +735,30 @@ service db {
   image "postgres:15"
   expose 5432 as "db.example.com"
   traefik {
-    disabled
+    disable
   }
 }
 ```
 
 ```text
-db.hll:3:15: service `db` sets `router`, but `traefik` is disabled (at db.hll:5:5), so there is no router for it to attach to — drop the `router` or remove `disabled`
+db.hll:3:15: service `db` declares a `router`, but `traefik` is disabled (at db.hll:5:5), so there is nothing for it to route — drop the `router` or remove `disable`
 ```
 
 Both sides of that contradiction mean something on their own—only the
 pair together doesn't—so `hllc` refuses to guess which one the service
 actually meant.
 
-No brace-free `traefik disabled` spelling exists—`disabled` needs the
-braced body, `traefik { disabled }`, exactly like
-[`healthcheck`](#healthcheck)'s own `disable` flag.
+No brace-free `traefik disable` spelling exists—`disable` needs the
+braced body, `traefik { disable }`, exactly like
+[`healthcheck`](#healthcheck)'s own `disable` flag, which it's named to
+match.
+
+**Migrating from an older `hll` file:** #199 renamed this flag from
+`disabled`. The old spelling no longer parses, and names the new one:
+
+```text
+db.hll:4:5: `disabled` is no longer a `traefik` field — it's spelled `disable` now, matching `healthcheck { disable }`
+```
 
 ## `publish`
 

@@ -121,7 +121,7 @@ enum FieldValue {
     /// An accumulating nested schema-free map-kind field (raw).
     Raw(RawMap),
     /// An accumulating reference-list field (middleware/networks/dns/
-    /// env_file/router.entrypoint/router.path_prefix).
+    /// env_file/router.entrypoints/router.path_prefix).
     /// See [`schema::FieldKind::ReferenceList`]'s doc for why one `Vec`
     /// of [`Literal`]s now covers every row, `path_prefix` included.
     RefList(Vec<Literal>),
@@ -342,7 +342,7 @@ impl<'src> Parser<'src> {
 
     /// `reference ::= ( key ( "." IDENT )? ) | "$" IDENT` — every
     /// reference-shaped position's own value grammar (#196):
-    /// `middleware`/`networks`/`dns`/`env_file`/`router.entrypoint`/
+    /// `middleware`/`networks`/`dns`/`env_file`/`router.entrypoints`/
     /// `router.path_prefix`/`router.middleware`, a `depends_on` entry,
     /// and a named-volume mount's host side. The trailing `.IDENT` names
     /// an import alias's declaration (`traefik.traefik-net`); only a
@@ -421,8 +421,8 @@ impl<'src> Parser<'src> {
     /// "one-token lookahead decides whether this comma belongs to me or
     /// to whoever called me" rule [`Self::parse_struct_primary_shorthand`]
     /// already applies to its own trailing fields, and needed here for
-    /// the same reason now that `router.entrypoint` is a reference list:
-    /// in `router api, entrypoint: web, host: "x"`, the second comma
+    /// the same reason now that `router.entrypoints` is a reference list:
+    /// in `router api, entrypoints: web, host: "x"`, the second comma
     /// starts a sibling *field* of `router`, not a second entry point,
     /// and a greedy list would swallow `host` as one and then fail on
     /// its `:` with an error pointing nowhere near the real problem.
@@ -875,7 +875,7 @@ impl<'src> Parser<'src> {
     ///
     /// Factored out of [`Self::parse_struct_primary_shorthand`] when
     /// `router` gained the same tail (#184): `router api, host: "...",
-    /// entrypoint: web-secure` continues from a *name* rather than from
+    /// entrypoints: web-secure` continues from a *name* rather than from
     /// a primary value, but everything after that first token is the
     /// identical production, and having one copy of it is what keeps the
     /// two spellings from drifting.
@@ -1027,7 +1027,7 @@ impl<'src> Parser<'src> {
     ///
     /// - the canonical braced body, `router api { host: "..." }`, whose
     ///   fields are newline-separated like any other struct body;
-    /// - the comma-continued form, `router api, host: "...", entrypoint:
+    /// - the comma-continued form, `router api, host: "...", entrypoints:
     ///   web-secure`, which reuses [`Self::parse_secondary_fields`]
     ///   verbatim — the same production `image "ref", ...` (or any other
     ///   primary-shorthand nested type with more than one field) already
@@ -1119,7 +1119,7 @@ impl<'src> Parser<'src> {
     /// DESIGN.md's desugaring rule 3) and can't itself be followed by
     /// further secondary fields, comma or no comma — a service that needs
     /// more than a bare host must write the router out explicitly
-    /// (`expose <port>` plus `router { host: "...", entrypoint: ... }`).
+    /// (`expose <port>` plus `router { host: "...", entrypoints: ... }`).
     /// Unlike before #198 (`ParseError::AliasSugarCannotContinue`, see
     /// F6), there is no dedicated diagnostic for a trailing comma here:
     /// whatever follows is left for the enclosing body's own statement
@@ -1917,7 +1917,7 @@ fn lower_service_fields(mut fields: StructFields) -> Result<ServiceFields, Parse
     // `entrypoint` (#183) lowers exactly like `command` just above —
     // the same `FieldKind::ScalarOrList` shape, into its own AST type.
     // Reached only for `entrypoint` written directly in a
-    // `service`/`template` body: `router`'s own `entrypoint` sub-field
+    // `service`/`template` body: `router`'s own `entrypoints` sub-field
     // is an unrelated reference list, lowered by `lower_router` instead,
     // from a `StructFields` map the `router` schema built.
     let entrypoint = match fields.remove("entrypoint") {
@@ -2084,7 +2084,7 @@ fn lower_router(name: Option<Ident>, mut fields: StructFields, span: Span) -> Ro
         Some(FieldValue::Scalar(lit)) => Some(lit),
         _ => None,
     };
-    let entrypoint = match fields.remove("entrypoint") {
+    let entrypoints = match fields.remove("entrypoints") {
         Some(FieldValue::RefList(v)) => v,
         _ => Vec::new(),
     };
@@ -2121,7 +2121,7 @@ fn lower_router(name: Option<Ident>, mut fields: StructFields, span: Span) -> Ro
     Router {
         name,
         host,
-        entrypoint,
+        entrypoints,
         path_prefix,
         middleware,
         priority,
@@ -2181,13 +2181,13 @@ fn lower_restart(mut fields: StructFields, span: Span) -> Restart {
 }
 
 /// Lowers a `traefik { ... }` body (#159). Mirrors `healthcheck`'s
-/// `disable` extraction exactly — see [`Traefik::disabled`]'s doc.
+/// `disable` extraction exactly — see [`Traefik::disable`]'s doc.
 fn lower_traefik(mut fields: StructFields, span: Span) -> Traefik {
-    let disabled = match fields.remove("disabled") {
+    let disable = match fields.remove("disable") {
         Some(FieldValue::Flag(s)) => Some(s),
         _ => None,
     };
-    Traefik { disabled, span }
+    Traefik { disable, span }
 }
 
 fn lower_healthcheck(mut fields: StructFields, span: Span) -> Healthcheck {

@@ -48,6 +48,6 @@ service jellyfin {
   expose 8096
   router {
     host: "media.techdebtor.io"
-    entrypoint: web-secure
+    entrypoints: web-secure
   }
 }

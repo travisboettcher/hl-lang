@@ -278,7 +278,7 @@ fn expose_as_sugar_desugars_to_port_plus_unnamed_router() {
     let router = &service.fields.routers[0];
     assert_eq!(router.key(), None);
     assert_eq!(router.host.as_ref().unwrap().text(), "host.example.com");
-    assert!(router.entrypoint.is_empty());
+    assert!(router.entrypoints.is_empty());
     assert!(router.path_prefix.is_empty());
 }
 
@@ -302,7 +302,7 @@ fn expose_host_field_no_longer_parses() {
 /// secondary fields, comma or no comma, exactly as the pre-#198 schema-
 /// driven alias sugar it replaced. A service that needs more than a bare
 /// host must write the router out explicitly (`expose <port>` plus
-/// `router { host: "...", entrypoint: ... }`).
+/// `router { host: "...", entrypoints: ... }`).
 ///
 /// Unlike before #198, there's no dedicated diagnostic for this dead end
 /// any more (`ParseError::AliasSugarCannotContinue` is gone — see F6 of
@@ -312,7 +312,7 @@ fn expose_host_field_no_longer_parses() {
 #[test]
 fn alias_sugar_cannot_be_followed_by_further_secondary_fields() {
     let err = parse(
-        "service s {\n  expose 8096 as \"host.example.com\", entrypoint: \"web-secure\"\n}\n",
+        "service s {\n  expose 8096 as \"host.example.com\", entrypoints: \"web-secure\"\n}\n",
     )
     .unwrap_err();
     assert!(
@@ -697,28 +697,29 @@ fn entrypoint_duplicate_is_error() {
 }
 
 /// Deliberately no bare comma-list sugar, matching `command` — and
-/// worth pinning separately here, since `router`'s own `entrypoint`
-/// *does* take exactly that sugar. The two fields share a name, not a
-/// grammar.
+/// worth pinning separately here, since `router`'s own `entrypoints`
+/// *does* take exactly that sugar. Two neighboring spellings, two
+/// different grammars.
 #[test]
 fn entrypoint_bare_comma_list_is_rejected() {
     assert!(parse("service s {\n  entrypoint \"a\", \"b\"\n}\n").is_err());
 }
 
-/// The service-level field and `router`'s reference-list sub-field
-/// coexist in one body, each resolved against its own enclosing type's
-/// field list: the bare `entrypoint` statement sets `ServiceFields`'s
-/// scalar-or-list field, while the one inside `router`'s body sets
-/// `Router::entrypoint` — an unrelated field two levels removed, not the
-/// same slot under a different name.
+/// The service-level `entrypoint` and `router`'s own `entrypoints`
+/// coexist in one body as two independent fields: the bare `entrypoint`
+/// statement sets `ServiceFields`'s scalar-or-list field (Compose's
+/// `ENTRYPOINT` override), while `entrypoints` inside `router`'s body
+/// sets `Router::entrypoints` (the Traefik entry-point list). #199
+/// renamed the router's field so the two no longer share an identifier
+/// at all; this pins down that neither one reaches the other's slot.
 #[test]
-fn service_entrypoint_and_router_entrypoint_coexist() {
+fn service_entrypoint_and_router_entrypoints_coexist() {
     let program = parse_ok(
         "service s {\n  \
            image \"nginx\"\n  \
            entrypoint [\"/bin/sh\", \"-c\", \"do-a-thing\"]\n  \
            expose 8080\n  \
-           router {\n    host: \"s.example.com\"\n    entrypoint: web, web-secure\n  }\n\
+           router {\n    host: \"s.example.com\"\n    entrypoints: web, web-secure\n  }\n\
          }\n",
     );
     let service = as_service(&program.decls[0]);
@@ -730,7 +731,7 @@ fn service_entrypoint_and_router_entrypoint_coexist() {
         other => panic!("expected Entrypoint::Exec, got {other:?}"),
     }
     let router = &service.fields.routers[0];
-    let names: Vec<&str> = router.entrypoint.iter().map(|r| r.text()).collect();
+    let names: Vec<&str> = router.entrypoints.iter().map(|r| r.text()).collect();
     assert_eq!(names, vec!["web", "web-secure"]);
 }
 
@@ -965,17 +966,17 @@ fn map_entry_in_a_top_level_volume_body_is_error() {
 }
 
 fn router_entrypoints_of(router: &hl_parser::Router) -> Vec<&str> {
-    router.entrypoint.iter().map(|r| r.text()).collect()
+    router.entrypoints.iter().map(|r| r.text()).collect()
 }
 
-/// `entrypoint` is a reference list, spelled exactly like `networks`:
+/// `entrypoints` is a reference list, spelled exactly like `networks`:
 /// a bare comma-separated list, a bracketed list, a quoted name, or a
 /// repeat of the field, all of which accumulate.
 #[test]
-fn router_entrypoint_accepts_a_bracketed_list_and_a_quoted_name() {
+fn router_entrypoints_accept_a_bracketed_list_and_a_quoted_name() {
     let program = parse_ok(
         "service s {\n  router {\n    host: \"a.example.com\"\n    \
-         entrypoint: [web, web-secure]\n    entrypoint: \"metrics\"\n  }\n}\n",
+         entrypoints: [web, web-secure]\n    entrypoints: \"metrics\"\n  }\n}\n",
     );
     let service = as_service(&program.decls[0]);
     let router = &service.fields.routers[0];
@@ -986,7 +987,7 @@ fn router_entrypoint_accepts_a_bracketed_list_and_a_quoted_name() {
 }
 
 #[test]
-fn router_entrypoint_accepts_a_bare_comma_list() {
+fn router_entrypoints_accept_a_bare_comma_list() {
     // The book documents this spelling for `router`'s reference list,
     // the same one `networks` takes. #198 moved `entrypoint` off
     // `expose`, and the deleted `expose_entrypoint_accepts_a_bare_list`
@@ -994,7 +995,7 @@ fn router_entrypoint_accepts_a_bare_comma_list() {
     // bracketed and quoted forms but not this one.
     let program = parse_ok(
         "service s {\n  router {\n    host: \"a.example.com\"\n    \
-         entrypoint: web, web-secure\n  }\n}\n",
+         entrypoints: web, web-secure\n  }\n}\n",
     );
     let service = as_service(&program.decls[0]);
     let router = &service.fields.routers[0];
@@ -1016,17 +1017,17 @@ fn expose_as_sugar_router_span_covers_through_the_host() {
     );
 }
 
-/// `host`/`entrypoint` together on the unnamed router, via the braced
+/// `host`/`entrypoints` together on the unnamed router, via the braced
 /// body — the shape `docs/DESIGN.md`'s `internal_web` template uses (the
 /// unnamed form has no name to continue a comma-list from, so the
 /// braced body is its only multi-field spelling). Exercised inside a
 /// `template` body specifically, matching that real worked example.
 #[test]
-fn router_host_and_entrypoint_fields_in_template_body() {
+fn router_host_and_entrypoints_fields_in_template_body() {
     let program = parse_ok(
         "template internal_web(port) {\n  \
            expose $port\n  \
-           router {\n    host: \"{{name}}.internal.techdebtor.io\"\n    entrypoint: \"web-secure\"\n  }\n  \
+           router {\n    host: \"{{name}}.internal.techdebtor.io\"\n    entrypoints: \"web-secure\"\n  }\n  \
            dns \"192.168.50.182\"\n\
          }\n",
     );
@@ -1040,15 +1041,15 @@ fn router_host_and_entrypoint_fields_in_template_body() {
     assert_eq!(template.fields.dns.len(), 1);
 }
 
-/// A bare `entrypoint` list stops at the next `key:` rather than
+/// A bare `entrypoints` list stops at the next `key:` rather than
 /// swallowing it as another entry point — the one-token lookahead in
 /// `parse_bare_reference_list`. Without it, `host` would be read as a
 /// second entry point and the parse would then die on its `:` with an
 /// error pointing at the wrong place entirely.
 #[test]
-fn bare_entrypoint_list_stops_at_the_next_field_key() {
+fn bare_entrypoints_list_stops_at_the_next_field_key() {
     let program =
-        parse_ok("service s {\n  router api, entrypoint: web, host: \"x.example.com\"\n}\n");
+        parse_ok("service s {\n  router api, entrypoints: web, host: \"x.example.com\"\n}\n");
     let service = as_service(&program.decls[0]);
     let router = &service.fields.routers[0];
     assert_eq!(router_entrypoints_of(router), vec!["web"]);
@@ -1146,10 +1147,10 @@ fn bool_flag_duplicate_is_error() {
 // --- traefik (#159) ---
 
 #[test]
-fn traefik_disabled_bare_flag() {
-    let program = parse_ok("service s {\n  image \"x\"\n  traefik {\n    disabled\n  }\n}\n");
+fn traefik_disable_bare_flag() {
+    let program = parse_ok("service s {\n  image \"x\"\n  traefik {\n    disable\n  }\n}\n");
     let service = as_service(&program.decls[0]);
-    assert!(service.fields.traefik.as_ref().unwrap().disabled.is_some());
+    assert!(service.fields.traefik.as_ref().unwrap().disable.is_some());
 }
 
 #[test]
@@ -1159,12 +1160,12 @@ fn service_without_traefik_field_defaults_to_none() {
     assert!(service.fields.traefik.is_none());
 }
 
-/// `disabled` is bare-presence only, exactly like `network`'s `external`
+/// `disable` is bare-presence only, exactly like `network`'s `external`
 /// and `healthcheck`'s `disable` — a `:` after it is rejected rather than
 /// treated as an attempted value.
 #[test]
-fn traefik_disabled_rejects_a_colon_value() {
-    let err = parse("service s {\n  traefik { disabled: true }\n}\n").unwrap_err();
+fn traefik_disable_rejects_a_colon_value() {
+    let err = parse("service s {\n  traefik { disable: true }\n}\n").unwrap_err();
     assert!(
         matches!(err, ParseError::UnexpectedToken { .. }),
         "got {err:?}"
@@ -1172,12 +1173,12 @@ fn traefik_disabled_rejects_a_colon_value() {
 }
 
 /// `traefik` has no `primary_field` (see `schema::TRAEFIK`'s doc) — the
-/// bare, brace-free `traefik disabled` spelling the motivating issue
+/// bare, brace-free `traefik disable` spelling the motivating issue
 /// (#159) first floated is rejected rather than parsed as sugar for
 /// anything.
 #[test]
 fn traefik_bare_value_without_braces_is_rejected() {
-    let err = parse("service s {\n  traefik disabled\n}\n").unwrap_err();
+    let err = parse("service s {\n  traefik disable\n}\n").unwrap_err();
     match err {
         ParseError::UnexpectedToken {
             expected: Expected::Token(TokenKind::LBrace),
@@ -1187,16 +1188,16 @@ fn traefik_bare_value_without_braces_is_rejected() {
     }
 }
 
-/// A second bare `disabled` is `DuplicateField`, the same regression
+/// A second bare `disable` is `DuplicateField`, the same regression
 /// coverage `bool_flag_duplicate_is_error` gives `network`'s `external`.
 #[test]
-fn traefik_disabled_duplicate_is_error() {
-    let err = parse("service s {\n  traefik {\n    disabled\n    disabled\n  }\n}\n").unwrap_err();
+fn traefik_disable_duplicate_is_error() {
+    let err = parse("service s {\n  traefik {\n    disable\n    disable\n  }\n}\n").unwrap_err();
     assert!(matches!(
         err,
         ParseError::DuplicateField {
             type_name: "traefik",
-            field: "disabled",
+            field: "disable",
             ..
         }
     ));
@@ -2629,7 +2630,7 @@ fn routers(service: &hl_parser::Service) -> &[hl_parser::Router] {
 }
 
 fn router_entrypoints(router: &hl_parser::Router) -> Vec<&str> {
-    router.entrypoint.iter().map(Literal::text).collect()
+    router.entrypoints.iter().map(Literal::text).collect()
 }
 
 fn router_prefixes(router: &hl_parser::Router) -> Vec<&str> {
@@ -2646,7 +2647,7 @@ fn router_middleware(router: &hl_parser::Router) -> Vec<&str> {
 fn router_named_braced_body_parses() {
     let program = parse_ok(
         "service s {\n  image \"x\"\n  router api {\n    host: \"a.example.com\"\n    \
-         entrypoint: web-secure\n    path_prefix: [\"/api/v1\", \"/dav/\"]\n  }\n}\n",
+         entrypoints: web-secure\n    path_prefix: [\"/api/v1\", \"/dav/\"]\n  }\n}\n",
     );
     let service = as_service(&program.decls[0]);
     let routers = routers(service);
@@ -2674,7 +2675,7 @@ fn router_unnamed_braced_body_parses() {
 #[test]
 fn router_comma_shorthand_parses() {
     let program = parse_ok(
-        "service s {\n  router api, host: \"a.example.com\", entrypoint: web-secure, \
+        "service s {\n  router api, host: \"a.example.com\", entrypoints: web-secure, \
          path_prefix: [\"/api\"]\n}\n",
     );
     let service = as_service(&program.decls[0]);
@@ -2692,17 +2693,18 @@ fn router_comma_shorthand_parses() {
 /// keyword alone rather than the fields that caused it.
 #[test]
 fn router_comma_shorthand_span_reaches_its_last_field() {
-    let program =
-        parse_ok("service s {\n  router api, host: \"a.example.com\", entrypoint: web-secure\n}\n");
+    let program = parse_ok(
+        "service s {\n  router api, host: \"a.example.com\", entrypoints: web-secure\n}\n",
+    );
     let service = as_service(&program.decls[0]);
     let router = &routers(service)[0];
     // The span starts at the `router` keyword, before the name...
     assert!(router.span.start < router.name.as_ref().unwrap().span.start);
-    // ...and reaches past the host, out to the final `entrypoint` entry.
+    // ...and reaches past the host, out to the final `entrypoints` entry.
     assert!(router.span.end > router.host.as_ref().unwrap().span().end);
     assert_eq!(
         router.span.end,
-        router.entrypoint.last().unwrap().span().end
+        router.entrypoints.last().unwrap().span().end
     );
 }
 
@@ -2748,12 +2750,12 @@ fn router_path_prefix_accepts_a_bare_list_and_accumulates() {
 
 /// The same `KEY :` one-token lookahead that keeps `expose`'s own bare
 /// lists from swallowing a sibling field: the second comma here starts
-/// `entrypoint`, not a third prefix.
+/// `entrypoints`, not a third prefix.
 #[test]
 fn router_bare_path_prefix_list_ends_at_the_next_field() {
     let program = parse_ok(
         "service s {\n  router api, host: \"a.example.com\", path_prefix: \"/api\", \
-         entrypoint: web-secure\n}\n",
+         entrypoints: web-secure\n}\n",
     );
     let service = as_service(&program.decls[0]);
     assert_eq!(router_prefixes(&routers(service)[0]), vec!["/api"]);
@@ -3020,6 +3022,68 @@ fn service_level_middleware_after_a_comma_is_still_reported() {
     );
 }
 
+/// #199 renamed `router`'s entry-point list to the plural, a pre-1.0
+/// breaking change, so the old singular gets the migration note rather
+/// than a bare "unknown field" — the same treatment `middleware`'s move
+/// gets just above, and for the same reason: an author with a working
+/// `.hll` file needs the new spelling, not a typo report.
+#[test]
+fn routers_old_entrypoint_spelling_names_its_new_one() {
+    let err = parse("service s {\n  router api {\n    entrypoint: web-secure\n  }\n}\n")
+        .expect_err("expected a parse error");
+    assert!(
+        matches!(
+            err,
+            ParseError::MovedField {
+                type_name: "router",
+                ref field,
+                ..
+            } if field == "entrypoint"
+        ),
+        "got {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "3:5: `entrypoint` is no longer a `router` field — it's spelled `entrypoints` now, a \
+         list matching Traefik's own `entrypoints=` label"
+    );
+}
+
+/// The service-level `entrypoint` is untouched by that rename — it's
+/// Compose's own key, and it still parses in a `service` body. Pinned
+/// beside the preceding test so a future edit to `moved_field` can't
+/// quietly start refusing it.
+#[test]
+fn service_level_entrypoint_still_parses_after_the_router_rename() {
+    let program = parse_ok("service s {\n  entrypoint \"/bin/sh\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert!(service.fields.entrypoint.is_some());
+}
+
+/// `traefik { disabled }`'s own half of #199's rename, reported the same
+/// way.
+#[test]
+fn traefiks_old_disabled_spelling_names_its_new_one() {
+    let err = parse("service s {\n  traefik {\n    disabled\n  }\n}\n")
+        .expect_err("expected a parse error");
+    assert!(
+        matches!(
+            err,
+            ParseError::MovedField {
+                type_name: "traefik",
+                ref field,
+                ..
+            } if field == "disabled"
+        ),
+        "got {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "3:5: `disabled` is no longer a `traefik` field — it's spelled `disable` now, matching \
+         `healthcheck { disable }`"
+    );
+}
+
 // --- `build` (#224) ---
 
 /// The bare-context form, Compose's own short spelling — `build`'s
@@ -3206,12 +3270,12 @@ fn and_binds_tighter_than_or() {
 #[test]
 fn a_rule_in_comma_shorthand_ends_at_the_next_field() {
     let program = parse_ok(
-        "service s {\n  router api, rule: Header(\"X-Env\", \"prod\"), entrypoint: web-secure\n}\n",
+        "service s {\n  router api, rule: Header(\"X-Env\", \"prod\"), entrypoints: web-secure\n}\n",
     );
     let router = &routers(as_service(&program.decls[0]))[0];
     assert_eq!(router.key(), Some("api"));
-    assert_eq!(router.entrypoint.len(), 1);
-    assert_eq!(router.entrypoint[0].text(), "web-secure");
+    assert_eq!(router.entrypoints.len(), 1);
+    assert_eq!(router.entrypoints[0].text(), "web-secure");
     let MatchExpr::Matcher { args, .. } = router.rule.as_ref().unwrap() else {
         panic!("expected one matcher");
     };
