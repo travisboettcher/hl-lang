@@ -18,7 +18,7 @@
 //! the diagnostics' `path:line:col` prefixes relative and therefore
 //! stable across machines. `<name>.out/` is the expected state of that
 //! sandbox afterwards, compared by `snapbox`'s directory diff — that is
-//! how the multi-file `--build --out <dir>` cases assert what was
+//! how the multi-file `build --out <dir>` cases assert what was
 //! written, instead of reading each generated file back by hand.
 //!
 //! Bless a deliberate change with `TRYCMD=overwrite cargo test -p

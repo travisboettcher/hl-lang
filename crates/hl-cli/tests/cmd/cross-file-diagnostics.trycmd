@@ -8,7 +8,7 @@ not a silent last-one-wins, and both sides of the collision are
 located: the one being applied, and the one that already set it.
 
 ```console
-$ hllc --build collision.hll
+$ hllc build collision.hll
 ? 1
 restart-unless-stopped.hll:2:11: field `restart.policy` set by both template `always_up` (at restart-always.hll:2:11) and template `mostly_up`—explicit templates must not conflict
 
@@ -18,7 +18,7 @@ A named volume must be declared before a service mounts it, and a
 typo in the reference is reported against the reference's own position.
 
 ```console
-$ hllc --build undeclared-volume.hll
+$ hllc build undeclared-volume.hll
 ? 1
 undeclared-volume.hll:5:10: service `syncthing` references undeclared volume `snycthing-config`
 
@@ -29,7 +29,7 @@ an alias that resolves to a real file with no such `volume` is a located
 error rather than a silently invented volume.
 
 ```console
-$ hllc --build unknown-qualified-volume.hll
+$ hllc build unknown-qualified-volume.hll
 ? 1
 unknown-qualified-volume.hll:5:10: no volume `medai` in `storage`
 
@@ -39,7 +39,7 @@ A codegen error raised inside an imported template reports the template's
 file, not the entry file that applied it.
 
 ```console
-$ hllc --build imported-codegen-error.hll
+$ hllc build imported-codegen-error.hll
 ? 1
 interpolating-template.hll:2:18: unknown interpolation `{{nmae}}`
 
@@ -51,7 +51,7 @@ service with the middleware silently missing; it now fails, and the
 message carries the fix.
 
 ```console
-$ hllc --build router-less-middleware.hll --out docker-compose.yml
+$ hllc build router-less-middleware.hll --out docker-compose.yml
 ? 1
 router-less-middleware.hll:4:3: service `web` declares an unnamed `router` with no `host` and no `rule`, so there is no rule for Traefik to match — add a host (`host: "web.example.com"`), write a `rule`, or drop the `router`
 

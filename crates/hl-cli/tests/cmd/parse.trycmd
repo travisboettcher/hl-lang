@@ -1,4 +1,4 @@
-`--parse` pretty-prints the AST for one file. It is a debugging aid, so
+`parse` pretty-prints the AST for one file. It is a debugging aid, so
 the transcript is deliberately the whole dump for the smallest service
 that parses: the point is that the shape of the AST — including the
 spans and the `FileId` every node carries — is visible somewhere as
@@ -6,7 +6,7 @@ text, and that adding a field to the AST shows up here as a reviewable
 diff rather than silently.
 
 ```console
-$ hllc --parse web.hll
+$ hllc parse web.hll
 Program {
     decls: [
         Service(

@@ -22,6 +22,7 @@ semver
 stderr
 stdout
 struct
+[Ss]ubcommands?
 subdirectory
 toolchain
 transpiles?

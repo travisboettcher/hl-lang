@@ -11,7 +11,7 @@ it is skipped rather than compiled into a service-less document, and
 the run stays silent about it.
 
 ```console
-$ hllc --build services --out dist
+$ hllc build services --out dist
 dist/api/docker-compose.yml
 dist/web/docker-compose.yml
 
@@ -28,7 +28,7 @@ message where the transcript expects silence; one that stops the
 counter incrementing makes the message appear in both.
 
 ```console
-$ hllc --build library --out dist
+$ hllc build library --out dist
 library: none of the .hll files here declare a service — nothing was built
 
 ```

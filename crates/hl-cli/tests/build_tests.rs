@@ -1,4 +1,4 @@
-//! Integration tests for `hl-cli`'s `--build` wiring: parse → compose →
+//! Integration tests for `hl-cli`'s `build`/`check` wiring: parse → compose →
 //! generate → write to disk. The underlying pipeline stages have their
 //! own extensive test coverage (`hl-parser`, `hl-codegen`); these tests
 //! only check the CLI's own plumbing — argument handling, file I/O,
@@ -22,7 +22,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use hl_cli::{Cli, GENERATED_HEADER, run};
+use hl_cli::{Cli, Command, GENERATED_HEADER, run};
 
 const HAND_WRITTEN_COMPOSE: &str = "\
 # hand-written by me, tuned over months
@@ -57,11 +57,11 @@ fn build_single_file_writes_yaml_to_out_path() {
     let out = dir.join("docker-compose.yml");
 
     let code = run(Cli {
-        file: input,
-        parse: false,
-        build: true,
-        out: Some(out.clone()),
-        force: false,
+        command: Command::Build {
+            file: input,
+            out: Some(out.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -87,11 +87,11 @@ fn build_single_file_creates_missing_out_parent_directories() {
     assert!(!out.parent().unwrap().exists());
 
     let code = run(Cli {
-        file: input,
-        parse: false,
-        build: true,
-        out: Some(out.clone()),
-        force: false,
+        command: Command::Build {
+            file: input,
+            out: Some(out.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -115,11 +115,11 @@ fn build_directory_writes_one_file_per_hll_input() {
     let out_dir = dir.join("out");
 
     let code = run(Cli {
-        file: dir.clone(),
-        parse: false,
-        build: true,
-        out: Some(out_dir.clone()),
-        force: false,
+        command: Command::Build {
+            file: dir.clone(),
+            out: Some(out_dir.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -164,11 +164,11 @@ fn build_directory_of_hll_files_with_use_imports_between_them() {
     let out = dir.join("docker-compose.yml");
 
     let code = run(Cli {
-        file: input,
-        parse: false,
-        build: true,
-        out: Some(out.clone()),
-        force: false,
+        command: Command::Build {
+            file: input,
+            out: Some(out.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -179,11 +179,11 @@ fn build_directory_of_hll_files_with_use_imports_between_them() {
     fs::write(&single_file_input, SYNCTHING_HLL).unwrap();
     let single_file_out = single_file_dir.join("docker-compose.yml");
     let code = run(Cli {
-        file: single_file_input,
-        parse: false,
-        build: true,
-        out: Some(single_file_out.clone()),
-        force: false,
+        command: Command::Build {
+            file: single_file_input,
+            out: Some(single_file_out.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
     let baseline_yaml = fs::read_to_string(&single_file_out).unwrap();
@@ -204,11 +204,11 @@ fn build_directory_without_out_is_error() {
     fs::write(dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
 
     let code = run(Cli {
-        file: dir.clone(),
-        parse: false,
-        build: true,
-        out: None,
-        force: false,
+        command: Command::Build {
+            file: dir.clone(),
+            out: None,
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::FAILURE);
 
@@ -227,11 +227,11 @@ fn build_colocated_service_directories_writes_in_place_with_no_out() {
     fs::write(syncthing_dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
 
     let code = run(Cli {
-        file: dir.clone(),
-        parse: false,
-        build: true,
-        out: None,
-        force: false,
+        command: Command::Build {
+            file: dir.clone(),
+            out: None,
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -266,11 +266,11 @@ fn build_colocated_service_directories_with_out_remaps_tree() {
     let out_dir = dir.join("out");
 
     let code = run(Cli {
-        file: dir.clone(),
-        parse: false,
-        build: true,
-        out: Some(out_dir.clone()),
-        force: false,
+        command: Command::Build {
+            file: dir.clone(),
+            out: Some(out_dir.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -300,11 +300,11 @@ fn build_colocated_directory_with_multiple_hll_files_is_error() {
     fs::write(service_dir.join("extra.hll"), SYNCTHING_HLL).unwrap();
 
     let code = run(Cli {
-        file: dir.clone(),
-        parse: false,
-        build: true,
-        out: None,
-        force: false,
+        command: Command::Build {
+            file: dir.clone(),
+            out: None,
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::FAILURE);
 
@@ -320,11 +320,11 @@ fn build_directory_with_no_hll_files_anywhere_is_a_no_op_success() {
     fs::create_dir_all(dir.join("not-a-service")).unwrap();
 
     let code = run(Cli {
-        file: dir.clone(),
-        parse: false,
-        build: true,
-        out: None,
-        force: false,
+        command: Command::Build {
+            file: dir.clone(),
+            out: None,
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -357,11 +357,11 @@ fn build_book_layout_with_library_directory_and_nested_services() {
     fs::write(syncthing_dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
 
     let code = run(Cli {
-        file: dir.clone(),
-        parse: false,
-        build: true,
-        out: None,
-        force: false,
+        command: Command::Build {
+            file: dir.clone(),
+            out: None,
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -396,11 +396,11 @@ fn build_book_layout_with_out_preserves_relative_structure() {
     let out_dir = dir.join("out");
 
     let code = run(Cli {
-        file: dir.clone(),
-        parse: false,
-        build: true,
-        out: Some(out_dir.clone()),
-        force: false,
+        command: Command::Build {
+            file: dir.clone(),
+            out: Some(out_dir.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -418,7 +418,7 @@ fn build_book_layout_with_out_preserves_relative_structure() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// #89: pointing `--build` (flat mode, since `shared/` holds `.hll`
+/// #89: pointing `build` (flat mode, since `shared/` holds `.hll`
 /// files directly) at a library directory used to produce one useless
 /// `docker-compose.yml` per file (`services: {}`, every declaration
 /// dropped). Both files here declare no service and should be skipped
@@ -432,11 +432,11 @@ fn build_flat_directory_skips_library_only_files() {
     let out_dir = dir.join("out");
 
     let code = run(Cli {
-        file: dir.clone(),
-        parse: false,
-        build: true,
-        out: Some(out_dir.clone()),
-        force: false,
+        command: Command::Build {
+            file: dir.clone(),
+            out: Some(out_dir.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
     assert!(
@@ -459,11 +459,11 @@ fn build_flat_directory_builds_only_the_files_that_declare_a_service() {
     let out_dir = dir.join("out");
 
     let code = run(Cli {
-        file: dir.clone(),
-        parse: false,
-        build: true,
-        out: Some(out_dir.clone()),
-        force: false,
+        command: Command::Build {
+            file: dir.clone(),
+            out: Some(out_dir.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -493,11 +493,11 @@ fn build_colocated_directory_cycle_is_stopped_by_the_depth_cap() {
     std::os::unix::fs::symlink(&dir, inner.join("loop")).unwrap();
 
     let code = run(Cli {
-        file: dir.clone(),
-        parse: false,
-        build: true,
-        out: None,
-        force: false,
+        command: Command::Build {
+            file: dir.clone(),
+            out: None,
+            force: false,
+        },
     });
     assert_eq!(
         code,
@@ -510,7 +510,7 @@ fn build_colocated_directory_cycle_is_stopped_by_the_depth_cap() {
 
 /// #64: `fs::write` follows symlinks, so a `docker-compose.yml` replaced
 /// by a link to an unrelated file used to have that file truncated and
-/// overwritten by a plain `hllc --build <repo>`. Unix-only: there's no
+/// overwritten by a plain `hllc build <repo>`. Unix-only: there's no
 /// portable way to create a symlink, and the guard itself is
 /// platform-independent.
 #[cfg(unix)]
@@ -525,11 +525,11 @@ fn build_refuses_to_write_through_a_symlinked_compose_file() {
     std::os::unix::fs::symlink(&victim, service_dir.join("docker-compose.yml")).unwrap();
 
     let code = run(Cli {
-        file: dir.clone(),
-        parse: false,
-        build: true,
-        out: None,
-        force: false,
+        command: Command::Build {
+            file: dir.clone(),
+            out: None,
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::FAILURE);
     assert_eq!(
@@ -555,11 +555,11 @@ fn build_refuses_a_symlinked_out_path() {
     std::os::unix::fs::symlink(&victim, &out).unwrap();
 
     let code = run(Cli {
-        file: input,
-        parse: false,
-        build: true,
-        out: Some(out),
-        force: false,
+        command: Command::Build {
+            file: input,
+            out: Some(out),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::FAILURE);
     assert_eq!(fs::read_to_string(&victim).unwrap(), "precious\n");
@@ -579,11 +579,11 @@ fn build_rejects_a_parent_escaping_file_stem() {
     let out_dir = dir.join("out");
 
     let code = run(Cli {
-        file: inputs,
-        parse: false,
-        build: true,
-        out: Some(out_dir.clone()),
-        force: false,
+        command: Command::Build {
+            file: inputs,
+            out: Some(out_dir.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::FAILURE);
     assert!(
@@ -612,11 +612,11 @@ fn build_rejects_a_current_directory_file_stem() {
     fs::create_dir_all(&out_dir).unwrap();
 
     let code = run(Cli {
-        file: inputs,
-        parse: false,
-        build: true,
-        out: Some(out_dir.clone()),
-        force: false,
+        command: Command::Build {
+            file: inputs,
+            out: Some(out_dir.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::FAILURE);
     assert!(
@@ -627,7 +627,7 @@ fn build_rejects_a_current_directory_file_stem() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// #85: every `--build` output carries a header identifying it as
+/// #85: every `build` output carries a header identifying it as
 /// generated — that's what makes generated files tellable apart from
 /// authored ones in a repo, and what the overwrite guard below keys off.
 /// The header is a YAML comment, so the document still parses.
@@ -639,11 +639,11 @@ fn build_output_starts_with_the_generated_header() {
     let out = dir.join("docker-compose.yml");
 
     let code = run(Cli {
-        file: input,
-        parse: false,
-        build: true,
-        out: Some(out.clone()),
-        force: false,
+        command: Command::Build {
+            file: input,
+            out: Some(out.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -678,11 +678,11 @@ fn build_refuses_to_overwrite_a_hand_written_compose_file() {
     fs::write(&compose, HAND_WRITTEN_COMPOSE).unwrap();
 
     let code = run(Cli {
-        file: dir.clone(),
-        parse: false,
-        build: true,
-        out: None,
-        force: false,
+        command: Command::Build {
+            file: dir.clone(),
+            out: None,
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::FAILURE);
     assert_eq!(
@@ -706,11 +706,11 @@ fn build_force_overwrites_a_hand_written_compose_file() {
     fs::write(&compose, HAND_WRITTEN_COMPOSE).unwrap();
 
     let code = run(Cli {
-        file: dir.clone(),
-        parse: false,
-        build: true,
-        out: None,
-        force: true,
+        command: Command::Build {
+            file: dir.clone(),
+            out: None,
+            force: true,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -740,11 +740,11 @@ fn build_overwrites_its_own_previous_output_without_force() {
 
     for _ in 0..2 {
         let code = run(Cli {
-            file: dir.clone(),
-            parse: false,
-            build: true,
-            out: None,
-            force: false,
+            command: Command::Build {
+                file: dir.clone(),
+                out: None,
+                force: false,
+            },
         });
         assert_eq!(code, ExitCode::SUCCESS);
     }
@@ -775,11 +775,11 @@ fn build_flat_mode_refuses_to_overwrite_a_hand_written_compose_file() {
     fs::write(&compose, HAND_WRITTEN_COMPOSE).unwrap();
 
     let code = run(Cli {
-        file: dir.clone(),
-        parse: false,
-        build: true,
-        out: Some(out_dir),
-        force: false,
+        command: Command::Build {
+            file: dir.clone(),
+            out: Some(out_dir),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::FAILURE);
     assert_eq!(fs::read_to_string(&compose).unwrap(), HAND_WRITTEN_COMPOSE);
@@ -797,11 +797,11 @@ fn build_refuses_a_hand_written_out_path() {
     fs::write(&out, HAND_WRITTEN_COMPOSE).unwrap();
 
     let code = run(Cli {
-        file: input,
-        parse: false,
-        build: true,
-        out: Some(out.clone()),
-        force: false,
+        command: Command::Build {
+            file: input,
+            out: Some(out.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::FAILURE);
     assert_eq!(fs::read_to_string(&out).unwrap(), HAND_WRITTEN_COMPOSE);
@@ -823,11 +823,11 @@ fn build_single_file_writes_into_an_existing_out_directory() {
     fs::create_dir_all(&out_dir).unwrap();
 
     let code = run(Cli {
-        file: input,
-        parse: false,
-        build: true,
-        out: Some(out_dir.clone()),
-        force: false,
+        command: Command::Build {
+            file: input,
+            out: Some(out_dir.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -858,11 +858,11 @@ fn build_refuses_an_out_path_it_cannot_inspect() {
     fs::set_permissions(&out, fs::Permissions::from_mode(0o000)).unwrap();
 
     let code = run(Cli {
-        file: input,
-        parse: false,
-        build: true,
-        out: Some(out.clone()),
-        force: false,
+        command: Command::Build {
+            file: input,
+            out: Some(out.clone()),
+            force: false,
+        },
     });
 
     fs::set_permissions(&out, fs::Permissions::from_mode(0o644)).unwrap();
@@ -893,11 +893,11 @@ fn build_force_still_refuses_to_write_through_a_symlink() {
     std::os::unix::fs::symlink(&victim, &out).unwrap();
 
     let code = run(Cli {
-        file: input,
-        parse: false,
-        build: true,
-        out: Some(out),
-        force: true,
+        command: Command::Build {
+            file: input,
+            out: Some(out),
+            force: true,
+        },
     });
     assert_eq!(code, ExitCode::FAILURE);
     assert_eq!(fs::read_to_string(&victim).unwrap(), "precious\n");
@@ -905,7 +905,7 @@ fn build_force_still_refuses_to_write_through_a_symlink() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// #88: piping `--parse`'s AST dump into something that closes its end
+/// #88: piping `hllc parse`'s AST dump into something that closes its end
 /// early (`head`, `less`, ...) — the only practical way to read what can
 /// be a many-thousand-line `{:#?}` dump — used to hand the user a Rust
 /// panic and backtrace the moment the reader closed the pipe, since
@@ -921,7 +921,7 @@ fn parse_does_not_panic_when_stdout_closes_early() {
     fs::write(&input, SYNCTHING_HLL).unwrap();
 
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_hllc"))
-        .args(["--parse", input.to_str().unwrap()])
+        .args(["parse", input.to_str().unwrap()])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -961,7 +961,7 @@ fn build_reports_a_real_stdout_write_failure_instead_of_exiting_clean() {
         .expect("this test requires /dev/full");
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_hllc"))
-        .args(["--build", input.to_str().unwrap()])
+        .args(["build", input.to_str().unwrap()])
         .stdout(dev_full)
         .output()
         .expect("failed to run the hllc binary");
@@ -979,7 +979,7 @@ fn build_reports_a_real_stdout_write_failure_instead_of_exiting_clean() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// What `--build` writes to stdout has to be *parseable* Compose YAML,
+/// What `hllc build` writes to stdout has to be *parseable* Compose YAML,
 /// not merely the bytes we last recorded. `cmd/build-stdout.trycmd`
 /// pins those bytes exactly, which catches any change to them, but
 /// byte-equality against a recorded run can't tell a valid document
@@ -1001,7 +1001,7 @@ fn build_to_stdout_emits_parseable_yaml_for_the_shared_fixture() {
     fs::write(&input, SYNCTHING_HLL).unwrap();
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_hllc"))
-        .args(["--build", input.to_str().unwrap()])
+        .args(["build", input.to_str().unwrap()])
         .output()
         .expect("failed to run the hllc binary");
 
@@ -1055,11 +1055,11 @@ fn build_resolves_an_imported_named_volume_through_its_alias() {
     let out = dir.join("docker-compose.yml");
 
     let code = run(Cli {
-        file: entry,
-        parse: false,
-        build: true,
-        out: Some(out.clone()),
-        force: false,
+        command: Command::Build {
+            file: entry,
+            out: Some(out.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -1098,11 +1098,11 @@ fn build_emits_a_declared_volumes_options_in_the_top_level_section() {
     let out = dir.join("docker-compose.yml");
 
     let code = run(Cli {
-        file: entry,
-        parse: false,
-        build: true,
-        out: Some(out.clone()),
-        force: false,
+        command: Command::Build {
+            file: entry,
+            out: Some(out.clone()),
+            force: false,
+        },
     });
     assert_eq!(code, ExitCode::SUCCESS);
 
@@ -1145,15 +1145,143 @@ fn build_fails_on_middleware_without_a_host() {
     let out = dir.join("docker-compose.yml");
 
     let code = run(Cli {
-        file: entry,
-        parse: false,
-        build: true,
-        out: Some(out.clone()),
-        force: false,
+        command: Command::Build {
+            file: entry,
+            out: Some(out.clone()),
+            force: false,
+        },
     });
 
     assert_eq!(code, ExitCode::FAILURE);
     assert!(!out.exists(), "a failed build must not write output");
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// #129: `check` runs the whole pipeline and writes nothing. That
+/// "nothing" is the entire feature, and it is exactly what a transcript
+/// can't assert — `tests/cmd/check.trycmd` pins what `check` prints,
+/// while the tests below pin what it must not leave on disk.
+///
+/// The single-file case first: there is no `--out` to name, so the only
+/// place output could land is the directory the source sits in.
+#[test]
+fn check_single_file_writes_nothing() {
+    let dir = scratch_dir("check-single");
+    let input = dir.join("syncthing.hll");
+    fs::write(&input, SYNCTHING_HLL).unwrap();
+
+    let code = run(Cli {
+        command: Command::Check {
+            file: input.clone(),
+        },
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let mut left_behind: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    left_behind.sort();
+    assert_eq!(
+        left_behind,
+        vec![input],
+        "check must leave the directory exactly as it found it"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// A file that doesn't compile fails the gate. `check` exists to be run
+/// for its exit code, so that code is the assertion.
+#[test]
+fn check_fails_on_a_file_that_does_not_compile() {
+    let dir = scratch_dir("check-broken");
+    let input = dir.join("broken.hll");
+    fs::write(
+        &input,
+        "service web {\n  image \"nginx\"\n  with hardened\n}\n",
+    )
+    .unwrap();
+
+    let code = run(Cli {
+        command: Command::Check { file: input },
+    });
+    assert_eq!(code, ExitCode::FAILURE);
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// Flat directory mode under `check`: every `.hll` file directly inside
+/// the directory is still its own entry point, but `--out` — which
+/// `build` requires here, having many files' output to place — is
+/// neither accepted nor needed, since nothing is placed anywhere.
+#[test]
+fn check_flat_directory_needs_no_out_and_writes_nothing() {
+    let dir = scratch_dir("check-flat");
+    fs::write(dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+
+    let code = run(Cli {
+        command: Command::Check { file: dir.clone() },
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    assert!(
+        !dir.join("syncthing").exists(),
+        "check must not create per-file output directories"
+    );
+    assert!(
+        !dir.join("docker-compose.yml").exists(),
+        "check must not write a Compose document"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// Co-located mode is where writing nothing matters most: `build` with
+/// no `--out` writes each service directory's document *in place*, so a
+/// `check` sharing one line too much of that path would scatter
+/// generated files through a tree it was only asked to inspect.
+#[test]
+fn check_colocated_tree_writes_nothing_in_place() {
+    let dir = scratch_dir("check-colocated");
+    let service_dir = dir.join("services").join("syncthing");
+    fs::create_dir_all(&service_dir).unwrap();
+    fs::write(service_dir.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+
+    let code = run(Cli {
+        command: Command::Check { file: dir.clone() },
+    });
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    assert!(
+        !service_dir.join("docker-compose.yml").exists(),
+        "check must not write into the service directory it walked"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// A broken file anywhere in a checked tree fails the whole run: the
+/// gate's promise is that a zero exit means every entry point compiles.
+#[test]
+fn check_colocated_tree_fails_on_a_broken_service() {
+    let dir = scratch_dir("check-colocated-broken");
+    let good = dir.join("good");
+    let bad = dir.join("bad");
+    fs::create_dir_all(&good).unwrap();
+    fs::create_dir_all(&bad).unwrap();
+    fs::write(good.join("syncthing.hll"), SYNCTHING_HLL).unwrap();
+    fs::write(
+        bad.join("web.hll"),
+        "service web {\n  image \"nginx\"\n  with nope\n}\n",
+    )
+    .unwrap();
+
+    let code = run(Cli {
+        command: Command::Check { file: dir.clone() },
+    });
+    assert_eq!(code, ExitCode::FAILURE);
 
     fs::remove_dir_all(&dir).ok();
 }

@@ -1,0 +1,4 @@
+# Declares no service, so there is no entry point here to check.
+network traefik-net {
+  external
+}

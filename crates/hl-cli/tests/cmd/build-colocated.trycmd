@@ -6,7 +6,7 @@ directories that hold no service, `homelab/services/` here, are walked
 through rather than treated as an error.
 
 ```console
-$ hllc --build homelab
+$ hllc build homelab
 homelab/services/web/docker-compose.yml
 
 ```
@@ -19,7 +19,7 @@ this pairs with the block above for the same reason
 different way of breaking the counter.
 
 ```console
-$ hllc --build library
+$ hllc build library
 library: no service directories found (looked for a single .hll file declaring a `service`, in this directory or any subdirectory) — nothing was built
 
 ```
