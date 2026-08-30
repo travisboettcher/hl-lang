@@ -1562,3 +1562,35 @@ nothing left for it to catch that `DuplicateRouterName` doesn't already.
   judgment call. Not yet designed: the line-length threshold, and whether
   formatting stays opinionated and non-configurable (à la
   `gofmt`/`rustfmt`) or takes any settings at all.
+- **A pluggable reverse-proxy backend**—Traefik label generation is
+  wired into the compiler rather than layered on top of it. The built-in
+  schema table carries `expose`, `router`, and `router`'s `middleware`
+  list as rows of its own, and `crates/hl-codegen/src/labels.rs`
+  hard-codes the `traefik.http.routers.*`, `traefik.docker.network`, and
+  `traefik.*.services.*.loadbalancer.server.port` label shapes into
+  every service's output. That sits in tension with this document's own
+  test for a new built-in—see the preceding section, "Design principle:
+  generic core, specific templates." Traefik is one particular reverse
+  proxy, not a universal one, and a homelab fronted by Caddy, by nginx,
+  or by nothing at all can reach none of those fields, leaving it `raw`
+  and a wide berth around half the language. #160 asks the question one
+  level further out than a homelab's own `templates.hll` does: not
+  "which conventions does it layer on the Traefik primitives," but
+  whether the Traefik primitives themselves belong behind an extension
+  point a homelab opts into, over a core that knows only containers,
+  networks, volumes, and environment.
+
+  Deferred out of 1.0 as a design question rather than a patch: it asks
+  whether `hll` has a backend abstraction at all, which touches the
+  schema table, `hl-codegen`'s structure, and probably how a file or the
+  command line selects a backend. Designing one against the single
+  backend that exists is how such an abstraction comes out wrong.
+
+  The consequence is worth stating plainly, because 1.0 freezes `.hll`
+  source compatibility—see "What a version number promises" in the
+  README. Every file written against 1.0 spells its routing with the
+  built-in Traefik fields, so moving those fields behind an opt-in layer
+  afterwards stops files compiling that compiled before. That's a 2.0,
+  not a 1.x minor. Shipping 1.0 with Traefik in the core accepts that
+  trade knowingly, and #160 stays open as the record of a decision
+  rather than an oversight.
