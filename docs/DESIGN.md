@@ -491,6 +491,39 @@ which keeps adding a row to this table from breaking files that were
 already reaching for `raw` in that row's absence (see the `raw` section
 of the book's Built-in Fields page).
 
+`labels` is the one key where that rule needs saying out loud, and #232
+is why. Every other overridable key is one built-in field, so replacing
+it means replacing the one thing the author wrote. `labels` is a
+*derived* key instead: nothing in the language sets it, and what codegen
+emits is the sum of four independent features.
+
+- `router`, contributing the routing rule, the entry points, and the
+  middleware list.
+- `expose`, contributing the load-balancer target port.
+- `traefik { disable }`, which trades the whole set for a single
+  `traefik.enable=false`.
+- The Docker network the service resolves to, as
+  `traefik.docker.network`.
+
+A service can reach for any one of those without knowing the other three
+exist. So `raw { labels: [...] }` beside a `router` block doesn't
+override *a* field. It discards the output of all four at once, and
+overriding it commits the author to reproducing every one of them by
+hand and keeping them in step from then on. That's still the correct
+behavior—a half-merged `raw` value would no longer be verbatim
+passthrough, and hand-writing the whole list is a legitimate use of the
+escape hatch—but losing the whole computed set in silence is a trap
+worth a diagnostic, so codegen raises a `RawLabelsReplaceGenerated`
+warning whenever a service generates labels and `raw` names the key too.
+A warning rather than an error: no file stops compiling, and no
+generated document changes.
+
+Codegen raises that warning only where the computed label set comes out
+non-empty, rather than wherever the service declares `router` or
+`expose`, so it fires exactly when the override actually costs
+something. A service with no `router`, no `expose` and no `traefik`
+block generates no labels for `raw` to replace, and says nothing.
+
 `raw`'s own job has narrowed as the preceding schema table has grown.
 Early on, before this table had more than a handful of rows, `raw` stood
 in for nearly everything—it was, practically, the only way to reach most

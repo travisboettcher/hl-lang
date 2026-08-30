@@ -618,12 +618,17 @@ pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenErr
     // single-service program that exists today.
     let auto_attach_default = program.services.len() >= 2;
 
+    // Per-service warnings accumulate here so they come out in service
+    // order, ahead of the program-wide `UnusedNetwork` pass below.
+    let mut warnings: Vec<CodegenWarning> = Vec::new();
+
     for service in &program.services {
         let (service_doc, network_docs, volume_docs) = generate_service(
             service,
             &program.networks,
             &program.volumes,
             auto_attach_default,
+            &mut warnings,
         )?;
         for (net_name, net_doc) in network_docs {
             networks.entry(net_name).or_insert(net_doc);
@@ -653,15 +658,16 @@ pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenErr
     // forgotten to declare it (#80). Checked against the *references*
     // rather than against `networks` above so the diagnostic survives a
     // future change to how the docs are keyed.
-    let warnings = program
-        .networks
-        .iter()
-        .filter(|decl| !referenced_networks.contains(decl.name.name.as_str()))
-        .map(|decl| CodegenWarning::UnusedNetwork {
-            network: decl.name.name.clone(),
-            span: decl.name.span,
-        })
-        .collect();
+    warnings.extend(
+        program
+            .networks
+            .iter()
+            .filter(|decl| !referenced_networks.contains(decl.name.name.as_str()))
+            .map(|decl| CodegenWarning::UnusedNetwork {
+                network: decl.name.name.clone(),
+                span: decl.name.span,
+            }),
+    );
 
     let compose_doc = doc::ComposeDoc {
         services,
@@ -678,6 +684,7 @@ fn generate_service(
     declared_networks: &[Network],
     declared_volumes: &[Volume],
     auto_attach_default: bool,
+    warnings: &mut Vec<CodegenWarning>,
 ) -> Result<(doc::ComposeServiceDoc, NetworkDocs, VolumeDocs), CodegenError> {
     let name = &service.name.name;
     let fields = &service.fields;
@@ -784,9 +791,38 @@ fn generate_service(
     let privileged = fields.privileged.is_some();
 
     let mut raw_map = IndexMap::new();
+    let mut raw_labels_span = None;
     for entry in &fields.raw.entries {
         let key = interp::resolve(entry.key.text(), &bindings, entry.key.span())?;
+        if key == "labels" {
+            raw_labels_span = Some(entry.key.span());
+        }
         raw_map.insert(key, raw::to_yaml(&entry.value, &bindings)?);
+    }
+
+    // `raw` replacing a built-in field it names is the documented rule,
+    // and `apply_raw_overrides` below is what carries it out. `labels` is
+    // the one key where that rule surprises people, because it is not one
+    // field from the language's own perspective: it is what `router`,
+    // `expose`, `traefik`, and the resolved Docker network add up to. A
+    // service with both loses the whole computed set — correct, and until
+    // #232 completely silent. Warned rather than rejected: hand-writing
+    // the full list is exactly what `raw` is for when `router` can't yet
+    // say something, so what was missing is visibility, not a
+    // prohibition.
+    //
+    // Conditioned on the computed set being non-empty rather than on
+    // which fields the service declares, so the warning fires exactly
+    // when something is actually dropped — that covers `traefik {
+    // disable }`'s lone `traefik.enable=false` too, which no
+    // `router`/`expose` test would have caught.
+    if let Some(span) = raw_labels_span
+        && !labels.is_empty()
+    {
+        warnings.push(CodegenWarning::RawLabelsReplaceGenerated {
+            service: name.clone(),
+            span,
+        });
     }
 
     let mut service_doc = doc::ComposeServiceDoc {

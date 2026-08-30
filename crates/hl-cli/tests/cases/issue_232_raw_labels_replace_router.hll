@@ -1,0 +1,20 @@
+# #232: a service with both a `router` block and `raw { labels: [...] }`
+# loses the entire router-computed label set — `rule`, `entrypoints`,
+# `docker.network`, the loadbalancer port — because `raw` replaces a
+# built-in key it names rather than merging with it. The output below is
+# what `hllc` has always produced; what this pins down is the warning
+# that now says so, since `labels` is the aggregate of several features
+# rather than one field, and losing it silently was the footgun.
+service web {
+  image "test"
+  expose 8123
+  router {
+    host: "hass.example.com"
+    entrypoints: web-secure
+  }
+  raw {
+    labels: [
+      "traefik.http.routers.web-internal.tls.domains[0].main=internal.example.com"
+    ]
+  }
+}
