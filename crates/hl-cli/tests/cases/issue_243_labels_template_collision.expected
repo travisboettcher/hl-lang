@@ -1,0 +1,2 @@
+--- error ---
+issue_243_labels_template_collision.hll:17:5: `labels` key "com.example.owner" set by both template `a` (at issue_243_labels_template_collision.hll:11:5) and template `b`—explicit templates must not conflict

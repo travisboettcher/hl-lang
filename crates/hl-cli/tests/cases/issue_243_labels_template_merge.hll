@@ -1,0 +1,42 @@
+# #243: `labels` merges across template tiers exactly as `env` does —
+# same key-side uniqueness, same `merge_map`, same tier rules.
+#
+# What this pins, in one service:
+#   - a template's entries reach the service (`com.example.owner`,
+#     `com.example.audit`);
+#   - the service's own body wins over a template that set the same key,
+#     silently, because own always beats a template (`com.example.tier`
+#     comes out `own`, not `template`);
+#   - `defaults` loses to both, so its `com.example.tier` never appears
+#     and its own key survives only where nothing else claimed one;
+#   - the merged order is tier order — `defaults`, then each `with`
+#     target left to right, then the body's own — which is what makes
+#     emitted label order a stable function of the source.
+template defaults {
+  labels {
+    "com.example.tier": "defaults"
+    "com.example.stack": "homelab"
+  }
+}
+
+template owner_tag {
+  labels {
+    "com.example.owner": "platform-team"
+    "com.example.tier": "template"
+  }
+}
+
+template audit_tag {
+  labels {
+    "com.example.audit": "yes"
+  }
+}
+
+service web {
+  with owner_tag, audit_tag
+  image "nginx"
+
+  labels {
+    "com.example.tier": "own"
+  }
+}

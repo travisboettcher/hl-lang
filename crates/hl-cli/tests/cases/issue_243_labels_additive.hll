@@ -1,0 +1,33 @@
+# #243: `labels` is a first-class `service` field, *added* to the label
+# set `router`/`expose`/`traefik`/the docker-network label already
+# compute rather than replacing it. Before this field the only way to
+# write one extra label line was `raw { labels: [...] }`, which replaces
+# the whole computed set and silently drops `rule`, `entrypoints`,
+# `docker.network` and the load-balancer port — #232's report.
+#
+# This is the issue's own worked example, and what it pins down is that
+# both halves reach the output: every computed Traefik label, in the
+# order it always had, then the two hand-written entries after them. The
+# ordering is the load-bearing half — appending rather than interleaving
+# is what keeps a file that writes no `labels` emitting byte-identical
+# output to before the field existed.
+network traefik-net {
+  external
+  name: "docker_default"
+}
+
+service web {
+  image "nginx"
+  expose 8123
+  networks [traefik-net]
+
+  router {
+    host: "web.example.com"
+    entrypoints: web-secure
+  }
+
+  labels {
+    "traefik.http.routers.web.tls.domains[0].main": "internal.example.com"
+    "com.example.owner": "platform-team"
+  }
+}

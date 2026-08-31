@@ -203,7 +203,7 @@ Different field kinds merge differently:
   explicit templates' conditions genuinely *differ* is it the same
   `MapKeyCollision` compile error two templates setting the same `env`
   key to two different values would raise.
-- **Map fields** (`volume`, `env`, `raw`) merge key-by-key (or
+- **Map fields** (`volume`, `env`, `labels`, `raw`) merge key-by-key (or
   value-by-value for `volume`, since its uniqueness check is on the
   container-path side)—a genuine collision on the same key, regardless
   of whether the two values happen to agree, is the preceding compile

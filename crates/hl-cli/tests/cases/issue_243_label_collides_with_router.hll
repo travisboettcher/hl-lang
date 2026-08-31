@@ -1,0 +1,23 @@
+# #243: a `labels` entry naming a key one of the service's other
+# features already generates is a hard error naming both sides — the
+# explicit entry's own span, and the `router` block that computes the
+# colliding key.
+#
+# Neither precedence rule is acceptable here. "Explicit wins" silently
+# drops a computed label the author never asked to lose, which is #232's
+# complaint about `raw { labels: [...] }` one field over; "generated
+# wins" silently drops the line the author plainly wrote. Either way one
+# of two spellings in one body does nothing and says nothing, which is
+# the failure #193, #206 and #232 all exist to close.
+service web {
+  image "nginx"
+  expose 8123
+
+  router {
+    host: "web.example.com"
+  }
+
+  labels {
+    "traefik.http.routers.web.rule": "Host(`somewhere-else.example.com`)"
+  }
+}

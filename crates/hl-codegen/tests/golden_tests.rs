@@ -13,7 +13,7 @@
 //! the pending diffs one at a time — reading each one is the point,
 //! because accepting a snapshot claims the new output is correct.
 
-use hl_codegen::{CodegenError, CodegenWarning, generate};
+use hl_codegen::{CodegenError, CodegenWarning, LabelFeature, generate};
 use hl_parser::{compose, parse};
 use insta::assert_yaml_snapshot;
 
@@ -1861,8 +1861,8 @@ fn raw_labels_beside_a_router_warn_that_they_replace_it() {
         generated.warnings[0].to_string(),
         "8:5: warning: `raw { labels: ... }` replaces service `web`'s generated Traefik labels \
          rather than adding to them, so every label `router`, `expose`, and `traefik` would \
-         have produced is dropped — reproduce the ones you still need in this list, or remove \
-         it and let them be generated"
+         have produced is dropped — use a `labels { ... }` block to add labels to the computed \
+         set instead, or reproduce the ones you still need in this list"
     );
 }
 
@@ -2767,6 +2767,319 @@ fn build_without_a_context_is_an_error() {
         matches!(
             &err,
             CodegenError::BuildWithoutContext { service, .. } if service == "app"
+        ),
+        "got {err:?}"
+    );
+}
+
+// ---- #243: a first-class, additive `labels` field ----
+
+/// #243's own worked example: hand-written `labels` land *after* every
+/// computed Traefik label, and none of the computed ones move. The
+/// ordering is the load-bearing half — appending rather than
+/// interleaving is what keeps a file that writes no `labels` emitting
+/// byte-identical output to before the field existed.
+#[test]
+fn explicit_labels_are_appended_to_the_computed_ones() {
+    let yaml = generate_from(
+        "network traefik-net {\n  external\n  name: \"docker_default\"\n}\n\
+         service web {\n  \
+           image \"nginx\"\n  \
+           expose 8123\n  \
+           networks [traefik-net]\n  \
+           router {\n    host: \"web.example.com\"\n    entrypoints: web-secure\n  }\n  \
+           labels {\n    \
+             \"traefik.http.routers.web.tls.domains[0].main\": \"internal.example.com\"\n    \
+             \"com.example.owner\": \"platform-team\"\n  }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      web:
+        image: nginx
+        networks:
+          - traefik-net
+        expose:
+          - 8123
+        labels:
+          - traefik.docker.network=docker_default
+          - "traefik.http.routers.web.rule=Host(`web.example.com`)"
+          - traefik.http.routers.web.entrypoints=web-secure
+          - traefik.http.services.web.loadbalancer.server.port=8123
+          - "traefik.http.routers.web.tls.domains[0].main=internal.example.com"
+          - com.example.owner=platform-team
+    networks:
+      traefik-net:
+        name: docker_default
+        external: true
+    "#);
+}
+
+/// The mirror of #232's report, which is what this field exists to fix:
+/// the same service written with `raw { labels: [...] }` keeps only the
+/// one hand-written line, while `labels` keeps both halves. Held side by
+/// side in one test so the difference is the diff.
+#[test]
+fn labels_adds_where_raw_labels_replaces() {
+    let additive = generate_from(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           expose 8123\n  \
+           router {\n    host: \"web.example.com\"\n  }\n  \
+           labels {\n    \"com.example.owner\": \"platform-team\"\n  }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&additive), @r#"
+    services:
+      web:
+        image: nginx
+        expose:
+          - 8123
+        labels:
+          - "traefik.http.routers.web.rule=Host(`web.example.com`)"
+          - traefik.http.services.web.loadbalancer.server.port=8123
+          - com.example.owner=platform-team
+    "#);
+
+    let replacing = generate_from(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           expose 8123\n  \
+           router {\n    host: \"web.example.com\"\n  }\n  \
+           raw {\n    labels: [\"com.example.owner=platform-team\"]\n  }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&replacing), @"
+    services:
+      web:
+        image: nginx
+        expose:
+          - 8123
+        labels:
+          - com.example.owner=platform-team
+    ");
+}
+
+/// `traefik { disable }` silences the labels *this crate computes*, not
+/// a label the user wrote by hand: an explicit entry is an ordinary
+/// Docker label that may have nothing to do with Traefik, so it survives
+/// the short circuit that leaves the computed list at one line.
+#[test]
+fn a_disabled_service_still_emits_its_explicit_labels() {
+    let yaml = generate_from(
+        "service db {\n  \
+           image \"postgres:15\"\n  \
+           traefik { disable }\n  \
+           labels {\n    \"com.example.owner\": \"platform-team\"\n  }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      db:
+        image: "postgres:15"
+        labels:
+          - traefik.enable=false
+          - com.example.owner=platform-team
+    "#);
+}
+
+/// `raw`'s documented full-override semantics are unchanged (#243
+/// deliberately leaves them alone): a `raw { labels: ... }` beside an
+/// explicit `labels` still replaces the whole list, hand-written entries
+/// included, because `raw` replaces the *emitted key* rather than any
+/// one contributor to it.
+#[test]
+fn raw_labels_still_replace_explicit_labels_too() {
+    let yaml = generate_from(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           labels {\n    \"com.example.owner\": \"platform-team\"\n  }\n  \
+           raw {\n    labels: [\"only.this=1\"]\n  }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      web:
+        image: nginx
+        labels:
+          - only.this=1
+    ");
+}
+
+/// `{{name}}` resolves in both halves of an entry, exactly as it does
+/// for `env` — the interpolated text is what reaches the label, and so
+/// what the collision and safety checks see.
+#[test]
+fn explicit_labels_interpolate_the_service_name() {
+    let yaml = generate_from(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           labels {\n    \"com.example.{{name}}.owner\": \"{{name}}-team\"\n  }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @"
+    services:
+      web:
+        image: nginx
+        labels:
+          - com.example.web.owner=web-team
+    ");
+}
+
+/// A label key a `router` block already generates is a hard error naming
+/// both sides — not "explicit wins" and not "generated wins", either of
+/// which would make one of the two lines the author wrote silently do
+/// nothing.
+#[test]
+fn a_label_colliding_with_a_router_label_is_an_error() {
+    let err = generate_err(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           expose 8123\n  \
+           router {\n    host: \"web.example.com\"\n  }\n  \
+           labels {\n    \"traefik.http.routers.web.rule\": \"Host(`x.example.com`)\"\n  }\n\
+         }\n",
+    );
+    assert!(
+        matches!(
+            &err,
+            CodegenError::LabelCollidesWithGenerated { key, feature, generated_span, .. }
+                if key == "traefik.http.routers.web.rule"
+                    && *feature == LabelFeature::Router
+                    && generated_span.is_some()
+        ),
+        "got {err:?}"
+    );
+}
+
+/// The `expose`-derived load-balancer target is its own producer, named
+/// as such rather than lumped in with the routers that fall back to it.
+#[test]
+fn a_label_colliding_with_the_expose_target_is_an_error() {
+    let err = generate_err(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           expose 8123\n  \
+           router {\n    host: \"web.example.com\"\n  }\n  \
+           labels {\n    \
+             \"traefik.http.services.web.loadbalancer.server.port\": \"9999\"\n  }\n\
+         }\n",
+    );
+    assert!(
+        matches!(
+            &err,
+            CodegenError::LabelCollidesWithGenerated { feature, .. }
+                if *feature == LabelFeature::Expose
+        ),
+        "got {err:?}"
+    );
+}
+
+/// `traefik.enable=false` is generated too, so a `labels` entry trying
+/// to contradict it collides rather than quietly losing — or, worse,
+/// quietly winning and re-enabling a service the author disabled.
+#[test]
+fn a_label_colliding_with_traefik_disable_is_an_error() {
+    let err = generate_err(
+        "service db {\n  \
+           image \"postgres:15\"\n  \
+           traefik { disable }\n  \
+           labels {\n    \"traefik.enable\": \"true\"\n  }\n\
+         }\n",
+    );
+    assert!(
+        matches!(
+            &err,
+            CodegenError::LabelCollidesWithGenerated { feature, .. }
+                if *feature == LabelFeature::Traefik
+        ),
+        "got {err:?}"
+    );
+}
+
+/// The one producer with no span to name: `traefik.docker.network` comes
+/// from whichever declared network is `external`, resolved far from the
+/// `networks [...]` entry, so the diagnostic names the producer and
+/// stops there.
+#[test]
+fn a_label_colliding_with_the_docker_network_label_is_an_error() {
+    let err = generate_err(
+        "network traefik-net {\n  external\n  name: \"docker_default\"\n}\n\
+         service web {\n  \
+           image \"nginx\"\n  \
+           networks [traefik-net]\n  \
+           labels {\n    \"traefik.docker.network\": \"somewhere-else\"\n  }\n\
+         }\n",
+    );
+    assert!(
+        matches!(
+            &err,
+            CodegenError::LabelCollidesWithGenerated { feature, generated_span, .. }
+                if *feature == LabelFeature::DockerNetwork && generated_span.is_none()
+        ),
+        "got {err:?}"
+    );
+}
+
+/// Two keys spelled differently in source can resolve to one key after
+/// `{{name}}` interpolation, which the parser's own duplicate-key check
+/// cannot see. Codegen catches it, since by then both are strings.
+#[test]
+fn two_explicit_labels_colliding_after_interpolation_is_an_error() {
+    let err = generate_err(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           labels {\n    \
+             \"a.{{name}}\": \"1\"\n    \
+             \"a.web\": \"2\"\n  }\n\
+         }\n",
+    );
+    assert!(
+        matches!(
+            &err,
+            CodegenError::LabelCollidesWithGenerated { key, feature, .. }
+                if key == "a.web" && *feature == LabelFeature::Labels
+        ),
+        "got {err:?}"
+    );
+}
+
+/// An `=` in a hand-written key would end the key where Docker splits
+/// the label, forging a different label than the one written — and one
+/// the collision check above cannot see, since the key it compares still
+/// holds the `=`. Refused, exactly as an `=` in a router name is.
+#[test]
+fn an_equals_sign_in_a_label_key_is_rejected() {
+    let err = generate_err(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           labels {\n    \"traefik.docker.network=forged\": \"y\"\n  }\n\
+         }\n",
+    );
+    assert!(
+        matches!(
+            &err,
+            CodegenError::UnsafeLabelKey { key, character, .. }
+                if key == "traefik.docker.network=forged" && *character == '='
+        ),
+        "got {err:?}"
+    );
+}
+
+/// A newline in a key is writable since string escapes landed (#181),
+/// and no label key can hold one for any legitimate reason.
+#[test]
+fn a_newline_in_a_label_key_is_rejected() {
+    let err = generate_err(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           labels {\n    \"com.example\\nowner\": \"y\"\n  }\n\
+         }\n",
+    );
+    assert!(
+        matches!(
+            &err,
+            CodegenError::UnsafeLabelKey { character, .. } if *character == '\n'
         ),
         "got {err:?}"
     );

@@ -1,0 +1,19 @@
+--- compose ---
+services:
+  web:
+    image: nginx
+    networks:
+    - traefik-net
+    expose:
+    - 8123
+    labels:
+    - traefik.docker.network=docker_default
+    - traefik.http.routers.web.rule=Host(`web.example.com`)
+    - traefik.http.routers.web.entrypoints=web-secure
+    - traefik.http.services.web.loadbalancer.server.port=8123
+    - traefik.http.routers.web.tls.domains[0].main=internal.example.com
+    - com.example.owner=platform-team
+networks:
+  traefik-net:
+    name: docker_default
+    external: true

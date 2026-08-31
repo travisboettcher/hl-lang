@@ -134,6 +134,107 @@ fn explicit_templates_restart_collision_is_error() {
     }
 }
 
+/// `labels` (#243) merges through the same `merge_map` `env` does, on
+/// the same key side, so it follows the same tier rules — pinned here,
+/// at the composition layer, rather than only end to end through
+/// codegen: the merged field has to *arrive* on `ServiceFields` for any
+/// downstream check of it to mean anything.
+#[test]
+fn labels_merge_across_tiers_like_env() {
+    let composed = compose_ok(
+        "template defaults {\n  labels { \"tier\": \"defaults\", \"stack\": \"homelab\" }\n}\n\
+         template t {\n  labels { \"owner\": \"platform-team\", \"tier\": \"template\" }\n}\n\
+         service s {\n  image \"x\"\n  with t\n  labels { \"tier\": \"own\" }\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries: Vec<(&str, &str)> = service
+        .fields
+        .labels
+        .entries
+        .iter()
+        .map(|e| (e.key.text(), e.value.text()))
+        .collect();
+    // Tier order — `defaults`, then the `with` target, then the body's
+    // own — with a key an earlier tier already claimed replaced in
+    // place rather than appended, exactly as `env` accumulates.
+    assert_eq!(
+        entries,
+        vec![
+            ("tier", "own"),
+            ("stack", "homelab"),
+            ("owner", "platform-team"),
+        ]
+    );
+}
+
+/// A template's `labels` reaching a service that writes none of its own
+/// — the plainest shape, and the one that fails outright if the merged
+/// field never reaches `ServiceFields`.
+#[test]
+fn labels_from_a_template_reach_the_service() {
+    let composed = compose_ok(
+        "template t {\n  labels { \"owner\": \"platform-team\" }\n}\n\
+         service s {\n  image \"x\"\n  with t\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries = &service.fields.labels.entries;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key.text(), "owner");
+    assert_eq!(entries[0].value.text(), "platform-team");
+}
+
+/// A service's own `labels`, with no template in sight, still has to
+/// survive composition — every field goes through the same merge
+/// whether or not anything was composed onto it.
+#[test]
+fn labels_written_directly_survive_composition() {
+    let composed =
+        compose_ok("service s {\n  image \"x\"\n  labels { \"owner\": \"platform-team\" }\n}\n");
+    let service = single_service(&composed);
+    let entries = &service.fields.labels.entries;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key.text(), "owner");
+    assert_eq!(entries[0].value.text(), "platform-team");
+}
+
+/// A `$param` substitutes into either half of a `labels` entry, like
+/// `env`'s — a template parameterizing an owner tag or a hostname in a
+/// Traefik key is exactly the case #243 expects.
+#[test]
+fn labels_substitute_parameters_on_both_sides() {
+    let composed = compose_ok(
+        "template t(key, owner) {\n  labels { $key: $owner }\n}\n\
+         service s {\n  image \"x\"\n           with t { key: \"com.example.owner\", owner: \"platform-team\" }\n}\n",
+    );
+    let service = single_service(&composed);
+    let entries = &service.fields.labels.entries;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key.text(), "com.example.owner");
+    assert_eq!(entries[0].value.text(), "platform-team");
+}
+
+/// The collision half of "merges like `env`": two explicit templates
+/// setting one label key raise the same `MapKeyCollision` two `env`
+/// entries do, naming the field as `labels`.
+#[test]
+fn explicit_templates_labels_key_collision_is_error() {
+    let err = compose_err(
+        "template a {\n  labels { \"owner\": \"team-a\" }\n}\n\
+         template b {\n  labels { \"owner\": \"team-b\" }\n}\n\
+         service s {\n  with a, b\n}\n",
+    );
+    match err {
+        ComposeError::MapKeyCollision(details) => {
+            assert_eq!(details.field, "labels");
+            assert_eq!(details.side, MapSide::Key);
+            assert_eq!(details.key, "owner");
+            assert_eq!(details.first_template, "a");
+            assert_eq!(details.second_template, "b");
+        }
+        other => panic!("expected MapKeyCollision, got {other:?}"),
+    }
+}
+
 #[test]
 fn explicit_templates_env_key_collision_is_error() {
     let err = compose_err(

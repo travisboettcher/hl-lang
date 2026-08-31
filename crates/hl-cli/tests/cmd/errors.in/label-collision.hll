@@ -1,0 +1,10 @@
+service web {
+  image "nginx"
+  expose 8123
+  router {
+    host: "web.example.com"
+  }
+  labels {
+    "traefik.http.routers.web.rule": "Host(`elsewhere.example.com`)"
+  }
+}

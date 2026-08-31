@@ -1,0 +1,9 @@
+--- compose ---
+services:
+  web:
+    image: nginx
+    labels:
+    - com.example.tier=own
+    - com.example.stack=homelab
+    - com.example.owner=platform-team
+    - com.example.audit=yes
