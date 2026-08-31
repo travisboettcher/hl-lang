@@ -1802,6 +1802,10 @@ fn raw_key_shadowing_a_built_in_field_overrides_it() {
 /// `labels` replaces the computed Traefik labels wholesale rather than
 /// merging with them. Merging would make `raw` something other than
 /// verbatim passthrough.
+///
+/// The output is unchanged by #232 — what changed is that it no longer
+/// happens in silence; see
+/// `raw_labels_beside_a_router_warn_that_they_replace_it`.
 #[test]
 fn raw_labels_replace_the_computed_traefik_labels() {
     let yaml = generate_from(
@@ -1820,6 +1824,116 @@ fn raw_labels_replace_the_computed_traefik_labels() {
         labels:
           - only.this=1
     ");
+}
+
+/// #232: the replacement above is now *said*, not just done. `labels`
+/// isn't one field from the language's own perspective — it's what
+/// `router`, `expose`, `traefik`, and the resolved Docker network add up
+/// to — so a service with both a `router` and a `raw { labels: ... }`
+/// loses the whole computed set, which is the one override that reliably
+/// surprises people. A warning, deliberately: the build still succeeds
+/// and the document is unchanged.
+#[test]
+fn raw_labels_beside_a_router_warn_that_they_replace_it() {
+    let program = parse(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           expose 8080\n  \
+           router {\n    host: \"web.example.com\"\n  }\n  \
+           raw {\n    labels: [\"only.this=1\"]\n  }\n\
+         }\n",
+    )
+    .unwrap();
+    let composed = compose(program).unwrap();
+    let generated = generate(composed).expect("replacing the labels is legal, not an error");
+
+    assert!(
+        matches!(
+            generated.warnings.as_slice(),
+            [CodegenWarning::RawLabelsReplaceGenerated { service, .. }] if service == "web"
+        ),
+        "expected one raw-labels warning, got: {:?}",
+        generated.warnings
+    );
+    // The span is the `labels` key inside the `raw` body — the line the
+    // author has to edit, not the `router` block it silently displaced.
+    assert_eq!(
+        generated.warnings[0].to_string(),
+        "8:5: warning: `raw { labels: ... }` replaces service `web`'s generated Traefik labels \
+         rather than adding to them, so every label `router`, `expose`, and `traefik` would \
+         have produced is dropped — reproduce the ones you still need in this list, or remove \
+         it and let them be generated"
+    );
+}
+
+/// The warning is conditioned on there being something to lose, not on
+/// which fields the service happens to declare: a service that generates
+/// no labels at all has nothing for `raw { labels: ... }` to replace, so
+/// it says nothing.
+#[test]
+fn raw_labels_on_a_service_with_no_computed_labels_say_nothing() {
+    let program = parse(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           raw {\n    labels: [\"only.this=1\"]\n  }\n\
+         }\n",
+    )
+    .unwrap();
+    let composed = compose(program).unwrap();
+    let generated = generate(composed).unwrap();
+    assert!(
+        generated.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        generated.warnings
+    );
+}
+
+/// `traefik { disable }` generates exactly one label, and losing it
+/// re-enables Traefik for the service — the smallest computed set there
+/// is, and the one most worth hearing about. It warns like any other.
+#[test]
+fn raw_labels_over_a_disabled_services_label_warn_too() {
+    let program = parse(
+        "service db {\n  \
+           image \"postgres:15\"\n  \
+           traefik { disable }\n  \
+           raw {\n    labels: [\"only.this=1\"]\n  }\n\
+         }\n",
+    )
+    .unwrap();
+    let composed = compose(program).unwrap();
+    let generated = generate(composed).unwrap();
+    assert!(
+        matches!(
+            generated.warnings.as_slice(),
+            [CodegenWarning::RawLabelsReplaceGenerated { service, .. }] if service == "db"
+        ),
+        "expected one raw-labels warning, got: {:?}",
+        generated.warnings
+    );
+}
+
+/// A `raw` key that isn't `labels` never warns, however many labels the
+/// service computes — the override rule is only a footgun for the one
+/// key that is an aggregate of several features.
+#[test]
+fn a_raw_key_other_than_labels_beside_a_router_says_nothing() {
+    let program = parse(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           expose 8080\n  \
+           router {\n    host: \"web.example.com\"\n  }\n  \
+           raw {\n    security_opt: [\"seccomp=unconfined\"]\n  }\n\
+         }\n",
+    )
+    .unwrap();
+    let composed = compose(program).unwrap();
+    let generated = generate(composed).unwrap();
+    assert!(
+        generated.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        generated.warnings
+    );
 }
 
 /// Every field `ComposeServiceDoc` serializes is overridable, checked in

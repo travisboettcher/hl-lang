@@ -1,0 +1,6 @@
+--- compose ---
+services:
+  web:
+    image: test
+    labels:
+    - com.example.owner=platform

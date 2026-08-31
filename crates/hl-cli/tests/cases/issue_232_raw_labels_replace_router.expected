@@ -1,0 +1,10 @@
+--- warnings ---
+issue_232_raw_labels_replace_router.hll:16:5: warning: `raw { labels: ... }` replaces service `web`'s generated Traefik labels rather than adding to them, so every label `router`, `expose`, and `traefik` would have produced is dropped — reproduce the ones you still need in this list, or remove it and let them be generated
+--- compose ---
+services:
+  web:
+    image: test
+    expose:
+    - 8123
+    labels:
+    - traefik.http.routers.web-internal.tls.domains[0].main=internal.example.com

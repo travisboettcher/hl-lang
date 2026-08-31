@@ -1472,8 +1472,25 @@ whichever Compose key gets a field next, so reaching for `raw` today
 costs nothing later.
 
 Note that `raw`'s value **replaces** the built-in one. It never merges
-with it. That's worth knowing for `labels` in particular, since `hll`
-computes the Traefik labels itself:
+with it.
+
+### `labels` is a derived key, and replacing it costs more than it looks
+
+`labels` deserves its own warning label, because it isn't one field from
+the language's point of view. You never write `labels` yourself: `hllc`
+assembles it out of four independent features, any of which a service can
+use without thinking about the others.
+
+- [`router`](#router)—the routing rule, the entry points, the
+  middleware.
+- [`expose`](#expose)—the load-balancer target port.
+- [`traefik { disable }`](#traefik)—the `traefik.enable=false` line
+  that keeps Traefik off a service entirely.
+- The Docker network the service resolves to, as
+  `traefik.docker.network`.
+
+So `raw { labels: [...] }` doesn't replace one field. It replaces
+everything that whole group produced, all at once:
 
 ```hll,fragment
 expose 8080 as "web.example.com"
@@ -1481,6 +1498,34 @@ raw {
   labels: ["only.this=1"]   # every computed Traefik label is dropped
 }
 ```
+
+The router's rule, its entry points, the `docker.network` line, and the
+load-balancer port all vanish from that service—`only.this=1` is
+the entire `labels:` list `hllc` emits. Overriding `labels` therefore
+means writing every line those features would have produced, by hand,
+and keeping them in step with the `.hll` file from then on.
+
+`hllc` says so rather than letting it happen quietly. A service that
+generates labels *and* names `labels` in its `raw` block gets a warning:
+
+```text
+8:5: warning: `raw { labels: ... }` replaces service `web`'s generated
+Traefik labels rather than adding to them, so every label `router`,
+`expose`, and `traefik` would have produced is dropped — reproduce the
+ones you still need in this list, or remove it and let them be generated
+```
+
+It's a warning, not an error. Hand-writing the whole label list is a
+legitimate thing to do—it's exactly what `raw` is for when `router`
+can't yet express a label you need—so the build still succeeds and the
+generated document stays exactly as it was. There's no additive form of
+this today: `raw` replaces, and there is no way to *append* a label line
+to the computed set. If all you need is one extra label, the choice is
+to reproduce the computed ones alongside it or to do without.
+
+A service that generates no labels at all—no `router`, no `expose`, no
+`traefik` block—has nothing for the raw list to replace, and says
+nothing.
 
 Overriding a service's `volumes:` or `networks:` key doesn't retract
 the top-level `volumes:`/`networks:` declarations that `volume` and
