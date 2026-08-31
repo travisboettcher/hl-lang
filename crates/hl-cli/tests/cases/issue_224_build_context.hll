@@ -21,7 +21,7 @@ service vault-git-sync {
   env_file "vault-git-sync.env"
   volume "/home/boettcherta/obsidian-vault" -> "/vault"
   traefik {
-    disabled
+    disable
   }
 
   # Neither `build`'s own sub-fields nor `user` overlap, so this stays
@@ -38,7 +38,7 @@ service app {
     dockerfile: "Dockerfile.prod"
   }
   traefik {
-    disabled
+    disable
   }
 }
 
@@ -49,6 +49,6 @@ service foo {
     build: "./raw"
   }
   traefik {
-    disabled
+    disable
   }
 }

@@ -18,7 +18,7 @@ use "docker.hll" as traefik
   bare identifier: a `networks [...]` entry (`networks
   [traefik.traefik-net]`), a named-volume mount's host side, or a `with`
   invocation's target (`with common.internal_web { ... }`).
-- `dns`, `env_file`, `depends_on`, and a router's own `entrypoint` and
+- `dns`, `env_file`, `depends_on`, and a router's own `entrypoints` and
   `middleware` lists don't support a qualified form. None has a coherent
   cross-file meaning: `depends_on` names a same-file sibling service,
   `dns` and `env_file` name an IP address and a path on disk, and an
@@ -51,7 +51,7 @@ template internal_web(port) {
   expose $port
   router {
     host: "{{name}}.internal.example.com"
-    entrypoint: web-secure
+    entrypoints: web-secure
     middleware: local-ipwhitelist
   }
 }

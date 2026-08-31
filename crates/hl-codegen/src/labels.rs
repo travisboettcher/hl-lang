@@ -10,7 +10,7 @@ use hl_parser::{Ident, Literal, MatchExpr, Router, ServiceFields, Span, matchers
 use crate::{CodegenError, interp};
 
 /// Characters rejected in every label value the user writes directly —
-/// a router's `host` and each `entrypoint` entry. Motivated by `host`,
+/// a router's `host` and each `entrypoints` entry. Motivated by `host`,
 /// which is spliced verbatim into
 /// a ``Host(`...`)`` router rule. A backtick alone is enough to break
 /// out: it closes the value and everything after it is read as more
@@ -26,10 +26,10 @@ use crate::{CodegenError, interp};
 /// clearly-dangerous characters rather than an attempt at a full
 /// hostname grammar, so no legitimate existing config is broken.
 ///
-/// `entrypoint` shares this exact set, `,` included. It used to
+/// `entrypoints` shares this exact set, `,` included. It used to
 /// need its own copy with `,` carved out, because a single scalar
 /// `entrypoint "web,websecure"` was the only way to attach a router to
-/// more than one entry point. Now that `entrypoint` is a list and
+/// more than one entry point. Now that `entrypoints` is a list and
 /// codegen writes the separator itself, a comma *inside* one entry can
 /// only ever be a mistake — so the carve-out is gone and one set covers
 /// every label value, with no per-field exception to keep in mind.
@@ -117,7 +117,7 @@ fn reject_metacharacters(
 
 /// The first `router` block a *disabled* service also declares, if it
 /// declares one at all (#159) — the whole of what can contradict
-/// `traefik { disabled }` since #221 folded `middleware` inside
+/// `traefik { disable }` since #221 folded `middleware` inside
 /// `router`, where it can't be written without one.
 ///
 /// `expose.port` deliberately isn't checked here: it's Compose's own
@@ -366,27 +366,27 @@ fn render_rule(
     }
 }
 
-/// The one `entrypoints=` label for `entrypoint`, or `None` when the
+/// The one `entrypoints=` label for `entrypoints`, or `None` when the
 /// list is empty — Traefik's own way of saying "attach to every entry
 /// point," rather than a homelab-specific default the compiler picks.
 ///
 /// Interpolation runs per entry, before validation, for the reason it
 /// always has: `{{name}}` is resolved here, so the resolved text is what
 /// actually reaches the label and therefore what the metacharacter guard
-/// has to inspect. An entry point spelled as a string (`entrypoint
+/// has to inspect. An entry point spelled as a string (`entrypoints
 /// "{{name}}-secure"`) is the case that makes this observable.
 fn entrypoints_label(
     ns: &str,
     id: &str,
     field: &'static str,
-    entrypoint: &[Literal],
+    entrypoints: &[Literal],
     bindings: &HashMap<&str, &str>,
 ) -> Result<Option<String>, CodegenError> {
-    if entrypoint.is_empty() {
+    if entrypoints.is_empty() {
         return Ok(None);
     }
-    let mut eps = Vec::with_capacity(entrypoint.len());
-    for r in entrypoint {
+    let mut eps = Vec::with_capacity(entrypoints.len());
+    for r in entrypoints {
         let resolved = interp::resolve(r.text(), bindings, r.span())?;
         reject_metacharacters(&resolved, field, LABEL_METACHARACTERS, r.span())?;
         eps.push(resolved);
@@ -553,7 +553,7 @@ fn push_router_labels(
         render_rule(&expr, protocol, service_name, router, bindings)?
     ));
     if let Some(label) =
-        entrypoints_label(ns, &id, "router.entrypoint", &router.entrypoint, bindings)?
+        entrypoints_label(ns, &id, "router.entrypoints", &router.entrypoints, bindings)?
     {
         labels.push(label);
     }
@@ -602,7 +602,7 @@ fn push_router_labels(
 /// `<id>.rule=` (with `path_prefix`'s alternatives `&&`-ed onto the
 /// `Host()` when the block sets any, `<id>` being `<service>` for the
 /// unnamed form and `<service>-<name>` for a named one), its own
-/// `.entrypoints=` (if the block's `entrypoint` list is non-empty — one
+/// `.entrypoints=` (if the block's `entrypoints` list is non-empty — one
 /// comma-joined label for the whole list, the same shape as
 /// `.middlewares=` below but with no `@file` suffix, which is a
 /// file-provider convention specific to middleware references), and its
@@ -630,7 +630,7 @@ fn push_router_labels(
 /// load-balance onto used to mean Traefik silently guessed one, and now
 /// means `hllc` refuses to compile instead.
 ///
-/// A service that sets `traefik { disabled }` (#159) short-circuits all
+/// A service that sets `traefik { disable }` (#159) short-circuits all
 /// of the above: the returned list is exactly `["traefik.enable=false"]`,
 /// full stop — no `traefik.docker.network=` label either. That label
 /// only matters for routing traffic *to* the container once Traefik's
@@ -648,7 +648,7 @@ pub fn compute(
     bindings: &HashMap<&str, &str>,
 ) -> Result<Vec<String>, CodegenError> {
     if let Some(traefik) = &fields.traefik
-        && let Some(disabled_span) = traefik.disabled
+        && let Some(disabled_span) = traefik.disable
     {
         if let Some(span) = traefik_conflict_router(fields) {
             return Err(CodegenError::TraefikDisabledWithRouter {
@@ -772,7 +772,7 @@ mod tests {
                 span: span(),
             }),
             host: host.map(lit),
-            entrypoint: Vec::new(),
+            entrypoints: Vec::new(),
             path_prefix: Vec::new(),
             middleware: Vec::new(),
             priority: None,
@@ -913,14 +913,14 @@ mod tests {
     /// The same for an entry point name, which reaches a label the
     /// codegen joins with commas.
     #[test]
-    fn newline_in_entrypoint_is_rejected() {
+    fn newline_in_an_entrypoints_entry_is_rejected() {
         let mut fields = router_with_host("ok.example.com");
-        fields.routers[0].entrypoint = refs(&["web\nsecure"]);
+        fields.routers[0].entrypoints = refs(&["web\nsecure"]);
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
             CodegenError::UnsafeLabelValue {
-                field: "router.entrypoint",
+                field: "router.entrypoints",
                 character: '\n',
                 ..
             }
@@ -978,14 +978,14 @@ mod tests {
     }
 
     #[test]
-    fn backtick_in_entrypoint_is_rejected() {
+    fn backtick_in_an_entrypoints_entry_is_rejected() {
         let mut fields = router_with_host("ok.example.com");
-        fields.routers[0].entrypoint = refs(&["web`-secure"]);
+        fields.routers[0].entrypoints = refs(&["web`-secure"]);
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
             CodegenError::UnsafeLabelValue {
-                field: "router.entrypoint",
+                field: "router.entrypoints",
                 character: '`',
                 ..
             }
@@ -997,14 +997,14 @@ mod tests {
     /// label — the same failure mode `middleware` already guards
     /// against. This used to be the one accepted metacharacter here.
     #[test]
-    fn comma_in_a_single_entrypoint_is_rejected() {
+    fn comma_in_a_single_entrypoints_entry_is_rejected() {
         let mut fields = router_with_host("ok.example.com");
-        fields.routers[0].entrypoint = refs(&["web,web-secure"]);
+        fields.routers[0].entrypoints = refs(&["web,web-secure"]);
         let err = compute("s", &fields, None, &bindings()).unwrap_err();
         assert!(matches!(
             err,
             CodegenError::UnsafeLabelValue {
-                field: "router.entrypoint",
+                field: "router.entrypoints",
                 character: ',',
                 ..
             }
@@ -1018,7 +1018,7 @@ mod tests {
     #[test]
     fn several_entrypoints_join_into_one_label() {
         let mut fields = router_with_host("ok.example.com");
-        fields.routers[0].entrypoint = refs(&["web", "web-secure"]);
+        fields.routers[0].entrypoints = refs(&["web", "web-secure"]);
         fields.expose = Some(expose_port(80));
         let labels = compute("s", &fields, None, &bindings()).unwrap();
         assert!(
@@ -1035,7 +1035,7 @@ mod tests {
     #[test]
     fn several_entrypoints_produce_exactly_one_entrypoints_label() {
         let mut fields = router_with_host("ok.example.com");
-        fields.routers[0].entrypoint = refs(&["web", "web-secure", "metrics"]);
+        fields.routers[0].entrypoints = refs(&["web", "web-secure", "metrics"]);
         fields.expose = Some(expose_port(80));
         let labels = compute("s", &fields, None, &bindings()).unwrap();
         assert_eq!(
@@ -1050,15 +1050,15 @@ mod tests {
     /// Same guarantee as `host_is_checked_after_interpolation`, for an
     /// entry point spelled as a string so it can carry a `{{name}}`.
     #[test]
-    fn entrypoint_is_checked_after_interpolation() {
+    fn entrypoints_are_checked_after_interpolation() {
         let mut fields = router_with_host("ok.example.com");
-        fields.routers[0].entrypoint = refs(&["{{name}}-secure"]);
+        fields.routers[0].entrypoints = refs(&["{{name}}-secure"]);
         let bindings = HashMap::from([("name", "web`")]);
         let err = compute("s", &fields, None, &bindings).unwrap_err();
         assert!(matches!(
             err,
             CodegenError::UnsafeLabelValue {
-                field: "router.entrypoint",
+                field: "router.entrypoints",
                 character: '`',
                 ..
             }
@@ -1068,9 +1068,9 @@ mod tests {
     /// And the resolved text — not the raw `{{name}}` source — is what
     /// lands in the label.
     #[test]
-    fn entrypoint_is_interpolated_into_the_label() {
+    fn entrypoints_are_interpolated_into_the_label() {
         let mut fields = router_with_host("ok.example.com");
-        fields.routers[0].entrypoint = refs(&["{{name}}-secure"]);
+        fields.routers[0].entrypoints = refs(&["{{name}}-secure"]);
         fields.expose = Some(expose_port(80));
         let labels = compute("s", &fields, None, &bindings()).unwrap();
         assert!(
@@ -1118,7 +1118,7 @@ mod tests {
     #[test]
     fn full_router_produces_all_labels_in_order() {
         let mut r = router(None, Some("syncthing.internal.techdebtor.io"));
-        r.entrypoint = refs(&["web-secure"]);
+        r.entrypoints = refs(&["web-secure"]);
         r.middleware = vec![
             Literal::Ident("local-ipwhitelist".to_string(), span()),
             Literal::Ident("forwardAuth-authentik".to_string(), span()),
@@ -1141,11 +1141,11 @@ mod tests {
         );
     }
 
-    // --- traefik { disabled } (#159) ---
+    // --- traefik { disable } (#159) ---
 
     fn disabled_traefik() -> Traefik {
         Traefik {
-            disabled: Some(span()),
+            disable: Some(span()),
             span: span(),
         }
     }
@@ -1181,7 +1181,7 @@ mod tests {
     /// A middleware can only be written inside a `router` since #221,
     /// so a disabled service carrying one is refused for the block that
     /// holds it — there is no longer a second, field-shaped way to
-    /// contradict `disabled`.
+    /// contradict `disable`.
     #[test]
     fn disabled_service_with_router_middleware_is_rejected() {
         let mut r = router(Some("api"), Some("db.example.com"));
@@ -1197,7 +1197,7 @@ mod tests {
 
     /// A service that never touches `traefik` at all keeps every
     /// existing behavior byte for byte — the guard clause only fires
-    /// when `fields.traefik.disabled` is actually `Some`.
+    /// when `fields.traefik.disable` is actually `Some`.
     #[test]
     fn no_traefik_field_leaves_ordinary_computation_untouched() {
         let mut fields = router_with_host("syncthing.internal.techdebtor.io");
@@ -1223,15 +1223,15 @@ mod tests {
     #[test]
     fn four_routers_produce_the_issue_s_own_label_set() {
         let mut api = router(Some("api"), Some("vikunja.techdebtor.io"));
-        api.entrypoint = refs(&["web-secure"]);
+        api.entrypoints = refs(&["web-secure"]);
         api.path_prefix = prefixes(&["/api/v1", "/dav/", "/.well-known/"]);
         let mut api_local = router(Some("api-local"), Some("vikunja.techdebtor.local"));
-        api_local.entrypoint = refs(&["local"]);
+        api_local.entrypoints = refs(&["local"]);
         api_local.path_prefix = prefixes(&["/api/v1", "/dav/", "/.well-known/"]);
         let mut frontend = router(Some("frontend"), Some("vikunja.techdebtor.io"));
-        frontend.entrypoint = refs(&["web-secure"]);
+        frontend.entrypoints = refs(&["web-secure"]);
         let mut frontend_local = router(Some("frontend-local"), Some("vikunja.techdebtor.local"));
-        frontend_local.entrypoint = refs(&["local"]);
+        frontend_local.entrypoints = refs(&["local"]);
 
         let mut fields = with_routers(vec![api, api_local, frontend, frontend_local]);
         fields.expose = Some(expose_port(3456));
@@ -1292,7 +1292,7 @@ mod tests {
     #[test]
     fn several_routers_emit_in_source_order() {
         let mut first = router(Some("one"), Some("one.example.com"));
-        first.entrypoint = refs(&["web-secure"]);
+        first.entrypoints = refs(&["web-secure"]);
         let second = router(Some("two"), Some("two.example.com"));
         let mut fields = with_routers(vec![first, second]);
         fields.expose = Some(expose_port(80));
@@ -1409,9 +1409,9 @@ mod tests {
     /// An entry point with no host is caught by the same rule: the block
     /// still has no `host`, whatever else it sets.
     #[test]
-    fn router_entrypoint_without_a_host_is_rejected() {
+    fn router_entrypoints_without_a_host_is_rejected() {
         let mut r = router(Some("api"), None);
-        r.entrypoint = refs(&["web-secure"]);
+        r.entrypoints = refs(&["web-secure"]);
         let fields = with_routers(vec![r]);
         let err = compute("app", &fields, None, &bindings()).unwrap_err();
         assert!(
@@ -1547,16 +1547,16 @@ mod tests {
     /// And each entry point, comma included, since codegen owns the
     /// comma that joins them.
     #[test]
-    fn comma_in_a_router_entrypoint_is_rejected() {
+    fn comma_in_a_router_entrypoints_entry_is_rejected() {
         let mut r = router(Some("api"), Some("a.example.com"));
-        r.entrypoint = refs(&["web,web-secure"]);
+        r.entrypoints = refs(&["web,web-secure"]);
         let fields = with_routers(vec![r]);
         let err = compute("app", &fields, None, &bindings()).unwrap_err();
         assert!(
             matches!(
                 err,
                 CodegenError::UnsafeLabelValue {
-                    field: "router.entrypoint",
+                    field: "router.entrypoints",
                     character: ',',
                     ..
                 }
@@ -1658,7 +1658,7 @@ mod tests {
         );
     }
 
-    /// `traefik { disabled }` covers `router` blocks too: a whole router
+    /// `traefik { disable }` covers `router` blocks too: a whole router
     /// declared on a service that just said it wants none is a
     /// contradiction, port or no port.
     #[test]
@@ -1695,7 +1695,7 @@ mod tests {
     #[test]
     fn sugared_expose_as_router_emits_exactly_what_expose_host_always_did() {
         let mut r = router(None, Some("{{name}}.internal.techdebtor.io"));
-        r.entrypoint = refs(&["web-secure"]);
+        r.entrypoints = refs(&["web-secure"]);
         r.middleware = refs(&["local-ipwhitelist", "forwardAuth-authentik"]);
         let fields = ServiceFields {
             routers: vec![r],
@@ -1770,7 +1770,7 @@ mod tests {
     }
 
     /// A router that names none emits no `middlewares=` label at all,
-    /// exactly as an empty `entrypoint` emits no `entrypoints=` — and
+    /// exactly as an empty `entrypoints` emits no `entrypoints=` — and
     /// nothing on a *sibling* router leaks onto it.
     #[test]
     fn a_router_naming_no_middleware_emits_no_label() {
@@ -1971,7 +1971,7 @@ mod tests {
         let mut r = router(Some("sftp"), Some("*"));
         r.protocol = Some(lit("tcp"));
         r.port = Some(num(1111));
-        r.entrypoint = refs(&["sftp"]);
+        r.entrypoints = refs(&["sftp"]);
         r.middleware = refs(&["inflightconn"]);
         let fields = with_routers(vec![r]);
         let labels = compute("app", &fields, None, &bindings()).unwrap();

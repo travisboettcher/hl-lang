@@ -25,7 +25,7 @@ service adventure_log_server {
   router {
     host: "travel.internal.techdebtor.io"
     path_prefix: ["/media", "/admin", "/static", "/accounts"]
-    entrypoint: web-secure
+    entrypoints: web-secure
   }
 }
 
@@ -37,7 +37,7 @@ service adventure_log_web {
     rule: Host("travel.internal.techdebtor.io")
        && !(PathPrefix("/media") || PathPrefix("/admin")
          || PathPrefix("/static") || PathPrefix("/accounts"))
-    entrypoint: web-secure
+    entrypoints: web-secure
   }
 }
 
@@ -52,12 +52,12 @@ service gitea {
 
   router public {
     rule: Host("git.techdebtor.io") && (Method("GET") || Method("HEAD"))
-    entrypoint: web-secure
+    entrypoints: web-secure
   }
 
   router internal {
     rule: Host("git.internal.techdebtor.io") || ClientIP("10.0.0.0/8")
-    entrypoint: web-secure
+    entrypoints: web-secure
   }
 }
 

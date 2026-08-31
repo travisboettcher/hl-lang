@@ -41,7 +41,7 @@ pub struct UseDecl {
 /// IDENT )?`, no `$param`) — purely because neither could represent the
 /// other's extra bit. That split meant a `Reference`-typed position
 /// (`networks`, `dns`, `env_file`, `expose.entrypoint`,
-/// `router.entrypoint`, `router.middleware`, a `depends_on` entry, a
+/// `router.entrypoints`, `router.middleware`, a `depends_on` entry, a
 /// named-volume mount's
 /// host side) could never accept a `$param`: `template web(net)
 /// { networks [$net] }` was a parse error with no way to fix it short of
@@ -444,7 +444,7 @@ pub struct Router {
     /// there, since the host is the whole of what creates a router.
     pub host: Option<Literal>,
     /// The Traefik entry points this router attaches to (e.g.
-    /// `entrypoint web, web-secure`). A list rather than a scalar because
+    /// `entrypoints web, web-secure`). A list rather than a scalar because
     /// Traefik's own `entrypoints=` label is itself comma-separated:
     /// modelling that as a list keeps the comma codegen's to write rather
     /// than the user's, so no label value ever has to tolerate one.
@@ -455,12 +455,12 @@ pub struct Router {
     /// this is a plain `Vec` and not an `Option<Vec<_>>`: "unset" and
     /// "set to nothing" have to mean the same thing here, exactly as
     /// they do for [`Self::middleware`] beside it.
-    pub entrypoint: Vec<Literal>,
+    pub entrypoints: Vec<Literal>,
     /// Path prefixes to `&&` onto the `Host()` rule, `||`-joined inside
     /// one parenthesized group: `path_prefix: ["/api/v1", "/dav/"]`
     /// yields ``Host(`h`) && (PathPrefix(`/api/v1`) ||
     /// PathPrefix(`/dav/`))``. `Vec<Literal>`, the same type
-    /// `entrypoint` above carries since #196 unified the two — a prefix
+    /// `entrypoints` above carries since #196 unified the two — a prefix
     /// is free text a template legitimately parameterizes with `$param`,
     /// which is exactly what that unification made reachable here too
     /// (previously it wasn't, since the pre-#196 `FieldKind::LiteralList`
@@ -470,7 +470,7 @@ pub struct Router {
     ///
     /// Order is observable — it's the order the `||` alternatives are
     /// written in — so this concatenates on merge without the
-    /// distinct-name dedupe `entrypoint` and `middleware` get, the same
+    /// distinct-name dedupe `entrypoints` and `middleware` get, the same
     /// split `dns`/`env_file` already draw against `networks`.
     pub path_prefix: Vec<Literal>,
     /// The Traefik middleware this router attaches (#221) — the whole
@@ -491,7 +491,7 @@ pub struct Router {
     /// a silently ignored line — see [`crate::schema::moved_field`].
     ///
     /// Empty means this router attaches no middleware, the same way an
-    /// empty [`Self::entrypoint`] means it names no entry point: a plain
+    /// empty [`Self::entrypoints`] means it names no entry point: a plain
     /// `Vec`, with "unset" and "set to nothing" deliberately identical.
     pub middleware: Vec<Literal>,
     /// Traefik's own router `priority=` (#225). Higher wins, and it's
@@ -686,15 +686,15 @@ pub struct Restart {
 /// A parsed `traefik` field (#159) — the one way to opt a service out of
 /// every Traefik label `hl-codegen`'s `labels.rs` otherwise computes for
 /// it. See [`crate::schema::TRAEFIK`]'s doc for why this is a `Nested`
-/// struct field rather than the bare `traefik disabled` spelling the
+/// struct field rather than the bare `traefik disable` spelling the
 /// motivating issue first floated.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Traefik {
-    /// `Some(span)` of the bare `disabled` flag if it was set; `None`
+    /// `Some(span)` of the bare `disable` flag if it was set; `None`
     /// otherwise — bare-presence only, modeled directly on
-    /// [`Network::external`] (see that doc). There is no `disabled:
+    /// [`Network::external`] (see that doc). There is no `disable:
     /// false` form this milestone.
-    pub disabled: Option<Span>,
+    pub disable: Option<Span>,
     pub span: Span,
 }
 
@@ -1052,7 +1052,7 @@ pub struct ServiceFields {
     /// just one sub-field of a template-supplied router of the same
     /// name. See `compose.rs`'s `merge_routers`.
     pub routers: Vec<Router>,
-    /// `traefik { disabled }` (#159). See [`Traefik`]'s doc. Codegen's
+    /// `traefik { disable }` (#159). See [`Traefik`]'s doc. Codegen's
     /// `labels.rs` is the sole reader — a service that leaves this unset
     /// gets exactly today's computed label list, byte for byte.
     pub traefik: Option<Traefik>,

@@ -30,23 +30,23 @@ service vikunja {
 
   router api {
     host: "vikunja.techdebtor.io"
-    entrypoint: web-secure
+    entrypoints: web-secure
     path_prefix: ["/api/v1", "/dav/", "/.well-known/"]
   }
 
   router api-local {
     host: "vikunja.techdebtor.local"
-    entrypoint: local
+    entrypoints: local
     path_prefix: ["/api/v1", "/dav/", "/.well-known/"]
   }
 
   router frontend {
     host: "vikunja.techdebtor.io"
-    entrypoint: web-secure
+    entrypoints: web-secure
   }
 
   router frontend-local {
     host: "vikunja.techdebtor.local"
-    entrypoint: local
+    entrypoints: local
   }
 }

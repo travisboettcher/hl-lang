@@ -17,7 +17,7 @@ template internal_web(port) {
   expose $port
   router {
     host: "{{name}}.internal.techdebtor.io"
-    entrypoint: web-secure
+    entrypoints: web-secure
     middleware: local-ipwhitelist
   }
 }
