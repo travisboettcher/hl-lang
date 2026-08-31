@@ -19,6 +19,12 @@ on:
   pull_request:
     types: [opened, labeled, unlabeled, synchronize, reopened]
     branches: [main]
+  # Same reason as linked-issue.yml: a required check that never reports
+  # on `merge_group` strands every queued PR. The label was already
+  # verified before the PR could enter the queue, and labels can't change
+  # while it sits there, so the queue run has nothing to re-check and
+  # skips its steps.
+  merge_group:
 
 permissions:
   contents: read
@@ -65,17 +71,27 @@ jobs:
     # change what follows the prefix (`.../actions-<hash>` rather than
     # `.../actions/checkout-7`). `user.login` is set by GitHub and can't
     # be spoofed by a contributor branch named to look the same way.
-    if: |
-      !(github.event.pull_request.user.login == (vars.RELEASE_BOT_LOGIN || github.repository_owner) &&
-        contains(github.event.pull_request.title, '[release-bump]')) &&
-      !(github.event.pull_request.user.login == 'dependabot[bot]' &&
-        startsWith(github.head_ref, 'dependabot/github_actions/'))
+    #
+    # `merge_group` is matched explicitly rather than left to fall
+    # through the clauses below, every one of which reads a field off
+    # `github.event.pull_request` — null on that event. See
+    # linked-issue.yml's note: the fall-through reaches the same answer
+    # by accident, and these exemptions describe pull requests, not
+    # queue entries.
+    if: >-
+      github.event_name == 'merge_group' ||
+      (!(github.event.pull_request.user.login == (vars.RELEASE_BOT_LOGIN || github.repository_owner) &&
+         contains(github.event.pull_request.title, '[release-bump]')) &&
+       !(github.event.pull_request.user.login == 'dependabot[bot]' &&
+         startsWith(github.head_ref, 'dependabot/github_actions/')))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
+        if: github.event_name == 'pull_request'
 
       - name: Check labels
+        if: github.event_name == 'pull_request'
         env:
           LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
         run: |

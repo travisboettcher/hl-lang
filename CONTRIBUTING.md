@@ -202,6 +202,49 @@ fuzz targets in `fuzz/` need a new corpus seed or cover the change
 already—see the README's "Building & testing" section for how to run
 them locally.
 
+## How changes merge
+
+`main` uses a merge queue. Choosing "Merge when ready" adds your pull
+request to a queue instead of merging it. GitHub builds each entry on
+top of `main`'s current tip *plus every entry ahead of it*, runs CI
+against that combination, and merges only if it passes. On a failure it
+drops that entry and hands the pull request back to you, leaving `main`
+untouched.
+
+The queue exists because a green pull request isn't evidence that `main`
+stays green. A `pull_request` run tests your branch against the base as
+it stood when that run started, so two people can write incompatible
+changes in parallel, each one passes, and the second merge breaks
+`main`. That isn't hypothetical: it's how v0.33.0 came out of a red
+commit, which issue #244 records. One change added a test fixture naming
+a field that another change was renaming at the same time. Both were
+correct, both were green, and nothing ran the combination until it had
+already landed. The queue runs the combination first.
+
+What this changes day to day:
+
+- **Usually nothing.** Push, get review, choose "Merge when ready."
+- **Staying current no longer needs a `git rebase`.** The queue builds
+  against the real tip however stale your branch is. Use `git rebase`
+  when you want your own branch's CI to mean something, or to settle a
+  genuine conflict—not as merge ceremony.
+- **An eviction from the queue is a real failure, not a flake.** Your
+  change and something ahead of it disagree. Read the run, fix the
+  conflict, and queue it again. Adding it back unchanged fails the same
+  way.
+- **GitHub batches entries**, so several changes share one CI run and
+  spread the cost instead of paying it per merge. When a batch fails,
+  GitHub bisects it to find the entry at fault.
+
+Two required checks—`require a linked issue` and `require exactly one
+semver-* label`—describe a pull request, and a queue entry isn't one.
+Both workflows subscribe to `merge_group` and report success with their
+steps skipped, because both already ran before the pull request could
+enter the queue, and neither can change while it waits there. A required
+check that never reports on `merge_group` strands every queued pull
+request until it times out, so this is load-bearing rather than
+tidiness: give any new required check a `merge_group` arm.
+
 ## Scope
 
 Keep PRs focused on one issue's worth of change. Unrelated formatting or

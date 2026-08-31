@@ -4,6 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The merge queue builds each candidate on top of `main`'s real tip
+  # plus every entry ahead of it, which is the state the merge actually
+  # produces — and the state a plain `pull_request` run never sees. A
+  # PR's run reflects the base as it was when the run started, so two
+  # PRs developed in parallel can each be green against a `main` that
+  # lacks the other's change and still break it on the second merge.
+  # That is exactly how v0.33.0 shipped red (#244): #234 added a
+  # `check.trycmd` fixture spelling a field #235 was concurrently
+  # renaming. Neither PR was wrong; nothing ran the combination until
+  # it was already on `main`.
+  merge_group:
 
 # Read-only by default: nothing in this workflow writes to the
 # repository, and an explicit block means a change to the org/repo
@@ -15,6 +26,14 @@ permissions:
 # run makes its result irrelevant. Runs on `main` are deliberately *not*
 # cancelled: main's CI history is the record of which commits were
 # actually green, and a cancelled run leaves a hole in it.
+#
+# Merge-queue runs are not cancelled either, and need no separate case
+# here: `github.ref` for a `merge_group` event is that entry's own
+# `refs/heads/gh-readonly-queue/main/pr-N-<sha>`, unique per candidate,
+# so no two queue runs ever share a group. Cancelling one would be
+# actively wrong — the queue is waiting on that result to decide
+# whether the candidate merges, and a cancelled run reads as a failure
+# that evicts the PR.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

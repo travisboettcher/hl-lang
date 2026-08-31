@@ -14,6 +14,14 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
     branches: [main]
+  # A required check must report on every event the merge queue builds,
+  # or a queued PR waits forever for a check that no run will ever
+  # produce and is eventually evicted. This job has nothing left to
+  # verify at that point — a PR only reaches the queue after passing it
+  # — so on `merge_group` it runs with its one step skipped and reports
+  # success. The condition below is what lets it start at all; the step
+  # is what it would otherwise do.
+  merge_group:
 
 permissions:
   pull-requests: read
@@ -41,14 +49,25 @@ jobs:
     # `github-actions` is about whether a release should be cut, which has
     # no bearing on whether an issue exists to close. `user.login` is set
     # by GitHub, so a contributor can't spoof it with a lookalike branch.
-    if: |
-      !(github.event.pull_request.user.login == (vars.RELEASE_BOT_LOGIN || github.repository_owner) &&
-        contains(github.event.pull_request.title, '[release-bump]')) &&
-      github.event.pull_request.user.login != 'dependabot[bot]'
+    #
+    # The `merge_group` arm is first and deliberate rather than incidental.
+    # `github.event.pull_request` is null on that event, so every clause
+    # below it would compare against null and the job would happen to run
+    # anyway — the right outcome reached by accident, and silently
+    # dependent on how GitHub coerces null in an expression. Saying it
+    # outright means the queue's required check can't be broken by a
+    # future edit to the exemptions, which are about *pull requests* and
+    # have no meaning for a queue entry.
+    if: >-
+      github.event_name == 'merge_group' ||
+      (!(github.event.pull_request.user.login == (vars.RELEASE_BOT_LOGIN || github.repository_owner) &&
+         contains(github.event.pull_request.title, '[release-bump]')) &&
+       github.event.pull_request.user.login != 'dependabot[bot]')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Check for a closing issue reference
+        if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWNER: ${{ github.repository_owner }}
