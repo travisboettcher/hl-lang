@@ -3,6 +3,6 @@ service web {
   expose 80
   router {
     host: "web.example.com"
-    entrypoint: web-secure
+    entrypoints: web-secure
   }
 }
