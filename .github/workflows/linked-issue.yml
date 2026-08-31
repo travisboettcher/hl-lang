@@ -6,9 +6,22 @@ name: Linked issue
 # "Development" panel links via GraphQL closingIssuesReferences — which is
 # exactly what a `Closes #123`/`Fixes #123`/`Resolves #123` keyword in the
 # PR body (or a manual sidebar link) populates — rather than regexing the
-# body text ourselves. Mark this job as a required status check in the
-# repo's branch protection settings for main, alongside ci.yml's test job
-# and semver-label.yml's check-semver-label job.
+# body text as the primary signal. Mark this job as a required status
+# check in the repo's branch protection settings for main, alongside
+# ci.yml's test job and semver-label.yml's check-semver-label job.
+#
+# That GraphQL list is empty for one whole class of PR, though (#210):
+# GitHub only creates a closing reference when the PR targets the
+# repository's default branch, so a PR opened against a stacked base
+# never gets one, and retargeting it to main afterwards doesn't create
+# one retroactively. The check then stays red until someone edits the
+# body to make GitHub re-parse the keyword, with nothing on the PR to
+# say why — the body reads `Closes #123` and looks correct. The step
+# below falls back to scanning the body for the same keywords GitHub
+# itself parses, and then confirms through the API that each number is a
+# real issue in this repository. The fallback removes that false
+# negative; it doesn't relax the gate, since a body naming an issue that
+# doesn't exist still fails.
 
 on:
   pull_request:
@@ -54,6 +67,7 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           set -euo pipefail
           count=$(gh api graphql -f query='
@@ -67,8 +81,38 @@ jobs:
               }
             }' -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUMBER" \
             --jq '.data.repository.pullRequest.closingIssuesReferences.totalCount')
-          if [ "$count" -eq 0 ]; then
-            echo "::error::This PR isn't linked to an issue. Add \`Closes #<issue>\` (or Fixes/Resolves) to the PR description, or link one via the Development panel."
-            exit 1
+          if [ "$count" -gt 0 ]; then
+            echo "OK: linked to $count issue(s)"
+            exit 0
           fi
-          echo "OK: linked to $count issue(s)"
+
+          # Fallback for the retargeted-stacked-PR case described in this
+          # file's header comment (#210). The body reaches the script
+          # through the environment rather than through workflow
+          # expression interpolation, so a PR title or body can't inject
+          # shell. Don't spell that interpolation out literally here:
+          # GitHub parses `run:` blocks for expressions even inside shell
+          # comments, so an empty one makes the whole file invalid and
+          # the job silently never runs.
+          # `grep` exits 1 on no match, which `|| true` absorbs under
+          # `pipefail` and leaves `numbers` empty.
+          numbers=$(printf '%s\n' "${PR_BODY:-}" |
+            grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[[:space:]]*:?[[:space:]]*#[0-9]+' |
+            grep -oE '[0-9]+$' | sort -un || true)
+
+          for n in $numbers; do
+            # A number in the body proves only that someone typed one, so
+            # ask the API what it is. `repos/.../issues/N` answers for
+            # pull requests too, and a pull request is not a linked
+            # issue; `.pull_request` is what tells the two apart.
+            kind=$(gh api "repos/$OWNER/$REPO/issues/$n" \
+              --jq 'if .pull_request then "pull-request" else "issue" end' 2>/dev/null || true)
+            if [ "$kind" = "issue" ]; then
+              echo "OK: no closing reference, but the PR body closes issue #$n."
+              echo "::notice::GitHub records a closing reference only for a PR targeting the default branch, so this PR has none. It closes issue #$n by keyword. Edit the PR body once to re-establish the link GitHub itself tracks."
+              exit 0
+            fi
+          done
+
+          echo "::error::This PR isn't linked to an issue. Add \`Closes #<issue>\` (or Fixes/Resolves) to the PR description, or link one via the Development panel. If the body already says so and this PR was retargeted from a stacked base, edit the body once so GitHub re-parses the keyword — see CONTRIBUTING.md, \"Stacked pull requests\"."
+          exit 1

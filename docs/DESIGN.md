@@ -1474,13 +1474,30 @@ readability choice, not a different construct.
    itself. On top of that, a program with two or more `service`
    declarations—already one Compose stack, one output document—
    implicitly attaches every service to `default` in addition to
-   whatever it names explicitly, exactly the behavior Compose itself
-   gives a project with no `networks:` key on any service. A
+   whatever it names explicitly. That attachment is unconditional: a
+   service that already carries its own `networks` list gets `default`
+   added to it, rather than the list suppressing the attachment. A
    single-service program gets no such attachment, since Compose's own
    default there is already implicit for free. An explicit `network
    default { ... }` declaration still wins over both of those: its
    `external`/`name` settings apply as they would to any other network,
    and it still emits its own `networks:` entry.
+
+   That unconditional attachment is deliberately *not* Compose's own
+   rule, and per #182 the difference is worth stating rather than
+   glossing over. Compose hands a service the default network only when
+   the service declares no `networks:` key at all. A service naming even
+   one network joins that network and no other. `hll` attaches `default`
+   either way, because of what `default` is for here: in a file holding
+   a whole stack, it already supplies the connectivity between those
+   services that a hand-declared private network would supply, for free,
+   with nothing to declare. A file converted from hand-written Compose can
+   therefore *drop* such a network instead of reproducing it, which
+   makes the converted file simpler than its original rather than a
+   workaround for one. The divergence isn't a fidelity gap to close: the
+   generated document means exactly what Compose reads it to mean, and
+   an unwanted `default` entry costs a service nothing beyond a line of
+   YAML.
 6. **Command-line tool** (`crates/hl-cli`, binary name `hllc`)—four
    subcommands, one per pipeline depth, each taking one positional path.
    `hllc tokens <file.hll>` lexes and prints tokens. `hllc parse

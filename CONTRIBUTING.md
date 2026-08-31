@@ -13,6 +13,44 @@
    "Releasing" in the README). See "Picking a semver label" below. A
    maintainer can help pick if it's unclear.
 
+### Stacked pull requests
+
+Point 2 is the normal case. A change that depends on another one that
+hasn't merged yet has to branch off the branch that change lives on
+instead, and two things behave differently for the PR that results. Each costs one edit
+or one command to deal with, but neither says anything about itself, so
+read this before stacking rather than after.
+
+**Edit the PR body once after a retarget.** GitHub creates the closing
+reference behind the "Development" panel—the link the `linked-issue`
+check reads—only for a PR that targets the repository's default branch.
+A PR opened against a stacked base never gets one, and GitHub
+retargeting it to `main` once the base merges doesn't create one
+retroactively, even though the body still says `Closes #123`. The check
+falls back to reading that keyword out of the body per #210, so it
+passes either way, but GitHub closes the issue on merge only from the
+real link. Any edit to the body makes GitHub re-parse the keyword and
+establish it.
+
+**Rebase onto `main` once the base merges.** Merges here are squashes,
+so the commits on the base branch never become ancestors of `main`:
+`main` gains a single new commit holding that content under a different
+identity. The stacked child still carries the originals, replays them
+on top of the squashed commit, and shows its base's whole diff a second
+time as though it were its own. Rebase it onto what actually landed:
+
+```sh
+git fetch origin
+git switch <your-branch>
+git rebase --onto origin/main <old-base>
+git push --force-with-lease
+```
+
+`<old-base>` names the branch this one grew out of—the local ref, or
+the commit it pointed at, since GitHub deletes the remote branch on
+merge. Everything after it in the child's history replays onto
+`origin/main`, and the diff shrinks back to the change under review.
+
 ## Picking a semver label
 
 The label describes compatibility for **users of `hllc`**, not for
