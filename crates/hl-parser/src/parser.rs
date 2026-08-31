@@ -1258,7 +1258,9 @@ impl<'src> Parser<'src> {
                     .entry(field.name)
                     .or_insert_with(|| FieldValue::Raw(RawMap::default()))
                 {
-                    FieldValue::Raw(existing) => existing.entries.extend(raw_map.entries),
+                    FieldValue::Raw(existing) => {
+                        merge_raw_entries(&mut existing.entries, raw_map.entries)?;
+                    }
                     _ => unreachable!("field kind is stable for a given field name"),
                 }
                 Ok(())
@@ -1522,11 +1524,22 @@ impl<'src> Parser<'src> {
             }
             TokenKind::LBrace => {
                 let open = self.expect(TokenKind::LBrace)?;
-                let mut entries = Vec::new();
+                let mut entries: Vec<(Literal, RawValue)> = Vec::new();
                 while self.peek().kind != TokenKind::RBrace {
                     let key = self.parse_key()?;
                     self.expect(TokenKind::Colon)?;
                     let value = self.parse_raw_value(depth + 1)?;
+                    // This mapping's own keys only — never the enclosing
+                    // one's, and never a mapping nested inside `value`,
+                    // which checked itself on the way out of its own
+                    // recursive call. That is what keeps `raw { a: { x: 1
+                    // }, b: { x: 2 } }` legal while rejecting a single
+                    // mapping that names `x` twice (#206).
+                    reject_duplicate_raw_key(
+                        entries.iter().map(|(held, _)| (held.text(), held.span())),
+                        key.text(),
+                        key.span(),
+                    )?;
                     entries.push((key, value));
                     if self.peek().kind == TokenKind::Comma {
                         self.bump();
@@ -1765,6 +1778,79 @@ fn merge_map_entries<K>(
             });
         }
         bucket.push((key, value, span));
+    }
+    Ok(())
+}
+
+/// [`merge_map_entries`]'s own twin for `raw` — the one map-kind field
+/// whose values are [`RawValue`] trees rather than [`Literal`]s, so it
+/// can't ride that function's `(K, Literal, Span)` shape.
+///
+/// Before #206 this path simply concatenated, which made `raw` the last
+/// map field where a key repeated inside one body silently lost a value:
+/// `raw { user: "1000", user: "2000" }` emitted `user: '2000'` and said
+/// nothing, while the same shape on `env` named both spans. The check
+/// here is deliberately the same one [`merge_map_entries`] applies —
+/// same [`ParseError::DuplicateMapKey`], same schema-declared uniqueness
+/// side, first occurrence keeps the blame span — so the two diagnostics
+/// read alike.
+///
+/// `bucket` is everything the enclosing body has accumulated for this
+/// field so far, which is what makes two `raw { }` blocks in one
+/// `service`/`template` collide exactly as two `env` statements already
+/// do. It stops there: a *nested* map inside a `raw` value is its own
+/// mapping, checked on its own by [`reject_duplicate_raw_key`]'s other
+/// caller.
+fn merge_raw_entries(
+    bucket: &mut Vec<RawEntry>,
+    new_entries: Vec<RawEntry>,
+) -> Result<(), ParseError> {
+    for entry in new_entries {
+        reject_duplicate_raw_key(
+            bucket.iter().map(|held| (held.key.text(), held.span)),
+            entry.key.text(),
+            entry.span,
+        )?;
+        bucket.push(entry);
+    }
+    Ok(())
+}
+
+/// Rejects `key` when one of `held` — the keys of the *same* mapping,
+/// each with the span to blame for its first occurrence — already claims
+/// it.
+///
+/// Scoping the check to one mapping is the whole of #206's "worth
+/// deciding first": `raw` is schema-free and its values recurse, so
+/// "duplicate key" has to mean what YAML means by it, which is a
+/// property of a single mapping and of nothing outside it. `raw { a: {
+/// x: 1 }, b: { x: 2 } }` is two distinct mappings that each happen to
+/// hold an `x`, and stays legal; only a mapping that names `x` twice
+/// itself is an error.
+///
+/// The side and the type name come from [`schema::RAW`] rather than
+/// being written out here, so this diagnostic and the cross-tier one
+/// [`merge_map_entries`] raises can't drift apart. Only the key side is
+/// meaningful for `raw` in any case — its values are trees, not
+/// literals, so there's nothing on the value side to compare.
+fn reject_duplicate_raw_key<'a>(
+    held: impl IntoIterator<Item = (&'a str, Span)>,
+    key: &str,
+    span: Span,
+) -> Result<(), ParseError> {
+    let side = schema::RAW
+        .uniqueness
+        .expect("the raw schema must define a uniqueness side");
+    for (existing, first) in held {
+        if existing == key {
+            return Err(ParseError::DuplicateMapKey {
+                type_name: schema::RAW.type_name,
+                side,
+                value: key.to_string(),
+                first,
+                second: span,
+            });
+        }
     }
     Ok(())
 }

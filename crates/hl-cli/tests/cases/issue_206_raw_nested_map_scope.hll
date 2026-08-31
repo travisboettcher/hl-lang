@@ -1,0 +1,14 @@
+# #206: the duplicate-key check is scoped to a single mapping, the way
+# YAML itself scopes duplicate-key-ness. `raw` is schema-free and its
+# values recurse, so two sibling nested maps may each hold an `x`, and a
+# nested map may reuse a key its enclosing mapping already claims — three
+# distinct mappings, no duplicate in any of them. This must keep
+# compiling; only a mapping that names one key twice is an error.
+service s {
+  image "nginx"
+  raw {
+    x: "top"
+    a: { x: 1 }
+    b: { x: 2, nested: { x: 3 } }
+  }
+}

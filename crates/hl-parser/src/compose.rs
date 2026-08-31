@@ -2929,10 +2929,10 @@ static ARROW_MAP_FIELDS: &[ArrowMapField] = &[
 /// and why `dns`/`env_file` aren't among them. `raw` isn't one of them
 /// any more (#193) — it merges key-by-key through [`merge_map`] exactly
 /// like `env`, so two explicit templates setting the same `raw` key
-/// collide instead of the second one silently winning. Only the
-/// cross-tier merge changed: a `raw` key repeated *within* one body
-/// still isn't checked, since that's the parser's own
-/// `parse_raw_body`, a separate code path this function never touches.
+/// collide instead of the second one silently winning. A `raw` key
+/// repeated *within* one body is the parser's own business, in
+/// `merge_raw_entries` — a separate code path this function never
+/// touches, which #206 brought to the same rule.
 fn merge_tier(
     acc: &mut MergeAcc,
     mut incoming: ServiceFields,

@@ -1397,11 +1397,41 @@ compile error, not a silent override. That's new as of #193—before it,
 `raw` was the one field the merge concatenated outright at every tier,
 with no uniqueness check at all, so two templates both writing `raw {
 user: "..." }` compiled with whichever template's `with` position came
-last quietly winning. A key repeated *within one body*—one `raw { }`
-block, or two—still isn't checked, matching `raw`'s own schema-free
-design: `hllc` extends the accumulated entries rather than rejecting the
-repeat, and the generated document keeps only the last value for that
-key, the same as any duplicate key inserted into a Rust map twice.
+last quietly winning.
+
+A key repeated *within one body* is a compile error too, as of #206—one
+`raw { }` block, or two in the same service, since two blocks accumulate
+into one map:
+
+```hll,ignore
+raw { user: "1000", user: "2000" }
+```
+
+```text
+3:23: duplicate `raw` entry: key "user" already set at 3:9
+```
+
+That's the same diagnostic a repeated `env` key raises, and it names both
+occurrences so you can see which value you were about to lose.
+
+### What counts as a duplicate
+
+A duplicate key is a key repeated inside **one** mapping, which is what
+it means in YAML too. `raw` values nest, so a `raw` body is a tree of
+mappings rather than one flat list of keys, and `hllc` checks each
+mapping on its own:
+
+```hll,fragment
+raw {
+  logging: { driver: "json-file" }
+  "x-backup": { driver: "restic" }
+}
+```
+
+Both nested maps hold a `driver`, and that's fine—they're two separate
+mappings, so neither one repeats anything. A nested map may likewise
+reuse a key its enclosing mapping already uses. Only writing one key
+twice in the same `{ }` is an error.
 
 ### `raw` wins over a built-in field of the same name
 

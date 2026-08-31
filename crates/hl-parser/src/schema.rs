@@ -606,11 +606,15 @@ pub static ENV: TypeSchema = TypeSchema {
 /// checking. `uniqueness` is `Some(MapSide::Key)`, the same convention
 /// `env` uses, since #193: a `with`-merge collision on a repeated `raw`
 /// key now raises the same `MapKeyCollision` a repeated `env` key does,
-/// rather than silently keeping whichever tier merged last. This field's
-/// value is read only by `hl_parser::compose`'s cross-tier merge — the
-/// parser's own `schema_free` body-parsing path (`parse_raw_body`) never
-/// reads it, so a `raw` key repeated within *one* body still isn't
-/// checked, unchanged from before #193.
+/// rather than silently keeping whichever tier merged last.
+///
+/// Both tiers read this field as of #206. The cross-tier merge in
+/// `hl_parser::compose` was the first; the parser's own `schema_free`
+/// body-parsing path is the second, so a `raw` key repeated within *one*
+/// body is a `DuplicateMapKey` too, exactly as a repeated `env` key
+/// already was. Only the key side is ever meaningful here — `raw`'s
+/// values are `RawValue` trees rather than literals, so there is nothing
+/// on the value side to compare.
 pub static RAW: TypeSchema = TypeSchema {
     type_name: "raw",
     kind: SchemaKind::Map,

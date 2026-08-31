@@ -1,0 +1,9 @@
+# #206: a `raw` key repeated inside one body is a compile error naming
+# both spans, the same `DuplicateMapKey` a repeated `env` key already
+# raised. Before this fix `hllc` accepted this file and emitted
+# `user: '2000'` with no diagnostic — #193 had made `raw` collide across
+# template tiers but left `parse_raw_body`, the intra-body path, alone.
+service s {
+  image "nginx"
+  raw { user: "1000", user: "2000" }
+}
