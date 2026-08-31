@@ -39,7 +39,7 @@ Every statement is one of two shapes:
 A "value" itself can be a string (`"jellyfin/jellyfin:latest"`), a number
 (`8096`), a bare word (`unless-stopped`), a list (`[a, b, c]`), or another
 nested statement—bodies nest arbitrarily, which is how `router { host:
-"...", entrypoint: web-secure }` and `with internal_web { port: 8080 }`
+"...", entrypoints: web-secure }` and `with internal_web { port: 8080 }`
 both work: the `{ ... }` after `internal_web` is itself a body, using
 the exact same grammar as a service's own top-level body.
 
@@ -77,17 +77,17 @@ field is which.
 ## Secondary-field shorthand
 
 A type with several fields—`router`, most often, since a router usually
-needs a `host` and sometimes an `entrypoint` or a `path_prefix` too—lets
+needs a `host` and sometimes `entrypoints` or a `path_prefix` too—lets
 you skip the full `{ }` body (each field on its own line—see [Layout
 rules](#layout-rules) below) and instead fuse further fields onto the
 primary position with a leading comma:
 
 ```hll,fragment
-router api, host: "media.example.com", entrypoint: web-secure
+router api, host: "media.example.com", entrypoints: web-secure
 # same as:
 # router api {
 #   host: "media.example.com"
-#   entrypoint: web-secure
+#   entrypoints: web-secure
 # }
 ```
 
@@ -100,14 +100,14 @@ unnamed `router { host }` (see [Built-in
 Fields](./built-in-fields.md#expose)), not a comma-continued field list.
 `as` fuses onto the primary value and stops there: nothing else can
 follow it, comma or no comma—`expose 8096 as "media.example.com",
-entrypoint: web-secure` is a **compile error**. A service that needs
+entrypoints: web-secure` is a **compile error**. A service that needs
 more than a bare host writes `router` out explicitly instead:
 
 ```hll,fragment
 expose 8096
 router {
   host: "media.example.com"
-  entrypoint: web-secure
+  entrypoints: web-secure
 }
 ```
 
@@ -248,7 +248,7 @@ backslash escapes the closing quote, which leaves the string unfinished.
 Write a trailing backslash as `\\`.
 
 A value that lands in a Traefik label—a [`router`](./built-in-fields.md#router)'s
-`host`, plus each `entrypoint` entry—rejects a newline or a tab, on top
+`host`, plus each `entrypoints` entry—rejects a newline or a tab, on top
 of the metacharacter set it already rejects. Neither one belongs in a
 hostname or an entry point name, and either one changes what the
 generated label means.

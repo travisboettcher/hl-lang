@@ -1,0 +1,4 @@
+service web {
+  image "nginx:alpine"
+  with hardened
+}

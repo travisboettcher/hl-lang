@@ -1,0 +1,13 @@
+# #232: the warning is conditioned on there being labels to lose, not on
+# the mere presence of a `raw { labels: [...] }` key. This service has no
+# `router`, no `expose`, and no `traefik` block, so it generates no
+# labels of its own and the raw list replaces nothing — no warning, and
+# the raw labels are emitted as written.
+service web {
+  image "test"
+  raw {
+    labels: [
+      "com.example.owner=platform"
+    ]
+  }
+}

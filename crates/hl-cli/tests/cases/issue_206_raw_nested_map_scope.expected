@@ -1,0 +1,11 @@
+--- compose ---
+services:
+  s:
+    image: nginx
+    x: top
+    a:
+      x: 1
+    b:
+      x: 2
+      nested:
+        x: 3

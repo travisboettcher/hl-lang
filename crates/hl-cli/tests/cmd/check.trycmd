@@ -1,0 +1,56 @@
+`check` runs the same pipeline `build` does — parse, link, compose,
+codegen — and then throws the document away. It is the CI gate: exit 0
+means every entry point it found compiles.
+
+A file that compiles prints nothing at all. There is no document to
+show and no path to report, and silence is what a gate that passed
+should look like, so the whole result is the exit code.
+
+```console
+$ hllc check web.hll
+
+```
+
+A file that does not compile prints exactly the diagnostic `build`
+would, on stderr, and exits non-zero. The two modes share one pipeline,
+so a message can't drift between the run that gates a change and the
+run that ships it.
+
+```console
+$ hllc check broken.hll
+? 1
+broken.hll:3:8: unknown template `hardened`
+
+```
+
+`check` accepts a directory in both shapes `build` does, since a gate
+wants the whole tree in one command. Flat mode needs no `--out` here:
+`build` requires one because it has however many files' worth of output
+to place, and `check` places none.
+
+```console
+$ hllc check services
+
+```
+
+Co-located mode is the same walk `build` makes, and matters more here:
+`build` with no `--out` writes each service directory's document *in
+place*, so `check` over the same tree has to leave every one of those
+directories untouched. `build_tests.rs` is what asserts that nothing
+appeared, since a directory comparison can only speak about files it
+names.
+
+```console
+$ hllc check homelab
+
+```
+
+A directory with no entry point in it says so, the way `build` does —
+a run that quietly does nothing is easy to mistake for one that
+passed — with the verb it was actually asked for rather than "built".
+
+```console
+$ hllc check library
+library: none of the .hll files here declare a service — nothing was checked
+
+```

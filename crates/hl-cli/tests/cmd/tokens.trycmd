@@ -1,0 +1,22 @@
+`tokens` prints one file's token stream, one token per line as
+`line:col kind lexeme`. It is a debugging aid for the lexer itself, and
+it is now something you have to ask for by name: it was `hllc`'s
+default mode until #129, which is why a seven-line file greeting a new
+user with twenty-one lines of token dump was the first thing #88
+listed.
+
+`errors.trycmd` pins what a lexer error looks like on this path. What
+this transcript holds is the successful shape — that a token carries a
+position, a kind, and the exact source text it came from.
+
+```console
+$ hllc tokens web.hll
+1:1 Ident "service"
+1:9 Ident "web"
+1:13 LBrace "{"
+2:3 Ident "image"
+2:9 Str "nginx:alpine"
+3:1 RBrace "}"
+4:1 Eof ""
+
+```

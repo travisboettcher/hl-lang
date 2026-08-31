@@ -9,7 +9,7 @@ The generated document is checked by `warnings.out/`, which is what
 holds the second half of this: warnings did not stop the build.
 
 ```console
-$ hllc --build web.hll --out docker-compose.yml
+$ hllc build web.hll --out docker-compose.yml
 lib.hll:1:10: warning: template `defaults` is declared in an imported file and is not applied — `defaults` is only looked up in the entry file; give it an ordinary name and apply it with `with`
 lib.hll:5:9: warning: service `db` is declared in an imported file and is not compiled — only the entry file's services are built
 web.hll:3:9: warning: network `unused` is declared but no service references it, so it is not emitted — add it to a service's `networks [...]` list, or remove the declaration

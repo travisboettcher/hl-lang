@@ -96,7 +96,7 @@ fn syncthing_fixture_composes_to_expected_service() {
         router.host.as_ref().unwrap().text(),
         "{{name}}.internal.techdebtor.io"
     );
-    let entrypoints: Vec<&str> = router.entrypoint.iter().map(|r| r.text()).collect();
+    let entrypoints: Vec<&str> = router.entrypoints.iter().map(|r| r.text()).collect();
     assert_eq!(entrypoints, vec!["web-secure"]);
     let restart = service.fields.restart.as_ref().expect("restart field set");
     assert_eq!(restart.policy.as_ref().unwrap().text(), "unless-stopped");

@@ -19,7 +19,7 @@ template internal_web(port) {
   expose $port
   router {
     host: "{{name}}.internal.example.com"
-    entrypoint: web-secure
+    entrypoints: web-secure
     middleware: local-ipwhitelist
   }
 }
@@ -94,7 +94,7 @@ template linuxserver_app(puid, pgid) {
 template linuxserver_web(puid, pgid, port) {
   with linuxserver_app { puid: $puid, pgid: $pgid }
   expose $port
-  router { entrypoint: web-secure }
+  router { entrypoints: web-secure }
 }
 ```
 
@@ -226,7 +226,7 @@ Different field kinds merge differently:
   `healthcheck` sub-field but `test` is a scalar and collides like
   `expose.port` does, and `test` collides the same way even though its
   value isn't a plain string or number—see below. A `router`'s `host`
-  is a scalar and collides, while its `entrypoint` is a list and
+  is a scalar and collides, while its `entrypoints` is a list and
   concatenates, so two explicit templates each naming one entry point
   produce a router attached to both—and two naming the *same* entry
   point produce a router attached to it once, per the preceding
@@ -260,10 +260,10 @@ Different field kinds merge differently:
   inside the other. Keyed, so a template's `router api` and a service's `router
   web` give the service two routers rather than one. Per sub-field, so a
   service body writing `router api { host: "..." }` over a template's
-  `router api { entrypoint: web-secure, path_prefix: [...] }` keeps the
+  `router api { entrypoints: web-secure, path_prefix: [...] }` keeps the
   entry point and the prefixes it didn't mention. Within one name,
   `host` is a scalar and collides between two explicit templates,
-  `entrypoint` and the router's own `middleware` concatenate by distinct
+  `entrypoints` and the router's own `middleware` concatenate by distinct
   name like the service-level `middleware`, and `path_prefix`
   concatenates keeping duplicates like `dns`, since the prefixes are
   alternatives whose order is observable in the emitted rule. A
@@ -283,7 +283,7 @@ can override just a router's `host` while still inheriting its
 service it-tools {
   with internal_web { port: 8080 }
   image "corentinth/it-tools:latest"
-  # overrides just the unnamed router's host—its entrypoint still comes
+  # overrides just the unnamed router's host—its entry points still come
   # from internal_web
   router { host: "tools.internal.example.com" }
 }
@@ -308,7 +308,7 @@ template internal_web(port) {
   expose $port
   router {
     host: "{{name}}.internal.example.com"
-    entrypoint: web-secure
+    entrypoints: web-secure
     middleware: local-ipwhitelist
   }
 }

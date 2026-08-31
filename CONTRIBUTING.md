@@ -62,8 +62,8 @@ three questions about your change:
 1. Does it break an existing `.hll` file—something that compiled
    before and now doesn't, or now compiles to something different?
 2. Does it break an existing `hllc` invocation—a removed or renamed
-   flag, a changed flag meaning, a changed exit code, output moved
-   between stdout and stderr?
+   subcommand or flag, a changed meaning for either, a changed exit
+   code, or output moved between stdout and stderr?
 3. Does it change the meaning of previously generated output—the
    emitted Compose YAML now describes different behavior when
    `docker compose up` runs it (different image, ports, volumes,

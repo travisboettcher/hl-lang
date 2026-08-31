@@ -1,0 +1,2 @@
+--- error ---
+issue_206_raw_duplicate_key.hll: 8:23: duplicate `raw` entry: key "user" already set at 8:9

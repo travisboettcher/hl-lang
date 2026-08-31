@@ -218,7 +218,7 @@ pub enum CodegenError {
     /// `span` points at the first `router` block, which is the one that
     /// needs either a sibling `expose <port>` or removing.
     RouterWithoutPort { service: String, span: Span },
-    /// A service sets `traefik { disabled }` (#159) and also declares a
+    /// A service sets `traefik { disable }` (#159) and also declares a
     /// `router` block — the one construct that flag exists to turn off.
     /// Plain `expose <port>` doesn't conflict — it's Compose's own
     /// `expose:` key, container-network visibility with no Traefik
@@ -239,7 +239,7 @@ pub enum CodegenError {
     /// the router-less case, just from the opposite direction.
     ///
     /// `span` points at the offending `router` block; `disabled_span`
-    /// points at the `disabled` flag it contradicts, so the rendered
+    /// points at the `disable` flag it contradicts, so the rendered
     /// message can name both lines.
     TraefikDisabledWithRouter {
         service: String,
@@ -438,10 +438,10 @@ impl CodegenError {
             CodegenError::UnsafeLabelValue {
                 field, character, ..
             } => {
-                // A comma in `router.entrypoint` gets an extra sentence.
+                // A comma in `router.entrypoints` gets an extra sentence.
                 // It's the one rejection here that used to be *accepted*
                 // — `entrypoint "web,websecure"` was how you attached a
-                // router to several entry points before `entrypoint`
+                // router to several entry points before `entrypoints`
                 // became a list — so it's the one a user is likely to
                 // hit by writing something that was correct yesterday,
                 // or by pasting a value straight out of Traefik's own
@@ -449,8 +449,8 @@ impl CodegenError {
                 // a one-line fix. Note this is a diagnostic affordance,
                 // not a semantic carve-out: the value is still rejected,
                 // exactly like every other metacharacter.
-                let hint = if *field == "router.entrypoint" && *character == ',' {
-                    " — `entrypoint` is a list, so write the entry points as separate items (`entrypoint web, websecure`) and let `hllc` join them"
+                let hint = if *field == "router.entrypoints" && *character == ',' {
+                    " — `entrypoints` is a list, so write the entry points as separate items (`entrypoints web, websecure`) and let `hllc` join them"
                 } else {
                     ""
                 };
@@ -523,7 +523,7 @@ impl CodegenError {
                 ..
             } => write!(
                 f,
-                "{at}: service `{service}` declares a `router`, but `traefik` is disabled (at {}), so there is nothing for it to route — drop the `router` or remove `disabled`",
+                "{at}: service `{service}` declares a `router`, but `traefik` is disabled (at {}), so there is nothing for it to route — drop the `router` or remove `disable`",
                 disabled_span.locate(files)
             ),
             CodegenError::UnsafeRouterName {
@@ -618,12 +618,17 @@ pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenErr
     // single-service program that exists today.
     let auto_attach_default = program.services.len() >= 2;
 
+    // Per-service warnings accumulate here so they come out in service
+    // order, ahead of the program-wide `UnusedNetwork` pass below.
+    let mut warnings: Vec<CodegenWarning> = Vec::new();
+
     for service in &program.services {
         let (service_doc, network_docs, volume_docs) = generate_service(
             service,
             &program.networks,
             &program.volumes,
             auto_attach_default,
+            &mut warnings,
         )?;
         for (net_name, net_doc) in network_docs {
             networks.entry(net_name).or_insert(net_doc);
@@ -653,15 +658,16 @@ pub fn generate(program: ComposedProgram) -> Result<GeneratedProgram, CodegenErr
     // forgotten to declare it (#80). Checked against the *references*
     // rather than against `networks` above so the diagnostic survives a
     // future change to how the docs are keyed.
-    let warnings = program
-        .networks
-        .iter()
-        .filter(|decl| !referenced_networks.contains(decl.name.name.as_str()))
-        .map(|decl| CodegenWarning::UnusedNetwork {
-            network: decl.name.name.clone(),
-            span: decl.name.span,
-        })
-        .collect();
+    warnings.extend(
+        program
+            .networks
+            .iter()
+            .filter(|decl| !referenced_networks.contains(decl.name.name.as_str()))
+            .map(|decl| CodegenWarning::UnusedNetwork {
+                network: decl.name.name.clone(),
+                span: decl.name.span,
+            }),
+    );
 
     let compose_doc = doc::ComposeDoc {
         services,
@@ -678,6 +684,7 @@ fn generate_service(
     declared_networks: &[Network],
     declared_volumes: &[Volume],
     auto_attach_default: bool,
+    warnings: &mut Vec<CodegenWarning>,
 ) -> Result<(doc::ComposeServiceDoc, NetworkDocs, VolumeDocs), CodegenError> {
     let name = &service.name.name;
     let fields = &service.fields;
@@ -784,9 +791,38 @@ fn generate_service(
     let privileged = fields.privileged.is_some();
 
     let mut raw_map = IndexMap::new();
+    let mut raw_labels_span = None;
     for entry in &fields.raw.entries {
         let key = interp::resolve(entry.key.text(), &bindings, entry.key.span())?;
+        if key == "labels" {
+            raw_labels_span = Some(entry.key.span());
+        }
         raw_map.insert(key, raw::to_yaml(&entry.value, &bindings)?);
+    }
+
+    // `raw` replacing a built-in field it names is the documented rule,
+    // and `apply_raw_overrides` below is what carries it out. `labels` is
+    // the one key where that rule surprises people, because it is not one
+    // field from the language's own perspective: it is what `router`,
+    // `expose`, `traefik`, and the resolved Docker network add up to. A
+    // service with both loses the whole computed set — correct, and until
+    // #232 completely silent. Warned rather than rejected: hand-writing
+    // the full list is exactly what `raw` is for when `router` can't yet
+    // say something, so what was missing is visibility, not a
+    // prohibition.
+    //
+    // Conditioned on the computed set being non-empty rather than on
+    // which fields the service declares, so the warning fires exactly
+    // when something is actually dropped — that covers `traefik {
+    // disable }`'s lone `traefik.enable=false` too, which no
+    // `router`/`expose` test would have caught.
+    if let Some(span) = raw_labels_span
+        && !labels.is_empty()
+    {
+        warnings.push(CodegenWarning::RawLabelsReplaceGenerated {
+            service: name.clone(),
+            span,
+        });
     }
 
     let mut service_doc = doc::ComposeServiceDoc {
@@ -1468,18 +1504,18 @@ mod error_display_tests {
         );
     }
 
-    /// A comma in `router.entrypoint` — and only that pairing — gets the
+    /// A comma in `router.entrypoints` — and only that pairing — gets the
     /// migration hint appended.
     #[test]
     fn comma_in_entrypoint_display_adds_a_list_hint() {
         let err = CodegenError::UnsafeLabelValue {
-            field: "router.entrypoint",
+            field: "router.entrypoints",
             character: ',',
             span: span(),
         };
         assert_eq!(
             err.to_string(),
-            "3:5: `router.entrypoint` must not contain ',' — it would change the meaning of the generated Traefik label — `entrypoint` is a list, so write the entry points as separate items (`entrypoint web, websecure`) and let `hllc` join them"
+            "3:5: `router.entrypoints` must not contain ',' — it would change the meaning of the generated Traefik label — `entrypoints` is a list, so write the entry points as separate items (`entrypoints web, websecure`) and let `hllc` join them"
         );
     }
 
@@ -1489,13 +1525,13 @@ mod error_display_tests {
     #[test]
     fn non_comma_in_entrypoint_display_has_no_list_hint() {
         let err = CodegenError::UnsafeLabelValue {
-            field: "router.entrypoint",
+            field: "router.entrypoints",
             character: '`',
             span: span(),
         };
         assert_eq!(
             err.to_string(),
-            "3:5: `router.entrypoint` must not contain '`' — it would change the meaning of the generated Traefik label"
+            "3:5: `router.entrypoints` must not contain '`' — it would change the meaning of the generated Traefik label"
         );
     }
 

@@ -46,7 +46,7 @@ service jellyfin {
 }
 ```
 
-`hllc --build` turns that into a ready-to-run `docker-compose.yml` with a
+`hllc build` turns that into a ready-to-run `docker-compose.yml` with a
 `jellyfin` service, its image, a bind mount, an environment variable, a
 restart policy, and Traefik labels routing `media.example.com` to port
 8096—all inferred from those five lines. The rest of this book walks

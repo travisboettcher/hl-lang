@@ -1,0 +1,26 @@
+--- compose ---
+services:
+  media:
+    image: jellyfin/jellyfin:latest
+    entrypoint:
+    - /bin/sh
+    - -c
+    - /usr/bin/jellyfin
+    networks:
+    - default
+    expose:
+    - 8096
+    labels:
+    - traefik.http.routers.media.rule=Host(`media.example.com`)
+    - traefik.http.routers.media.entrypoints=web,web-secure
+    - traefik.http.services.media.loadbalancer.server.port=8096
+  db:
+    image: postgres:15
+    healthcheck:
+      disable: true
+    networks:
+    - default
+    expose:
+    - 5432
+    labels:
+    - traefik.enable=false

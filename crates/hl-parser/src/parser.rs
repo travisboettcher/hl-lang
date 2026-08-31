@@ -121,7 +121,7 @@ enum FieldValue {
     /// An accumulating nested schema-free map-kind field (raw).
     Raw(RawMap),
     /// An accumulating reference-list field (middleware/networks/dns/
-    /// env_file/router.entrypoint/router.path_prefix).
+    /// env_file/router.entrypoints/router.path_prefix).
     /// See [`schema::FieldKind::ReferenceList`]'s doc for why one `Vec`
     /// of [`Literal`]s now covers every row, `path_prefix` included.
     RefList(Vec<Literal>),
@@ -342,7 +342,7 @@ impl<'src> Parser<'src> {
 
     /// `reference ::= ( key ( "." IDENT )? ) | "$" IDENT` — every
     /// reference-shaped position's own value grammar (#196):
-    /// `middleware`/`networks`/`dns`/`env_file`/`router.entrypoint`/
+    /// `middleware`/`networks`/`dns`/`env_file`/`router.entrypoints`/
     /// `router.path_prefix`/`router.middleware`, a `depends_on` entry,
     /// and a named-volume mount's host side. The trailing `.IDENT` names
     /// an import alias's declaration (`traefik.traefik-net`); only a
@@ -421,8 +421,8 @@ impl<'src> Parser<'src> {
     /// "one-token lookahead decides whether this comma belongs to me or
     /// to whoever called me" rule [`Self::parse_struct_primary_shorthand`]
     /// already applies to its own trailing fields, and needed here for
-    /// the same reason now that `router.entrypoint` is a reference list:
-    /// in `router api, entrypoint: web, host: "x"`, the second comma
+    /// the same reason now that `router.entrypoints` is a reference list:
+    /// in `router api, entrypoints: web, host: "x"`, the second comma
     /// starts a sibling *field* of `router`, not a second entry point,
     /// and a greedy list would swallow `host` as one and then fail on
     /// its `:` with an error pointing nowhere near the real problem.
@@ -875,7 +875,7 @@ impl<'src> Parser<'src> {
     ///
     /// Factored out of [`Self::parse_struct_primary_shorthand`] when
     /// `router` gained the same tail (#184): `router api, host: "...",
-    /// entrypoint: web-secure` continues from a *name* rather than from
+    /// entrypoints: web-secure` continues from a *name* rather than from
     /// a primary value, but everything after that first token is the
     /// identical production, and having one copy of it is what keeps the
     /// two spellings from drifting.
@@ -1027,7 +1027,7 @@ impl<'src> Parser<'src> {
     ///
     /// - the canonical braced body, `router api { host: "..." }`, whose
     ///   fields are newline-separated like any other struct body;
-    /// - the comma-continued form, `router api, host: "...", entrypoint:
+    /// - the comma-continued form, `router api, host: "...", entrypoints:
     ///   web-secure`, which reuses [`Self::parse_secondary_fields`]
     ///   verbatim — the same production `image "ref", ...` (or any other
     ///   primary-shorthand nested type with more than one field) already
@@ -1119,7 +1119,7 @@ impl<'src> Parser<'src> {
     /// DESIGN.md's desugaring rule 3) and can't itself be followed by
     /// further secondary fields, comma or no comma — a service that needs
     /// more than a bare host must write the router out explicitly
-    /// (`expose <port>` plus `router { host: "...", entrypoint: ... }`).
+    /// (`expose <port>` plus `router { host: "...", entrypoints: ... }`).
     /// Unlike before #198 (`ParseError::AliasSugarCannotContinue`, see
     /// F6), there is no dedicated diagnostic for a trailing comma here:
     /// whatever follows is left for the enclosing body's own statement
@@ -1258,7 +1258,9 @@ impl<'src> Parser<'src> {
                     .entry(field.name)
                     .or_insert_with(|| FieldValue::Raw(RawMap::default()))
                 {
-                    FieldValue::Raw(existing) => existing.entries.extend(raw_map.entries),
+                    FieldValue::Raw(existing) => {
+                        merge_raw_entries(&mut existing.entries, raw_map.entries)?;
+                    }
                     _ => unreachable!("field kind is stable for a given field name"),
                 }
                 Ok(())
@@ -1522,11 +1524,22 @@ impl<'src> Parser<'src> {
             }
             TokenKind::LBrace => {
                 let open = self.expect(TokenKind::LBrace)?;
-                let mut entries = Vec::new();
+                let mut entries: Vec<(Literal, RawValue)> = Vec::new();
                 while self.peek().kind != TokenKind::RBrace {
                     let key = self.parse_key()?;
                     self.expect(TokenKind::Colon)?;
                     let value = self.parse_raw_value(depth + 1)?;
+                    // This mapping's own keys only — never the enclosing
+                    // one's, and never a mapping nested inside `value`,
+                    // which checked itself on the way out of its own
+                    // recursive call. That is what keeps `raw { a: { x: 1
+                    // }, b: { x: 2 } }` legal while rejecting a single
+                    // mapping that names `x` twice (#206).
+                    reject_duplicate_raw_key(
+                        entries.iter().map(|(held, _)| (held.text(), held.span())),
+                        key.text(),
+                        key.span(),
+                    )?;
                     entries.push((key, value));
                     if self.peek().kind == TokenKind::Comma {
                         self.bump();
@@ -1769,6 +1782,79 @@ fn merge_map_entries<K>(
     Ok(())
 }
 
+/// [`merge_map_entries`]'s own twin for `raw` — the one map-kind field
+/// whose values are [`RawValue`] trees rather than [`Literal`]s, so it
+/// can't ride that function's `(K, Literal, Span)` shape.
+///
+/// Before #206 this path simply concatenated, which made `raw` the last
+/// map field where a key repeated inside one body silently lost a value:
+/// `raw { user: "1000", user: "2000" }` emitted `user: '2000'` and said
+/// nothing, while the same shape on `env` named both spans. The check
+/// here is deliberately the same one [`merge_map_entries`] applies —
+/// same [`ParseError::DuplicateMapKey`], same schema-declared uniqueness
+/// side, first occurrence keeps the blame span — so the two diagnostics
+/// read alike.
+///
+/// `bucket` is everything the enclosing body has accumulated for this
+/// field so far, which is what makes two `raw { }` blocks in one
+/// `service`/`template` collide exactly as two `env` statements already
+/// do. It stops there: a *nested* map inside a `raw` value is its own
+/// mapping, checked on its own by [`reject_duplicate_raw_key`]'s other
+/// caller.
+fn merge_raw_entries(
+    bucket: &mut Vec<RawEntry>,
+    new_entries: Vec<RawEntry>,
+) -> Result<(), ParseError> {
+    for entry in new_entries {
+        reject_duplicate_raw_key(
+            bucket.iter().map(|held| (held.key.text(), held.span)),
+            entry.key.text(),
+            entry.span,
+        )?;
+        bucket.push(entry);
+    }
+    Ok(())
+}
+
+/// Rejects `key` when one of `held` — the keys of the *same* mapping,
+/// each with the span to blame for its first occurrence — already claims
+/// it.
+///
+/// Scoping the check to one mapping is the whole of #206's "worth
+/// deciding first": `raw` is schema-free and its values recurse, so
+/// "duplicate key" has to mean what YAML means by it, which is a
+/// property of a single mapping and of nothing outside it. `raw { a: {
+/// x: 1 }, b: { x: 2 } }` is two distinct mappings that each happen to
+/// hold an `x`, and stays legal; only a mapping that names `x` twice
+/// itself is an error.
+///
+/// The side and the type name come from [`schema::RAW`] rather than
+/// being written out here, so this diagnostic and the cross-tier one
+/// [`merge_map_entries`] raises can't drift apart. Only the key side is
+/// meaningful for `raw` in any case — its values are trees, not
+/// literals, so there's nothing on the value side to compare.
+fn reject_duplicate_raw_key<'a>(
+    held: impl IntoIterator<Item = (&'a str, Span)>,
+    key: &str,
+    span: Span,
+) -> Result<(), ParseError> {
+    let side = schema::RAW
+        .uniqueness
+        .expect("the raw schema must define a uniqueness side");
+    for (existing, first) in held {
+        if existing == key {
+            return Err(ParseError::DuplicateMapKey {
+                type_name: schema::RAW.type_name,
+                side,
+                value: key.to_string(),
+                first,
+                second: span,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// [`merge_map_entries`]'s own twin for `volume`, the one map-kind field
 /// whose entries carry a fourth element (the `{ read_only }` flag, #158)
 /// alongside `(host, container, span)`. Not folded into
@@ -1917,7 +2003,7 @@ fn lower_service_fields(mut fields: StructFields) -> Result<ServiceFields, Parse
     // `entrypoint` (#183) lowers exactly like `command` just above —
     // the same `FieldKind::ScalarOrList` shape, into its own AST type.
     // Reached only for `entrypoint` written directly in a
-    // `service`/`template` body: `router`'s own `entrypoint` sub-field
+    // `service`/`template` body: `router`'s own `entrypoints` sub-field
     // is an unrelated reference list, lowered by `lower_router` instead,
     // from a `StructFields` map the `router` schema built.
     let entrypoint = match fields.remove("entrypoint") {
@@ -2084,7 +2170,7 @@ fn lower_router(name: Option<Ident>, mut fields: StructFields, span: Span) -> Ro
         Some(FieldValue::Scalar(lit)) => Some(lit),
         _ => None,
     };
-    let entrypoint = match fields.remove("entrypoint") {
+    let entrypoints = match fields.remove("entrypoints") {
         Some(FieldValue::RefList(v)) => v,
         _ => Vec::new(),
     };
@@ -2121,7 +2207,7 @@ fn lower_router(name: Option<Ident>, mut fields: StructFields, span: Span) -> Ro
     Router {
         name,
         host,
-        entrypoint,
+        entrypoints,
         path_prefix,
         middleware,
         priority,
@@ -2181,13 +2267,13 @@ fn lower_restart(mut fields: StructFields, span: Span) -> Restart {
 }
 
 /// Lowers a `traefik { ... }` body (#159). Mirrors `healthcheck`'s
-/// `disable` extraction exactly — see [`Traefik::disabled`]'s doc.
+/// `disable` extraction exactly — see [`Traefik::disable`]'s doc.
 fn lower_traefik(mut fields: StructFields, span: Span) -> Traefik {
-    let disabled = match fields.remove("disabled") {
+    let disable = match fields.remove("disable") {
         Some(FieldValue::Flag(s)) => Some(s),
         _ => None,
     };
-    Traefik { disabled, span }
+    Traefik { disable, span }
 }
 
 fn lower_healthcheck(mut fields: StructFields, span: Span) -> Healthcheck {

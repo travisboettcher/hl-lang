@@ -3,10 +3,10 @@
 # `ENTRYPOINT` — distinct from `command`, which overrides its `CMD`. It
 # used to be reachable only through `raw`. Both forms are covered, plus
 # a `$param` written into each (which composition has to substitute, per
-# #168), and the coexistence that makes this issue's name confusing: the
-# service-level `entrypoint` field and `expose`'s unrelated `entrypoint`
-# sub-field, a list of Traefik entry points, both appear in `router`
-# below and reach different parts of the output.
+# #168), and the coexistence #199 disentangled: the service-level
+# `entrypoint` field and `router`'s `entrypoints` sub-field, a list of
+# Traefik entry points, both appear in service `router` below and reach
+# different parts of the output.
 template shell_entrypoint(ep) {
   entrypoint $ep
 }
@@ -47,6 +47,6 @@ service router {
   expose 8080
   router {
     host: "router.example.com"
-    entrypoint: web, web-secure
+    entrypoints: web, web-secure
   }
 }

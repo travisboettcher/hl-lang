@@ -1,0 +1,34 @@
+# #199 renamed two built-in field names without changing a byte of the
+# generated Compose: `router`'s entry-point list is `entrypoints` (it is
+# a list, and it is what Traefik's own label spells), and `traefik`'s
+# opt-out flag is `disable` (matching Compose's own key and the
+# `healthcheck { disable }` beside it). This case pins the output of both
+# new spellings — the `entrypoints=` label and `traefik.enable=false` are
+# exactly what the old spellings emitted.
+#
+# `media` also writes the service-level `entrypoint`, Compose's
+# `ENTRYPOINT` override, one line away from a `router` that writes
+# `entrypoints`. That pair was the collision #199 removed: before the
+# rename the two spellings were identical and only position told them
+# apart.
+
+service media {
+  image "jellyfin/jellyfin:latest"
+  entrypoint ["/bin/sh", "-c", "/usr/bin/jellyfin"]
+  expose 8096
+  router {
+    host: "media.example.com"
+    entrypoints: web, web-secure
+  }
+}
+
+service db {
+  image "postgres:15"
+  expose 5432
+  healthcheck {
+    disable
+  }
+  traefik {
+    disable
+  }
+}
