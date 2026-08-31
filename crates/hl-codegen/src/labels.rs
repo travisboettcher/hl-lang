@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use hl_parser::{Ident, Literal, MatchExpr, Router, ServiceFields, Span, matchers};
 
-use crate::{CodegenError, interp};
+use crate::{CodegenError, LabelFeature, interp};
 
 /// Characters rejected in every label value the user writes directly —
 /// a router's `host` and each `entrypoints` entry. Motivated by `host`,
@@ -531,15 +531,108 @@ fn router_rule_expr(
     ))
 }
 
+/// The label list under construction, plus who claimed each key.
+///
+/// [`compute`] used to build a bare `Vec<String>`. It can't any more:
+/// #243's hand-written `labels` entries have to be checked against the
+/// computed set, and "which feature computed this key" is knowable only
+/// here, at the moment the label is pushed. Keeping the claim beside the
+/// label — rather than re-deriving provenance from a key's shape
+/// afterwards — is what lets the diagnostic name a real span instead of
+/// guessing from a `traefik.http.routers.` prefix.
+#[derive(Default)]
+struct LabelSet {
+    /// The emitted `key=value` strings, in emission order.
+    labels: Vec<String>,
+    /// One row per label already emitted: its key (everything before the
+    /// first `=`), the feature that produced it, and where that feature
+    /// was written, when it has one place to point at.
+    claims: Vec<(String, LabelFeature, Option<Span>)>,
+}
+
+impl LabelSet {
+    /// Records one computed label. `label` is the whole `key=value`
+    /// string; the key is everything before its first `=`, which is
+    /// exactly how Docker itself splits a label — and safe to rely on
+    /// here because every key this crate generates is built from a
+    /// service name and a router name, both already refused an `=` by
+    /// [`reject_unsafe_router_name`] and by `IDENT`'s own grammar.
+    fn push(&mut self, feature: LabelFeature, span: Option<Span>, label: String) {
+        let key = match label.split_once('=') {
+            Some((key, _)) => key.to_string(),
+            None => label.clone(),
+        };
+        self.claims.push((key, feature, span));
+        self.labels.push(label);
+    }
+
+    /// Records one hand-written `labels` entry, refusing a key another
+    /// feature — or an earlier entry of this same field — already
+    /// claims.
+    fn push_explicit(
+        &mut self,
+        key: String,
+        value: String,
+        span: Span,
+    ) -> Result<(), CodegenError> {
+        if let Some((_, feature, at)) = self.claims.iter().find(|(held, _, _)| *held == key) {
+            return Err(CodegenError::LabelCollidesWithGenerated {
+                key,
+                feature: *feature,
+                generated_span: *at,
+                span,
+            });
+        }
+        self.push(LabelFeature::Labels, Some(span), format!("{key}={value}"));
+        Ok(())
+    }
+}
+
+/// Rejects a hand-written label key holding a character that would make
+/// it stand for a *different* key than the one written.
+///
+/// `=` is the whole of the danger, and it is the same danger
+/// [`reject_unsafe_router_name`] guards on the generated side: Docker
+/// splits a label string at its first `=`, so `labels` writing the key
+/// `a=b` with the value `c` produces the key `a` holding `b=c`. That is
+/// a forged label rather than a corrupted one — and, worse here, one
+/// [`LabelSet::push_explicit`] cannot see, since the key it compares is
+/// the whole `a=b`. So this check is load-bearing for the collision
+/// rule itself, not general hygiene: without it, a key spelled
+/// `traefik.docker.network=x` slips a second `traefik.docker.network`
+/// label past a check written to make exactly that impossible.
+///
+/// Control characters ride along for [`reject_metacharacters`]'s own
+/// reason: a string literal has escape sequences since #181, so a
+/// newline in a key is now writable, and no label key can hold one for
+/// any legitimate reason.
+fn reject_unsafe_label_key(key: &str, span: Span) -> Result<(), CodegenError> {
+    match key.chars().find(|c| *c == '=' || c.is_control()) {
+        Some(character) => Err(CodegenError::UnsafeLabelKey {
+            key: key.to_string(),
+            character,
+            span,
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Emits one `router` block's labels — rule, then `entrypoints=`, then
 /// `middlewares=` — in the same order and the same shape `expose.host`'s
 /// own router emits them (#184).
 fn push_router_labels(
-    labels: &mut Vec<String>,
+    labels: &mut LabelSet,
     service_name: &str,
     router: &Router,
     bindings: &HashMap<&str, &str>,
 ) -> Result<(), CodegenError> {
+    // Every label this function emits is claimed by the block it came
+    // from, at the block's own span — which is what
+    // `CodegenError::LabelCollidesWithGenerated` quotes back when a
+    // hand-written `labels` entry names one of these keys (#243).
+    let claim = |labels: &mut LabelSet, label: String| {
+        labels.push(LabelFeature::Router, Some(router.span), label)
+    };
     if let Some(name) = router.key() {
         reject_unsafe_router_name(service_name, name, router.span)?;
     }
@@ -548,23 +641,26 @@ fn push_router_labels(
     let ns = protocol.segment();
 
     let expr = router_rule_expr(service_name, router, protocol, bindings)?;
-    labels.push(format!(
-        "traefik.{ns}.routers.{id}.rule={}",
-        render_rule(&expr, protocol, service_name, router, bindings)?
-    ));
+    claim(
+        labels,
+        format!(
+            "traefik.{ns}.routers.{id}.rule={}",
+            render_rule(&expr, protocol, service_name, router, bindings)?
+        ),
+    );
     if let Some(label) =
         entrypoints_label(ns, &id, "router.entrypoints", &router.entrypoints, bindings)?
     {
-        labels.push(label);
+        claim(labels, label);
     }
     if let Some(label) = middlewares_label(ns, &id, &router.middleware)? {
-        labels.push(label);
+        claim(labels, label);
     }
     if let Some(priority) = &router.priority {
-        labels.push(format!(
-            "traefik.{ns}.routers.{id}.priority={}",
-            priority.text()
-        ));
+        claim(
+            labels,
+            format!("traefik.{ns}.routers.{id}.priority={}", priority.text()),
+        );
     }
 
     // A router naming its own port gets a Traefik *service* of its own,
@@ -575,11 +671,14 @@ fn push_router_labels(
     // model still gets.
     match &router.port {
         Some(port) => {
-            labels.push(format!("traefik.{ns}.routers.{id}.service={id}"));
-            labels.push(format!(
-                "traefik.{ns}.services.{id}.loadbalancer.server.port={}",
-                port.text()
-            ));
+            claim(labels, format!("traefik.{ns}.routers.{id}.service={id}"));
+            claim(
+                labels,
+                format!(
+                    "traefik.{ns}.services.{id}.loadbalancer.server.port={}",
+                    port.text()
+                ),
+            );
         }
         None if protocol == Protocol::Tcp => {
             // The fallback target is an *HTTP* service, so there is
@@ -631,8 +730,9 @@ fn push_router_labels(
 /// means `hllc` refuses to compile instead.
 ///
 /// A service that sets `traefik { disable }` (#159) short-circuits all
-/// of the above: the returned list is exactly `["traefik.enable=false"]`,
-/// full stop — no `traefik.docker.network=` label either. That label
+/// of the above: the computed part of the list is exactly
+/// `["traefik.enable=false"]`, full stop — no `traefik.docker.network=`
+/// label either. That label
 /// only matters for routing traffic *to* the container once Traefik's
 /// Docker provider has decided to act on it; with `enable=false` it
 /// never acts on the container at all, so the network label would be
@@ -641,6 +741,24 @@ fn push_router_labels(
 /// one. `raw { labels: [...] }` still overrides this entirely, same as
 /// it overrides the ordinary computed list — see
 /// [`crate::doc::ComposeServiceDoc::apply_raw_overrides`].
+///
+/// Finally, every hand-written `labels { "key": "value" }` entry (#243)
+/// is appended, in composed source order, **after** everything above.
+/// Appending rather than interleaving is what keeps a file that writes
+/// no `labels` emitting byte-identical output to before the field
+/// existed: nothing moves, the list only grows at the end. A disabled
+/// service still gets them — `traefik { disable }` turns off the
+/// *Traefik* labels this module computes, and an explicit label is an
+/// ordinary Docker label that may have nothing to do with Traefik.
+///
+/// An explicit entry whose key one of the features above already
+/// generated is [`CodegenError::LabelCollidesWithGenerated`], a hard
+/// error naming both sides. Neither precedence rule is available:
+/// letting the explicit entry win silently drops a computed label the
+/// author never asked to lose, and letting the computed one win
+/// silently drops a line the author plainly wrote. Refusing is the only
+/// answer that keeps every line either taking effect or being
+/// diagnosed.
 pub fn compute(
     service_name: &str,
     fields: &ServiceFields,
@@ -657,13 +775,28 @@ pub fn compute(
                 span,
             });
         }
-        return Ok(vec!["traefik.enable=false".to_string()]);
+        let mut labels = LabelSet::default();
+        labels.push(
+            LabelFeature::Traefik,
+            Some(disabled_span),
+            "traefik.enable=false".to_string(),
+        );
+        return push_explicit_labels(labels, fields, bindings);
     }
 
-    let mut labels = Vec::new();
+    let mut labels = LabelSet::default();
 
     if let Some(net) = docker_network {
-        labels.push(format!("traefik.docker.network={net}"));
+        // The one generated label with no single field to point at: it
+        // comes from whichever of the service's declared networks is
+        // `external`, resolved several stages away from here (see
+        // `crate::resolve_networks`), so the claim carries no span and
+        // the diagnostic names the `networks` list instead of a line.
+        labels.push(
+            LabelFeature::DockerNetwork,
+            None,
+            format!("traefik.docker.network={net}"),
+        );
     }
 
     // In source order (#184), which composition has already made a
@@ -696,10 +829,14 @@ pub fn compute(
     let fallback = fields.routers.iter().find(|r| r.port.is_none());
     if let Some(router) = fallback {
         match fields.expose.as_ref().and_then(|e| e.port.as_ref()) {
-            Some(port) => labels.push(format!(
-                "traefik.http.services.{service_name}.loadbalancer.server.port={}",
-                port.text()
-            )),
+            Some(port) => labels.push(
+                LabelFeature::Expose,
+                Some(port.span()),
+                format!(
+                    "traefik.http.services.{service_name}.loadbalancer.server.port={}",
+                    port.text()
+                ),
+            ),
             None => {
                 return Err(CodegenError::RouterWithoutPort {
                     service: service_name.to_string(),
@@ -709,7 +846,35 @@ pub fn compute(
         }
     }
 
-    Ok(labels)
+    push_explicit_labels(labels, fields, bindings)
+}
+
+/// Appends every hand-written `labels` entry to the computed set and
+/// hands back the finished list (#243).
+///
+/// Split out rather than inlined at the end of [`compute`] because
+/// `traefik { disable }` returns early from the middle of that function,
+/// and an explicit label has to survive that path too — a `labels` entry
+/// is an ordinary Docker label, not a Traefik one, so the flag that
+/// silences Traefik's own has no business silencing it. One function
+/// both paths end in is what keeps the two from drifting.
+fn push_explicit_labels(
+    mut labels: LabelSet,
+    fields: &ServiceFields,
+    bindings: &HashMap<&str, &str>,
+) -> Result<Vec<String>, CodegenError> {
+    for entry in &fields.labels.entries {
+        // Resolved before anything else looks at it, exactly as
+        // `reject_metacharacters` insists for a router's `host`: the
+        // text that reaches the label is the interpolated text, so
+        // that's the text the safety check and the collision check both
+        // have to see.
+        let key = interp::resolve(entry.key.text(), bindings, entry.key.span())?;
+        let value = interp::resolve(entry.value.text(), bindings, entry.value.span())?;
+        reject_unsafe_label_key(&key, entry.key.span())?;
+        labels.push_explicit(key, value, entry.span)?;
+    }
+    Ok(labels.labels)
 }
 
 #[cfg(test)]

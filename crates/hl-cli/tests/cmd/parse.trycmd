@@ -66,6 +66,9 @@ Program {
                     env: EnvMap {
                         entries: [],
                     },
+                    labels: LabelMap {
+                        entries: [],
+                    },
                     raw: RawMap {
                         entries: [],
                     },

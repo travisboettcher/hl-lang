@@ -24,9 +24,9 @@ use hl_lexer::{SourceMap, Span};
 
 use crate::ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnEntry, Entrypoint, EnvEntry,
-    EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal, MatchExpr, Network,
-    Program, RawEntry, RawMap, RawValue, Restart, Router, Service, ServiceFields, TemplateDecl,
-    TemplateInvocation, TopDecl, Traefik, Volume,
+    EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, LabelEntry, LabelMap, Literal,
+    MatchExpr, Network, Program, RawEntry, RawMap, RawValue, Restart, Router, Service,
+    ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, Volume,
 };
 use crate::schema::{self, MapSide};
 
@@ -1821,6 +1821,13 @@ fn substitute_params(
         substitute_literal(&mut e.key, args, template_name)?;
         substitute_literal(&mut e.value, args, template_name)?;
     }
+    // `labels` (#243) substitutes exactly like `env` just above: both
+    // sides are plain `Literal` slots, so a template may parameterize
+    // either a label's key or its value.
+    for e in &mut fields.labels.entries {
+        substitute_literal(&mut e.key, args, template_name)?;
+        substitute_literal(&mut e.value, args, template_name)?;
+    }
     for entry in &mut fields.raw.entries {
         substitute_literal(&mut entry.key, args, template_name)?;
         substitute_raw_value(&mut entry.value, args);
@@ -2140,6 +2147,11 @@ impl Spanned for EnvEntry {
         self.span
     }
 }
+impl Spanned for LabelEntry {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
 impl Spanned for RawEntry {
     fn span(&self) -> Span {
         self.span
@@ -2235,6 +2247,17 @@ struct MergeAcc {
     /// not this table-driven grouping.
     arrow_maps: HashMap<&'static str, Vec<(ArrowMapEntry, Tier)>>,
     env: Vec<(EnvEntry, Tier)>,
+    /// `labels`' own merge point (#243) — its own field beside
+    /// [`Self::env`] for exactly the reason `env` has one: both key on
+    /// [`crate::schema::MapSide::Key`] rather than `Value`, and both
+    /// carry their own entry type rather than [`ArrowMapEntry`], so
+    /// neither fits [`Self::arrow_maps`]' table-driven grouping. Merged
+    /// through the same [`merge_map`] `env` goes through, with the same
+    /// tier rules: own wins over any template, `defaults` always loses,
+    /// and two explicit `with`-listed templates setting one label key
+    /// collide with [`ComposeError::MapKeyCollision`] rather than the
+    /// second silently overwriting the first.
+    labels: Vec<(LabelEntry, Tier)>,
     /// `depends_on`'s own merge point — see this struct's own doc for
     /// why it's merged like a map field (keyed by the referenced
     /// service's name) rather than riding [`Self::lists`].
@@ -2310,6 +2333,9 @@ impl MergeAcc {
         let mut fields = ServiceFields {
             env: EnvMap {
                 entries: self.env.into_iter().map(|(v, _)| v).collect(),
+            },
+            labels: LabelMap {
+                entries: self.labels.into_iter().map(|(v, _)| v).collect(),
             },
             depends_on: self.depends_on.into_iter().map(|(v, _)| v).collect(),
             raw: RawMap {
@@ -3017,6 +3043,18 @@ fn merge_tier(
         "env",
         MapSide::Key,
         incoming.env.entries,
+        tier,
+        |e| e.key.text().to_string(),
+    )?;
+    // Keyed exactly like `env` above — same side, same rules (#243). The
+    // accumulated order is tier order (`defaults`, then each `with`
+    // target left to right, then the body's own), which is what makes
+    // the emitted label order a stable function of the source.
+    merge_map(
+        &mut acc.labels,
+        "labels",
+        MapSide::Key,
+        incoming.labels.entries,
         tier,
         |e| e.key.text().to_string(),
     )?;

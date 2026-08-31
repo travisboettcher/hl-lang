@@ -376,6 +376,7 @@ same two entries—see #81.
 | `publish` | map |—| `->` | value—the container port | no |
 | `devices` | map |—| `->` | value—the container device path | no |
 | `env` | map |—| `=` | key | no |
+| `labels` | map |—| `:` | key | no |
 | `restart` | struct | `policy` |—|—| no |
 | `healthcheck` | struct |—|—|—| no |
 | `traefik` | struct |—|—|—| no |
@@ -402,10 +403,10 @@ ever varied row to row were two schema-driven bits, both covered below:
 whether the host side may name a declared top-level `volume`—
 `key_may_be_reference`, true for `volume` alone—and whether an entry
 carries a trailing `{ read_only }` modifier, likewise `volume`-only.
-`env`, `driver_opts`, and `raw` are map-kind too but outside this
-group—their uniqueness lands on the key side instead, per the preceding
-table, so they never shared `volume`/`publish`/`devices`' own value-side
-convention to begin with.
+`env`, `labels`, `driver_opts`, and `raw` are map-kind too but outside
+this group—their uniqueness lands on the key side instead, per the
+preceding table, so they never shared `volume`/`publish`/`devices`' own
+value-side convention to begin with.
 
 The `volume` field is also the one map-kind type whose *key* side isn't
 restricted to a literal. Its host side is either a string, meaning a
@@ -895,6 +896,62 @@ It costs nothing beyond what `healthcheck { disable }` already pays for,
 reads as its exact mirror, and leaves `traefik` a home a later Traefik
 knob can join without inventing a second `traefik`-prefixed field
 name.
+
+`labels` is the last row in that same group, added by #243, and the only
+one that *adds* to the label list rather than computing part of it. Every
+preceding row—`router`, `expose`, `traefik`, and the
+`traefik.docker.network` label an external `networks` entry produces—
+derives labels from something it models. `labels` models nothing: it
+carries whatever Docker label the author wants, `hllc` has no opinion
+about it, and it lands after every computed label in the emitted list.
+Appending rather than interleaving is deliberate. It means a service
+that writes no `labels` emits the identical list it emitted before the
+row existed, so the row is purely additive for every file already
+written.
+
+Before #243 there was no additive form at all. The only way to write one
+extra label line was `raw { labels: [...] }`, which replaces the whole
+computed set—so a service keeping its `router` blocks and wanting a
+single extra line silently lost `rule`, `entrypoints`,
+`docker.network` and the load-balancer port, and had to reproduce all
+four by hand and keep them in sync. That's #232, reported against a real
+conversion, and #231 is the concrete need behind it: per-router TLS
+Subject Alternative Name (SAN) domains, which `router` has no field for.
+A first-class additive `labels` covers #231 without a schema row of its
+own, so a Traefik label `router` can't yet spell costs one line rather
+than the whole list.
+
+The row is map-kind rather than a list of `"key=value"` strings, and the
+choice is the same one #193 and #206 settled elsewhere. A list would read
+closer to Traefik's own documentation and would need no quoting around a
+dotted key. It would also be the one collection in the language with no
+uniqueness side, so a key written twice would silently keep the last
+value—exactly the hazard those two issues closed for `raw`, reintroduced
+in a brand-new field. A map reuses `TypeSchema::uniqueness` as it stands,
+so the parser names both spans. Compose's own `labels:` key takes a map
+form natively as well, so this is also the spelling closest to Compose.
+The cost is real and worth naming: a key such as
+`"traefik.http.routers.web.tls.domains[0].main"` needs quotes around it,
+because dots and brackets can't appear in a bare word.
+
+A `labels` key that collides with a computed one is a hard error naming
+both sides, not a precedence rule. Neither precedence is available.
+"Explicit wins" means a `router` block quietly stops deciding what it
+plainly says it decides. "Generated wins" means the line the author wrote
+quietly does nothing. Both leave one of two spellings in one body inert
+and undiagnosed, which is the failure #144, #193, #206 and #232 all exist
+to close. Refusing is the only outcome that keeps the language's promise
+that a line either takes effect or draws a diagnostic. Because the check reads
+the *key*, a key holding an `=` would defeat it—Docker splits a label at
+its first `=`, so `"traefik.docker.network=x"` would emit a second
+`traefik.docker.network` label the check never saw. Codegen rejects an
+`=` in a hand-written key for that reason, the same second lock
+`UnsafeRouterName` puts on a router name.
+
+`raw { labels: ... }` keeps its documented full-override semantics
+unchanged, and overrides a `labels` field too: `raw` replaces the emitted
+Compose key, not any one contributor to it, so the escape hatch stays
+exactly as blunt—and exactly as predictable—as it has always been.
 
 `depends_on`, `networks`, `dns`, and `env_file` aren't
 rows in this table—they're plain list-of-reference fields directly on
@@ -1579,6 +1636,36 @@ or left incomplete—#184, #198:
   different label. The grammar already refuses such a name—a router
   name is an `IDENT`—and codegen checks it again anyway, so its safety
   doesn't rest on the grammar staying as it stands.
+
+`labels` adds two more, both #243's, and both the same shape as the
+preceding `UnsafeRouterName`—a hand-written string that would name a
+different label than the one written, or a second answer to a question
+the service already answered:
+
+- A `labels` key one of the service's other features already generates
+  is `LabelCollidesWithGenerated`, naming the explicit entry's own span
+  and the producer that claimed the key—the `router` block, the `expose`
+  port, `traefik { disable }`, or the external network behind
+  `traefik.docker.network`. That last producer is the one with no single
+  line to point at, since codegen derives the label from whichever
+  declared network is `external`, several stages away from the
+  `networks [...]` entry that named it, so its message names the producer
+  and stops there. The variant also covers two `labels` entries colliding with
+  each other after `{{name}}` interpolation, which the parser's own
+  duplicate-key check can't see: two keys spelled differently in source
+  can resolve to one key by the time codegen holds both as strings.
+- A hand-written key containing `=` is `UnsafeLabelKey`. Docker splits a
+  label at its first `=`, so such a key ends there and the rest joins
+  the value—a forged label, and one the preceding check can't see, since
+  the key it compares still holds the `=`. Control characters are
+  refused with it, for the reason the label-value guard refuses them:
+  #181's string escapes made a newline writable, and no label key holds
+  one on purpose.
+
+A `labels` key repeated within one body is the parser's business
+instead, as `ParseError::DuplicateMapKey`—the same error a repeated
+`env`, `volume`, `publish` or `raw` key raises, from the same
+schema-declared uniqueness side.
 
 The parser catches two `router` blocks in one body claiming the same
 router id instead—`ParseError::DuplicateRouterName`—alongside the

@@ -96,8 +96,9 @@ impl CodegenWarning {
                 f,
                 "{at}: warning: `raw {{ labels: ... }}` replaces service `{service}`'s generated \
                  Traefik labels rather than adding to them, so every label `router`, `expose`, \
-                 and `traefik` would have produced is dropped — reproduce the ones you still \
-                 need in this list, or remove it and let them be generated"
+                 and `traefik` would have produced is dropped — use a `labels {{ ... }}` block to \
+                 add labels to the computed set instead, or reproduce the ones you still need in \
+                 this list"
             ),
         }
     }
@@ -184,8 +185,9 @@ mod tests {
             warning.display(&files).to_string(),
             "shared/routed.hll:4:5: warning: `raw { labels: ... }` replaces service `web`'s \
              generated Traefik labels rather than adding to them, so every label `router`, \
-             `expose`, and `traefik` would have produced is dropped — reproduce the ones you \
-             still need in this list, or remove it and let them be generated"
+             `expose`, and `traefik` would have produced is dropped — use a `labels { ... }` \
+             block to add labels to the computed set instead, or reproduce the ones you still \
+             need in this list"
         );
         assert_eq!(warning.span().line, 4);
     }

@@ -4,10 +4,10 @@ use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnCondition, DependsOnEntry,
-    Entrypoint, EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, Literal,
-    MatchExpr, Network, Param, Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart, Router,
-    Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, UseDecl, Volume,
-    VolumeDriverOpt,
+    Entrypoint, EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, LabelEntry,
+    LabelMap, Literal, MatchExpr, Network, Param, Program, QualifiedRef, RawEntry, RawMap,
+    RawValue, Restart, Router, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl,
+    Traefik, UseDecl, Volume, VolumeDriverOpt,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -2058,6 +2058,20 @@ fn lower_service_fields(mut fields: StructFields) -> Result<ServiceFields, Parse
         },
         _ => EnvMap::default(),
     };
+    // `labels` (#243) lowers exactly like `env` just above — the same
+    // map-kind `(key, value, span)` triples, into its own AST type. The
+    // two stay separate types for the reason `command`/`entrypoint` do:
+    // they're two different Compose keys, and one type for both would
+    // make every diagnostic downstream read as if they were one field.
+    let labels = match fields.remove("labels") {
+        Some(FieldValue::LiteralMap(entries)) => LabelMap {
+            entries: entries
+                .into_iter()
+                .map(|(key, value, span)| LabelEntry { key, value, span })
+                .collect(),
+        },
+        _ => LabelMap::default(),
+    };
     let raw = match fields.remove("raw") {
         Some(FieldValue::Raw(r)) => r,
         _ => RawMap::default(),
@@ -2116,6 +2130,7 @@ fn lower_service_fields(mut fields: StructFields) -> Result<ServiceFields, Parse
         publish,
         volumes,
         env,
+        labels,
         raw,
         depends_on,
         networks,

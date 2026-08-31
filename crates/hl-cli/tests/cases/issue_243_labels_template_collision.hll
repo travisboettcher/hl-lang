@@ -1,0 +1,24 @@
+# #243: the other half of "merges consistently with `env`" — two
+# *explicit* `with`-listed templates setting the same `labels` key is a
+# `MapKeyCollision` naming both templates and both spans, not the
+# second one silently overwriting the first.
+#
+# Only explicit-versus-explicit collides. `defaults` always loses and
+# the service's own body always wins, both silently, exactly as they do
+# for `env`/`volume`/`publish`/`raw`.
+template a {
+  labels {
+    "com.example.owner": "team-a"
+  }
+}
+
+template b {
+  labels {
+    "com.example.owner": "team-b"
+  }
+}
+
+service web {
+  with a, b
+  image "nginx"
+}

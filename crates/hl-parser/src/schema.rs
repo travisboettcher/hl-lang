@@ -628,6 +628,46 @@ pub static ENV: TypeSchema = TypeSchema {
     schema_free: false,
 };
 
+/// `labels { "com.example.owner": "platform-team" }` — extra Docker
+/// labels written by hand, *added* to the label set `router`/`expose`/
+/// `traefik`/the docker-network label already compute for the service
+/// (#243). Map-kind with a `:` separator, so — like `raw` and
+/// `driver_opts` — its bare-entry and canonical forms are the same
+/// thing, and key-side uniqueness, like [`ENV`].
+///
+/// **Map-shaped rather than a list of `"k=v"` strings.** A list would
+/// read closer to Traefik's own documentation and would need no quoting
+/// around a dotted key, but it would also be the one collection in the
+/// language with no uniqueness side, which is precisely the silent-loss
+/// hazard #193 and #206 closed everywhere else. A map reuses
+/// [`TypeSchema::uniqueness`] as it stands, so a key repeated inside one
+/// body is a [`crate::ParseError::DuplicateMapKey`] naming both spans,
+/// exactly as `env`/`volume`/`publish`/`driver_opts` already behave.
+/// Compose's own `labels:` key takes a map form natively too, so this is
+/// also the spelling that matches Compose.
+///
+/// Not `schema_free`: a label value is a flat string, never a nested
+/// YAML tree, so [`RAW`]'s recursing [`crate::ast::RawValue`] would buy
+/// nothing here and would let a `labels` entry describe something a
+/// Docker label cannot hold.
+///
+/// A key that collides with a *generated* label is a codegen error
+/// rather than a parse error — see
+/// [`crate::ast::ServiceFields::labels`] and `hl_codegen`'s
+/// `labels::compute`, which is the only place that knows what the other
+/// features computed.
+pub static LABELS: TypeSchema = TypeSchema {
+    type_name: "labels",
+    kind: SchemaKind::Map,
+    fields: &[],
+    primary_field: None,
+    map_separator: Some(TokenKind::Colon),
+    uniqueness: Some(MapSide::Key),
+    key_may_be_reference: false,
+    needs_name: false,
+    schema_free: false,
+};
+
 /// `raw { any_key: any_value }` — schema-free passthrough, no unknown-key
 /// checking. `uniqueness` is `Some(MapSide::Key)`, the same convention
 /// `env` uses, since #193: a `with`-merge collision on a repeated `raw`
@@ -850,6 +890,16 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
     FieldSchema {
         name: "traefik",
         kind: FieldKind::Nested(&TRAEFIK),
+    },
+    // `labels { "key": "value" }` (#243) completes the group: `router`,
+    // `expose` and `traefik` decide which labels are *computed*, and
+    // this one adds the ones no feature computes. It sits with them
+    // rather than beside `env` — its nearest map-kind relative — because
+    // what a reader needs to know about it is which other fields it can
+    // collide with, and those are its three neighbors here.
+    FieldSchema {
+        name: "labels",
+        kind: FieldKind::Nested(&LABELS),
     },
     FieldSchema {
         name: "restart",

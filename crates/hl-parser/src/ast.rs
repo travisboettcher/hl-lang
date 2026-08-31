@@ -967,6 +967,29 @@ pub struct EnvEntry {
     pub span: Span,
 }
 
+/// `labels`' entries (#243). Uniqueness is checked on `key`, like
+/// [`EnvMap`]'s — the type it is deliberately shaped after, down to the
+/// field names, since the two are the same "flat string map with
+/// key-side uniqueness" idea applied to two different Compose keys.
+///
+/// A separate type rather than a reuse of [`EnvMap`] for the reason
+/// [`Command`] and [`Entrypoint`] stay separate despite sharing a shape:
+/// they are two different Compose keys, and one type standing for both
+/// would make every diagnostic and every merge site read as if `env` and
+/// `labels` were one field.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LabelMap {
+    pub entries: Vec<LabelEntry>,
+}
+
+/// One `"key": "value"` label entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabelEntry {
+    pub key: Literal,
+    pub value: Literal,
+    pub span: Span,
+}
+
 /// `raw`'s entries: a schema-free passthrough map with no unknown-field
 /// checking and no uniqueness checking — arbitrary keys, values that may
 /// themselves recurse into lists or nested maps.
@@ -1070,6 +1093,27 @@ pub struct ServiceFields {
     pub publish: ArrowMap,
     pub volumes: ArrowMap,
     pub env: EnvMap,
+    /// `labels { "com.example.owner": "platform-team" }` (#243) — extra
+    /// Docker labels, **added** to the set `hl_codegen`'s `labels.rs`
+    /// computes from `router`/`expose`/`traefik`/the docker-network
+    /// label rather than replacing it, which is the one thing
+    /// `raw { labels: [...] }` cannot do (#232).
+    ///
+    /// Emitted after every computed label, so a service that writes none
+    /// of these gets exactly the label list it got before this field
+    /// existed, byte for byte.
+    ///
+    /// A key that collides with a computed one is a hard error in
+    /// codegen (`CodegenError::LabelCollidesWithGenerated`), not a
+    /// precedence rule: whichever side won silently, one of the two
+    /// lines the author wrote would do nothing, which is the failure
+    /// #193, #206 and #232 all exist to close.
+    ///
+    /// Merged across template tiers exactly like [`Self::env`] — same
+    /// [`crate::schema::MapSide::Key`] convention, same `merge_map`, so
+    /// own wins over a template, `defaults` always loses, and two
+    /// explicit templates setting one key collide.
+    pub labels: LabelMap,
     pub raw: RawMap,
     /// `depends_on [db]` / `depends_on [db { condition: service_healthy }]`
     /// (#155) — each entry is a same-file service reference, optionally

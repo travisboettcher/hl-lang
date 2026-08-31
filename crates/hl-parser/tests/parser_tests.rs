@@ -1339,6 +1339,105 @@ fn env_duplicate_key_is_error() {
     }
 }
 
+/// `labels` (#243) parses like `env` — a map-kind body with key-side
+/// uniqueness — except its separator is `:`, so the canonical and
+/// bare-entry forms are the same thing, as they are for `raw`.
+///
+/// The keys are the point of the test: Traefik's dotted, bracketed label
+/// keys are the field's primary use, and they only reach the AST intact
+/// if a quoted string key survives the lexer's own `.`-handling
+/// untouched.
+#[test]
+fn labels_body_keeps_dotted_and_bracketed_keys_intact() {
+    let program = parse_ok(
+        "service s {\n  labels {\n               \"traefik.http.routers.s.tls.domains[0].main\": \"internal.example.com\"\n               \"com.example.owner\": \"platform-team\"\n  }\n}\n",
+    );
+    let service = as_service(&program.decls[0]);
+    let entries: Vec<(&str, &str)> = service
+        .fields
+        .labels
+        .entries
+        .iter()
+        .map(|e| (e.key.text(), e.value.text()))
+        .collect();
+    assert_eq!(
+        entries,
+        vec![
+            (
+                "traefik.http.routers.s.tls.domains[0].main",
+                "internal.example.com"
+            ),
+            ("com.example.owner", "platform-team"),
+        ]
+    );
+}
+
+/// The bare-entry form, with no braces — `labels`' separator is `:`, so
+/// one entry written straight onto the field parses the same way one
+/// inside a body does.
+#[test]
+fn labels_bare_entry_form() {
+    let program = parse_ok("service s {\n  labels \"com.example.owner\": \"platform-team\"\n}\n");
+    let service = as_service(&program.decls[0]);
+    assert_eq!(service.fields.labels.entries.len(), 1);
+    assert_eq!(
+        service.fields.labels.entries[0].key.text(),
+        "com.example.owner"
+    );
+}
+
+#[test]
+fn labels_repeated_blocks_accumulate() {
+    let program =
+        parse_ok("service s {\n  labels { \"a\": \"1\" }\n  labels { \"b\": \"2\" }\n}\n");
+    let service = as_service(&program.decls[0]);
+    let keys: Vec<&str> = service
+        .fields
+        .labels
+        .entries
+        .iter()
+        .map(|e| e.key.text())
+        .collect();
+    assert_eq!(keys, vec!["a", "b"]);
+}
+
+/// The whole reason the field is map-shaped rather than a list of
+/// `"key=value"` strings: a repeated key is caught here, by the same
+/// schema-declared uniqueness `env` uses, naming both spans.
+#[test]
+fn labels_duplicate_key_is_error() {
+    let err = parse("service s {\n  labels { \"a\": \"1\", \"a\": \"2\" }\n}\n").unwrap_err();
+    match err {
+        ParseError::DuplicateMapKey {
+            type_name: "labels",
+            side: MapSide::Key,
+            value,
+            ..
+        } => {
+            assert_eq!(value, "a");
+        }
+        other => panic!("expected DuplicateMapKey on a labels key, got {other:?}"),
+    }
+}
+
+/// ...and across two blocks in one body, since they accumulate into one
+/// map, exactly as two `env` statements or two `raw { }` blocks do.
+#[test]
+fn labels_duplicate_key_across_two_blocks_is_error() {
+    let err = parse("service s {\n  labels { \"a\": \"1\" }\n  labels { \"a\": \"2\" }\n}\n")
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::DuplicateMapKey {
+                type_name: "labels",
+                ..
+            }
+        ),
+        "expected DuplicateMapKey across two labels blocks"
+    );
+}
+
 #[test]
 fn volume_duplicate_container_path_is_error() {
     let err = parse("service s {\n  volume \"a\" -> \"/data\"\n  volume \"b\" -> \"/data\"\n}\n")

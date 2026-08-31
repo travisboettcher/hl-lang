@@ -1,0 +1,2 @@
+--- error ---
+issue_243_duplicate_label_key.hll: 14:5: duplicate `labels` entry: key "com.example.owner" already set at 13:5

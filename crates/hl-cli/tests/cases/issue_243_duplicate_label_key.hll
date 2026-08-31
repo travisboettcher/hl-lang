@@ -1,0 +1,16 @@
+# #243: a `labels` key repeated inside one body is a parse error naming
+# both spans — the same `DuplicateMapKey` a repeated `env`, `volume`,
+# `publish` or `raw` key already raises.
+#
+# This is why the field is map-shaped rather than a list of `"k=v"`
+# strings. A list would read closer to Traefik's own documentation and
+# would need no quoting, but it would be the one collection in the
+# language with no uniqueness side, reintroducing in a brand-new field
+# exactly the silent-loss hazard #193 and #206 closed everywhere else.
+service s {
+  image "nginx"
+  labels {
+    "com.example.owner": "platform-team"
+    "com.example.owner": "someone-else"
+  }
+}

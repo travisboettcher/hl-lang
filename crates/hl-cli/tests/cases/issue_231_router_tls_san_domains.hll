@@ -1,0 +1,46 @@
+# #231 asked for a per-router TLS SAN domain list on `router` itself —
+# `tls_domain { main: "...", sans: [...] }` — so that `hass.hll`'s
+# internal-only router could extend a wildcard certificate's SAN list to
+# cover its own host. It was deprioritized because `raw` covered it, and
+# `raw` covered it only by taking the *whole* label list hand-written,
+# giving up every check `router` performs (#232).
+#
+# #243 argues a first-class additive `labels` subsumes it without a
+# schema row of its own. This case is that argument, compiled: the two
+# label lines from #231's issue body, verbatim, written beside the
+# native `router` blocks that keep computing everything else.
+#
+# What it pins down:
+#   - the explicit keys name `home-assistant-internal`, the router id
+#     codegen derives from `<service>-<router name>`, so the two halves
+#     really do address the same router rather than merely coexisting;
+#   - the public router's own labels are untouched, which is exactly
+#     what `raw { labels: [...] }` could not manage;
+#   - `[0]` and the dots inside a quoted map key survive the lexer
+#     intact and reach the label unchanged.
+network traefik-net {
+  external
+  name: "docker_default"
+}
+
+service home-assistant {
+  image "ghcr.io/home-assistant/home-assistant:stable"
+  expose 8123
+  networks [traefik-net]
+
+  router {
+    host: "hass.techdebtor.io"
+    entrypoints: web-secure
+  }
+
+  router internal {
+    host: "hass.internal.techdebtor.io"
+    entrypoints: web-secure
+    middleware: local-ipwhitelist
+  }
+
+  labels {
+    "traefik.http.routers.home-assistant-internal.tls.domains[0].main": "internal.techdebtor.io"
+    "traefik.http.routers.home-assistant-internal.tls.domains[0].sans": "*.internal.techdebtor.io"
+  }
+}
