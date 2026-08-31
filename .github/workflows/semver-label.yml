@@ -16,8 +16,13 @@ name: Semver label
 # after merge; release.yml enforces it again for real.
 
 on:
+  # `edited` fires on a retarget as well as a body or title edit (#210).
+  # Without it, a PR that GitHub retargets to main after its stacked base
+  # merges — and that nobody pushes to again — reaches main with this
+  # gate never having run against its new base. `linked-issue.yml`
+  # already listens for it, for the same reason.
   pull_request:
-    types: [opened, labeled, unlabeled, synchronize, reopened]
+    types: [opened, edited, labeled, unlabeled, synchronize, reopened]
     branches: [main]
 
 permissions:

@@ -1183,6 +1183,14 @@ error that says so.
   `default` entry, not two—and, when explicit, always sorts last in that
   service's `networks:` list.
 
+  Attaching every service unconditionally is where `hllc` parts company
+  with `docker compose` itself, which hands a service the default
+  network only when that service lists no networks of its own. The
+  difference is deliberate: `default` already carries the traffic
+  between the services in one file, so a stack can lean on it and
+  declare no private network for that job—one declaration fewer than the
+  hand-written Compose it replaces, rather than a shortfall next to it.
+
   An explicit `network default { ... }` declaration still wins: its
   `external`/`name` settings apply exactly as they would to any other
   named network, including feeding the `traefik.docker.network=` label

@@ -59,5 +59,7 @@ parenthesization
 parser's
 reparses
 snake_case
+[Rr]ebas(e|es|ed|ing)
+[Rr]etarget(s|ed|ing)?
 YAML's
 overridable
