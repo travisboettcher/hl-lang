@@ -91,7 +91,7 @@ image "jellyfin/jellyfin:latest"
 ```
 
 Every service needs an `image` or a [`build`](#build)—either directly or
-inherited from a template—and `hllc --build` fails when it would emit
+inherited from a template—and `hllc build` fails when it would emit
 neither.
 
 That check reads the *generated document*, not the `image` field, so a

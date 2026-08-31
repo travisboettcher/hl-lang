@@ -29,9 +29,10 @@ combine reusable `template`s onto a service via `with`, and `use` another
 `.hll` file under a local alias to reuse its templates/networks across
 files (`use "docker.hll" as traefik`, then for example
 `networks [traefik.traefik-net]`)—see docs/DESIGN.md's Composition and
-Imports sections. `hllc --build` runs the whole pipeline end to end,
+Imports sections. `hllc build` runs the whole pipeline end to end,
 printing the generated Compose YAML to stdout or, with `--out`, writing
-it to disk.
+it to disk. `hllc check` runs that same pipeline and writes nothing,
+which is what makes it a CI gate.
 
 ## Layout
 
@@ -46,9 +47,10 @@ hl-lang/
                  # in-memory map) and implements hl-parser's SymbolResolver
                  # over it
     hl-codegen/  # ComposedProgram -> Docker Compose YAML + Traefik labels
-    hl-cli/      # `hllc <file.hll>` lexes; `--parse` parses and prints
-                 # the AST; `--build [--out <path>]` runs the full
-                 # pipeline (link -> compose -> codegen)
+    hl-cli/      # `hllc build <file.hll> [--out <path>]` runs the full
+                 # pipeline (link -> compose -> codegen); `hllc check`
+                 # runs it and writes nothing; `hllc parse`/`hllc tokens`
+                 # print the AST and the token stream
 ```
 
 ## Installing
@@ -60,7 +62,7 @@ with a prebuilt `hllc` Linux x86-64 binary attached—download it,
 ```sh
 curl -Lo hllc https://github.com/travisboettcher/hl-lang/releases/latest/download/hllc-linux-x86_64
 chmod +x hllc
-./hllc --build <file.hll>
+./hllc build <file.hll>
 ```
 
 Consumers—CI, a local deploy step—should pin to a specific tag rather than
@@ -114,7 +116,7 @@ an invocation, the stdout and stderr it produces, and its exit code, as
 plain text you can read. A `<name>.in/` directory beside it supplies the
 working directory those commands run in, and a `<name>.out/` directory
 states what that working directory must hold afterwards, which is how the
-multi-file `--build --out <dir>` cases assert everything they wrote at
+multi-file `build --out <dir>` cases assert everything they wrote at
 once. Bless a deliberate change to the output the same way:
 
 ```sh
@@ -216,22 +218,23 @@ Try the command-line tool (`hllc`) against an `.hll` file—`cargo run -p
 hl-cli --` runs it straight from source without a separate install step:
 
 ```sh
-cargo run -p hl-cli -- crates/hl-lexer/tests/fixtures/jellyfin.hll
-cargo run -p hl-cli -- --parse crates/hl-parser/tests/fixtures/jellyfin.hll
-cargo run -p hl-cli -- --build crates/hl-parser/tests/fixtures/syncthing.hll
+cargo run -p hl-cli -- tokens crates/hl-lexer/tests/fixtures/jellyfin.hll
+cargo run -p hl-cli -- parse crates/hl-parser/tests/fixtures/jellyfin.hll
+cargo run -p hl-cli -- build crates/hl-parser/tests/fixtures/syncthing.hll
+cargo run -p hl-cli -- check crates/hl-parser/tests/fixtures/syncthing.hll
 ```
 
 (`cargo build -p hl-cli` / `cargo install --path crates/hl-cli` produce the
-`hllc` binary directly, usable the same way: `hllc --build <file.hll>`.)
+`hllc` binary directly, usable the same way: `hllc build <file.hll>`.)
 
-`--build` also resolves real cross-file `use` imports—try it against
+`build` also resolves real cross-file `use` imports—try it against
 the split-file example in `crates/hl-cli/tests/fixtures/imports/`
 (`network.hll` + `templates.hll` + `syncthing.hll`, connected by `use`
 decls), which produces byte-identical output to the preceding
 single-file version:
 
 ```sh
-cargo run -p hl-cli -- --build crates/hl-cli/tests/fixtures/imports/syncthing.hll
+cargo run -p hl-cli -- build crates/hl-cli/tests/fixtures/imports/syncthing.hll
 ```
 
 ## Releasing
@@ -273,9 +276,9 @@ either way:
 
 - **`.hll` source compatibility.** A `.hll` file that compiled before
   still compiles, and still means the same thing.
-- **The `hllc` command-line tool contract.** Flag names and their
-  semantics, positional arguments, the shape of what lands on stdout vs.
-  stderr, and exit codes.
+- **The `hllc` command-line tool contract.** Subcommand and flag names
+  and their semantics, positional arguments, the shape of what lands on
+  stdout vs. stderr, and exit codes.
 - **Generated-Compose semantics.** What the emitted YAML *does* when
   `docker compose up` runs it: the services, images, ports, volumes,
   networks, environment, and Traefik labels it describes.

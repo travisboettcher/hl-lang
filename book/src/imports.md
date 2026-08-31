@@ -81,7 +81,7 @@ service syncthing {
 }
 ```
 
-Compiling `syncthing.hll` with `hllc --build` produces byte-identical
+Compiling `syncthing.hll` with `hllc build` produces byte-identical
 output to writing all three declarations in one file—`use` is purely
 an organizational tool, not a different composition mechanism.
 

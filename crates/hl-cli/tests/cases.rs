@@ -6,7 +6,7 @@
 //!
 //! # What a case pins down
 //!
-//! Each case runs the pipeline `hllc --build` runs — [`hl_linker::link`]
+//! Each case runs the pipeline `hllc build` runs — [`hl_linker::link`]
 //! (lex, parse, compose, resolve `use` imports) then
 //! [`hl_codegen::generate`] — and records the outcome in its `.expected`
 //! file as labelled sections:
@@ -170,7 +170,7 @@ fn check(path: &Path, expected: std::path::PathBuf) -> datatest_stable::Result<(
     Ok(())
 }
 
-/// Runs the `hllc --build` pipeline over one case and renders the
+/// Runs the `hllc build` pipeline over one case and renders the
 /// outcome as the sectioned text its `.expected` file holds.
 fn compile(path: &Path) -> String {
     let rendered = match hl_linker::link(path, &FsLoader) {

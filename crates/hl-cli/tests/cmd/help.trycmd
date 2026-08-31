@@ -1,0 +1,54 @@
+Bare `hllc`, with no subcommand, prints help and exits non-zero (#129).
+It used to lex whatever path followed it and dump the token stream,
+which meant the first command anyone typed answered a question nobody
+had asked. This transcript is what pins the whole command surface as
+text: adding, renaming, or re-describing a subcommand shows up here as
+a reviewable diff.
+
+```console
+$ hllc
+? 2
+Compile hl-lang (.hll) sources into Docker Compose YAML
+
+Usage: hllc <COMMAND>
+
+Commands:
+  build   Compile into Compose YAML
+  check   Run the same pipeline as `build`, writing nothing
+  parse   Parse one file and pretty-print its AST
+  tokens  Lex one file and print its token stream
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help (see more with '--help')
+  -V, --version  Print version
+
+EXAMPLES:
+    hllc build jellyfin.hll                           Print Compose YAML to stdout
+    hllc build jellyfin.hll --out docker-compose.yml  Write it to a file
+    hllc build services/ --out dist/                  Build every service in a directory
+    hllc check services/                              Compile it all, write nothing
+
+See the book for the full field reference and directory-build modes:
+https://travisboettcher.github.io/hl-lang/
+
+```
+
+`--out` and `--force` belong to `build` alone, and that is now a fact
+about where they are declared rather than a rule `clap` has to enforce
+(#123 added `requires`/`conflicts_with` for this; a subcommand cannot
+also be a different subcommand, so those states stopped being
+expressible at all):
+
+```console
+$ hllc check services --out dist
+? 2
+error: unexpected argument '--out' found
+
+  tip: to pass '--out' as a value, use '-- --out'
+
+Usage: hllc check <FILE>
+
+For more information, try '--help'.
+
+```

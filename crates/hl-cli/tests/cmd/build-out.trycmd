@@ -1,4 +1,4 @@
-`--build --out <path>` writes the document to that path and prints the
+`build --out <path>` writes the document to that path and prints the
 path it wrote, so a caller knows where the output went without having
 to guess. The file itself is checked by `build-out.out/`, which is what
 pins the generated-file header: `hllc` recognizes its own output by
@@ -6,7 +6,7 @@ that header before overwriting anything, so the exact bytes at the top
 of every generated file are load-bearing, not decoration.
 
 ```console
-$ hllc --build web.hll --out docker-compose.yml
+$ hllc build web.hll --out docker-compose.yml
 docker-compose.yml
 
 ```

@@ -161,7 +161,7 @@ fn scratch_dir(name: &str) -> PathBuf {
 }
 
 /// Runs the full pipeline — link (which composes) then codegen — over
-/// one source file, exactly as `hllc --build` does.
+/// one source file, exactly as `hllc build` does.
 fn build(src: &str) -> Result<String, String> {
     let mut loader = hl_linker::InMemoryLoader::default();
     loader.add("case.hll", src);
