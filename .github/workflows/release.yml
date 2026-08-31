@@ -140,7 +140,7 @@ jobs:
 
       - name: Install Rust
         if: steps.label.outputs.skip == 'false'
-        uses: dtolnay/rust-toolchain@1.94.1
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - uses: Swatinem/rust-cache@v2
         if: steps.label.outputs.skip == 'false'
@@ -374,7 +374,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.94.1
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - uses: Swatinem/rust-cache@v2
 
