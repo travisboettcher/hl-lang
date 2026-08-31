@@ -88,8 +88,12 @@ jobs:
 
           # Fallback for the retargeted-stacked-PR case described in this
           # file's header comment (#210). The body reaches the script
-          # through the environment rather than through `${{ }}`
-          # interpolation, so a PR title or body can't inject shell.
+          # through the environment rather than through workflow
+          # expression interpolation, so a PR title or body can't inject
+          # shell. Don't spell that interpolation out literally here:
+          # GitHub parses `run:` blocks for expressions even inside shell
+          # comments, so an empty one makes the whole file invalid and
+          # the job silently never runs.
           # `grep` exits 1 on no match, which `|| true` absorbs under
           # `pipefail` and leaves `numbers` empty.
           numbers=$(printf '%s\n' "${PR_BODY:-}" |
