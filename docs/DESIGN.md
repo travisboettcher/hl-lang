@@ -495,8 +495,8 @@ of the book's Built-in Fields page).
 `labels` is the one key where that rule needs saying out loud, and #232
 is why. Every other overridable key is one built-in field, so replacing
 it means replacing the one thing the author wrote. `labels` is a
-*derived* key instead: nothing in the language sets it, and what codegen
-emits is the sum of four independent features.
+*derived* key instead: no single field sets it, and what codegen emits is
+the sum of four independent features.
 
 - `router`, contributing the routing rule, the entry points, and the
   middleware list.
@@ -507,10 +507,12 @@ emits is the sum of four independent features.
   `traefik.docker.network`.
 
 A service can reach for any one of those without knowing the other three
-exist. So `raw { labels: [...] }` beside a `router` block doesn't
-override *a* field. It discards the output of all four at once, and
-overriding it commits the author to reproducing every one of them by
-hand and keeping them in step from then on. That's still the correct
+exist. #243 later added a fifth contributor, the explicit `labels` field
+documented below, whose entries codegen appends to that same computed
+set. So `raw { labels: [...] }` beside a `router` block doesn't override
+*a* field. It discards the output of all of them at once, and overriding
+it commits the author to reproducing every one of them by hand and
+keeping them in step from then on. That's still the correct
 behavior—a half-merged `raw` value would no longer be verbatim
 passthrough, and hand-writing the whole list is a legitimate use of the
 escape hatch—but losing the whole computed set in silence is a trap

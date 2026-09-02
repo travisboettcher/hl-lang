@@ -211,16 +211,6 @@ router {
 }
 ```
 
-**Migrating from an older `hll` file:** `expose 80, host: "h",
-entrypoint: web`—a pre-#198 spelling—becomes `expose 80` plus a
-`router` block naming the same host and entry points, with the list
-spelled `entrypoints`. A `router` writing the old singular no longer
-parses, and says so:
-
-```text
-web.hll:4:5: `entrypoint` is no longer a `router` field — it's spelled `entrypoints` now, a list matching Traefik's own `entrypoints=` label
-```
-
 ## `router`
 
 No primary field: the router's name already occupies the position right
@@ -356,9 +346,8 @@ service-wide target
 `traefik.http.services.<service>.loadbalancer.server.port`, which comes
 from [`expose`](#expose). That's the common case: a container listens on
 one port however many routers point at it. A service with such a router
-but no `expose <port>` is a compile error—a router with nothing to
-load-balance onto used to mean Traefik silently guessed a port, and now
-means `hllc` refuses to compile:
+but no `expose <port>` is a compile error—rather than leave Traefik to
+guess a port, `hllc` refuses to compile:
 
 ```hll,ignore
 service web {
@@ -585,10 +574,10 @@ traefik.http.services.gitea.loadbalancer.server.port=3000
 ```
 
 That's a public route beside an internal, IP-restricted one off the same
-container. Earlier versions put `middleware` on the *service* instead,
-where one list reached every router the service had—which couldn't
-express this at all: the allowlist went onto the public route or came
-off the internal one, and both readings are wrong.
+container, and it's why `middleware` belongs to the router rather than
+the service: one service-wide list would reach every router at once, so
+the allowlist would land on the public route as well as the internal
+one.
 
 However many you name, they produce **one** label per router, not one
 per item: `traefik.http.routers.<id>.middlewares=` with the names
@@ -634,7 +623,7 @@ compiles clean. A template can still carry the shared part once—see
 [Templates & composition](./templates-and-composition.md).
 
 Writing `middleware` on a `service` or `template` body is a compile
-error naming where it went, rather than a line quietly ignored:
+error naming where it belongs, rather than a line quietly ignored:
 
 ```hll,ignore
 service web {
@@ -686,8 +675,7 @@ services:
 This is the dedicated answer to a shape several real homelab services
 share: a backing database with no `router`/`middleware` of its own,
 sitting next to a Traefik-facing sibling service in the same file.
-Before this field, the only way to say "no Traefik" was to replace the
-*entire* computed label list through `raw`:
+Reaching for `raw` to say the same thing:
 
 ```hll,fragment
 raw {
@@ -695,8 +683,8 @@ raw {
 }
 ```
 
-That still works—`raw`'s override rule doesn't change—but it's a blunt
-instrument for a one-label change, and it silently stops tracking
+works, since `raw` overrides the computed list either way—but it's a
+blunt instrument for a one-label change, and it silently stops tracking
 whatever `traefik.docker.network=`/router labels a future edit to the
 service would otherwise have added.
 
@@ -752,13 +740,6 @@ No brace-free `traefik disable` spelling exists—`disable` needs the
 braced body, `traefik { disable }`, exactly like
 [`healthcheck`](#healthcheck)'s own `disable` flag, which it's named to
 match.
-
-**Migrating from an older `hll` file:** #199 renamed this flag from
-`disabled`. The old spelling no longer parses, and names the new one:
-
-```text
-db.hll:4:5: `disabled` is no longer a `traefik` field — it's spelled `disable` now, matching `healthcheck { disable }`
-```
 
 ## `publish`
 
@@ -875,12 +856,6 @@ that.
 There's no single-value shorthand, matching `publish`/`volume`:
 `devices "/dev/kmsg"` is an error, not "the same path on both sides."
 
-This field grew its arrow syntax from review feedback on the pull
-request that introduced it at #167—it originally shipped taking a
-single pre-joined `"host:container"` string, `devices
-["/dev/kmsg:/dev/kmsg"]`, before landing on the same shape `publish`/
-`volume` already use.
-
 ## `volume`
 
 Map-kind. Bare-entry separator: `->`, which points from the host path
@@ -957,7 +932,7 @@ declaration no service names produces none—though only the `network`
 case raises a [warning](./cli.md#warnings) today.
 
 Either kind of entry may add a trailing `{ read_only }` body, appending
-Compose short syntax's `:ro` mode suffix—see #158:
+Compose short syntax's `:ro` mode suffix:
 
 ```hll,fragment
 volume "/" -> "/rootfs" { read_only }
@@ -1049,7 +1024,7 @@ labels:
 
 Explicit entries always come last, after every computed label. Nothing a
 service computed moves to make room, so a file that writes no `labels`
-generates exactly the output it did before this field existed.
+block generates exactly what it would without one.
 
 This is the field to reach for when Traefik needs one label `router`
 can't yet spell—the standard example is a per-router list of TLS Subject
@@ -1242,7 +1217,7 @@ env_file "miniflux.env"
 env_file ["miniflux.env", "common.env"]
 ```
 
-`middleware` used to belong to this group and no longer does: it's a
+`middleware` looks like it belongs to this group but doesn't: it's a
 [`router`](#middleware) field, since a middleware only ever reaches
 Traefik as a label on one specific router. Writing it here is a compile
 error that says so.
@@ -1265,12 +1240,11 @@ error that says so.
 
   Compose has two mutually exclusive shapes for `depends_on:` and never
   mixes them in one document: a plain list of names, or a mapping of
-  name to `{ condition: ... }`. `hllc` emits the plain list—unchanged
-  from before this syntax existed—as long as *no* entry in the field
-  carries a condition, and switches the whole field to the mapping form
-  once *any* entry does. A sibling entry with no explicit condition is
-  then filled in with `service_started`, since the mapping form
-  requires every entry to name one.
+  name to `{ condition: ... }`. `hllc` emits the plain list as long as
+  *no* entry in the field carries a condition, and switches the whole
+  field to the mapping form once *any* entry does. A sibling entry with
+  no explicit condition is then filled in with `service_started`, since
+  the mapping form requires every entry to name one.
 
   `service_healthy` is only meaningful when the target service actually
   has a healthcheck to become healthy against—but `hllc` doesn't warn
@@ -1514,12 +1488,10 @@ one whole argument vector.
 
 Map-kind, schema-free: `hllc` accepts unknown keys as-is rather than
 checking them against a fixed field list, and their values pass
-straight through to the generated YAML. `raw`'s job has narrowed over
-time as more of its common uses graduated into dedicated fields—
-`privileged`/`devices` most recently—so what's left is the genuine long
-tail: real Compose keys that come up rarely enough, or are specific
-enough to one deployment, that a dedicated field isn't worth it. `cadvisor`'s
-`security_opt` is one:
+straight through to the generated YAML. Its job is the long tail the
+language doesn't model with a field of its own: real Compose keys that
+come up rarely enough, or are specific enough to one deployment, that a
+dedicated field isn't worth it. `cadvisor`'s `security_opt` is one:
 
 ```hll,fragment
 raw {
@@ -1539,15 +1511,11 @@ ever comes up for generated or pathological input.
 
 `hllc` checks uniqueness on the **key**, the same convention `env` uses:
 two *explicit* `with`-listed templates setting the same `raw` key is a
-compile error, not a silent override. That's new as of #193—before it,
-`raw` was the one field the merge concatenated outright at every tier,
-with no uniqueness check at all, so two templates both writing `raw {
-user: "..." }` compiled with whichever template's `with` position came
-last quietly winning.
+compile error, not a silent override.
 
-A key repeated *within one body* is a compile error too, as of #206—one
-`raw { }` block, or two in the same service, since two blocks accumulate
-into one map:
+A key repeated *within one body* is a compile error too—one `raw { }`
+block, or two in the same service, since two blocks accumulate into one
+map:
 
 ```hll,ignore
 raw { user: "1000", user: "2000" }
@@ -1608,9 +1576,10 @@ with it.
 
 ### `labels` is a derived key, and replacing it costs more than it looks
 
-`labels` deserves its own warning label, because it isn't one field from
-the language's point of view. You never write `labels` yourself: `hllc`
-assembles it out of four independent features, any of which a service can
+`labels` deserves its own warning label, because the key `hllc` emits
+isn't one field from the language's point of view. On top of whatever a
+service writes in its own [`labels`](#labels) block, `hllc` assembles
+that key out of four independent features, any of which a service can
 use without thinking about the others.
 
 - [`router`](#router)—the routing rule, the entry points, the
