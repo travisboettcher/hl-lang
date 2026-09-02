@@ -3182,7 +3182,7 @@ fn service_level_middleware_names_its_new_home() {
     );
     assert_eq!(
         err.to_string(),
-        "3:3: `middleware` is no longer a `service` field — move it inside the `router` block \
+        "3:3: `middleware` isn't a `service` field — move it inside the `router` block \
          it applies to (`router { host: \"...\", middleware: ... }`)"
     );
 }
@@ -3248,7 +3248,7 @@ fn routers_old_entrypoint_spelling_names_its_new_one() {
     );
     assert_eq!(
         err.to_string(),
-        "3:5: `entrypoint` is no longer a `router` field — it's spelled `entrypoints` now, a \
+        "3:5: `entrypoint` isn't a `router` field — it's spelled `entrypoints`, a \
          list matching Traefik's own `entrypoints=` label"
     );
 }
@@ -3283,7 +3283,7 @@ fn traefiks_old_disabled_spelling_names_its_new_one() {
     );
     assert_eq!(
         err.to_string(),
-        "3:5: `disabled` is no longer a `traefik` field — it's spelled `disable` now, matching \
+        "3:5: `disabled` isn't a `traefik` field — it's spelled `disable`, matching \
          `healthcheck { disable }`"
     );
 }

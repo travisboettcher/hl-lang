@@ -218,7 +218,7 @@ spelled `entrypoints`. A `router` writing the old singular no longer
 parses, and says so:
 
 ```text
-web.hll:4:5: `entrypoint` is no longer a `router` field — it's spelled `entrypoints` now, a list matching Traefik's own `entrypoints=` label
+web.hll:4:5: `entrypoint` isn't a `router` field — it's spelled `entrypoints`, a list matching Traefik's own `entrypoints=` label
 ```
 
 ## `router`
@@ -645,7 +645,7 @@ service web {
 ```
 
 ```text
-web.hll:4:3: `middleware` is no longer a `service` field — move it inside the `router` block it applies to (`router { host: "...", middleware: ... }`)
+web.hll:4:3: `middleware` isn't a `service` field — move it inside the `router` block it applies to (`router { host: "...", middleware: ... }`)
 ```
 
 ## `traefik`
@@ -757,7 +757,7 @@ match.
 `disabled`. The old spelling no longer parses, and names the new one:
 
 ```text
-db.hll:4:5: `disabled` is no longer a `traefik` field — it's spelled `disable` now, matching `healthcheck { disable }`
+db.hll:4:5: `disabled` isn't a `traefik` field — it's spelled `disable`, matching `healthcheck { disable }`
 ```
 
 ## `publish`

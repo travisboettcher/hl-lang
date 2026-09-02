@@ -323,7 +323,14 @@ impl fmt::Display for ParseError {
                 ..
             } => write!(
                 f,
-                "{}:{}: `{field}` is no longer a `{type_name}` field — {guidance}",
+                // Present tense on purpose. Every row in `moved_field`
+                // moved or was renamed pre-1.0, so a reader hitting one
+                // today most likely never wrote the old spelling — they
+                // guessed this field belonged here. "is no longer"
+                // answers a question they didn't ask, and reads as
+                // "your file is outdated" when the file is new. The
+                // `guidance` clause carries the part they need.
+                "{}:{}: `{field}` isn't a `{type_name}` field — {guidance}",
                 span.line, span.col
             ),
             ParseError::DuplicateField {
