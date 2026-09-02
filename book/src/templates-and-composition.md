@@ -188,8 +188,7 @@ Different field kinds merge differently:
   each `with` target left to right, then the body's own entries. `dns`
   and `env_file` are the exception and keep every entry, duplicates
   included, because their order is observable—resolver priority for
-  `dns`, Compose's own last-file-wins precedence for `env_file`—see
-  #154.
+  `dns`, Compose's own last-file-wins precedence for `env_file`.
 - **`depends_on`** looks like a list field—`depends_on [db]`—but merges
   like the map fields just below it, keyed on the referenced service's
   own name, so the service's own body always wins over a template's
@@ -207,13 +206,8 @@ Different field kinds merge differently:
   value-by-value for `volume`, since its uniqueness check is on the
   container-path side)—a genuine collision on the same key, regardless
   of whether the two values happen to agree, is the preceding compile
-  error case. `raw` followed this rule only starting in #193—before
-  that it was the one field the merge concatenated outright at every
-  tier, so two explicit templates setting the same `raw` key compiled
-  with the second one's value silently winning instead of raising a
-  collision—see [`raw`'s own section](./built-in-fields.md#raw) for that
-  history. The preceding entry's `depends_on` keys like a map field too,
-  but its collision check also looks at the *value*: two entries that
+  error case. The preceding entry's `depends_on` keys like a map field
+  too, but its collision check also looks at the *value*: two entries that
   agree aren't a real collision the way two `env` entries sharing a key
   always are, whatever those two entries' values happen to be.
 - **Scalar fields** (`image`, `restart`, `expose`'s `port`) error on
@@ -239,18 +233,18 @@ Different field kinds merge differently:
   present at all. Two explicit templates each setting `test` (or each
   setting `disable`) still collide, exactly as two explicit templates
   each setting `expose.port` do.
-- **`command`**, added in #156, merges the same way `healthcheck.test` does, not
-  the way `container_name` does: its shell-string-or-exec-list shape
-  isn't a plain `Literal` either, so it collides between two explicit
-  templates by the same rule rather than riding the plain-scalar
+- **`command`** merges the same way `healthcheck.test` does, not the way
+  `container_name` does: its shell-string-or-exec-list shape isn't a
+  plain `Literal` either, so it collides between two explicit templates
+  by the same rule rather than riding the plain-scalar
   machinery `image`/`restart`/`container_name` use. Unlike
   `healthcheck.test`, `command` sits directly on the service body rather
   than inside a struct field of its own, so there's no sub-field
   independence to it—setting `command` at all is the whole collision,
   the same as setting `container_name` is.
-- **`entrypoint`**, added in #183, merges exactly the way `command`
-  does, and for the same reasons—a service's own value replaces an
-  inherited one, and two explicit templates that each set it collide.
+- **`entrypoint`** merges exactly the way `command` does, and for the
+  same reasons—a service's own value replaces an inherited one, and two
+  explicit templates that each set it collide.
   The two are separate Compose keys, though, so they don't collide with
   *each other*: a template that sets `entrypoint` and a template that
   sets `command` merge cleanly, and the service gets both.
