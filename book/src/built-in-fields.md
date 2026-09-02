@@ -1608,9 +1608,10 @@ with it.
 
 ### `labels` is a derived key, and replacing it costs more than it looks
 
-`labels` deserves its own warning label, because it isn't one field from
-the language's point of view. You never write `labels` yourself: `hllc`
-assembles it out of four independent features, any of which a service can
+`labels` deserves its own warning label, because the key `hllc` emits
+isn't one field from the language's point of view. On top of whatever a
+service writes in its own [`labels`](#labels) block, `hllc` assembles
+that key out of four independent features, any of which a service can
 use without thinking about the others.
 
 - [`router`](#router)—the routing rule, the entry points, the

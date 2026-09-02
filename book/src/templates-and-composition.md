@@ -54,7 +54,7 @@ template authenticated {
 
 Both templates name the *unnamed* router, so composing them merges the
 two blocks under that one key and their `middleware` lists concatenate
-in tier order—see [`router`](#the-merge-rules-field-by-field) below.
+in tier order—see [`router`](#merge-order-and-collisions) below.
 
 ## Applying a template with `with`
 

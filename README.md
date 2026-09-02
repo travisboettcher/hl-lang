@@ -23,16 +23,20 @@ underlying the user guide.
 
 **The compiler implements the full pipeline**: lexer → parser →
 template/`with` composition → cross-file `use` imports → codegen →
-command-line tool. A `.hll` file can declare
-`network`/`service`/`image`/`expose`/`publish`/`volume`/`env`/`restart`/`raw`,
-combine reusable `template`s onto a service via `with`, and `use` another
-`.hll` file under a local alias to reuse its templates/networks across
-files (`use "docker.hll" as traefik`, then for example
-`networks [traefik.traefik-net]`)—see docs/DESIGN.md's Composition and
-Imports sections. `hllc build` runs the whole pipeline end to end,
-printing the generated Compose YAML to stdout or, with `--out`, writing
-it to disk. `hllc check` runs that same pipeline and writes nothing,
-which is what makes it a CI gate.
+command-line tool. A `.hll` file declares `network`, `volume` and
+`service` blocks. A service carries the image or build context it runs,
+the ports it exposes or publishes, its volumes, environment, restart and
+health-check policy, one or more Traefik `router` blocks, extra Docker
+`labels`, and a `raw` escape hatch for any Compose key the language
+doesn't model yet. The user guide lists every field and what it
+generates. Services combine reusable `template`s via `with`, and
+`use` another `.hll` file under a local alias to reuse its
+templates/networks across files (`use "docker.hll" as traefik`, then for
+example `networks [traefik.traefik-net]`)—see docs/DESIGN.md's
+Composition and Imports sections. `hllc build` runs the whole pipeline
+end to end, printing the generated Compose YAML to stdout or, with
+`--out`, writing it to disk. `hllc check` runs that same pipeline and
+writes nothing, which is what makes it a CI gate.
 
 ## Layout
 
