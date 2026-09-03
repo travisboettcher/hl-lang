@@ -634,7 +634,7 @@ service web {
 ```
 
 ```text
-web.hll:4:3: `middleware` is no longer a `service` field — move it inside the `router` block it applies to (`router { host: "...", middleware: ... }`)
+web.hll:4:3: `middleware` isn't a `service` field — move it inside the `router` block it applies to (`router { host: "...", middleware: ... }`)
 ```
 
 ## `traefik`

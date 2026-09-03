@@ -2255,7 +2255,7 @@ fn service_level_middleware_is_a_parse_error_naming_its_new_home() {
         .expect_err("expected a parse error");
     assert_eq!(
         err.to_string(),
-        "4:3: `middleware` is no longer a `service` field — move it inside the `router` block \
+        "4:3: `middleware` isn't a `service` field — move it inside the `router` block \
          it applies to (`router { host: \"...\", middleware: ... }`)"
     );
 }

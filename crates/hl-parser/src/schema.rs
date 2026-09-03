@@ -1096,9 +1096,14 @@ pub enum FieldResolution {
 ///
 /// The two #199 rows are renames rather than moves, which is the same
 /// mistake from the compiler's side: the name is gone, and an author
-/// migrating a pre-#199 `.hll` file is better served by being told the
-/// new spelling than by "unknown field". Both are pre-1.0 breaking
-/// changes, so the guidance is the migration note.
+/// who reaches for it is better served by being told the spelling that
+/// works than by "unknown field".
+///
+/// Every row here moved or was renamed pre-1.0, so write each guidance
+/// clause for someone who never saw the old name — most readers who hit
+/// one guessed the field belonged here rather than carrying it over
+/// from an older file. Say where the field is, not when it left; the
+/// rendering in [`crate::ParseError`] makes the same choice.
 ///
 /// It's a function rather than a `FieldSchema` flag because a moved
 /// field has no kind, no value grammar, and nothing for the parser to do
@@ -1112,13 +1117,13 @@ pub fn moved_field(schema: &'static TypeSchema, key_text: &str) -> Option<&'stat
         ),
         // #199: renamed to the plural, which is what the field has been
         // since it became a list and what Traefik's own label spells.
-        ("router", "entrypoint") => Some(
-            "it's spelled `entrypoints` now, a list matching Traefik's own `entrypoints=` label",
-        ),
+        ("router", "entrypoint") => {
+            Some("it's spelled `entrypoints`, a list matching Traefik's own `entrypoints=` label")
+        }
         // #199: renamed to match `healthcheck { disable }` and Compose's
         // own key. See [`TRAEFIK`].
         ("traefik", "disabled") => {
-            Some("it's spelled `disable` now, matching `healthcheck { disable }`")
+            Some("it's spelled `disable`, matching `healthcheck { disable }`")
         }
         _ => None,
     }
