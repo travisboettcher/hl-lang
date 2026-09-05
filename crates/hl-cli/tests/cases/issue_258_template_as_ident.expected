@@ -1,0 +1,6 @@
+--- compose ---
+services:
+  template:
+    image: nginx
+    environment:
+    - TEMPLATE=yes

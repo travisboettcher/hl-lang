@@ -486,12 +486,16 @@ fn a_rule_expression_lexes_into_its_operators_and_matchers() {
     );
 }
 
-// --- template keyword ---
+// --- template is not a keyword (#258) ---
 
 #[test]
-fn template_keyword_recognized() {
+fn template_lexes_as_an_ordinary_ident() {
+    // The language reserves no words. `template` is meaningful only in
+    // the one grammar position the parser matches its lexeme in; to the
+    // lexer it is an identifier like any other.
     let tok = single_token("template");
-    assert_eq!(tok.kind, TokenKind::Template);
+    assert_eq!(tok.kind, TokenKind::Ident);
+    assert_eq!(tok.lexeme, "template");
 }
 
 #[test]

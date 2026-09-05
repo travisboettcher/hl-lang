@@ -350,13 +350,8 @@ impl<'src> Lexer<'src> {
             }
         }
         let lexeme = &self.source[start..end];
-        let kind = if lexeme == "template" {
-            TokenKind::Template
-        } else {
-            TokenKind::Ident
-        };
         Token {
-            kind,
+            kind: TokenKind::Ident,
             lexeme,
             span: Span {
                 start: offset(start),

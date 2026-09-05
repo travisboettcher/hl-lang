@@ -12,9 +12,10 @@ kinds:
 
 - A **named declaration**—a `service`, a `network`, or a `volume`—gives
   a type and a name, followed by a body: `service jellyfin { ... }`.
-- A **template declaration** starts with the word `template`, the *one*
-  reserved word in the whole language (see [Reserved words](#reserved-words)
-  below): `template internal_web(port) { ... }`.
+- A **template declaration** starts with the word `template`:
+  `template internal_web(port) { ... }`. That word isn't reserved—see
+  [Reserved words](#reserved-words) below—it just has to come first
+  here.
 - A **`use` declaration** imports another file: `use "docker.hll" as
   traefik`. See [Imports](./imports.md).
 
@@ -45,15 +46,33 @@ the exact same grammar as a service's own top-level body.
 
 ## Reserved words
 
-`template` is the only word in `hll` that you can never use as an
-identifier. Everything else that looks like a keyword—`service`,
-`network`, `image`, `build`, `volume`, `env`, `restart`, `expose`,
-`router`,
+`hll` has none. Every word that looks like a keyword—`template`,
+`service`, `network`, `image`, `build`, `volume`, `env`, `restart`,
+`expose`, `router`,
 `with`, `as`, `use`, `raw`, `defaults`, and so on—is an ordinary
 identifier that only *means* something because of where it appears and
 what field it's assigned to. This is deliberate: it keeps the door open
-for a field or a template named almost anything, without a growing list
-of words you have to avoid.
+for a field or a template named anything at all, with no list of words
+you have to avoid.
+
+`template` was the one exception until recently. Removing it lets the
+preceding rule hold without a footnote. So this parses, odd as it
+reads:
+
+```hll
+template template {
+  restart unless-stopped
+}
+
+service template {
+  image "nginx"
+  with template
+}
+```
+
+Naming things this way is a bad idea, not a good one. The point is that
+nothing in the language stops you—which is the same promise every other
+keyword-shaped word already made.
 
 ## The primary-value shorthand
 
