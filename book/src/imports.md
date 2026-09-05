@@ -236,3 +236,37 @@ a directory build, give it a directory of its own—see
 [The `hllc` command-line tool](./cli.md#directory-co-located-mode). If
 you meant to share it, what you want is a `template`, applied with
 `with`.
+
+## Modules bundled with the compiler
+
+`hllc` can carry `.hll` modules inside its own binary. A `use` path that
+starts with `std:` names one of those instead of a file beside yours:
+
+```hll
+use "std:traefik" as traefik
+```
+
+That path resolves against the compiler's own modules rather than
+against your tree. This compiler bundles none yet, so every `std:` path
+you can write today ends in one diagnostic:
+
+```text
+service.hll:1:5: unknown standard library module "std:traefik" — this compiler bundles no standard library modules
+```
+
+The first module to ship there is a Traefik template that reproduces the
+labels `hllc` generates for a `router` block, and it arrives with that
+migration rather than ahead of it. Until it does, the prefix earns its
+place in this page for one reason: `std:` belongs to the compiler. A
+file of your own named `std:something.hll` no longer answers to
+`use "std:something.hll"`, and reaching it takes an explicit relative
+spelling, `use "./std:something.hll"`.
+
+Once a module does ship, it behaves like any other import. An alias
+qualifies its declarations the same way, its templates resolve against
+the module that declared them, and its own imports stay its own. The one
+thing it never does: come from anywhere but the binary. No search path,
+no environment variable, no directory in your home, nothing fetched over
+a network. A bundled module and the compiler that reads it ship as one
+artifact and move together, which also means a compiler upgrade can
+change what one of them generates.

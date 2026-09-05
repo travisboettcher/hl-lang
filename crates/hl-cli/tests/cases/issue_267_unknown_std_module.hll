@@ -1,0 +1,15 @@
+# #267: a `use` path starting `std:` names a module compiled into the
+# compiler, not a file next to this one, so it never reaches relative
+# resolution and never touches the filesystem. No module ships yet —
+# the Traefik template of #259 arrives with #269 — which makes the
+# diagnostic the whole of what a user can see today, and the thing
+# worth pinning: it has to name what was asked for and say what this
+# compiler actually carries, rather than leaving someone hunting for a
+# `std:traefik.hll` they were never meant to have on disk.
+use "std:traefik" as traefik
+
+service web {
+  with traefik.labels
+  image "nginx"
+  expose 80
+}

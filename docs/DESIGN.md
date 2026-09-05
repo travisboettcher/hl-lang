@@ -1308,6 +1308,9 @@ use "docker.hll" as traefik
   path isn't lexable. It's resolved relative to the *importing file's
   own location*, never the entry file's location or the directory the
   compiler ran from.
+- **A path starting `std:` names a module bundled into the compiler**
+  rather than a file, and never reaches that relative resolution at
+  all—see the following "Modules bundled with the compiler."
 - `alias.name` qualifies any reference: a `networks [...]` entry
   (`networks [traefik.traefik-net]`), a named-volume mount's host side
   (`volume storage.media -> "/data"`), a `with` invocation's target
@@ -1362,6 +1365,72 @@ use "docker.hll" as traefik
   service, so
   `with common.defaults` resolves exactly as any other qualified
   invocation does.
+
+### Modules bundled with the compiler
+
+`hllc` carries `.hll` modules inside its own binary, and a `use` path
+prefixed `std:` names one of them:
+
+```
+use "std:traefik" as traefik
+```
+
+The namespace ships empty. #267 landed the mechanism ahead of its first
+module because that module—#259's Traefik template—has to reproduce the
+labels this compiler generates, byte for byte, which makes shipping
+alongside the compiler the whole point of it. A copy in the user's own tree
+drifts from the compiler that generated it the moment either one moves,
+and drift in a template whose job is byte-for-byte agreement means
+silently wrong output rather than a diagnostic.
+
+**Why a prefix rather than new syntax.** The obvious alternative,
+`use <std/traefik>`, costs two tokens the lexer has never carried—`<`
+and `>` appear nowhere else in the language—plus a second `use_decl`
+production to reach them. The prefix costs neither: `use_decl ::= "use"
+STRING "as" IDENT` covers it exactly as written, so the preceding
+Lexical grammar and Syntactic grammar sections need no new exception,
+and the whole of the feature lives in the linker, the stage that already
+decides what a path means.
+
+**The compiler reserves the `std:` prefix.** A path that starts with it
+names a bundled module and never reaches relative resolution, so no file
+answers to one—whatever a user names a file, and however some other
+`use` spells its path. Stated plainly, the consequence: a file literally
+named `std:traefik.hll` no longer answers to `use "std:traefik.hll"`.
+Reaching that file takes an explicit relative spelling,
+`use "./std:traefik.hll"`, and even then a diagnostic can't tell the two
+apart by name, since a bundled module renders under exactly the same
+`std:traefik.hll`. That's an accepted trade rather than an oversight: a
+`:` in a filename is rare enough to make the collision a curiosity,
+while a namespace any file can shadow by name defeats the point of
+shipping a module with the compiler at all.
+
+**A relative `use` inside a bundled module stays inside the standard
+library.** A compiled-in module has no directory in the user's tree to
+be relative to, so a `use "labels.hll"` written inside `std:traefik`
+names `std:labels`, and `use "std:labels"` names that same one module
+rather than a second copy of it. Every other rule holds unchanged: an
+absolute path, or one climbing out through `..`, draws the same
+rejection there that it draws in a user's own file. Cycles need no new
+machinery either—a bundled module joins the same module graph under an
+identity of its own, so the load-once-per-module rule that already keeps
+`A` uses `B` uses `A` from looping covers a cycle through the standard
+library too.
+
+**What this namespace never grows into.** No search path, no `$HLL_PATH`
+or `~/.hllc/lib`, nothing fetched over a network, and no version inside
+a module path, such as `std:traefik@2`. One namespace, one copy of the
+bytes, shipping with the compiler that reads them. Ambient state is
+precisely what the relative-only rule for ordinary paths keeps out of a
+build, and a module path that can name two different bodies is the seam
+a package manager grows from.
+
+Bundling instead of versioning has its own consequence, and it belongs
+here rather than in a footnote: the modules move with the compiler, so a
+release can change what one of them generates, and nothing pins an older
+copy. A change to a bundled module is a change to what a user's build
+generates, and it takes the same semver label any other such change
+takes—see CONTRIBUTING.md's "Picking a semver label."
 
 ## Worked examples
 
