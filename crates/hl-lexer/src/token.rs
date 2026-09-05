@@ -4,16 +4,23 @@ use crate::span::Span;
 
 /// The kind of a lexical token.
 ///
-/// Per the language's lexical grammar, `template` is the *only* reserved
-/// word — it gets its own variant here because the lexical grammar itself
-/// reserves it, not because the lexer is guessing at keyword meaning.
-/// Every other keyword-shaped word (`service`, `with`, `as`, `external`,
-/// `raw`, `defaults`, ...) is deliberately left as [`TokenKind::Ident`]:
-/// their meaning is resolved later by the parser against a schema table,
-/// and the lexer must not special-case them.
+/// The language has no reserved words at all (#258). Every
+/// keyword-shaped word — `service`, `template`, `with`, `as`,
+/// `external`, `raw`, `defaults`, ... — is deliberately left as
+/// [`TokenKind::Ident`]: their meaning is resolved later by the parser,
+/// against a schema table or by grammar position, and the lexer must not
+/// special-case them.
+///
+/// `template` was the one exception through #258. It had its own
+/// variant, on the reasoning that the lexical grammar itself reserved
+/// it — but that reserved it *everywhere*, including the positions where
+/// it is just a name, and the parser was already recognizing `use` and
+/// `as` by lexeme one grammar rule away. Now it goes the same way; see
+/// `hl_parser::Parser::parse_top_decl`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
-    /// `[A-Za-z_][A-Za-z0-9_-]*`, excluding the reserved word `template`.
+    /// `[A-Za-z_][A-Za-z0-9_-]*`. No word is excluded: the language
+    /// reserves none.
     Ident,
     /// `[0-9]+` — integers only, no sign, decimal point, or exponent.
     Number,
@@ -21,8 +28,6 @@ pub enum TokenKind {
     /// tab, a carriage return, or a `\` itself is written as a
     /// backslash escape (see [`crate::unescape`]).
     Str,
-    /// The reserved word `template`.
-    Template,
     LBrace,
     RBrace,
     LBracket,
@@ -67,7 +72,6 @@ impl fmt::Display for TokenKind {
             TokenKind::Ident => "an identifier",
             TokenKind::Number => "a number",
             TokenKind::Str => "a string literal",
-            TokenKind::Template => "`template`",
             TokenKind::LBrace => "`{`",
             TokenKind::RBrace => "`}`",
             TokenKind::LBracket => "`[`",

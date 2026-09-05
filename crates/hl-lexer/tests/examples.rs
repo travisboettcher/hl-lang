@@ -36,16 +36,15 @@ fn syncthing_example_lexes_to_expected_token_sequence() {
     use TokenKind::*;
     let expected = vec![
         // template internal_web(port) {
-        Template, Ident, LParen, Ident, RParen, LBrace, // networks [traefik-net]
+        Ident, Ident, LParen, Ident, RParen, LBrace, // networks [traefik-net]
         Ident, LBracket, Ident, RBracket, // restart unless-stopped
         Ident, Ident, // expose $port as "{{name}}.internal.techdebtor.io"
         Ident, Dollar, Ident, Ident, Str, // router { middleware: local-ipwhitelist }
         Ident, LBrace, Ident, Colon, Ident, RBrace, RBrace,
         // template authenticated { router { middleware: forwardAuth-authentik } }
-        Template, Ident, LBrace, Ident, LBrace, Ident, Colon, Ident, RBrace, RBrace,
+        Ident, Ident, LBrace, Ident, LBrace, Ident, Colon, Ident, RBrace, RBrace,
         // template linuxserver_app(puid, pgid) {
-        Template, Ident, LParen, Ident, Comma, Ident, RParen, LBrace,
-        // env PUID = $puid
+        Ident, Ident, LParen, Ident, Comma, Ident, RParen, LBrace, // env PUID = $puid
         Ident, Ident, Equals, Dollar, Ident, // env PGID = $pgid
         Ident, Ident, Equals, Dollar, Ident, RBrace, // service syncthing {
         Ident, Ident, LBrace,
@@ -73,21 +72,19 @@ fn combined_fixture_lexes_without_error() {
 }
 
 #[test]
-fn syncthing_example_never_emits_template_as_plain_ident() {
+fn syncthing_example_lexes_template_as_a_plain_ident() {
     // Sanity check on the fixture itself: it declares three `template`
-    // blocks, so exactly three Template tokens should appear, and the
-    // string "template" should never leak through as an Ident lexeme.
+    // blocks, and since #258 removed the language's last reserved word,
+    // each of those leads with an ordinary `Ident` whose lexeme happens
+    // to be "template". The parser tells them apart by position — see
+    // `hl_parser::Parser::parse_top_decl` — and the lexer no longer has
+    // a variant that could.
     let tokens = Lexer::tokenize(SYNCTHING).unwrap();
     let template_count = tokens
         .iter()
-        .filter(|t| t.kind == TokenKind::Template)
+        .filter(|t| t.kind == TokenKind::Ident && t.lexeme == "template")
         .count();
     assert_eq!(template_count, 3);
-    assert!(
-        tokens
-            .iter()
-            .all(|t| !(t.kind == TokenKind::Ident && t.lexeme == "template"))
-    );
 }
 
 /// #181: the escapes fixture lexes cleanly, and each of its string

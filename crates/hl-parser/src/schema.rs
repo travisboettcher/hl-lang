@@ -996,9 +996,11 @@ pub static TEMPLATE: TypeSchema = TypeSchema {
     schema_free: false,
 };
 
-/// Looks up a top-level declaration's type schema by name. `template` is
-/// handled separately by the parser as a lexical-token check (`template`
-/// is a reserved word, not an ordinary `IDENT`), not via this table.
+/// Looks up a top-level declaration's type schema by name. `template`
+/// is handled separately by the parser, which matches its lexeme before
+/// consulting this table (#258) — it is an ordinary `IDENT`, and
+/// deliberately not a row here, so a declaration *named* `template`
+/// still resolves against its own type's schema like any other.
 ///
 /// `volume` appears both here (as [`VOLUME_DECL`], the top-level
 /// declaration) and in `SERVICE_FIELDS` (as [`VOLUME`], the map-kind

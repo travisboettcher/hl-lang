@@ -38,22 +38,31 @@ STRING  ::= '"' ( [^"\\\n] | ESCAPE )* '"'
 ESCAPE  ::= '\\' ( '"' | '\\' | 'n' | 't' | 'r' )
 COMMENT ::= '#' [^\n]*        # to end of line; not part of the token stream
 
-Reserved (not usable as IDENT): "template"
+Reserved (not usable as IDENT): none
 Punctuation: { } [ ] ( ) : = -> , . $
 ```
 
-- `template` is the *only* reserved word in the entire language. Everything
-  else that looks like a keyword (`service`, `network`, `image`, `build`,
+- **The language has no reserved words.** Every word that looks like a
+  keyword (`template`, `service`, `network`, `image`, `build`,
   `volume`,
   `publish`, `env`, `env_file`, `restart`, `expose`, `healthcheck`,
   `depends_on`, `networks`, `dns`, `devices`,
   `container_name`, `command`, `entrypoint`, `privileged`, `with`, `as`,
   `external`, `use`, `raw`, `defaults`, and more) is an ordinary
-  `IDENT`, resolved against a schema table at parse time—not a
-  lexer-level keyword. `with`, `as`, `external`, and `use` are
-  *contextual* keywords, meaningful only in the grammar position expected
-  (the same technique as C#'s `var`/`async`/`await`/`yield`), not
-  globally off-limits as identifiers.
+  `IDENT`. The parser resolves it at parse time, against a schema table
+  or by grammar position—never at the lexer level. They're all *contextual*
+  keywords, meaningful only in the grammar position expected (the same
+  technique as C#'s `var`/`async`/`await`/`yield`), not globally
+  off-limits as identifiers.
+- `template` was the one exception through #258, with a token kind of
+  its own. It bought nothing the other contextual keywords don't already
+  demonstrate: `template` leads a `template_decl` and `use` leads a
+  `use_decl`, one token separates either from a `named_decl`'s type
+  name, and `template` isn't a registered top-level type, so there's
+  no competing parse to resolve. Reserving it only cost the positions
+  where the word is just a name—`service template { ... }`, a parameter
+  called `template`—and left the lexical grammar with one exception to
+  explain.
 - `.` separates an import alias from the name it qualifies (`alias.name`,
   see Imports, below) and never appears anywhere else in the grammar—
   `NUMBER` is integer-only, so there's no decimal-point ambiguity to
@@ -1425,11 +1434,11 @@ readability choice, not a different construct.
 
 ## Pipeline
 
-1. **Lexer** (`crates/hl-lexer`)—one reserved word (`template`),
+1. **Lexer** (`crates/hl-lexer`)—no reserved words at all,
    string/number literals, `{`/`}`/`[`/`]`/`.`/`$`, `->`, `:`, `=`,
-   `(`/`)`, `,`, and `#` line comments. Everything else is just an
-   identifier to the lexer. Meaning comes from the schema table during
-   parsing.
+   `(`/`)`, `,`, and `#` line comments. Every word is just an
+   identifier to the lexer. Meaning comes from the schema table, or from
+   grammar position, during parsing.
 2. **Parser** (`crates/hl-parser`)—one generic block parser, not one
    function per keyword: parse `<type> [<n>]`, then a bare value or
    list—the primary-field shorthand—or a `{ field: value, ... }` body,

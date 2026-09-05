@@ -5,13 +5,13 @@
 //! This crate turns hl-lang source text into a stream of [`Token`]s. It
 //! recognizes the language's lexical grammar exactly and no more:
 //! identifiers, integer number literals, double-quoted string literals
-//! (with the backslash escapes [`unescape`] decodes), the single
-//! reserved word `template`, the punctuation set
-//! `{ } [ ] ( ) : = -> , . $`, and `#`-to-end-of-line
-//! comments. Every other keyword-shaped word (`service`, `with`, `as`,
-//! `external`, `raw`, `defaults`, ...) is lexed as a plain [`TokenKind::Ident`]
-//! — the lexer has no notion of which identifiers are meaningful; that is
-//! resolved later by the parser against a schema table.
+//! (with the backslash escapes [`unescape`] decodes), the punctuation
+//! set `{ } [ ] ( ) : = -> , . $`, and `#`-to-end-of-line
+//! comments. The language reserves no words, so every keyword-shaped
+//! word (`service`, `template`, `with`, `as`, `external`, `raw`,
+//! `defaults`, ...) is lexed as a plain [`TokenKind::Ident`] — the lexer
+//! has no notion of which identifiers are meaningful; that is resolved
+//! later by the parser.
 //!
 //! # Example
 //!

@@ -1,0 +1,13 @@
+# #258 removed the language's last reserved word, so `template` is now
+# an ordinary `IDENT` everywhere one is legal — a declaration's name, a
+# parameter's name, a `with` argument's key — and is meaningful only in
+# the single grammar position `parse_top_decl` matches its lexeme in.
+# Every one of those spellings was a parse error before this landed.
+template template(template) {
+  env TEMPLATE = $template
+}
+
+service template {
+  image "nginx"
+  with template { template: "yes" }
+}

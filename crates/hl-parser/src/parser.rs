@@ -1569,8 +1569,16 @@ impl<'src> Parser<'src> {
         Ok(Program { decls })
     }
 
+    /// `template` and `use` are recognized here by lexeme, not by token
+    /// kind: neither is lexically reserved (#258). One token separates
+    /// all three top-level shapes — `use` leads a `use_decl`, `template`
+    /// leads a `template_decl`, and anything else has to be a registered
+    /// top-level type name — so neither check needs lookahead, and
+    /// neither competes with the other. `template` is not a registered
+    /// top-level type, so there is no `named_decl` parse for it to
+    /// shadow.
     fn parse_top_decl(&mut self) -> Result<TopDecl, ParseError> {
-        if self.peek().kind == TokenKind::Template {
+        if self.peek().kind == TokenKind::Ident && self.peek().lexeme == "template" {
             return Ok(TopDecl::Template(Box::new(self.parse_template_decl()?)));
         }
         if self.peek().kind == TokenKind::Ident && self.peek().lexeme == "use" {
@@ -1641,9 +1649,13 @@ impl<'src> Parser<'src> {
         Ok(UseDecl { path, alias, span })
     }
 
-    /// `template_decl ::= "template" IDENT param_list? body`.
+    /// `template_decl ::= "template" IDENT param_list? body`. `template`
+    /// is an ordinary `Ident` matched by lexeme in
+    /// [`Self::parse_top_decl`], which is the only caller and has
+    /// already peeked it — `parse_use_decl` takes its own `use` exactly
+    /// the same way.
     fn parse_template_decl(&mut self) -> Result<TemplateDecl, ParseError> {
-        let template_tok = self.expect(TokenKind::Template)?;
+        let template_tok = self.expect(TokenKind::Ident)?; // lexeme == "template", already peeked
         let name_tok = self.expect(TokenKind::Ident)?;
         let name = Ident {
             name: name_tok.lexeme.to_string(),
