@@ -56,10 +56,12 @@
 mod ast;
 pub mod compose;
 mod error;
+pub mod interp;
 mod match_expr;
 pub mod matchers;
 mod parser;
 pub mod schema;
+mod warning;
 
 pub use ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnCondition, DependsOnEntry,
@@ -76,3 +78,4 @@ pub use error::{Expected, ParseError};
 pub use hl_lexer::{FileId, Location, SourceMap, Span};
 pub use match_expr::MAX_MATCH_EXPR_DEPTH;
 pub use parser::{MAX_RAW_VALUE_DEPTH, parse, parse_in_file};
+pub use warning::ComposeWarning;

@@ -5,3 +5,9 @@ template defaults {
 service db {
   image "postgres"
 }
+
+template rule(host) {
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`$host`)"
+  }
+}

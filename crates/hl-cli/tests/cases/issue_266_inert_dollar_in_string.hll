@@ -1,0 +1,17 @@
+# #266: `$host` inside a string is not a parameter reference — `$`
+# substitutes a whole literal slot, never part of one — so the text
+# reaches the label verbatim and Traefik reads a router matching the
+# literal hostname `$host`: a rule that silently never matches, from
+# source that looks correct. Pinned as a warning plus the passthrough it
+# is about, since the value compiling unchanged is half of what makes
+# this a warning rather than an error.
+template traefik-http(host) {
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`$host`)"
+  }
+}
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  with traefik-http { host: "jellyfin.example.com" }
+}

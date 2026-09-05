@@ -5,8 +5,8 @@
 
 use hl_parser::schema::MapSide;
 use hl_parser::{
-    ArrowMapHost, Command, ComposeError, ComposedProgram, Entrypoint, Healthcheck, HealthcheckTest,
-    Literal, MatchExpr, RawValue, Service, compose, parse,
+    ArrowMapHost, Command, ComposeError, ComposeWarning, ComposedProgram, Entrypoint, Healthcheck,
+    HealthcheckTest, Literal, MatchExpr, RawValue, Service, compose, parse,
 };
 
 fn compose_ok(source: &str) -> ComposedProgram {
@@ -3016,4 +3016,404 @@ fn a_qualified_matcher_argument_is_rejected() {
         }
         other => panic!("expected UnsupportedQualifiedReference, got {other:?}"),
     }
+}
+
+// --- `{{param}}` interpolation inside string content (#266) ---
+//
+// The second way a parameter reaches a value, alongside the whole-slot
+// `$param` above. Resolved here rather than at codegen because an
+// invocation's bound arguments exist only while the invocation is being
+// resolved; `{{name}}` is left for codegen, which is the only stage that
+// knows which service a template's contribution landed on.
+
+fn label_value<'a>(service: &'a Service, key: &str) -> &'a str {
+    service
+        .fields
+        .labels
+        .entries
+        .iter()
+        .find(|e| e.key.text() == key)
+        .unwrap_or_else(|| panic!("no label `{key}`"))
+        .value
+        .text()
+}
+
+/// #259's target shape: a parameter interpolated *inside* a string, so
+/// the template can build a value rather than take a pre-rendered one.
+#[test]
+fn a_parameter_interpolates_into_string_content() {
+    let composed = compose_ok(
+        "template t(host) {\n  labels { \"rule\": \"Host(`{{host}}`)\" }\n}\n\
+         service s {\n  with t { host: \"a.example.com\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(label_value(service, "rule"), "Host(`a.example.com`)");
+}
+
+/// Both halves of a `labels` entry are plain `Literal` slots, so both
+/// interpolate — the key is where a Traefik router name would land.
+#[test]
+fn a_parameter_interpolates_into_a_label_key() {
+    let composed = compose_ok(
+        "template t(router) {\n  labels { \"traefik.http.routers.{{router}}.rule\": \"x\" }\n}\n\
+         service s {\n  with t { router: \"web\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        service.fields.labels.entries[0].key.text(),
+        "traefik.http.routers.web.rule"
+    );
+}
+
+/// Every literal kind an argument can be has a text form, and each
+/// contributes exactly the characters it was written with — a number
+/// keeps its own source digits rather than being re-rendered.
+#[test]
+fn every_scalar_argument_kind_has_an_interpolated_text_form() {
+    let composed = compose_ok(
+        "template t(s, n, i) {\n  \
+           labels { \"k\": \"{{s}}/{{n}}/{{i}}\" }\n\
+         }\n\
+         service s {\n  with t { s: \"str\", n: 0080, i: bare }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(label_value(service, "k"), "str/0080/bare");
+}
+
+/// Interpolation reaches wherever a `$param` does, `raw` included —
+/// both sides of a nested entry, since codegen resolves `{{name}}` on
+/// both when it emits one.
+#[test]
+fn a_parameter_interpolates_into_raw_keys_and_values() {
+    let composed = compose_ok(
+        "template t(k, v) {\n  raw { deploy: { \"{{k}}-count\": \"{{v}}!\" } }\n}\n\
+         service s {\n  with t { k: \"replica\", v: \"two\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    let RawValue::Map(entries, _) = &service.fields.raw.entries[0].value else {
+        panic!("expected a nested map");
+    };
+    assert_eq!(entries[0].0.text(), "replica-count");
+    assert_eq!(raw_text(&entries[0].1), "two!");
+}
+
+/// `{{name}}` is not composition's to resolve — it belongs to the
+/// service codegen is generating — so it survives this pass untouched,
+/// including in a string that also holds a parameter this pass *does*
+/// resolve.
+#[test]
+fn the_name_binding_is_left_for_codegen() {
+    let composed = compose_ok(
+        "template t(suffix) {\n  container_name \"{{name}}-{{suffix}}\"\n}\n\
+         service s {\n  with t { suffix: \"one\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        service.fields.container_name.as_ref().unwrap().text(),
+        "{{name}}-one"
+    );
+}
+
+/// A binding naming nothing is *also* left alone rather than rejected
+/// here: composition can't tell a typo from a binding a later stage
+/// owns. Codegen's `UnknownInterpolation` is what catches it, so the
+/// diagnostic doesn't move.
+#[test]
+fn an_unknown_binding_is_left_for_codegen_to_reject() {
+    let composed = compose_ok(
+        "template t(host) {\n  container_name \"{{hsot}}\"\n}\n\
+         service s {\n  with t { host: \"a\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        service.fields.container_name.as_ref().unwrap().text(),
+        "{{hsot}}"
+    );
+}
+
+/// A template forwarding its own parameter into a nested invocation has
+/// nothing concrete to splice yet, so the interpolation is renamed into
+/// the enclosing template's parameter namespace and resolved by whichever
+/// call site finally binds it.
+#[test]
+fn a_forwarded_parameter_interpolates_at_the_outer_call_site() {
+    let composed = compose_ok(
+        "template inner(h) {\n  labels { \"rule\": \"Host(`{{h}}`)\" }\n}\n\
+         template outer(host) {\n  with inner { h: $host }\n}\n\
+         service s {\n  with outer { host: \"b.example.com\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(label_value(service, "rule"), "Host(`b.example.com`)");
+}
+
+/// The forwarded argument can itself be a string built by the outer
+/// template, which is what makes the rename compose rather than just
+/// work one level deep.
+#[test]
+fn a_forwarded_interpolated_string_resolves_through_both_levels() {
+    let composed = compose_ok(
+        "template inner(h) {\n  labels { \"rule\": \"Host(`{{h}}`)\" }\n}\n\
+         template outer(sub) {\n  with inner { h: \"{{sub}}.example.com\" }\n}\n\
+         service s {\n  with outer { sub: \"media\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(label_value(service, "rule"), "Host(`media.example.com`)");
+}
+
+/// An argument the caller writes as `{{name}}` is the caller's own
+/// string content, so it reaches codegen intact and resolves against the
+/// service — the property that lets a template take a host derived from
+/// the service's name.
+#[test]
+fn an_argument_may_carry_the_name_binding_through() {
+    let composed = compose_ok(
+        "template t(host) {\n  labels { \"rule\": \"Host(`{{host}}`)\" }\n}\n\
+         service s {\n  with t { host: \"{{name}}.example.com\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(label_value(service, "rule"), "Host(`{{name}}.example.com`)");
+}
+
+/// A list has no text form to splice into the middle of a string. Named
+/// at the argument, matching `ArgumentNotReferenceShaped`/
+/// `ArgumentNotNumeric`: the argument is what has to change, and one
+/// template body can be reached from many call sites.
+#[test]
+fn a_list_argument_cannot_be_interpolated() {
+    let err = compose_err(
+        "template t(xs) {\n  container_name \"{{xs}}\"\n}\n\
+         service s {\n  with t { xs: [a, b] }\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentNotInterpolable { param, found, .. } => {
+            assert_eq!(param, "xs");
+            assert_eq!(found, "a list");
+        }
+        other => panic!("expected ArgumentNotInterpolable, got {other:?}"),
+    }
+}
+
+/// A nested map is the same case one shape along.
+#[test]
+fn a_map_argument_cannot_be_interpolated() {
+    let err = compose_err(
+        "template t(m) {\n  container_name \"{{m}}\"\n}\n\
+         service s {\n  with t { m: { a: b } }\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentNotInterpolable { found, .. } => assert_eq!(found, "a nested map"),
+        other => panic!("expected ArgumentNotInterpolable, got {other:?}"),
+    }
+}
+
+/// The third shape `ArgumentNotInterpolable` names — a qualified
+/// reference, whose qualifier is an import alias that means nothing in
+/// generated output — never reaches interpolation, because an argument
+/// body can't hold one in the first place. Pinned here so the backstop
+/// arm in `interpolated_text` is documented as unreachable-for-now
+/// rather than dead code someone deletes: it becomes live the moment an
+/// argument may be qualified.
+#[test]
+fn a_qualified_argument_is_rejected_before_interpolation_sees_it() {
+    let program = parse(
+        "use \"other.hll\" as other\n\
+         template t(v) {\n  container_name \"{{v}}\"\n}\n\
+         service s {\n  with t { v: other.thing }\n  image \"x\"\n}\n",
+    );
+    assert!(program.is_err(), "a qualified argument should not parse");
+}
+
+/// A list argument still *fills* a whole slot that accepts one, so the
+/// new check is about interpolation only and doesn't narrow what an
+/// argument may be.
+#[test]
+fn a_list_argument_still_fills_a_raw_slot() {
+    let composed = compose_ok(
+        "template t(xs) {\n  raw { command: $xs }\n}\n\
+         service s {\n  with t { xs: [a, b] }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert!(matches!(
+        &service.fields.raw.entries[0].value,
+        RawValue::List(items, _) if items.len() == 2
+    ));
+}
+
+// --- the two spellings that look like interpolation and aren't (#266) ---
+//
+// Warned rather than rejected in both cases: each has a legitimate
+// reading, and it's only the collision with a parameter name that makes
+// it suspicious.
+
+fn compose_warnings(source: &str) -> Vec<ComposeWarning> {
+    compose_ok(source).warnings
+}
+
+/// The footgun #259 names: `$host` in a string is not a parameter
+/// reference, so it reaches the generated output verbatim — a Traefik
+/// rule matching the literal hostname `$host`, from source that looks
+/// correct.
+#[test]
+fn an_inert_parameter_reference_in_a_string_warns() {
+    let warnings = compose_warnings(
+        "template t(host) {\n  labels { \"rule\": \"Host(`$host`)\" }\n}\n\
+         service s {\n  with t { host: \"a.example.com\" }\n  image \"x\"\n}\n",
+    );
+    match warnings.as_slice() {
+        [
+            ComposeWarning::InertParameterInString {
+                template, param, ..
+            },
+        ] => {
+            assert_eq!(template, "t");
+            assert_eq!(param, "host");
+        }
+        other => panic!("expected one InertParameterInString, got {other:?}"),
+    }
+}
+
+/// …and the value still passes through untouched. A warning changes
+/// nothing about what compiles.
+#[test]
+fn an_inert_parameter_reference_still_compiles_verbatim() {
+    let composed = compose_ok(
+        "template t(host) {\n  labels { \"rule\": \"Host(`$host`)\" }\n}\n\
+         service s {\n  with t { host: \"a.example.com\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(label_value(service, "rule"), "Host(`$host`)");
+}
+
+/// Only a name the template actually declares is flagged. `$HOME` in a
+/// `command` is ordinary content headed for a shell, and nothing about
+/// it resembles a parameter this template has.
+#[test]
+fn a_dollar_naming_no_parameter_is_not_flagged() {
+    let warnings = compose_warnings(
+        "template t(host) {\n  command \"sh -c 'echo $HOME $hostname'\"\n}\n\
+         service s {\n  with t { host: \"a\" }\n  image \"x\"\n}\n",
+    );
+    assert!(warnings.is_empty(), "got {warnings:?}");
+}
+
+/// `${host}` is Compose's own interpolation spelling, read out of the
+/// generated YAML after `hllc` is done with it — never a parameter
+/// reference, even when the name inside matches one.
+#[test]
+fn compose_style_braced_interpolation_is_not_flagged() {
+    let warnings = compose_warnings(
+        "template t(host) {\n  env HOST = \"${host}\"\n}\n\
+         service s {\n  with t { host: \"a\" }\n  image \"x\"\n}\n",
+    );
+    assert!(warnings.is_empty(), "got {warnings:?}");
+}
+
+/// The scan takes the same identifier run the lexer would, so a
+/// parameter's name matching a *prefix* of what follows the `$` is not a
+/// match.
+#[test]
+fn a_dollar_reference_is_matched_on_the_whole_identifier() {
+    let warnings = compose_warnings(
+        "template t(host) {\n  env H = \"$hostname\"\n}\n\
+         service s {\n  with t { host: \"a\" }\n  image \"x\"\n}\n",
+    );
+    assert!(warnings.is_empty(), "got {warnings:?}");
+}
+
+/// That run holds `-` and `_` too, exactly as an `IDENT` does — the
+/// halves of the rule a purely alphanumeric name like `$hostname` above
+/// can't tell apart. Without them `$host-name` would scan as `host` and
+/// warn about a parameter nobody referenced.
+#[test]
+fn a_dollar_reference_run_holds_hyphens_and_underscores() {
+    let warnings = compose_warnings(
+        "template t(host) {\n  env H = \"$host-name $host_name\"\n}\n\
+         service s {\n  with t { host: \"a\" }\n  image \"x\"\n}\n",
+    );
+    assert!(warnings.is_empty(), "got {warnings:?}");
+}
+
+/// Two inert references in one body are reported in source order rather
+/// than in whatever order the argument map happens to iterate.
+#[test]
+fn inert_references_are_reported_in_order() {
+    let warnings = compose_warnings(
+        "template t(a, b) {\n  env E = \"$a and $b\"\n}\n\
+         service s {\n  with t { a: \"1\", b: \"2\" }\n  image \"x\"\n}\n",
+    );
+    let params: Vec<&str> = warnings
+        .iter()
+        .map(|w| match w {
+            ComposeWarning::InertParameterInString { param, .. } => param.as_str(),
+            other => panic!("expected InertParameterInString, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(params, ["a", "b"]);
+}
+
+/// A template invoked by two services substitutes into two clones of the
+/// same body, so the same span is walked twice — reported once.
+#[test]
+fn one_warning_per_problem_not_per_invocation() {
+    let warnings = compose_warnings(
+        "template t(host) {\n  env H = \"$host\"\n}\n\
+         service a {\n  with t { host: \"x\" }\n  image \"i\"\n}\n\
+         service b {\n  with t { host: \"y\" }\n  image \"i\"\n}\n",
+    );
+    assert_eq!(warnings.len(), 1, "got {warnings:?}");
+}
+
+/// `{{name}}` keeps meaning the enclosing service's name even when a
+/// template declares a parameter by that name — which is what makes
+/// interpolating parameters an additive change — so the collision is
+/// said out loud at the string that trips over it.
+#[test]
+fn a_name_parameter_does_not_capture_the_name_binding() {
+    let composed = compose_ok(
+        "template t(name) {\n  container_name $name\n  labels { \"k\": \"{{name}}\" }\n}\n\
+         service s {\n  with t { name: \"explicit\" }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(label_value(service, "k"), "{{name}}");
+    assert_eq!(
+        service.fields.container_name.as_ref().unwrap().text(),
+        "explicit"
+    );
+    match composed.warnings.as_slice() {
+        [ComposeWarning::NameParameterNotInterpolated { template, .. }] => {
+            assert_eq!(template, "t");
+        }
+        other => panic!("expected one NameParameterNotInterpolated, got {other:?}"),
+    }
+}
+
+/// A `name` parameter that never interpolates the binding is not a
+/// collision at all — nothing about `$name` alone is ambiguous — so it
+/// stays silent.
+#[test]
+fn a_name_parameter_alone_is_not_warned_about() {
+    let warnings = compose_warnings(
+        "template t(name) {\n  container_name $name\n}\n\
+         service s {\n  with t { name: \"explicit\" }\n  image \"x\"\n}\n",
+    );
+    assert!(warnings.is_empty(), "got {warnings:?}");
+}
+
+/// And a `{{name}}` in a template with no such parameter is the ordinary
+/// case that has always worked.
+#[test]
+fn the_name_binding_alone_is_not_warned_about() {
+    let warnings = compose_warnings(
+        "template t(port) {\n  container_name \"{{name}}-{{port}}\"\n}\n\
+         service s {\n  with t { port: 80 }\n  image \"x\"\n}\n",
+    );
+    assert!(warnings.is_empty(), "got {warnings:?}");
+}
+
+/// A program with no templates at all raises nothing — the channel is
+/// empty in the overwhelmingly common case.
+#[test]
+fn a_program_without_templates_raises_no_warnings() {
+    let warnings = compose_warnings("service s {\n  image \"x\"\n  env E = \"$HOME\"\n}\n");
+    assert!(warnings.is_empty(), "got {warnings:?}");
 }

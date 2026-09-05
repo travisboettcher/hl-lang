@@ -28,7 +28,9 @@ use crate::ast::{
     MatchExpr, Network, Program, RawEntry, RawMap, RawValue, Restart, Router, Service,
     ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, Volume,
 };
+use crate::interp;
 use crate::schema::{self, MapSide};
+use crate::warning::ComposeWarning;
 
 /// How deep a chain of `with` invocations may nest before
 /// [`ComposeError::TemplateNestingTooDeep`] stops it.
@@ -78,6 +80,16 @@ pub struct ComposedProgram {
     /// `link` fills it in with the module graph's own map, since that's
     /// the layer that actually reads the files.
     pub files: SourceMap,
+    /// Every non-fatal diagnostic composition raised on the way here, in
+    /// the order it was raised (see [`ComposeWarning`]).
+    ///
+    /// Rides *inside* [`ComposedProgram`] rather than alongside it the
+    /// way `hl_linker`'s own warnings do, because unlike those there is
+    /// no wrapper type at this layer to put them in: [`compose`] returns
+    /// the program itself, and a second return value would have to be
+    /// threaded through `hl_linker::link` — which produces this same
+    /// type — to reach `hllc` at all.
+    pub warnings: Vec<ComposeWarning>,
 }
 
 /// An error raised while resolving `template`/`with` composition.
@@ -218,6 +230,34 @@ pub enum ComposeError {
     /// see that variant's own doc for why one check alone can't cover
     /// both paths.
     ArgumentNotNumeric {
+        template: String,
+        param: String,
+        found: &'static str,
+        span: Span,
+    },
+    /// A `{{param}}` interpolation whose bound argument has no string
+    /// form to splice into the surrounding content: a list, a nested
+    /// map, or an `alias.name` qualified reference.
+    ///
+    /// The first two are [`Self::TemplateArgumentNotScalar`]'s case one
+    /// step further along — there a list can't *fill* a single-value
+    /// slot, here it can't fill part of one. The qualified case is a
+    /// backstop rather than a reachable diagnostic today: an argument
+    /// body's grammar has no place for an `alias.name`, so one can't be
+    /// passed to interpolate in the first place. Named anyway, because
+    /// the reason it *would* be rejected is a property of qualified
+    /// references and not of the grammar that currently excludes them:
+    /// the qualifier is an import alias, which exists only while
+    /// composition is resolving names and means nothing in generated
+    /// output, so there is no honest text to substitute (rendering it
+    /// `alias.name` would emit a local alias the deployment never
+    /// sees).
+    ///
+    /// Names the argument at its own call site rather than the `{{...}}`
+    /// use site, matching [`Self::ArgumentNotReferenceShaped`] and
+    /// [`Self::ArgumentNotNumeric`]: the argument is what has to change,
+    /// and one template's body can be reached from many call sites.
+    ArgumentNotInterpolable {
         template: String,
         param: String,
         found: &'static str,
@@ -385,6 +425,7 @@ impl ComposeError {
             | ComposeError::TemplateArgumentNotScalar { span, .. }
             | ComposeError::ArgumentNotReferenceShaped { span, .. }
             | ComposeError::ArgumentNotNumeric { span, .. }
+            | ComposeError::ArgumentNotInterpolable { span, .. }
             | ComposeError::FieldNotNumeric { span, .. }
             | ComposeError::FieldCollision { second: span, .. }
             | ComposeError::UnknownAlias { span, .. }
@@ -493,6 +534,16 @@ impl ComposeError {
             } => write!(
                 f,
                 "{at}: argument `{param}` for template `{template}` must be a number (found {found})"
+            ),
+            ComposeError::ArgumentNotInterpolable {
+                template,
+                param,
+                found,
+                ..
+            } => write!(
+                f,
+                "{at}: argument `{param}` for template `{template}` can't be interpolated into \
+                 a string (found {found})"
             ),
             ComposeError::FieldNotNumeric { field, found, .. } => {
                 write!(f, "{at}: `{field}` must be a number (found {found})")
@@ -1173,6 +1224,7 @@ pub fn compose_with_resolver<R: SymbolResolver>(
 ) -> Result<ComposedProgram, ComposeError> {
     let mut cache: HashMap<(R::Scope, String), ServiceFields> = HashMap::new();
     let mut imports = Imports::default();
+    let mut warnings = Vec::new();
     let mut composed = Vec::with_capacity(services.len());
     for service in services {
         composed.push(compose_service(
@@ -1181,6 +1233,7 @@ pub fn compose_with_resolver<R: SymbolResolver>(
             resolver,
             &mut cache,
             &mut imports,
+            &mut warnings,
         )?);
     }
 
@@ -1196,6 +1249,7 @@ pub fn compose_with_resolver<R: SymbolResolver>(
         // Composition never reads a file, so it has no paths to intern;
         // the linker attaches its own map to what this returns.
         files: SourceMap::default(),
+        warnings,
     })
 }
 
@@ -1295,12 +1349,21 @@ fn compose_service<R: SymbolResolver>(
     resolver: &R,
     cache: &mut HashMap<(R::Scope, String), ServiceFields>,
     imports: &mut Imports,
+    warnings: &mut Vec<ComposeWarning>,
 ) -> Result<Service, ComposeError> {
     let mut acc = MergeAcc::default();
     let mut in_progress = Vec::new();
 
     for inv in &service.fields.with {
-        let resolved = resolve_invocation(inv, scope, resolver, cache, &mut in_progress, imports)?;
+        let resolved = resolve_invocation(
+            inv,
+            scope,
+            resolver,
+            cache,
+            &mut in_progress,
+            imports,
+            warnings,
+        )?;
         merge_tier(&mut acc, resolved, &Tier::Explicit(inv.name.name.clone()))?;
     }
 
@@ -1338,6 +1401,7 @@ fn resolve_template<'r, R: SymbolResolver>(
     cache: &mut HashMap<(R::Scope, String), ServiceFields>,
     in_progress: &mut Vec<(R::Scope, String)>,
     imports: &mut Imports,
+    warnings: &mut Vec<ComposeWarning>,
 ) -> Result<ServiceFields, ComposeError> {
     let name = &decl.name.name;
     let cache_key = (scope, name.clone());
@@ -1378,7 +1442,8 @@ fn resolve_template<'r, R: SymbolResolver>(
 
     let mut acc = MergeAcc::default();
     for inv in &decl.fields.with {
-        let resolved = resolve_invocation(inv, scope, resolver, cache, in_progress, imports)?;
+        let resolved =
+            resolve_invocation(inv, scope, resolver, cache, in_progress, imports, warnings)?;
         merge_tier(&mut acc, resolved, &Tier::Explicit(inv.name.name.clone()))?;
     }
     let mut own = decl.fields.clone();
@@ -1407,6 +1472,7 @@ fn resolve_invocation<R: SymbolResolver>(
     cache: &mut HashMap<(R::Scope, String), ServiceFields>,
     in_progress: &mut Vec<(R::Scope, String)>,
     imports: &mut Imports,
+    warnings: &mut Vec<ComposeWarning>,
 ) -> Result<ServiceFields, ComposeError> {
     let (target_scope, decl) =
         resolver.resolve_template(scope, inv.qualifier.as_ref(), &inv.name.name, inv.span)?;
@@ -1443,8 +1509,16 @@ fn resolve_invocation<R: SymbolResolver>(
         }
     }
 
-    let mut fields = resolve_template(decl, target_scope, resolver, cache, in_progress, imports)?;
-    substitute_params(&mut fields, &args, &decl.name.name)?;
+    let mut fields = resolve_template(
+        decl,
+        target_scope,
+        resolver,
+        cache,
+        in_progress,
+        imports,
+        warnings,
+    )?;
+    substitute_params(&mut fields, &args, &decl.name.name, warnings)?;
     Ok(fields)
 }
 
@@ -1580,11 +1654,12 @@ fn substitute_params(
     fields: &mut ServiceFields,
     args: &HashMap<&str, &RawValue>,
     template_name: &str,
+    warnings: &mut Vec<ComposeWarning>,
 ) -> Result<(), ComposeError> {
     if let Some(img) = &mut fields.image
         && let Some(r) = &mut img.reference
     {
-        substitute_literal(r, args, template_name)?;
+        substitute_literal(r, args, template_name, warnings)?;
     }
     // `build`'s own literal slots (#224) — both plain free-text paths,
     // so both take an ordinary `substitute_literal`. Missing either
@@ -1593,16 +1668,16 @@ fn substitute_params(
     // the generated `build:` key and exits 0.
     if let Some(b) = &mut fields.build {
         if let Some(c) = &mut b.context {
-            substitute_literal(c, args, template_name)?;
+            substitute_literal(c, args, template_name, warnings)?;
         }
         if let Some(d) = &mut b.dockerfile {
-            substitute_literal(d, args, template_name)?;
+            substitute_literal(d, args, template_name, warnings)?;
         }
     }
     if let Some(e) = &mut fields.expose
         && let Some(p) = &mut e.port
     {
-        substitute_numeric_literal(p, args, template_name)?;
+        substitute_numeric_literal(p, args, template_name, warnings)?;
     }
     // `router`'s own literal slots (#184, #221) — `host`, `entrypoints`,
     // `path_prefix`, and `middleware` are all `Literal`-carrying (see
@@ -1612,29 +1687,29 @@ fn substitute_params(
     // and exits 0.
     for router in &mut fields.routers {
         if let Some(h) = &mut router.host {
-            substitute_literal(h, args, template_name)?;
+            substitute_literal(h, args, template_name, warnings)?;
         }
         for entry in &mut router.entrypoints {
-            substitute_reference_literal(entry, args, template_name)?;
+            substitute_reference_literal(entry, args, template_name, warnings)?;
         }
         for prefix in &mut router.path_prefix {
-            substitute_reference_literal(prefix, args, template_name)?;
+            substitute_reference_literal(prefix, args, template_name, warnings)?;
         }
         for mw in &mut router.middleware {
-            substitute_reference_literal(mw, args, template_name)?;
+            substitute_reference_literal(mw, args, template_name, warnings)?;
         }
         // #225: `priority`/`port` are numbers, so they take the same
         // numeric-checked substitution `expose.port` does; `protocol`
         // is a plain literal, validated in codegen rather than here so
         // an unresolved `$proto` never reaches that check.
         if let Some(p) = &mut router.priority {
-            substitute_numeric_literal(p, args, template_name)?;
+            substitute_numeric_literal(p, args, template_name, warnings)?;
         }
         if let Some(p) = &mut router.port {
-            substitute_numeric_literal(p, args, template_name)?;
+            substitute_numeric_literal(p, args, template_name, warnings)?;
         }
         if let Some(p) = &mut router.protocol {
-            substitute_literal(p, args, template_name)?;
+            substitute_literal(p, args, template_name, warnings)?;
         }
         // #228: every matcher argument in a `rule`, reached through the
         // one walk `reject_qualified` above uses, so the two can't
@@ -1643,17 +1718,17 @@ fn substitute_params(
         // free text, never a number.
         if let Some(rule) = &mut router.rule {
             for arg in rule.args_mut() {
-                substitute_reference_literal(arg, args, template_name)?;
+                substitute_reference_literal(arg, args, template_name, warnings)?;
             }
         }
     }
     if let Some(r) = &mut fields.restart
         && let Some(p) = &mut r.policy
     {
-        substitute_literal(p, args, template_name)?;
+        substitute_literal(p, args, template_name, warnings)?;
     }
     if let Some(cn) = &mut fields.container_name {
-        substitute_literal(cn, args, template_name)?;
+        substitute_literal(cn, args, template_name, warnings)?;
     }
     // `command`'s literals (#156) go through the same substitution walk
     // as every other `Literal` slot above, so a `$param` reference
@@ -1661,10 +1736,10 @@ fn substitute_params(
     // `ast::Literal::Param`'s own doc for why a `Param` surviving this
     // pass unresolved would be a bug.
     match &mut fields.command {
-        Some(Command::Shell(lit)) => substitute_literal(lit, args, template_name)?,
+        Some(Command::Shell(lit)) => substitute_literal(lit, args, template_name, warnings)?,
         Some(Command::Exec(items, _)) => {
             for item in items {
-                substitute_literal(item, args, template_name)?;
+                substitute_literal(item, args, template_name, warnings)?;
             }
         }
         None => {}
@@ -1676,10 +1751,10 @@ fn substitute_params(
     // the parameter's own name — issue #168's bug class, which is why
     // every new literal-carrying field gets an arm in this walk.
     match &mut fields.entrypoint {
-        Some(Entrypoint::Shell(lit)) => substitute_literal(lit, args, template_name)?,
+        Some(Entrypoint::Shell(lit)) => substitute_literal(lit, args, template_name, warnings)?,
         Some(Entrypoint::Exec(items, _)) => {
             for item in items {
-                substitute_literal(item, args, template_name)?;
+                substitute_literal(item, args, template_name, warnings)?;
             }
         }
         None => {}
@@ -1693,10 +1768,12 @@ fn substitute_params(
     // own name.
     if let Some(hc) = &mut fields.healthcheck {
         match &mut hc.test {
-            Some(HealthcheckTest::Shell(lit)) => substitute_literal(lit, args, template_name)?,
+            Some(HealthcheckTest::Shell(lit)) => {
+                substitute_literal(lit, args, template_name, warnings)?
+            }
             Some(HealthcheckTest::Exec(items, _)) => {
                 for item in items {
-                    substitute_literal(item, args, template_name)?;
+                    substitute_literal(item, args, template_name, warnings)?;
                 }
             }
             None => {}
@@ -1706,7 +1783,7 @@ fn substitute_params(
         // substitution rather than riding the loop below with its four
         // string-typed siblings.
         if let Some(retries) = &mut hc.retries {
-            substitute_numeric_literal(retries, args, template_name)?;
+            substitute_numeric_literal(retries, args, template_name, warnings)?;
         }
         for lit in [
             hc.interval.as_mut(),
@@ -1717,7 +1794,7 @@ fn substitute_params(
         .into_iter()
         .flatten()
         {
-            substitute_literal(lit, args, template_name)?;
+            substitute_literal(lit, args, template_name, warnings)?;
         }
     }
     // `volume`, `publish`, and `devices` share one entry type since
@@ -1743,7 +1820,7 @@ fn substitute_params(
         for entry in entries.iter_mut() {
             match &mut entry.host {
                 ArrowMapHost::BindMount(host) => {
-                    substitute_literal(host, args, template_name)?;
+                    substitute_literal(host, args, template_name, warnings)?;
                 }
                 ArrowMapHost::Named(_) => debug_assert_eq!(
                     field_name, "volume",
@@ -1751,28 +1828,28 @@ fn substitute_params(
                      entries can carry a named host"
                 ),
             }
-            substitute_literal(&mut entry.container, args, template_name)?;
+            substitute_literal(&mut entry.container, args, template_name, warnings)?;
         }
     }
     for e in &mut fields.env.entries {
-        substitute_literal(&mut e.key, args, template_name)?;
-        substitute_literal(&mut e.value, args, template_name)?;
+        substitute_literal(&mut e.key, args, template_name, warnings)?;
+        substitute_literal(&mut e.value, args, template_name, warnings)?;
     }
     // `labels` (#243) substitutes exactly like `env` just above: both
     // sides are plain `Literal` slots, so a template may parameterize
     // either a label's key or its value.
     for e in &mut fields.labels.entries {
-        substitute_literal(&mut e.key, args, template_name)?;
-        substitute_literal(&mut e.value, args, template_name)?;
+        substitute_literal(&mut e.key, args, template_name, warnings)?;
+        substitute_literal(&mut e.value, args, template_name, warnings)?;
     }
     for entry in &mut fields.raw.entries {
-        substitute_literal(&mut entry.key, args, template_name)?;
-        substitute_raw_value(&mut entry.value, args);
+        substitute_literal(&mut entry.key, args, template_name, warnings)?;
+        substitute_raw_value(&mut entry.value, args, template_name, warnings)?;
     }
     for inv in &mut fields.with {
         for entry in &mut inv.args.entries {
-            substitute_literal(&mut entry.key, args, template_name)?;
-            substitute_raw_value(&mut entry.value, args);
+            substitute_literal(&mut entry.key, args, template_name, warnings)?;
+            substitute_raw_value(&mut entry.value, args, template_name, warnings)?;
         }
     }
     // The reference-shaped list fields #196 newly opened to `$param` —
@@ -1793,16 +1870,16 @@ fn substitute_params(
     // survives composition unresolved and reaches codegen as the literal
     // text `net`.
     for lit in &mut fields.networks {
-        substitute_reference_literal(lit, args, template_name)?;
+        substitute_reference_literal(lit, args, template_name, warnings)?;
     }
     for lit in &mut fields.dns {
-        substitute_reference_literal(lit, args, template_name)?;
+        substitute_reference_literal(lit, args, template_name, warnings)?;
     }
     for lit in &mut fields.env_file {
-        substitute_reference_literal(lit, args, template_name)?;
+        substitute_reference_literal(lit, args, template_name, warnings)?;
     }
     for entry in &mut fields.depends_on {
-        substitute_reference_literal(&mut entry.reference, args, template_name)?;
+        substitute_reference_literal(&mut entry.reference, args, template_name, warnings)?;
     }
     Ok(())
 }
@@ -1817,12 +1894,23 @@ fn substitute_literal(
     lit: &mut Literal,
     args: &HashMap<&str, &RawValue>,
     template_name: &str,
+    warnings: &mut Vec<ComposeWarning>,
 ) -> Result<(), ComposeError> {
     let param_name = match lit {
         Literal::Param(name, _) => Some(name.clone()),
         _ => None,
     };
     let Some(name) = param_name else {
+        // Not a whole-slot `$param`, so this is where the *other* way a
+        // parameter reaches a value gets its turn: `{{param}}` inside
+        // string content (#266). Only a `Str` can hold one — an `Ident`
+        // can't contain `{`, and a `Number` can't contain anything but
+        // digits.
+        if let Literal::Str(text, span) = lit {
+            let span = *span;
+            let resolved = substitute_string_content(text, span, args, template_name, warnings)?;
+            *text = resolved;
+        }
         return Ok(());
     };
     let span = lit.span();
@@ -1841,6 +1929,179 @@ fn substitute_literal(
                 span,
             })
         }
+    }
+}
+
+/// The one `{{binding}}` name composition never resolves: `{{name}}` is
+/// the *enclosing service's* own name, and only codegen knows which
+/// service a template's contribution finally landed on. Reserving it
+/// here is what keeps #266 additive — every `{{name}}` written before a
+/// parameter could be interpolated at all still means what it meant
+/// then, whatever a template happens to call its parameters. A template
+/// that declares a parameter by this name reaches it as `$name` and gets
+/// [`ComposeWarning::NameParameterNotInterpolated`] if its body also
+/// interpolates the binding.
+const SERVICE_NAME_BINDING: &str = "name";
+
+/// Resolves `{{param}}` interpolation inside one string literal's
+/// content against the invocation's bound arguments, and reports the two
+/// spellings that look like they do this and don't (see
+/// [`ComposeWarning`]).
+///
+/// This runs at composition rather than at codegen for the reason
+/// [`crate::interp`]'s own doc gives: an invocation's arguments exist
+/// only while the invocation is being resolved. What it leaves behind —
+/// `{{name}}`, and any binding this template has no parameter for — is
+/// passed through untouched for codegen's `interp::resolve` to either
+/// resolve or reject, so a genuine typo still reports as an unknown
+/// interpolation rather than reaching the generated YAML.
+fn substitute_string_content(
+    text: &str,
+    span: Span,
+    args: &HashMap<&str, &RawValue>,
+    template_name: &str,
+    warnings: &mut Vec<ComposeWarning>,
+) -> Result<String, ComposeError> {
+    for param in inert_param_refs(text, args) {
+        warn(
+            warnings,
+            ComposeWarning::InertParameterInString {
+                template: template_name.to_string(),
+                param: param.to_string(),
+                span,
+            },
+        );
+    }
+    interp::resolve_with(text, |binding| {
+        if binding == SERVICE_NAME_BINDING {
+            if args.contains_key(SERVICE_NAME_BINDING) {
+                warn(
+                    warnings,
+                    ComposeWarning::NameParameterNotInterpolated {
+                        template: template_name.to_string(),
+                        span,
+                    },
+                );
+            }
+            return Ok(None);
+        }
+        let Some(arg) = args.get(binding) else {
+            return Ok(None);
+        };
+        interpolated_text(arg)
+            .map(Some)
+            .ok_or_else(|| ComposeError::ArgumentNotInterpolable {
+                template: template_name.to_string(),
+                param: binding.to_string(),
+                found: uninterpolable_kind(arg),
+                span: arg.span(),
+            })
+    })
+}
+
+/// The text one bound argument contributes to the string it is
+/// interpolated into — `None` for an argument with no honest text form,
+/// which [`substitute_string_content`] turns into
+/// [`ComposeError::ArgumentNotInterpolable`].
+///
+/// A [`Literal::Param`] argument is the interesting case: a template
+/// forwarding its own parameter into a nested invocation (`template
+/// outer(host) { with inner { h: $host } }`) has nothing concrete to
+/// splice yet, since `outer`'s `host` isn't bound until `outer` itself
+/// is invoked. Rather than failing, the interpolation is *renamed* into
+/// the enclosing template's parameter namespace — `inner`'s `{{h}}`
+/// becomes `{{host}}` — which is exactly the scope the string now lives
+/// in, so the substitution that eventually binds `outer` resolves it.
+/// This mirrors what [`substitute_literal`] already does for a
+/// whole-slot `$param`, where forwarding replaces one
+/// [`Literal::Param`] with another.
+///
+/// The one corner that leaves: forwarding a parameter *named* `name`
+/// renames the interpolation to `{{name}}`, which
+/// [`SERVICE_NAME_BINDING`] then hands to codegen as the service name.
+/// That collision is what [`ComposeWarning::NameParameterNotInterpolated`]
+/// exists to surface at the declaration that causes it.
+fn interpolated_text(arg: &RawValue) -> Option<String> {
+    match arg {
+        RawValue::Literal(Literal::Param(name, _)) => Some(format!("{{{{{name}}}}}")),
+        RawValue::Literal(Literal::Str(text, _)) => Some(text.clone()),
+        RawValue::Literal(Literal::Number { text, .. }) => Some(text.clone()),
+        RawValue::Literal(Literal::Ident(name, _)) => Some(name.clone()),
+        RawValue::Literal(Literal::Qualified(_)) | RawValue::List(_, _) | RawValue::Map(_, _) => {
+            None
+        }
+    }
+}
+
+/// The `found` text naming why [`interpolated_text`] refused an
+/// argument, in the same vocabulary [`numeric_mismatch`] uses for its
+/// own mismatches. The qualified arm is
+/// [`ComposeError::ArgumentNotInterpolable`]'s documented backstop —
+/// unreachable while an argument body's grammar has no `alias.name`
+/// form, and live the moment it gains one.
+fn uninterpolable_kind(arg: &RawValue) -> &'static str {
+    match arg {
+        RawValue::Literal(Literal::Qualified(_)) => "a qualified reference",
+        RawValue::List(_, _) => "a list",
+        RawValue::Map(_, _) => "a nested map",
+        RawValue::Literal(_) => unreachable!("every other literal kind has a text form"),
+    }
+}
+
+/// Every `$param` written inside string content that names one of
+/// `args`' parameters — the spelling
+/// [`ComposeWarning::InertParameterInString`] is about — in the order
+/// they appear, so a string holding two of them warns about them
+/// left to right rather than in `HashMap` order.
+///
+/// Scanned out of the text rather than by searching the text for each
+/// parameter's name, which would match `$host` inside `$hostname`. The
+/// run taken after the `$` is exactly what the lexer's own `scan_ident`
+/// would take, so `$user-agent` names the parameter `user-agent` or
+/// nothing at all — never `user`.
+///
+/// `${ident}` is deliberately not scanned: braces make it Compose's own
+/// interpolation spelling, which the generated YAML is read for after
+/// `hllc` is finished with it, and no parameter reference has ever
+/// looked like that. It needs no special case — `{` simply isn't an
+/// identifier character, so the name after that `$` comes out empty and
+/// no parameter is ever named `""`.
+///
+/// Written over [`str::split`] rather than as an index scan on purpose.
+/// The obvious hand-rolled version — find a `$`, walk the identifier,
+/// resume past it — terminates only because of how its two cursors
+/// advance, which makes an off-by-one in either one an infinite loop
+/// rather than a wrong answer: `cargo mutants` turns each of those
+/// arithmetic operators over in turn and hangs, and the resulting
+/// TIMEOUTs would have to be excluded by name in `.cargo/mutants.toml`
+/// alongside the lexer's. An iterator over the pieces can't fail to
+/// terminate no matter what a mutant does to the body, so there is
+/// nothing to exclude.
+fn inert_param_refs<'a>(text: &'a str, args: &HashMap<&str, &RawValue>) -> Vec<&'a str> {
+    text.split('$')
+        // Everything before the first `$` is not after any `$`.
+        .skip(1)
+        .map(|after_sigil| {
+            let end = after_sigil
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                .unwrap_or(after_sigil.len());
+            &after_sigil[..end]
+        })
+        .filter(|name| args.contains_key(*name))
+        .collect()
+}
+
+/// Records `warning` unless an identical one is already there.
+///
+/// Composition substitutes into a *clone* of a template's resolved
+/// fields at every call site (see [`resolve_template`]'s cache), so a
+/// template invoked by three services walks the same body spans three
+/// times and would otherwise report the same problem three times. The
+/// list is short enough that a linear scan is cheaper than the set this
+/// would otherwise need, and it preserves first-raised order.
+fn warn(warnings: &mut Vec<ComposeWarning>, warning: ComposeWarning) {
+    if !warnings.contains(&warning) {
+        warnings.push(warning);
     }
 }
 
@@ -1877,12 +2138,13 @@ fn substitute_reference_literal(
     lit: &mut Literal,
     args: &HashMap<&str, &RawValue>,
     template_name: &str,
+    warnings: &mut Vec<ComposeWarning>,
 ) -> Result<(), ComposeError> {
     let param_name = match lit {
         Literal::Param(name, _) => Some(name.clone()),
         _ => None,
     };
-    substitute_literal(lit, args, template_name)?;
+    substitute_literal(lit, args, template_name, warnings)?;
     if let (Some(param), Literal::Number { span, .. }) = (param_name, &*lit) {
         return Err(ComposeError::ArgumentNotReferenceShaped {
             template: template_name.to_string(),
@@ -1942,12 +2204,13 @@ fn substitute_numeric_literal(
     lit: &mut Literal,
     args: &HashMap<&str, &RawValue>,
     template_name: &str,
+    warnings: &mut Vec<ComposeWarning>,
 ) -> Result<(), ComposeError> {
     let param_name = match lit {
         Literal::Param(name, _) => Some(name.clone()),
         _ => None,
     };
-    substitute_literal(lit, args, template_name)?;
+    substitute_literal(lit, args, template_name, warnings)?;
     let Some(param) = param_name else {
         return Ok(());
     };
@@ -2021,7 +2284,12 @@ fn check_numeric_fields(fields: &ServiceFields) -> Result<(), ComposeError> {
 /// a whole list/map forwarded through unchanged. Never fails (unlike
 /// [`substitute_literal`]): a `RawValue` position can hold any argument
 /// shape, so there's no "not scalar" case to reject here.
-fn substitute_raw_value(value: &mut RawValue, args: &HashMap<&str, &RawValue>) {
+fn substitute_raw_value(
+    value: &mut RawValue,
+    args: &HashMap<&str, &RawValue>,
+    template_name: &str,
+    warnings: &mut Vec<ComposeWarning>,
+) -> Result<(), ComposeError> {
     let param_name = match value {
         RawValue::Literal(Literal::Param(name, _)) => Some(name.clone()),
         _ => None,
@@ -2031,21 +2299,39 @@ fn substitute_raw_value(value: &mut RawValue, args: &HashMap<&str, &RawValue>) {
             .get(name.as_str())
             .expect("param name was already validated against the template's declared params");
         *value = (*replacement).clone();
-        return;
+        return Ok(());
     }
     match value {
         RawValue::List(items, _) => {
             for item in items {
-                substitute_raw_value(item, args);
+                substitute_raw_value(item, args, template_name, warnings)?;
             }
         }
         RawValue::Map(entries, _) => {
-            for (_, v) in entries {
-                substitute_raw_value(v, args);
+            for (key, v) in entries {
+                // A nested map's *keys* interpolate too: `raw` writes
+                // arbitrary Compose structure, and codegen resolves
+                // `{{name}}` on both sides of every entry it emits
+                // (`raw::to_yaml`), so composition has to reach the same
+                // slots or the two stages disagree about which halves of
+                // a `raw` block a template can parameterize.
+                //
+                // Only interpolation is ever found here, never a
+                // whole-slot `$param`: a key is parsed as a field name,
+                // and the grammar has no `$` in that position (`raw {
+                // deploy: { $k: "v" } }` is a parse error), so unlike
+                // every other row in this walk there is no
+                // `Literal::Param` for the substitution half to replace.
+                substitute_literal(key, args, template_name, warnings)?;
+                substitute_raw_value(v, args, template_name, warnings)?;
             }
         }
-        RawValue::Literal(_) => {}
+        // A literal that isn't a whole-slot `$param` still routes
+        // through `substitute_literal`, which is what interpolates
+        // `{{param}}` inside its string content (#266).
+        RawValue::Literal(lit) => substitute_literal(lit, args, template_name, warnings)?,
     }
+    Ok(())
 }
 
 // ---- merge engine ----

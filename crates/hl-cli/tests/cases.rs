@@ -181,6 +181,19 @@ fn compile(path: &Path) -> String {
                 .warnings
                 .iter()
                 .map(|warning| warning.display(&files).to_string())
+                .chain(
+                    // Composition's warnings ride on the program itself
+                    // (`ComposedProgram::warnings`), so they are read
+                    // here rather than from `linked` — and before
+                    // `generate` takes ownership of it. Ordered between
+                    // the link and codegen sets, which is pipeline
+                    // order and the order `hllc` prints them in.
+                    linked
+                        .program
+                        .warnings
+                        .iter()
+                        .map(|warning| warning.display(&files).to_string()),
+                )
                 .collect();
             match hl_codegen::generate(linked.program) {
                 // Warnings raised before the failure are dropped on

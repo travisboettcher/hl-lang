@@ -2,11 +2,18 @@
 //! docs/DESIGN.md's lexical grammar section: `{{name}}` is "an implicit
 //! binding to the enclosing service's own name... not part of the
 //! lexical grammar — it's ordinary content inside a STRING token,
-//! resolved later at codegen time." This is that later resolution.
+//! resolved later at codegen time."
+//!
+//! This is the *last* of those resolutions. Composition resolves a
+//! binding naming one of the enclosing template's own parameters first
+//! (#266) and leaves the rest alone, so what reaches here is what only a
+//! service can answer. Both stages scan for a binding with
+//! [`hl_parser::interp::resolve_with`] rather than a loop each — see its
+//! own doc for why there is exactly one scanner.
 
 use std::collections::HashMap;
 
-use hl_parser::Span;
+use hl_parser::{Span, interp};
 
 use crate::CodegenError;
 
@@ -20,32 +27,15 @@ pub fn resolve(
     bindings: &HashMap<&str, &str>,
     span: Span,
 ) -> Result<String, CodegenError> {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("{{") {
-        out.push_str(&rest[..start]);
-        let after_open = &rest[start + 2..];
-        let Some(end) = after_open.find("}}") else {
-            // No closing `}}` — not our job to lex-validate hl-lang
-            // source here, just pass the rest through unchanged.
-            out.push_str("{{");
-            rest = after_open;
-            break;
-        };
-        let binding = &after_open[..end];
-        match bindings.get(binding) {
-            Some(value) => out.push_str(value),
-            None => {
-                return Err(CodegenError::UnknownInterpolation {
-                    binding: binding.to_string(),
-                    span,
-                });
-            }
-        }
-        rest = &after_open[end + 2..];
-    }
-    out.push_str(rest);
-    Ok(out)
+    // Never defers (`Ok(None)`): this is the end of the pipeline, so a
+    // binding nothing here answers is a binding nothing ever will.
+    interp::resolve_with(text, |binding| match bindings.get(binding) {
+        Some(value) => Ok(Some((*value).to_string())),
+        None => Err(CodegenError::UnknownInterpolation {
+            binding: binding.to_string(),
+            span,
+        }),
+    })
 }
 
 #[cfg(test)]
