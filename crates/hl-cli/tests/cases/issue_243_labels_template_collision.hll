@@ -3,9 +3,8 @@
 # `MapKeyCollision` naming both templates and both spans, not the
 # second one silently overwriting the first.
 #
-# Only explicit-versus-explicit collides. `defaults` always loses and
-# the service's own body always wins, both silently, exactly as they do
-# for `env`/`volume`/`publish`/`raw`.
+# Only template-versus-template collides. The service's own body always
+# wins, silently, exactly as it does for `env`/`volume`/`publish`/`raw`.
 template a {
   labels {
     "com.example.owner": "team-a"

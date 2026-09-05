@@ -73,13 +73,6 @@ impl SymbolResolver for FakeResolver {
             })
     }
 
-    fn resolve_defaults(&self, scope: Scope) -> Option<(Scope, &TemplateDecl)> {
-        self.modules[&scope]
-            .templates
-            .get("defaults")
-            .map(|decl| (scope, decl))
-    }
-
     fn resolve_qualified_network(
         &self,
         scope: Scope,

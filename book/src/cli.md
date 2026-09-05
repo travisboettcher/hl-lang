@@ -275,7 +275,7 @@ output. A build that raises only warnings still writes its files and
 still exits 0, so a warning can't break a CI gate:
 
 ```text
-shared/common.hll:1:10: warning: template `defaults` is declared in an imported file and is not applied — `defaults` is only looked up in the entry file; give it an ordinary name and apply it with `with`
+shared/common.hll:1:10: warning: template `defaults` is not applied to anything — it is an ordinary template now, no longer applied implicitly to every service; add `with defaults` to each service that wants it
 shared/common.hll:6:9: warning: service `db` is declared in an imported file and is not compiled — only the entry file's services are built
 jellyfin.hll:2:9: warning: network `unused` is declared but no service references it, so it is not emitted — add it to a service's `networks [...]` list, or remove the declaration
 ```
@@ -286,8 +286,9 @@ purpose:
 - a `service` in an imported file, since `hllc` builds only the entry
   file's services—see
   [Imports](./imports.md#only-the-entry-file-contributes-services)
-- a `template defaults` in an imported file, since `hllc` looks
-  `defaults` up only in the entry file
+- a `template defaults` no service applies with a `with`, since
+  `defaults` is no longer applied implicitly—see
+  [Templates & Composition](./templates-and-composition.md#every-template-needs-a-with)
 - a top-level `network` no service references, since `hllc` builds the
   `networks:` section from services' references
 

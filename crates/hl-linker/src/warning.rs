@@ -26,12 +26,18 @@ pub enum LinkWarning {
     /// service across files — so this declaration is parsed, checked for
     /// duplicates, and then discarded.
     ImportedService { service: String, span: Span },
-    /// An imported (non-entry) file declares `template defaults`. The
-    /// implicit `defaults` template is looked up only in the entry
-    /// module (see `Graph::resolve_defaults`), because it has no
-    /// invocation to carry an alias — there is no `with common.defaults`
-    /// to write — so an imported one contributes nothing to any service.
-    ImportedDefaults { span: Span },
+    /// A file declares `template defaults`, and no service invokes it.
+    ///
+    /// `defaults` used to be applied implicitly to every service in its
+    /// file, at a tier below every explicit `with`. #260 removed that:
+    /// it's an ordinary template now, applied only where a `with` names
+    /// it. The removal is silent on its own — such a file still
+    /// compiles, it just quietly stops picking those fields up — so
+    /// this says so at the declaration.
+    ///
+    /// Suppressed as soon as any service names `defaults` in a `with`,
+    /// qualified or not, which is what having migrated looks like.
+    UnappliedDefaults { span: Span },
 }
 
 impl LinkWarning {
@@ -39,7 +45,7 @@ impl LinkWarning {
     /// the location itself.
     pub fn span(&self) -> Span {
         match self {
-            LinkWarning::ImportedService { span, .. } | LinkWarning::ImportedDefaults { span } => {
+            LinkWarning::ImportedService { span, .. } | LinkWarning::UnappliedDefaults { span } => {
                 *span
             }
         }
@@ -50,9 +56,9 @@ impl LinkWarning {
     ///
     /// The map to pass is the one [`crate::link`] attaches to the program
     /// it returns ([`hl_parser::ComposedProgram::files`]). A warning
-    /// raised here is *always* about an imported file rather than the one
-    /// named on the command line, so naming the file is the point rather
-    /// than a nicety.
+    /// raised here can be about any file in the `use` graph rather than
+    /// the one named on the command line, so naming the file is the
+    /// point rather than a nicety.
     pub fn display<'a>(&'a self, files: &'a SourceMap) -> impl fmt::Display + 'a {
         DisplayLinkWarning {
             warning: self,
@@ -77,11 +83,11 @@ impl LinkWarning {
                 "{at}: warning: service `{service}` is declared in an imported file and is not \
                  compiled — only the entry file's services are built"
             ),
-            LinkWarning::ImportedDefaults { .. } => write!(
+            LinkWarning::UnappliedDefaults { .. } => write!(
                 f,
-                "{at}: warning: template `defaults` is declared in an imported file and is not \
-                 applied — `defaults` is only looked up in the entry file; give it an ordinary \
-                 name and apply it with `with`"
+                "{at}: warning: template `defaults` is not applied to anything — it is an \
+                 ordinary template now, no longer applied implicitly to every service; add \
+                 `with defaults` to each service that wants it"
             ),
         }
     }
@@ -140,15 +146,15 @@ mod tests {
     }
 
     #[test]
-    fn imported_defaults_display_falls_back_to_line_col() {
-        let warning = LinkWarning::ImportedDefaults {
+    fn unapplied_defaults_display_falls_back_to_line_col() {
+        let warning = LinkWarning::UnappliedDefaults {
             span: span(2, 3, FileId::ANONYMOUS),
         };
         assert_eq!(
             warning.to_string(),
-            "2:3: warning: template `defaults` is declared in an imported file and is not \
-             applied — `defaults` is only looked up in the entry file; give it an ordinary name \
-             and apply it with `with`"
+            "2:3: warning: template `defaults` is not applied to anything — it is an ordinary \
+             template now, no longer applied implicitly to every service; add `with defaults` \
+             to each service that wants it"
         );
     }
 

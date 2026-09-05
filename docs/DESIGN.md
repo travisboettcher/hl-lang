@@ -764,7 +764,7 @@ that—a template's own `router` block carries the shared name once for
 every service that composes it—and what's left is repetition the
 compiler can see, rather than brevity that hides which routers differ.
 
-Across tiers—`defaults`, each `with` target, the service body—one
+Across tiers—each `with` target, then the service body—one
 router's `middleware` concatenates and dedupes by name, exactly like its
 `entrypoints`, so a template supplies a base list a service body adds to.
 
@@ -1051,9 +1051,9 @@ reason `NETWORK`'s `external` isn't: a bare-presence `FieldKind::BoolFlag`
 directly on `service`/`template`, matching Compose's own `privileged:`
 key—see #157. `template` isn't a
 row either—it's the mechanism for adding new rows to this table at
-parse time. `defaults` is likewise not a row—it's an ordinary template,
-semantically special only in that it's implicitly applied—see
-Composition, below.
+parse time. Neither is `defaults`, which through #260 named a template
+the compiler applied on its own and is now just a template name like
+any other—see Composition, below.
 
 ## Composition: templates and `with`
 
@@ -1063,17 +1063,27 @@ Templates must be fully applied at each call: never partially applied,
 and never curried. A template's body can itself `with` other
 templates—composition.
 
-`defaults` isn't a reserved word—it's an ordinary template name the
-compiler treats specially: if declared, it's implicitly applied at the
-lowest-priority tier, below any explicit `with`-listed template, and
-never participates in conflict-checking—it always silently loses.
+A template applies to a service only where that service's own `with`
+names it. No template applies on its own, and no template name means
+anything special to the compiler.
 
 Merge priority, lowest to highest:
 
-1. the implicit `defaults` template, if declared
-2. explicit `with`-listed templates, left to right—a collision between
-   two of these on the same scalar/map field is a **compile error**
-3. the service's own body—always wins over everything
+1. `with`-listed templates, left to right—a collision between two of
+   these on the same scalar/map field is a **compile error**
+2. the service's own body—always wins over everything
+
+#260 removed a third tier below both: a template named exactly
+`defaults`, implicitly applied to every service in its file, which never
+took part in conflict checking and so always silently lost. It couldn't
+cross a `use` boundary, because having no invocation left no alias for a
+lookup to go through—so the case that would have paid for it, sharing
+one baseline across files, was the one case it structurally couldn't
+serve. Naming the template and applying it with `with` costs one line
+per service, works across files, and leaves the merge rules with one
+fewer tier to restate. A `defaults` template nothing invokes now warns,
+per the Diagnostics section, since the old behavior would otherwise stop
+applying in silence.
 
 List fields concatenate, so no collision is possible. The set-like ones
 (`networks` alone, since #221 moved `middleware` onto `router`, where
@@ -1092,15 +1102,15 @@ order-dependent Compose behavior under which naming one twice meant
 anything different from naming it once. #167 moved it onto the same
 key-by-key `merge_map` path `volume`/`publish` use instead, keyed on the
 container side—see the preceding schema table's `publish`/`devices`
-paragraph—which happens to produce the same "own wins, defaults loses,
-two explicit collide" result for the common case of the same tier
+paragraph—which happens to produce the same "own wins, two explicit
+collide" result for the common case of the same tier
 repeating the same mapping, but now raises a genuine `MapKeyCollision`,
 the same one `publish` would, when two *explicit* templates map
 different hosts onto the same container path. `privileged` gets the
 same collision rule as a scalar
 field even though it isn't one—see the `healthcheck.test`/`.disable`
 paragraph below for how a bare-presence flag rides the same
-Own-always-wins/`defaults`-always-loses/two-explicit-collide rule
+Own-always-wins/two-explicit-collide rule
 through the same table-driven `SCALAR_FIELDS`/`merge_scalar` every
 other scalar field uses.
 
@@ -1288,12 +1298,13 @@ use "docker.hll" as traefik
 - **`use` shares declarations, not services.** The compiler builds only
   the entry file's own `service` blocks. It parses one in an imported
   file, so duplicate names and syntax still get checked, and then drops
-  it, since nothing resolves a service across files anyway. Likewise, it
-  looks up the implicit `defaults` template only in the entry module. It
-  has no invocation to carry an alias, so there is no
-  `with common.defaults` to write, and an imported `defaults` applies to
-  nothing. Both are warnings rather than errors—see the following
-  Diagnostics section.
+  it, since nothing resolves a service across files anyway. That's a
+  warning rather than an error—see the following Diagnostics section.
+  `use` does share every template, `defaults` included: since #260
+  naming one in a `with` is the only way any template reaches a
+  service, so
+  `with common.defaults` resolves exactly as any other qualified
+  invocation does.
 
 ## Worked examples
 
@@ -1568,8 +1579,8 @@ hands its warnings back with its success value
 in the same shape errors render in, with a `warning:` marker after the
 location. `hllc` prints them to stderr and touches neither its exit code
 nor its output. Three constructs warn today: a `service` in a non-entry
-file, a `defaults` template in a non-entry file, and a top-level
-`network` no service references. That last one drops out of assembling
+file, a `template defaults` no service applies with a `with`, and a
+top-level `network` no service references. That last one drops out of assembling
 the `networks:` section from services' references, which leaves a
 declaration nothing names with nowhere to go. An explicit `network
 default { ... }` in a multi-service program doesn't trigger it, even

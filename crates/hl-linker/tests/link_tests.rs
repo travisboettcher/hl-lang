@@ -131,8 +131,11 @@ fn template_qualified_reference_resolves_in_its_own_declaring_file_not_the_invok
     );
 }
 
+/// #260: `defaults` is an ordinary template name. A service that never
+/// `with`s it picks up nothing from it, and the declaration warns rather
+/// than applying silently.
 #[test]
-fn implicit_defaults_template_applies_through_the_module_graph() {
+fn an_uninvoked_defaults_template_applies_to_nothing() {
     let mut loader = InMemoryLoader::default();
     loader.add(
         "service.hll",
@@ -140,12 +143,39 @@ fn implicit_defaults_template_applies_through_the_module_graph() {
          service s {\n  image \"x\"\n}\n",
     );
 
-    let composed = link(Path::new("service.hll"), &loader)
-        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
-        .program;
+    let linked = link(Path::new("service.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+
+    assert!(
+        linked.program.services[0].fields.restart.is_none(),
+        "`defaults` is no longer applied implicitly"
+    );
+    assert!(
+        matches!(
+            linked.warnings.as_slice(),
+            [LinkWarning::UnappliedDefaults { .. }]
+        ),
+        "expected one unapplied-defaults warning, got: {:?}",
+        linked.warnings
+    );
+}
+
+/// The same file, migrated: naming `defaults` in a `with` applies it and
+/// silences the warning.
+#[test]
+fn an_invoked_defaults_template_applies_and_stays_quiet() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "service.hll",
+        "template defaults {\n  restart unless-stopped\n}\n\
+         service s {\n  with defaults\n  image \"x\"\n}\n",
+    );
+
+    let linked = link(Path::new("service.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
 
     assert_eq!(
-        composed.services[0]
+        linked.program.services[0]
             .fields
             .restart
             .as_ref()
@@ -154,8 +184,12 @@ fn implicit_defaults_template_applies_through_the_module_graph() {
             .as_ref()
             .unwrap()
             .text(),
-        "unless-stopped",
-        "the module's own `defaults` template should apply even though `s` never `with`s it explicitly"
+        "unless-stopped"
+    );
+    assert!(
+        linked.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        linked.warnings
     );
 }
 
@@ -988,9 +1022,11 @@ fn a_service_in_an_imported_file_warns() {
     );
 }
 
-/// #80: `defaults` is looked up only in the entry module, so an
-/// imported one contributes nothing to any service — the imported
-/// `restart` below never reaches `web`.
+/// An imported `defaults` nothing invokes warns at its declaration, in
+/// the file that declares it — the imported `restart` below never
+/// reaches `web`. Before #260 this was a warning for a different
+/// reason: `defaults` was applied implicitly, but looked up only in the
+/// entry module, so an imported one could never be the one applied.
 #[test]
 fn a_defaults_template_in_an_imported_file_warns() {
     let mut loader = InMemoryLoader::default();
@@ -1010,24 +1046,24 @@ fn a_defaults_template_in_an_imported_file_warns() {
     assert!(
         matches!(
             linked.warnings.as_slice(),
-            [LinkWarning::ImportedDefaults { .. }]
+            [LinkWarning::UnappliedDefaults { .. }]
         ),
-        "expected one imported-defaults warning, got: {:?}",
+        "expected one unapplied-defaults warning, got: {:?}",
         linked.warnings
     );
     assert_eq!(
         linked.warnings[0]
             .display(&linked.program.files)
             .to_string(),
-        "lib.hll:1:10: warning: template `defaults` is declared in an imported file and is not \
-         applied — `defaults` is only looked up in the entry file; give it an ordinary name and \
-         apply it with `with`"
+        "lib.hll:1:10: warning: template `defaults` is not applied to anything — it is an \
+         ordinary template now, no longer applied implicitly to every service; add `with \
+         defaults` to each service that wants it"
     );
 }
 
-/// The entry file's own `defaults` and services are exactly what the
-/// warnings are *not* about: an ordinary single-purpose graph stays
-/// silent.
+/// An ordinary graph stays silent: nothing imported is dropped, and the
+/// entry file's own `defaults` is applied by a `with` like any other
+/// template.
 #[test]
 fn an_ordinary_graph_produces_no_warnings() {
     let mut loader = InMemoryLoader::default();
@@ -1039,7 +1075,7 @@ fn an_ordinary_graph_produces_no_warnings() {
         "svc.hll",
         "use \"lib.hll\" as common\n\
          template defaults {\n  env TZ = \"UTC\"\n}\n\
-         service web {\n  with common.baseline\n  image \"nginx\"\n}\n",
+         service web {\n  with common.baseline, defaults\n  image \"nginx\"\n}\n",
     );
 
     let linked = link(Path::new("svc.hll"), &loader)

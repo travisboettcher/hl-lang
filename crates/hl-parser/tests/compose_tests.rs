@@ -31,35 +31,22 @@ fn raw_text(value: &RawValue) -> &str {
     }
 }
 
-// --- defaults tier ---
+// --- template tier vs. the service's own body ---
+//
+// #260 removed a third, lowest tier: the implicit `defaults` template,
+// which never took part in conflict checking and so always silently
+// lost. Every test here that only pinned *that* rule went with it —
+// with `defaults` no longer applied to anything, such a test would have
+// gone on passing while asserting nothing, since the value it expected
+// to win is now the only one in play. What's left is the rule that
+// survived: a template's fields reach the service, and the service's
+// own body silently overrides any it names itself.
 
 #[test]
-fn defaults_is_overridden_by_explicit_template_silently() {
+fn template_map_entries_survive_untouched_but_service_body_overrides_others() {
     let composed = compose_ok(
-        "template defaults {\n  restart unless-stopped\n}\n\
-         template override_restart {\n  restart always\n}\n\
-         service s {\n  with override_restart\n  image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    assert_eq!(
-        service
-            .fields
-            .restart
-            .as_ref()
-            .unwrap()
-            .policy
-            .as_ref()
-            .unwrap()
-            .text(),
-        "always"
-    );
-}
-
-#[test]
-fn defaults_map_entries_survive_untouched_but_service_body_overrides_others() {
-    let composed = compose_ok(
-        "template defaults {\n  env FOO = \"default\"\n  env BAR = \"default-bar\"\n}\n\
-         service s {\n  image \"x\"\n  env FOO = \"own\"\n}\n",
+        "template base {\n  env FOO = \"default\"\n  env BAR = \"default-bar\"\n}\n\
+         service s {\n  with base\n  image \"x\"\n  env FOO = \"own\"\n}\n",
     );
     let service = single_service(&composed);
     let entries = &service.fields.env.entries;
@@ -68,20 +55,6 @@ fn defaults_map_entries_survive_untouched_but_service_body_overrides_others() {
     assert_eq!(entries[0].value.text(), "own");
     assert_eq!(entries[1].key.text(), "BAR");
     assert_eq!(entries[1].value.text(), "default-bar");
-}
-
-#[test]
-fn defaults_map_entry_is_silently_overridden_by_explicit_template() {
-    let composed = compose_ok(
-        "template defaults {\n  env FOO = \"default\"\n}\n\
-         template t {\n  env FOO = \"explicit\"\n}\n\
-         service s {\n  image \"x\"\n  with t\n}\n",
-    );
-    let service = single_service(&composed);
-    let entries = &service.fields.env.entries;
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].key.text(), "FOO");
-    assert_eq!(entries[0].value.text(), "explicit");
 }
 
 // --- explicit-vs-explicit collisions ---
@@ -142,9 +115,9 @@ fn explicit_templates_restart_collision_is_error() {
 #[test]
 fn labels_merge_across_tiers_like_env() {
     let composed = compose_ok(
-        "template defaults {\n  labels { \"tier\": \"defaults\", \"stack\": \"homelab\" }\n}\n\
+        "template base {\n  labels { \"stack\": \"homelab\" }\n}\n\
          template t {\n  labels { \"owner\": \"platform-team\", \"tier\": \"template\" }\n}\n\
-         service s {\n  image \"x\"\n  with t\n  labels { \"tier\": \"own\" }\n}\n",
+         service s {\n  image \"x\"\n  with base, t\n  labels { \"tier\": \"own\" }\n}\n",
     );
     let service = single_service(&composed);
     let entries: Vec<(&str, &str)> = service
@@ -154,15 +127,15 @@ fn labels_merge_across_tiers_like_env() {
         .iter()
         .map(|e| (e.key.text(), e.value.text()))
         .collect();
-    // Tier order — `defaults`, then the `with` target, then the body's
+    // Tier order — each `with` target left to right, then the body's
     // own — with a key an earlier tier already claimed replaced in
     // place rather than appended, exactly as `env` accumulates.
     assert_eq!(
         entries,
         vec![
-            ("tier", "own"),
             ("stack", "homelab"),
             ("owner", "platform-team"),
+            ("tier", "own"),
         ]
     );
 }
@@ -411,24 +384,6 @@ fn depends_on_own_body_overrides_a_templates_condition() {
     );
 }
 
-/// The implicit `defaults` template always silently loses, even on
-/// `depends_on` — an explicit `with`-listed template's own entry for the
-/// same service wins.
-#[test]
-fn depends_on_defaults_tier_loses_to_an_explicit_template() {
-    let composed = compose_ok(
-        "template defaults {\n  depends_on [db { condition: service_started }]\n}\n\
-         template waits_for_db {\n  depends_on [db { condition: service_healthy }]\n}\n\
-         service s {\n  with waits_for_db\n}\n",
-    );
-    let service = single_service(&composed);
-    assert_eq!(service.fields.depends_on.len(), 1);
-    assert_eq!(
-        service.fields.depends_on[0].condition.map(|(c, _)| c),
-        Some(hl_parser::DependsOnCondition::ServiceHealthy)
-    );
-}
-
 /// Non-colliding entries accumulate across tiers, and a `$param` in
 /// either half of a mapping is substituted like any other literal slot.
 #[test]
@@ -529,21 +484,6 @@ fn explicit_templates_setting_expose_port_still_collide() {
         }
         other => panic!("expected FieldCollision on expose.port, got {other:?}"),
     }
-}
-
-/// `defaults`' own `expose.port` is silently overridden by an explicit
-/// template's, matching every other scalar field's own `defaults`-
-/// always-loses rule.
-#[test]
-fn defaults_expose_port_is_overridden_silently() {
-    let composed = compose_ok(
-        "template defaults {\n  expose 1234\n}\n\
-         template real {\n  expose 8080\n}\n\
-         service s {\n  with real\n  image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    let expose = service.fields.expose.as_ref().expect("expose set");
-    assert_eq!(expose.port.as_ref().unwrap().text(), "8080");
 }
 
 // --- healthcheck sub-field merge (#153) ---
@@ -680,15 +620,15 @@ fn explicit_templates_setting_same_healthcheck_interval_still_collide() {
     );
 }
 
-/// A `defaults` template setting one `healthcheck` sub-field is
-/// silently overridden only on that sub-field — the other sub-fields an
-/// explicit template sets still come through.
+/// A service's own body overriding one `healthcheck` sub-field
+/// overrides only that sub-field — the other sub-fields the template
+/// set still come through, since `healthcheck` merges per sub-field
+/// rather than as one indivisible unit.
 #[test]
-fn defaults_healthcheck_subfield_is_overridden_but_others_survive() {
+fn own_healthcheck_subfield_overrides_only_that_subfield() {
     let composed = compose_ok(
-        "template defaults {\n  healthcheck {\n    test: \"placeholder\"\n    interval: \"1s\"\n  }\n}\n\
-         template real {\n  healthcheck { interval: \"10s\" }\n}\n\
-         service s {\n  with real\n  image \"x\"\n}\n",
+        "template base {\n  healthcheck {\n    test: \"placeholder\"\n    interval: \"1s\"\n  }\n}\n\
+         service s {\n  with base\n  image \"x\"\n  healthcheck { interval: \"10s\" }\n}\n",
     );
     let service = single_service(&composed);
     let hc = service
@@ -702,7 +642,7 @@ fn defaults_healthcheck_subfield_is_overridden_but_others_survive() {
 
 /// A service's own `healthcheck.test` beats an explicit `with`
 /// template's `test` for the same sub-field — the `test`/`disable`
-/// analogue of `service_own_body_can_override_just_healthcheck_interval`
+/// analogue of `own_healthcheck_subfield_overrides_only_that_subfield`
 /// above, but exercising `merge_scalar_like`'s `(_, Tier::Own)` arm
 /// directly rather than `merge_scalar`'s identical rule for plain
 /// `Literal` fields. `test`/`disable` are the only two `healthcheck`
@@ -725,30 +665,6 @@ fn service_own_healthcheck_test_beats_an_explicit_templates_test() {
         .as_ref()
         .expect("healthcheck set");
     assert_eq!(healthcheck_test_text(hc), "custom-check");
-}
-
-/// A `defaults` template's `healthcheck.test` is silently overridden by
-/// an *explicit* template's own `test` for the same sub-field — the
-/// `test`/`disable` analogue of
-/// `defaults_healthcheck_subfield_is_overridden_but_others_survive`
-/// above, but exercising `merge_scalar_like`'s `(Tier::Defaults, _)`
-/// arm directly. That test only exercises `interval` (a plain
-/// `Literal`, routed through `merge_scalar`); `test`'s collision point
-/// is a distinct function with its own copy of the same rule.
-#[test]
-fn defaults_healthcheck_test_loses_to_an_explicit_templates_test() {
-    let composed = compose_ok(
-        "template defaults {\n  healthcheck { test: \"placeholder\" }\n}\n\
-         template real {\n  healthcheck { test: \"pg_isready\" }\n}\n\
-         service s {\n  with real\n  image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    let hc = service
-        .fields
-        .healthcheck
-        .as_ref()
-        .expect("healthcheck set");
-    assert_eq!(healthcheck_test_text(hc), "pg_isready");
 }
 
 /// `healthcheck` lives entirely inside one `Option<Healthcheck>` that
@@ -825,36 +741,17 @@ fn explicit_templates_setting_same_traefik_disable_still_collide() {
     );
 }
 
-/// A `defaults` template's `traefik { disable }` survives untouched
-/// when nothing else in the composition names `traefik` at all — the
-/// `traefik` analogue of `defaults_map_entries_survive_untouched_but_service_body_overrides_others`:
-/// `Tier::Defaults` only ever loses to a *competing* value for the same
-/// field, and an unset field from a later tier is never that.
+/// A template's `traefik { disable }` survives untouched when nothing
+/// else in the composition names `traefik` at all — the `traefik`
+/// analogue of
+/// `template_map_entries_survive_untouched_but_service_body_overrides_others`:
+/// a template's value only ever loses to a *competing* value for the
+/// same field, and an unset field from a later tier is never that.
 #[test]
-fn defaults_traefik_disable_survives_when_unchallenged() {
+fn template_traefik_disable_survives_when_unchallenged() {
     let composed = compose_ok(
-        "template defaults {\n  traefik { disable }\n}\n\
-         service s {\n  image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    let traefik = service.fields.traefik.as_ref().expect("traefik set");
-    assert!(traefik.disable.is_some());
-}
-
-/// A `defaults` template's `traefik { disable }` is silently overridden
-/// once an *explicit* template also sets it — the `Tier::Defaults` arm
-/// of `merge_scalar_like`, the same rule
-/// `defaults_healthcheck_test_loses_to_an_explicit_templates_test`
-/// exercises for `healthcheck.test`. The visible value can't actually
-/// differ (`disable` has no `false` form), so what this pins down is
-/// that the *explicit* tier's own span — not the `defaults` one — is
-/// what survives the merge.
-#[test]
-fn defaults_traefik_disable_loses_its_span_to_an_explicit_templates_disable() {
-    let composed = compose_ok(
-        "template defaults {\n  traefik { disable }\n}\n\
-         template real {\n  traefik { disable }\n}\n\
-         service s {\n  with real\n  image \"x\"\n}\n",
+        "template base {\n  traefik { disable }\n}\n\
+         service s {\n  with base\n  image \"x\"\n}\n",
     );
     let service = single_service(&composed);
     let traefik = service.fields.traefik.as_ref().expect("traefik set");
@@ -880,7 +777,7 @@ fn service_own_traefik_disable_survives_with_no_competing_template_value() {
 // --- command merge (#156) ---
 //
 // `command` merges through `merge_scalar_like` — the same
-// Own-always-wins/Defaults-always-loses/two-explicit-collide rule
+// Own-always-wins/two-explicit-collide rule
 // `healthcheck.test` uses (#153), since `Command` isn't a `Literal` and
 // so can't ride `SCALAR_FIELDS`. Unlike `healthcheck.test`, `command`
 // lives directly on `ServiceFields` rather than inside a nested struct,
@@ -948,25 +845,6 @@ fn explicit_templates_command_collision_is_error() {
         }
         other => panic!("expected FieldCollision on command, got {other:?}"),
     }
-}
-
-/// A `defaults` template's `command` is silently overridden by an
-/// explicit template's own value — exercising `merge_scalar_like`'s
-/// `(Tier::Defaults, _)` arm on `command`'s own `MergeAcc` slot, the
-/// same arm `defaults_healthcheck_test_loses_to_an_explicit_templates_test`
-/// exercises on `healthcheck.test`'s.
-#[test]
-fn defaults_command_loses_to_an_explicit_templates_command() {
-    let composed = compose_ok(
-        "template defaults {\n  command \"placeholder\"\n}\n\
-         template real {\n  command \"npm start\"\n}\n\
-         service s {\n  with real\n  image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    assert_eq!(
-        command_shell_text(service.fields.command.as_ref().unwrap()),
-        "npm start"
-    );
 }
 
 /// The exec form survives composition intact, including an item with an
@@ -1151,10 +1029,10 @@ fn own_body_override_replaces_the_inherited_entrys_read_only_flag_not_just_its_h
 #[test]
 fn raw_entries_from_every_tier_accumulate_by_distinct_key() {
     let composed = compose_ok(
-        "template defaults {\n  raw { d: \"d\" }\n}\n\
+        "template d {\n  raw { d: \"d\" }\n}\n\
          template a {\n  raw { a: \"a\" }\n}\n\
          template b {\n  raw { b: \"b\" }\n}\n\
-         service s {\n  with a, b\n  raw { c: \"c\" }\n}\n",
+         service s {\n  with d, a, b\n  raw { c: \"c\" }\n}\n",
     );
     let service = single_service(&composed);
     let keys: Vec<&str> = service
@@ -1192,27 +1070,6 @@ fn explicit_templates_raw_key_collision_is_error() {
     }
 }
 
-/// `defaults`-loses, `raw`'s own version of
-/// `defaults_map_entry_is_silently_overridden_by_explicit_template`
-/// above: when the implicit `defaults` template and an explicit
-/// `with`-listed template both set the same `raw` key, the explicit
-/// template's value silently wins — no collision is raised, even though
-/// both contributors are templates, because `defaults` never
-/// participates in conflict-checking.
-#[test]
-fn raw_defaults_entry_is_silently_overridden_by_explicit_template() {
-    let composed = compose_ok(
-        "template defaults {\n  raw { key: \"default\" }\n}\n\
-         template t {\n  raw { key: \"explicit\" }\n}\n\
-         service s {\n  image \"x\"\n  with t\n}\n",
-    );
-    let service = single_service(&composed);
-    let entries = &service.fields.raw.entries;
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].key.text(), "key");
-    assert_eq!(raw_text(&entries[0].value), "explicit");
-}
-
 /// Own-always-wins, `raw`'s own version of
 /// `service_body_overrides_inherited_map_entry_unconditionally` above: a
 /// service's own `raw` key silently replaces a `with`-listed template's
@@ -1235,10 +1092,10 @@ fn raw_own_body_overrides_inherited_map_entry_unconditionally() {
 #[test]
 fn list_fields_concatenate_in_priority_order() {
     let composed = compose_ok(
-        "template defaults {\n  dns d1\n}\n\
+        "template d {\n  dns d1\n}\n\
          template a {\n  dns a1\n}\n\
          template b {\n  dns b1\n}\n\
-         service s {\n  with a, b\n  dns own1\n}\n",
+         service s {\n  with d, a, b\n  dns own1\n}\n",
     );
     let service = single_service(&composed);
     let names: Vec<&str> = service.fields.dns.iter().map(|r| r.text()).collect();
@@ -1280,14 +1137,14 @@ fn set_like_list_fields_dedupe_across_tiers() {
 }
 
 /// Deduping keeps the *first* occurrence, so the surviving order is
-/// still tier order — `defaults`, then each `with` target left to
-/// right, then the service's own list.
+/// still tier order — each `with` target left to right, then the
+/// service's own list.
 #[test]
 fn deduped_list_keeps_first_occurrence_order() {
     let composed = compose_ok(
-        "template defaults {\n  networks [d1]\n}\n\
+        "template d {\n  networks [d1]\n}\n\
          template a {\n  networks [a1]\n  networks [d1]\n}\n\
-         service s {\n  image \"x\"\n  with a\n  networks [own1]\n  networks [a1]\n}\n",
+         service s {\n  image \"x\"\n  with d, a\n  networks [own1]\n  networks [a1]\n}\n",
     );
     let service = single_service(&composed);
     let names: Vec<&str> = service.fields.networks.iter().map(|r| r.text()).collect();
@@ -1497,27 +1354,6 @@ fn service_own_privileged_does_not_collide_with_an_explicit_templates_privileged
     );
     let service = single_service(&composed);
     assert!(service.fields.privileged.is_some());
-}
-
-/// A `defaults` template setting `privileged` is silently overridden by
-/// an explicit template's own `privileged` for the same field, mirroring
-/// `defaults_healthcheck_test_loses_to_an_explicit_templates_test`'s
-/// `(Tier::Defaults, _)` arm. `privileged`'s "value" is only ever
-/// presence, so unlike `healthcheck.test`'s distinct strings, the two
-/// tiers can't be told apart by content — only by which span composition
-/// kept, so this pins that down by source line instead: `defaults`'s own
-/// `privileged` sits on line 2, `real`'s on line 5, and it's `real`'s
-/// that must survive.
-#[test]
-fn defaults_privileged_span_loses_to_an_explicit_templates_privileged() {
-    let composed = compose_ok(
-        "template defaults {\n  privileged\n}\n\
-         template real {\n  privileged\n}\n\
-         service s {\n  with real\n  image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    let span = service.fields.privileged.expect("privileged set");
-    assert_eq!(span.line, 5);
 }
 
 /// Two explicit templates both setting `privileged` collide, the same
@@ -2325,43 +2161,18 @@ fn duplicate_top_level_template_name_is_error() {
     ));
 }
 
-/// #62: `defaults` is applied without an invocation, so nothing can
-/// ever bind its parameters — declaring any is rejected rather than
-/// silently leaking the parameter's own name (or panicking in codegen)
-/// into the generated Compose file.
+/// #62 rejected a parameterized `defaults`, because it was applied
+/// without an invocation and so nothing could ever bind its parameters —
+/// an unbound `$x` reached codegen as the parameter's own name, or
+/// panicked there. #260 removed the implicit application, which removes
+/// the hazard by construction rather than by a check: a `defaults` with
+/// parameters is now an ordinary parameterized template, reached only
+/// through a `with` that binds them.
 #[test]
-fn parameterized_defaults_template_is_error() {
-    let err = compose_err(
-        "template defaults(x) {\n  restart $x\n}\n\
-         service s {\n  image \"nginx\"\n}\n",
-    );
-    assert!(matches!(
-        err,
-        ComposeError::ParameterizedDefaults { param, .. } if param == "x"
-    ));
-}
-
-/// The same rejection covers a parameter used in a `raw` block, which
-/// is the shape that used to reach codegen's `raw` transcription.
-#[test]
-fn parameterized_defaults_template_with_raw_param_is_error() {
-    let err = compose_err(
-        "template defaults(x) {\n  raw { k: $x }\n}\n\
-         service s {\n  image \"nginx\"\n}\n",
-    );
-    assert!(matches!(
-        err,
-        ComposeError::ParameterizedDefaults { param, .. } if param == "x"
-    ));
-}
-
-/// A parameterless `defaults` is of course still fine — the rejection
-/// keys on the parameter list, not on the name.
-#[test]
-fn parameterless_defaults_template_is_still_accepted() {
+fn a_parameterized_defaults_template_is_an_ordinary_template() {
     let composed = compose_ok(
-        "template defaults {\n  restart unless-stopped\n}\n\
-         service s {\n  image \"nginx\"\n}\n",
+        "template defaults(x) {\n  restart $x\n}\n\
+         service s {\n  with defaults { x: unless-stopped }\n  image \"nginx\"\n}\n",
     );
     let service = single_service(&composed);
     assert_eq!(
@@ -2378,8 +2189,51 @@ fn parameterless_defaults_template_is_still_accepted() {
     );
 }
 
-/// A *non*-`defaults` template may still declare parameters — this is
-/// only about the implicitly-applied one.
+/// And left uninvoked, it contributes nothing — no unbound `$x` escapes
+/// to codegen, which is what #62's rejection existed to prevent.
+#[test]
+fn an_uninvoked_parameterized_defaults_template_contributes_nothing() {
+    let composed = compose_ok(
+        "template defaults(x) {\n  raw { k: $x }\n}\n\
+         service s {\n  image \"nginx\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert!(service.fields.raw.entries.is_empty());
+}
+
+/// `defaults` is applied by a `with` like every other template, and by
+/// nothing else.
+#[test]
+fn defaults_applies_only_when_invoked() {
+    let uninvoked = compose_ok(
+        "template defaults {\n  restart unless-stopped\n}\n\
+         service s {\n  image \"nginx\"\n}\n",
+    );
+    assert!(
+        single_service(&uninvoked).fields.restart.is_none(),
+        "`defaults` is no longer applied implicitly (#260)"
+    );
+
+    let invoked = compose_ok(
+        "template defaults {\n  restart unless-stopped\n}\n\
+         service s {\n  with defaults\n  image \"nginx\"\n}\n",
+    );
+    assert_eq!(
+        single_service(&invoked)
+            .fields
+            .restart
+            .as_ref()
+            .unwrap()
+            .policy
+            .as_ref()
+            .unwrap()
+            .text(),
+        "unless-stopped"
+    );
+}
+
+/// A template's parameters were never about the name `defaults` — this
+/// pins the ordinary case unchanged.
 #[test]
 fn parameterized_non_defaults_template_is_unaffected() {
     let composed = compose_ok(
@@ -2622,9 +2476,9 @@ fn service_own_body_can_override_just_one_router_subfield() {
 #[test]
 fn routers_with_different_names_accumulate_across_tiers() {
     let composed = compose_ok(
-        "template defaults {\n  router lan, host: \"a.example.local\"\n}\n\
+        "template lan_only {\n  router lan, host: \"a.example.local\"\n}\n\
          template public {\n  router web, host: \"a.example.com\"\n}\n\
-         service s {\n  with public\n  image \"x\"\n  router admin, host: \"admin.example.com\"\n}\n",
+         service s {\n  with lan_only, public\n  image \"x\"\n  router admin, host: \"admin.example.com\"\n}\n",
     );
     let service = single_service(&composed);
     let names: Vec<Option<&str>> = service.fields.routers.iter().map(|r| r.key()).collect();
@@ -2701,22 +2555,6 @@ fn router_path_prefixes_concatenate_in_tier_order() {
     assert_eq!(
         router_prefixes(router_named(service, "api")),
         vec!["/api/v1", "/dav/"]
-    );
-}
-
-/// `defaults` loses to an explicit template on a router's scalar
-/// sub-field, silently, the way it loses everywhere else.
-#[test]
-fn defaults_router_host_is_overridden_silently() {
-    let composed = compose_ok(
-        "template defaults {\n  router api, host: \"placeholder.example.com\"\n}\n\
-         template a {\n  router api, host: \"a.example.com\"\n}\n\
-         service s {\n  with a\n  image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    assert_eq!(
-        router_named(service, "api").host.as_ref().unwrap().text(),
-        "a.example.com"
     );
 }
 
@@ -2992,9 +2830,8 @@ fn a_service_without_build_composes_to_none() {
 
 // --- `priority`, `port`, `protocol` on a router (#225) ---
 
-/// The three new scalars merge on `host`'s rule: own wins, `defaults`
-/// loses, and a service body overriding one keeps the rest its template
-/// supplied.
+/// The three new scalars merge on `host`'s rule: own wins, and a
+/// service body overriding one keeps the rest its template supplied.
 #[test]
 fn service_body_can_override_just_one_new_router_subfield() {
     let composed = compose_ok(

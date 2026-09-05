@@ -104,12 +104,20 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
     let mut files = SourceMap::default();
     let mut path_to_id: HashMap<PathBuf, ModuleId> = HashMap::new();
     let mut queue: VecDeque<(ModuleId, PathBuf)> = VecDeque::new();
-    // Both things an imported file can declare that this stage then
-    // drops on the floor: its own `service`s, and a `defaults` template
-    // (#80). Neither is an error — the file is still perfectly usable
-    // for the templates, networks, and volumes it was imported for — so
-    // they accumulate here and ride out alongside the finished graph.
+    // What an imported file can declare that this stage then drops on
+    // the floor: its own `service`s (#80). Not an error — the file is
+    // still perfectly usable for the templates, networks, and volumes it
+    // was imported for — so these accumulate here and ride out alongside
+    // the finished graph.
     let mut warnings: Vec<LinkWarning> = Vec::new();
+    // Every `template defaults` declaration seen, and whether any
+    // service ended up invoking one. Whether to warn isn't knowable
+    // until the whole graph is loaded, so each declaration records the
+    // index its warning *would* have taken in load order, and the
+    // warnings are spliced back in at those positions below — see
+    // `LinkWarning::UnappliedDefaults`.
+    let mut defaults_decls: Vec<(usize, Span)> = Vec::new();
+    let mut defaults_invoked = false;
 
     let entry_id = ModuleId(0);
     let entry_path = normalize(entry);
@@ -194,6 +202,14 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
                         ));
                     }
                     service_spans.insert(s.name.name.clone(), s.name.span);
+                    // Qualified or not: `with defaults` in the entry
+                    // file and `with common.defaults` against an
+                    // imported one both mean the migration to #260's
+                    // explicit application has happened, so neither
+                    // should warn.
+                    if s.fields.with.iter().any(|inv| inv.name.name == "defaults") {
+                        defaults_invoked = true;
+                    }
                     if is_entry {
                         module.services.push(*s);
                     } else {
@@ -221,13 +237,15 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
                             &files,
                         ));
                     }
-                    // `defaults` is the one template with no invocation
-                    // to carry an alias, so `Graph::resolve_defaults`
-                    // only ever looks in the entry module — an imported
-                    // one is loaded, name-checked, and then never
-                    // applied to anything (#80).
-                    if !is_entry && t.name.name == "defaults" {
-                        warnings.push(LinkWarning::ImportedDefaults { span: t.name.span });
+                    // #260 removed the implicit `defaults` tier, so a
+                    // template with this name is now ordinary and
+                    // applies only where a `with` names it. A file
+                    // written against the old behavior still compiles —
+                    // it just silently stops picking those fields up —
+                    // so the declaration site is recorded here and
+                    // warned about below if nothing invokes it.
+                    if t.name.name == "defaults" {
+                        defaults_decls.push((warnings.len(), t.name.span));
                     }
                     module.templates.insert(t.name.name.clone(), *t);
                 }
@@ -263,6 +281,20 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
         modules[id.0] = module;
     }
 
+    // One warning per declaration, and only when nothing applies any of
+    // them: a file that has migrated names `defaults` in a `with` and
+    // stays quiet, while one written against the old implicit behavior
+    // gets told the fields it declares are no longer reaching anything.
+    //
+    // Spliced in back-to-front so each recorded index is still valid
+    // when its own insert happens, which is what keeps the whole list in
+    // load order (see `Graph::warnings`).
+    if !defaults_invoked {
+        for (at, span) in defaults_decls.into_iter().rev() {
+            warnings.insert(at, LinkWarning::UnappliedDefaults { span });
+        }
+    }
+
     Ok(Graph {
         modules,
         files,
@@ -292,13 +324,6 @@ impl SymbolResolver for Graph {
                 name: name.to_string(),
                 span,
             })
-    }
-
-    fn resolve_defaults(&self, scope: ModuleId) -> Option<(ModuleId, &TemplateDecl)> {
-        self.modules[scope.0]
-            .templates
-            .get("defaults")
-            .map(|decl| (scope, decl))
     }
 
     fn resolve_qualified_network(

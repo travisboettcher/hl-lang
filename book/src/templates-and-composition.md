@@ -130,11 +130,10 @@ argument still has to name something real: `with attached_to { net:
 written directly would, since resolving a network by name happens after
 composition binds the parameter, not before.
 
-## The implicit `defaults` template
+## Every template needs a `with`
 
-A template named exactly `defaults` is special-cased: if a file declares
-one, `hllc` applies it to every service in that file automatically—no
-`with defaults` needed:
+A template reaches a service only through that service's own `with`.
+No template name is special to the compiler, `defaults` included:
 
 ```hll,build
 template defaults {
@@ -142,39 +141,44 @@ template defaults {
 }
 
 service jellyfin {
+  with defaults
   image "jellyfin/jellyfin:latest"
   expose 8096 as "media.example.com"
-  # restart unless-stopped comes from `defaults` for free
 }
 ```
 
-`defaults` isn't a reserved word—it's an ordinary template name the
-compiler recognizes. It also never participates in the collision-checking
-described in the next section: it always loses silently to anything more
-specific, which is exactly what you want from a fallback.
+`hllc` used to apply a template named exactly `defaults` to every
+service in its file, with no `with` needed. That's gone. It only ever
+worked within one file—having no invocation left no alias for a
+cross-file lookup to go through—so the case it looked like it saved you
+from, sharing one baseline across your whole homelab, was the one case
+it couldn't serve. Writing `with defaults` costs a line per service and
+works everywhere, [imported files](./imports.md) included.
+
+A `template defaults` that no service applies is a warning rather than a
+silent no-op, since a file written against the old behavior would
+otherwise stop picking those fields up without saying so.
 
 ## Merge order and collisions
 
 When a service ends up with fields from more than one source—its own
-body, one or more `with`-listed templates, and possibly an implicit
-`defaults`—they merge in a fixed priority order, lowest to highest:
+body and one or more `with`-listed templates—they merge in a fixed
+priority order, lowest to highest:
 
-1. the implicit `defaults` template, if declared
-2. explicit `with`-listed templates, left to right
-3. the service's own body—always wins over everything
+1. `with`-listed templates, left to right
+2. the service's own body—always wins over everything
 
-**A collision between two explicit `with`-listed templates on the same
+**A collision between two `with`-listed templates on the same
 scalar or map field is a compile error**—if two templates you
-explicitly listed both try to set `image`, or both set the same `env`
+listed both try to set `image`, or both set the same `env`
 key, `hllc` won't guess which one you meant. Note that setting the field
-in the service's own body does *not* break the tie: the explicit tier
+in the service's own body does *not* break the tie: the template tier
 merges to completion before `hllc` applies the body, so it reports the
 collision first, and the body never gets a chance to win. The two real
 remedies are to drop one of the templates from the `with` list, or to
-refactor the contested field out of one of them. `defaults` is exempt
-from this check because it always silently loses, and the service's own
-body is exempt too because it always silently wins over whatever
-survives the explicit tier.
+refactor the contested field out of one of them. The service's own
+body is exempt from this check, because it always silently wins over
+whatever survives the template tier.
 
 Different field kinds merge differently:
 
@@ -184,8 +188,8 @@ Different field kinds merge differently:
   *by distinct name*: naming the same network in a template and again in
   the service's own body means what naming it once means, so `hllc`
   drops the repeat rather than emitting it twice. The first occurrence
-  is the one kept, so the surviving order is still `defaults`, then
-  each `with` target left to right, then the body's own entries. `dns`
+  is the one kept, so the surviving order is still each `with` target
+  left to right, then the body's own entries. `dns`
   and `env_file` are the exception and keep every entry, duplicates
   included, because their order is observable—resolver priority for
   `dns`, Compose's own last-file-wins precedence for `env_file`.
