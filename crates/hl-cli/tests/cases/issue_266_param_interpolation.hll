@@ -1,0 +1,18 @@
+# #266: a template parameter interpolates into string content with
+# `{{param}}`, so a template can build a value rather than take a
+# pre-rendered one. Pinned as the shape #259 needs: the whole point is
+# that the rule is assembled inside the template, leaving the call site
+# to say only what is specific to this service. `{{name}}` is resolved
+# by codegen against the service, `{{host}}` by composition against the
+# argument, and both land in one string.
+template traefik-http(host, port) {
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`{{host}}`)"
+    "traefik.http.services.{{name}}.loadbalancer.server.port": $port
+  }
+}
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  with traefik-http { host: "{{name}}.example.com", port: 8096 }
+}

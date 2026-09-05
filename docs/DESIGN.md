@@ -69,7 +69,17 @@ Punctuation: { } [ ] ( ) : = -> , . $
   resolve.
 - `$` prefixes a reference to a `template`'s own declared parameter
   (`$port`), see Composition, below. It's reserved for exactly that one
-  purpose—not a general sigil for anything else.
+  purpose—not a general sigil for anything else. It is a *token*, so it
+  substitutes a whole `literal` and is not live inside a `STRING`'s
+  content: ``"Host(`$host`)"`` carries the five characters `$host` like
+  any others, and reaches generated output as written.
+  `{{param}}`, below, is how a parameter gets inside a string.
+  Composition warns when a template's own string holds a `$` naming one
+  of that template's parameters, since the two spellings are easy to
+  confuse and the wrong one fails silently
+  (`ComposeWarning::InertParameterInString`); a `$` naming anything else
+  is left alone, because `command`/`env` carry `$HOME` to a shell and
+  Compose reads its own `${VAR}` form out of the generated file.
 - `NUMBER` is integer-only: `[0-9]+`, no sign, no decimal point, no exponent.
 - `STRING` is double-quoted, and a backslash escapes the character after
   it. The five escape sequences are `\"`, `\\`, `\n`, `\t`, and `\r`, and
@@ -83,9 +93,29 @@ Punctuation: { } [ ] ( ) : = -> , . $
 - `->` is always a single token. A bare `-` is never valid on its own (it
   only ever appears inside an `IDENT`'s tail, or as the lead character of
   `->`).
-- `{{name}}` (string interpolation, an implicit binding to the enclosing
-  service's own name) is *not* part of the lexical grammar—it's ordinary
-  content inside a `STRING` token, resolved later at codegen time.
+- `{{binding}}` (string interpolation) is *not* part of the lexical
+  grammar—it's ordinary content inside a `STRING` token, resolved later.
+  Two stages resolve it, because the two things it can name are known at
+  different times. Composition resolves a binding naming one of the
+  enclosing template's own declared parameters, since an invocation's
+  bound arguments exist only while that invocation is being resolved.
+  `{{name}}`—the implicit binding to the enclosing service's own
+  name—is resolved at codegen, the only stage that knows which service a
+  template's contribution finally landed on, and composition passes it
+  through untouched along with any binding it has no parameter for, so a
+  typo still reports as an unknown interpolation rather than reaching
+  the output. Both stages find a binding with the same scanner
+  (`hl_parser::interp::resolve_with`) rather than a loop each, so they
+  can't disagree about where one starts and ends.
+- `name` is reserved to that service-name binding: a template *may*
+  declare a parameter called `name`, and `$name` reaches it, but
+  `{{name}}` goes on meaning the service. Deciding it that way round is
+  what makes interpolating parameters additive—every `{{name}}` written
+  before parameters could be interpolated at all still resolves to what
+  it resolved to then—and a template that declares the parameter *and*
+  interpolates the binding gets
+  `ComposeWarning::NameParameterNotInterpolated` rather than a silent
+  change of meaning.
 - The lexer skips `#` line comments like whitespace and emits no comment
   token. A `#` inside a `STRING` is just ordinary string content, not a
   comment—comments are only recognized between tokens.
@@ -235,6 +265,24 @@ matcher        ::= IDENT "(" ( literal ( "," literal )* )? ")"
   up: a parameter that never lands in a reference-shaped or
   `number`-typed position goes unchecked, the same as an untyped one
   always did, since there's no field-shape left to check it against.
+- A parameter reaches a value two ways, and they are not
+  interchangeable. `$param` substitutes a whole `literal` slot, span
+  included, so the argument's own literal kind is what lands in the
+  field—which is what the reference-shape and `number` checks above are
+  checking. `{{param}}` substitutes *text* into a `STRING`'s content,
+  so the argument contributes its characters and the slot stays a
+  string: a template can build ``Host(`media.example.com`)`` out of a
+  `host` argument rather than taking the whole rendered rule. An
+  argument with no text form—a list or a nested map—is rejected there
+  (`ComposeError::ArgumentNotInterpolable`) while still being a
+  perfectly good whole-slot argument elsewhere.
+  A parameter forwarded into a nested invocation (`with inner { h:
+  $host }`) has nothing concrete to splice yet, so the interpolation is
+  *renamed* into the enclosing template's parameter namespace—`inner`'s
+  `{{h}}` becomes `{{host}}`—which is the scope the string now lives in,
+  and whichever call site finally binds `host` resolves it. That mirrors
+  what the whole-slot form already does, where forwarding replaces one
+  `Literal::Param` with another.
 - The `"$" IDENT` form of `literal`, a parameter reference such as
   `$port`, is only legal inside a `template`'s own body—including a
   nested `with`-invocation argument body written inside that template,

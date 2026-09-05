@@ -38,7 +38,10 @@ template internal_web(port) {
   be.
 - `$port` inside the body refers to that declared parameter—the `$`
   sigil serves exactly this purpose, and works only inside a
-  template's own body.
+  template's own body. It fills a whole value; to put a parameter
+  *inside* a string, see
+  [Interpolating a parameter](#interpolating-a-parameter-into-a-string)
+  below.
 - `{{name}}` interpolates the *calling* service's own name at compile
   time—see [Syntax Basics](./syntax-basics.md#comments-and-interpolation).
 
@@ -129,6 +132,76 @@ argument still has to name something real: `with attached_to { net:
 "ghost" }` fails with the same `UnknownNetwork` error `networks [ghost]`
 written directly would, since resolving a network by name happens after
 composition binds the parameter, not before.
+
+## Interpolating a parameter into a string
+
+`$param` fills a whole value. When what you need is a parameter in the
+*middle* of one—a hostname inside a routing rule, a name inside a
+dotted label key—write `{{param}}` instead, the same interpolation form
+`{{name}}` uses:
+
+```hll,build
+template traefik_http(host, port) {
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`{{host}}`)"
+    "traefik.http.services.{{name}}.loadbalancer.server.port": $port
+  }
+}
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  with traefik_http { host: "media.example.com", port: 8096 }
+}
+```
+
+```yaml
+labels:
+- traefik.http.routers.jellyfin.rule=Host(`media.example.com`)
+- traefik.http.services.jellyfin.loadbalancer.server.port=8096
+```
+
+Both bindings appear in that template and they resolve at different
+times, which is worth knowing when one of them is wrong:
+
+- `{{param}}` resolves when the template is applied, against that
+  invocation's arguments.
+- `{{name}}` resolves later, against the service the result lands on. A
+  parameter can't be called `name`—or rather it can, but `{{name}}` goes
+  on meaning the service, and `hllc` says so; reach that parameter as
+  `$name`.
+
+A binding naming neither is an error (`unknown interpolation
+{{hsot}}`), so a typo is caught rather than emitted.
+
+An argument can be anything with a text form—a string, a number, a bare
+identifier, or another parameter forwarded from the enclosing template.
+A list or a nested map has no text to splice into a string, and passing
+one to a `{{param}}` is a compile error, even though the same argument
+can still fill a whole slot that accepts a list.
+
+### `$param` inside a string does nothing
+
+The `$` sigil is not live inside string content, and never has been:
+
+```hll
+template traefik_http(host) {
+  labels {
+    # Wrong: emits the three characters `$host`, not the argument.
+    "traefik.http.routers.{{name}}.rule": "Host(`$host`)"
+  }
+}
+```
+
+That compiles, and writes ``rule=Host(`$host`)`` into the generated
+file—a router matching a host literally named `$host`, which nothing
+will ever request. `hllc` warns when a string inside a template holds a
+`$` naming one of that template's own parameters, and the fix is the
+`{{host}}` spelling above.
+
+The warning is deliberately narrow. A `$` in any other string is
+ordinary content: `command` and `env` values carry `$HOME` through to a
+shell, and Compose reads its own `${VAR}` interpolation out of the
+generated file after `hllc` is finished with it. Neither is flagged.
 
 ## Every template needs a `with`
 

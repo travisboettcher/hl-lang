@@ -1,8 +1,11 @@
 Warnings go to stderr as each stage produces them and change nothing
 else: the document is still written and the exit code is still 0, so a
-warning cannot break a build used as a CI gate. All three cases are
-here at once — an imported file's own `service`, a `template defaults`
-nothing applies, and a declared network no service references.
+warning cannot break a build used as a CI gate. Every case is here at
+once — an imported file's own `service`, a `template defaults` nothing
+applies, a `$param` inside a template's string that isn't a parameter
+reference, and a declared network no service references — which also
+pins the order they print in: linking, then composition, then codegen,
+the order the stages run.
 
 The generated document is checked by `warnings.out/`, which is what
 holds the second half of this: warnings did not stop the build.
@@ -11,6 +14,7 @@ holds the second half of this: warnings did not stop the build.
 $ hllc build web.hll --out docker-compose.yml
 lib.hll:1:10: warning: template `defaults` is not applied to anything — it is an ordinary template now, no longer applied implicitly to every service; add `with defaults` to each service that wants it
 lib.hll:5:9: warning: service `db` is declared in an imported file and is not compiled — only the entry file's services are built
+lib.hll:11:43: warning: `$host` inside a string is not a parameter reference — it is emitted verbatim; write `{{host}}` to interpolate template `rule`'s `host` here
 web.hll:3:9: warning: network `unused` is declared but no service references it, so it is not emitted — add it to a service's `networks [...]` list, or remove the declaration
 docker-compose.yml
 

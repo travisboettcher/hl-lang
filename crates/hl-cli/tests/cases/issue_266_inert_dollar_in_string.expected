@@ -1,0 +1,8 @@
+--- warnings ---
+issue_266_inert_dollar_in_string.hll:10:43: warning: `$host` inside a string is not a parameter reference — it is emitted verbatim; write `{{host}}` to interpolate template `traefik-http`'s `host` here
+--- compose ---
+services:
+  jellyfin:
+    image: jellyfin/jellyfin
+    labels:
+    - traefik.http.routers.jellyfin.rule=Host(`$host`)

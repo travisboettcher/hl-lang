@@ -707,6 +707,13 @@ fn build_yaml(path: &Path) -> Result<String, ExitCode> {
     for warning in &linked.warnings {
         eprintln!("{}", warning.display(&files));
     }
+    // Composition's own warnings ride on the program rather than
+    // beside it (see `ComposedProgram::warnings`), so they have to be
+    // printed before `generate` takes ownership of it. Between the
+    // link and codegen sets, which is pipeline order.
+    for warning in &linked.program.warnings {
+        eprintln!("{}", warning.display(&files));
+    }
     let generated = hl_codegen::generate(linked.program).map_err(|err| {
         eprintln!("{}", err.display(&files));
         ExitCode::FAILURE

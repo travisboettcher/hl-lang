@@ -229,6 +229,13 @@ Applied inside `service syncthing { with internal_web { port: 8384 } }`,
 `{{name}}` resolves to `syncthing`, producing
 `syncthing.internal.example.com`.
 
+Inside a template, the same form also reaches that template's own
+parameters: `{{port}}` puts the `port` argument into a string, where
+`$port` can only fill a whole value. See
+[Interpolating a parameter](./templates-and-composition.md#interpolating-a-parameter-into-a-string).
+`{{name}}` always means the service, even in a template that declares a
+parameter of that name.
+
 ## Numbers and strings
 
 Numbers are integers only—no sign, no decimal point, no exponent

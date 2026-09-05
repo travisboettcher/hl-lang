@@ -3,3 +3,5 @@
 services:
   web:
     image: nginx:alpine
+    labels:
+    - traefik.http.routers.web.rule=Host(`$host`)
