@@ -2080,10 +2080,10 @@ fn inert_param_refs<'a>(text: &'a str, args: &HashMap<&str, &RawValue>) -> Vec<&
         if !name.is_empty() && args.contains_key(name) {
             found.push(name);
         }
-        // `end == start` for a `$` followed by anything else (`${`, a
-        // space, end of string); stepping past the `$` itself keeps the
-        // scan moving either way.
-        i = end.max(start);
+        // `end` is `start` for a `$` followed by anything else (`${`, a
+        // space, end of string), so resuming here always moves past at
+        // least the `$` and the scan terminates either way.
+        i = end;
     }
     found
 }
