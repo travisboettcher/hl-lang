@@ -1095,8 +1095,8 @@ effect or gets a diagnostic.
 
 `labels` merges exactly the way `env` does. A template's entries reach
 the service, the service's own body wins over a template that set the
-same key, `defaults` loses to both, and two explicitly listed templates
-setting one key is a `MapKeyCollision`—see [Templates &
+same key, and two `with`-listed templates setting one key is a
+`MapKeyCollision`—see [Templates &
 Composition](./templates-and-composition.md).
 
 `{{name}}` resolves in both halves of an entry, so

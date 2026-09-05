@@ -1,0 +1,11 @@
+--- compose ---
+services:
+  web:
+    image: nginx
+    restart: unless-stopped
+    networks:
+    - default
+  db:
+    image: postgres
+    networks:
+    - default

@@ -1,0 +1,22 @@
+# #260 removed the implicit `defaults` tier. A template named `defaults`
+# is now ordinary: it reaches a service only through a `with` that names
+# it, and it collides with another explicit template exactly as any two
+# templates do.
+#
+# `web` below applies it and gets `restart`; `db` does not and gets
+# nothing from it. Before this landed, both picked it up and there was
+# no way to opt one out. The warning that covers the *un*migrated shape
+# — a `defaults` nothing invokes at all — is pinned by
+# `tests/cmd/warnings.trycmd` instead, since it needs a multi-file graph.
+template defaults {
+  restart unless-stopped
+}
+
+service web {
+  with defaults
+  image "nginx"
+}
+
+service db {
+  image "postgres"
+}

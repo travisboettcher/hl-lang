@@ -7,14 +7,15 @@
 #   - the service's own body wins over a template that set the same key,
 #     silently, because own always beats a template (`com.example.tier`
 #     comes out `own`, not `template`);
-#   - `defaults` loses to both, so its `com.example.tier` never appears
-#     and its own key survives only where nothing else claimed one;
-#   - the merged order is tier order — `defaults`, then each `with`
-#     target left to right, then the body's own — which is what makes
-#     emitted label order a stable function of the source.
-template defaults {
+#   - the merged order is tier order — each `with` target left to right,
+#     then the body's own — which is what makes emitted label order a
+#     stable function of the source.
+#
+# #260 removed the `defaults` tier this case used to open with. Its leg
+# ("defaults loses to both") went with it; `base` below is an ordinary
+# leftmost `with` target, which is what pins the ordering now.
+template base {
   labels {
-    "com.example.tier": "defaults"
     "com.example.stack": "homelab"
   }
 }
@@ -33,7 +34,7 @@ template audit_tag {
 }
 
 service web {
-  with owner_tag, audit_tag
+  with base, owner_tag, audit_tag
   image "nginx"
 
   labels {

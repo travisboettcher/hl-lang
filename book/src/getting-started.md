@@ -113,13 +113,14 @@ Traefik network, the same forward-auth middleware, the same
 for:
 
 ```hll,build
-template defaults {
+template baseline {
   restart unless-stopped
 }
 
 volume uptime-kuma-data {}
 
 service jellyfin {
+  with baseline
   image "jellyfin/jellyfin:latest"
   expose 8096 as "media.example.com"
   volume "/mnt/media" -> "/data"
@@ -127,19 +128,20 @@ service jellyfin {
 }
 
 service uptime-kuma {
+  with baseline
   image "louislam/uptime-kuma:latest"
   expose 3001 as "status.example.com"
   volume uptime-kuma-data -> "/app/data"
 }
 ```
 
-`hllc` applies a template named exactly `defaults` to every service in its
-file automatically—no `with` needed. Both preceding services now pick up
-`restart unless-stopped` without repeating it. [Templates &
-Composition](./templates-and-composition.md) covers named templates,
-parameters, and the merge rules in full. [Imports](./imports.md) covers
-sharing templates like this across every `.hll` file in your homelab
-instead of just within one file.
+Both services now pick up `restart unless-stopped` from one place. A
+template applies only where a `with` names it, so nothing happens behind
+your back and a service can opt out by leaving the line off. [Templates
+& Composition](./templates-and-composition.md) covers parameters and the
+merge rules in full. [Imports](./imports.md) covers sharing templates
+like this across every `.hll` file in your homelab instead of just
+within one file.
 
 ## Where to go next
 

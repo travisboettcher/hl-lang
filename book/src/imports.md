@@ -184,38 +184,20 @@ same way:
 jellyfin.hll:6:10: `storage.media` collides with another volume named `media` already in scope — volumes are resolved by their bare name, so the two can't be told apart; rename one of them
 ```
 
-## `defaults` is the one template `use` can't share
+## Sharing a set of baseline fields
 
-`hllc` looks up the implicit `defaults` template (see
-[Templates & Composition](./templates-and-composition.md)) only in the
-entry file—the one it was actually pointed at. A
-`template defaults { ... }` in an imported file is **ignored**: nothing
-errors, the services just don't get those fields. This falls out
-of `defaults` having no invocation to resolve—there's no `with
-common.defaults` to write, and no alias for the lookup to go through.
+Every template is shareable, because naming a template in a `with` is
+the one way any template reaches a service. So a baseline several service files
+should agree on lives in one imported file, and each service applies it:
 
-The compiler doesn't drop it quietly, though. `hllc` warns, names the
-file that declares the stray `defaults`, and carries on—see
-[Warnings](./cli.md#warnings):
-
-```text
-common.hll:1:10: warning: template `defaults` is declared in an imported file and is not applied — `defaults` is only looked up in the entry file; give it an ordinary name and apply it with `with`
-```
-
-So if several service files should share a set of baseline fields, give
-the shared template an ordinary name and apply it explicitly:
-
-<!-- vale Google.EmDash = NO -->
-```hll,file=common.hll,group=defaults-not-shared
-# common.hll — naming this template `defaults` instead would leave it
-# unapplied (and warned about) in every file that imports this one
+```hll,file=common.hll,group=shared-baseline
+# common.hll
 template baseline {
   restart unless-stopped
 }
 ```
-<!-- vale Google.EmDash = YES -->
 
-```hll,file=syncthing.hll,group=defaults-not-shared,entry
+```hll,file=syncthing.hll,group=shared-baseline,entry
 # syncthing.hll
 use "common.hll" as common
 
@@ -225,7 +207,14 @@ service syncthing {
 }
 ```
 
-Each file may still declare its own `defaults` for its own services.
+`hllc` used to apply a template named exactly `defaults` on its own, and
+that one template was the one `use` could never share: with no
+invocation, there was no alias for a cross-file lookup to go through, so
+an imported `defaults` reached nothing and warned. That special case no
+longer exists. `defaults` is an ordinary name now, and
+`with common.defaults` reaches an imported one exactly as
+`with common.baseline` does—see
+[Templates & Composition](./templates-and-composition.md).
 
 ## Only the entry file contributes services
 

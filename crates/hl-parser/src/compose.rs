@@ -85,7 +85,7 @@ pub struct ComposedProgram {
 /// error recovery — resolution stops at the first error).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ComposeError {
-    /// `with X` (or the implicit `defaults`) names a template with no
+    /// `with X` names a template with no
     /// matching top-level `template` declaration anywhere in the program.
     UnknownTemplate { name: String, span: Span },
     /// Two top-level `template` declarations share a name — template
@@ -241,12 +241,11 @@ pub enum ComposeError {
         found: &'static str,
         span: Span,
     },
-    /// Two *explicit* `with`-listed templates both set the same
-    /// scalar/struct field (`image`/`expose`/`restart`). Per
-    /// docs/DESIGN.md: "a collision between two of these on the same
-    /// scalar/map field is a compile error." Never raised against
-    /// `defaults` (always silently loses) or the service's own body
-    /// (always silently wins).
+    /// Two `with`-listed templates both set the same scalar/struct
+    /// field (`image`/`expose`/`restart`). Per docs/DESIGN.md: "a
+    /// collision between two of these on the same scalar/map field is a
+    /// compile error." Never raised against the service's own body,
+    /// which always silently wins.
     FieldCollision {
         field: &'static str,
         first_template: String,
@@ -289,13 +288,6 @@ pub enum ComposeError {
         alias: String,
         span: Span,
     },
-    /// The implicit `defaults` template declares parameters. Every other
-    /// template is reached through an explicit `with` invocation, which
-    /// is where arguments are bound; `defaults` has no invocation at all
-    /// (it's applied to every service automatically), so there is
-    /// nowhere for a caller to supply one and nothing to substitute its
-    /// `$param` references with.
-    ParameterizedDefaults { param: String, span: Span },
     /// A qualified `networks [alias.name]` entry's `alias` resolved to a
     /// real imported scope, but no `network` named `name` exists there.
     /// Distinct from [`Self::UnknownAlias`] (the alias itself didn't
@@ -397,7 +389,6 @@ impl ComposeError {
             | ComposeError::FieldCollision { second: span, .. }
             | ComposeError::UnknownAlias { span, .. }
             | ComposeError::UnsupportedQualifiedReference { span, .. }
-            | ComposeError::ParameterizedDefaults { span, .. }
             | ComposeError::UnknownQualifiedNetwork { span, .. }
             | ComposeError::CollidingImportedNetwork { span, .. }
             | ComposeError::UnknownQualifiedVolume { span, .. }
@@ -538,10 +529,6 @@ impl ComposeError {
             ComposeError::UnsupportedQualifiedReference { field, alias, .. } => write!(
                 f,
                 "{at}: `{field}` doesn't support a qualified reference yet (`{alias}.` ...)"
-            ),
-            ComposeError::ParameterizedDefaults { param, .. } => write!(
-                f,
-                "{at}: template `defaults` must not declare parameters (`{param}`) — it's applied implicitly to every service, so there's no call site to bind them"
             ),
             ComposeError::UnknownQualifiedNetwork { alias, name, .. } => {
                 write!(f, "{at}: no network `{name}` in `{alias}`")
@@ -911,18 +898,6 @@ mod error_display_tests {
     }
 
     #[test]
-    fn parameterized_defaults_display() {
-        let err = ComposeError::ParameterizedDefaults {
-            param: "x".to_string(),
-            span: span(1, 18),
-        };
-        assert_eq!(
-            err.to_string(),
-            "1:18: template `defaults` must not declare parameters (`x`) — it's applied implicitly to every service, so there's no call site to bind them"
-        );
-    }
-
-    #[test]
     fn unknown_qualified_network_display() {
         let err = ComposeError::UnknownQualifiedNetwork {
             alias: "traefik".to_string(),
@@ -993,11 +968,11 @@ mod error_display_tests {
 pub trait SymbolResolver {
     type Scope: Copy + Eq + std::hash::Hash;
 
-    /// Resolves an explicit `with`-list invocation's target template.
+    /// Resolves a `with`-list invocation's target template.
     /// `qualifier` is `Some` for `with alias.name`, `None` for a bare
-    /// `with name`. Always an error if nothing matches — unlike
-    /// [`Self::resolve_defaults`], every call here corresponds to an
-    /// explicit, user-written invocation.
+    /// `with name`. Always an error if nothing matches: every call here
+    /// corresponds to an explicit, user-written invocation, which is now
+    /// the only way a template is ever applied (#260).
     fn resolve_template(
         &self,
         scope: Self::Scope,
@@ -1005,11 +980,6 @@ pub trait SymbolResolver {
         name: &str,
         span: Span,
     ) -> Result<(Self::Scope, &TemplateDecl), ComposeError>;
-
-    /// Looks up the implicit `defaults` template in `scope`. `None`, not
-    /// an error, if none is declared — unlike [`Self::resolve_template`],
-    /// this never corresponds to an explicit invocation the user wrote.
-    fn resolve_defaults(&self, scope: Self::Scope) -> Option<(Self::Scope, &TemplateDecl)>;
 
     /// Resolves a *qualified* `networks [alias.name]` entry. Never called
     /// for a bare/unqualified entry — those are left completely
@@ -1072,10 +1042,6 @@ impl SymbolResolver for SingleFileResolver {
             })
     }
 
-    fn resolve_defaults(&self, _scope: ()) -> Option<((), &TemplateDecl)> {
-        self.templates.get("defaults").map(|decl| ((), decl))
-    }
-
     fn resolve_qualified_network(
         &self,
         _scope: (),
@@ -1111,11 +1077,10 @@ impl SymbolResolver for SingleFileResolver {
 /// resolve it). Templates are collected into a whole-program symbol
 /// table first (so `with` can reference a template declared anywhere in
 /// the file, not just earlier in it), then each service's `with`-list is
-/// merged per docs/DESIGN.md's 3-tier priority: the implicit `defaults`
-/// template (if declared) at the lowest tier, each explicit
-/// `with`-listed template left-to-right above that (collisions between
-/// two of these are errors), and the service's own body on top (always
-/// wins, unconditionally). Resolution stops at the first error, matching
+/// merged per docs/DESIGN.md's 2-tier priority: each `with`-listed
+/// template left-to-right at the lower tier (collisions between two of
+/// these are errors), and the service's own body on top (always wins,
+/// unconditionally). Resolution stops at the first error, matching
 /// [`crate::parse`]'s own no-error-recovery precedent.
 pub fn compose(program: Program) -> Result<ComposedProgram, ComposeError> {
     let mut networks = Vec::new();
@@ -1334,34 +1299,6 @@ fn compose_service<R: SymbolResolver>(
     let mut acc = MergeAcc::default();
     let mut in_progress = Vec::new();
 
-    if let Some((defaults_scope, defaults_decl)) = resolver.resolve_defaults(scope) {
-        // `defaults` is the one template applied without an invocation,
-        // so it reaches `resolve_template` directly rather than through
-        // `resolve_invocation` — which is where arity is checked and
-        // where `Literal::Param`s are substituted. A parameterized
-        // `defaults` would therefore skip both: its `$x` references
-        // would survive composition, reaching codegen either as the
-        // parameter's own *name* emitted as a real Compose value or as
-        // a hard error deep in transcription (#62). Rejecting it up
-        // front is the only coherent answer — there is no call site
-        // that could ever supply the arguments.
-        if let Some(param) = defaults_decl.params.first() {
-            return Err(ComposeError::ParameterizedDefaults {
-                param: param.name.name.clone(),
-                span: param.name.span,
-            });
-        }
-        let resolved = resolve_template(
-            defaults_decl,
-            defaults_scope,
-            resolver,
-            cache,
-            &mut in_progress,
-            imports,
-        )?;
-        merge_tier(&mut acc, resolved, &Tier::Defaults)?;
-    }
-
     for inv in &service.fields.with {
         let resolved = resolve_invocation(inv, scope, resolver, cache, &mut in_progress, imports)?;
         merge_tier(&mut acc, resolved, &Tier::Explicit(inv.name.name.clone()))?;
@@ -1384,7 +1321,7 @@ fn compose_service<R: SymbolResolver>(
 /// Resolves a *template's own* composition: its own `with`-list merged
 /// (explicit-tier, left-to-right) with its own directly-set fields
 /// (always winning over its own `with`-list — the same rule as a
-/// service's own body, minus `defaults`, which is confirmed to apply
+/// service's own body
 /// only at the final service-level merge, never inside template-internal
 /// resolution). The result is cached by `(scope, name)` — still in
 /// *parameterized* form (any `Literal::Param` the template's own body
@@ -2123,11 +2060,15 @@ fn substitute_raw_value(value: &mut RawValue, args: &HashMap<&str, &RawValue>) {
 // piece of this module.
 
 /// Which priority tier a value came from, per docs/DESIGN.md's Composition
-/// section: `Defaults` < `Explicit(template_name)` (left-to-right among
-/// themselves) < `Own` (the service's/template's own body).
+/// section: `Explicit(template_name)` (left-to-right among themselves) <
+/// `Own` (the service's/template's own body).
+///
+/// #260 removed a third, lowest tier, `Defaults`, when the implicit
+/// `defaults` template went: it was the one tier that never
+/// participated in conflict checking, so every merge below had to spell
+/// out an "always silently loses" arm beside the real rule.
 #[derive(Debug, Clone, PartialEq)]
 enum Tier {
-    Defaults,
     Explicit(String),
     Own,
 }
@@ -2159,7 +2100,7 @@ impl Spanned for RawEntry {
 }
 /// The accumulator a field-bag's tiers merge into, tracking which tier
 /// last set each value so [`merge_scalar`]/[`merge_map`] can tell
-/// "explicit-vs-explicit" (an error) apart from "defaults-vs-anything"
+/// "explicit-vs-explicit" (an error) apart from "anything-vs-own"
 /// or "anything-vs-own" (silent overrides).
 ///
 /// `scalars` holds every single-value collision point in the language —
@@ -2212,7 +2153,7 @@ impl Spanned for RawEntry {
 /// [`LIST_FIELDS`], once #155 gave each entry an optional `condition`
 /// that two entries naming the same service could actually disagree
 /// about. Own always wins over whatever a template said about the same
-/// dependency, and `defaults` always loses, exactly like every other
+/// dependency, exactly like every other
 /// keyed field — but unlike `env`/`volume`/`publish`'s own
 /// [`merge_map`], two `with`-listed templates naming the same service
 /// only collide when their *effective* conditions actually differ.
@@ -2253,7 +2194,7 @@ struct MergeAcc {
     /// carry their own entry type rather than [`ArrowMapEntry`], so
     /// neither fits [`Self::arrow_maps`]' table-driven grouping. Merged
     /// through the same [`merge_map`] `env` goes through, with the same
-    /// tier rules: own wins over any template, `defaults` always loses,
+    /// tier rules: own wins over any template,
     /// and two explicit `with`-listed templates setting one label key
     /// collide with [`ComposeError::MapKeyCollision`] rather than the
     /// second silently overwriting the first.
@@ -2267,7 +2208,7 @@ struct MergeAcc {
     /// concatenated map field. Merged key-by-key through the same
     /// [`merge_map`] `env` uses, keyed the same way
     /// ([`MapSide::Key`]), now that [`crate::schema::RAW`]'s own `uniqueness`
-    /// names one: own always wins, `defaults` always loses, and two
+    /// names one: own always wins, and two
     /// explicit `with`-listed templates setting the same key collide
     /// with [`ComposeError::MapKeyCollision`] instead of the second one
     /// silently overwriting the first.
@@ -2380,10 +2321,10 @@ impl MergeAcc {
                 (field.set)(&mut fields, values);
             }
         }
-        // In accumulated order, which is tier order: `defaults`' routers
-        // first, then each `with` target's left to right, then the
-        // body's own, with a name any earlier tier already contributed
-        // merged in place rather than appended. That's what makes label
+        // In accumulated order, which is tier order: each `with`
+        // target's left to right, then the body's own, with a name an
+        // earlier tier already contributed merged in place rather than
+        // appended. That's what makes label
         // emission order a stable function of the source (#184).
         fields.routers = self
             .routers
@@ -2996,8 +2937,8 @@ fn merge_tier(
             let acc_values = acc.lists.entry(field.key).or_default();
             if field.dedupe {
                 // First occurrence wins, so the accumulated order is
-                // still tier order (`defaults`, then each `with` target
-                // left-to-right, then the body's own list) with later
+                // still tier order (each `with` target left-to-right,
+                // then the body's own list) with later
                 // repeats dropped — see [`ListField::dedupe`]. The
                 // linear scan is over a list whose length is now bounded
                 // by the number of *distinct* names, which is what makes
@@ -3047,8 +2988,8 @@ fn merge_tier(
         |e| e.key.text().to_string(),
     )?;
     // Keyed exactly like `env` above — same side, same rules (#243). The
-    // accumulated order is tier order (`defaults`, then each `with`
-    // target left to right, then the body's own), which is what makes
+    // accumulated order is tier order (each `with` target left to
+    // right, then the body's own), which is what makes
     // the emitted label order a stable function of the source.
     merge_map(
         &mut acc.labels,
@@ -3091,7 +3032,7 @@ fn merge_tier(
 /// added twice. *Within* one name, each sub-field then merges by its own
 /// kind, exactly the way `expose`'s `port`/`host`/`entrypoint` do — the
 /// scalar `host` follows [`merge_scalar`]'s Own-always-wins /
-/// `defaults`-always-loses / two-explicit-templates-collide rule, while
+/// two-explicit-templates-collide rule, while
 /// `entrypoints`, `path_prefix`, and `middleware` concatenate.
 ///
 /// That second level is the whole point. [`merge_map`]'s own
@@ -3231,7 +3172,7 @@ fn merge_routers(
 ///
 /// Generic over the slot rather than written once per sub-field: `host`
 /// was the only one until #225 added `priority`/`port`/`protocol`, and
-/// all four want the identical Own-wins / `defaults`-loses /
+/// all four want the identical Own-wins /
 /// two-explicit-templates-collide rule. `slot` is the [`RouterAcc`]
 /// field to merge into and `field` the dotted name a collision reports.
 fn merge_router_scalar<T: RouterScalar>(
@@ -3245,7 +3186,6 @@ fn merge_router_scalar<T: RouterScalar>(
         None => *slot = Some((value, tier.clone())),
         Some((existing, existing_tier)) => match (&existing_tier, tier) {
             (_, Tier::Own) => *slot = Some((value, Tier::Own)),
-            (Tier::Defaults, _) => *slot = Some((value, tier.clone())),
             (Tier::Explicit(first), Tier::Explicit(second)) => {
                 return Err(ComposeError::MapKeyCollision(Box::new(MapKeyCollision {
                     field,
@@ -3257,7 +3197,7 @@ fn merge_router_scalar<T: RouterScalar>(
                     second: value.span(),
                 })));
             }
-            _ => unreachable!("Own is always merged last; Defaults is always merged first"),
+            _ => unreachable!("Own is always merged last, so it is never the existing tier"),
         },
     }
     Ok(())
@@ -3266,7 +3206,7 @@ fn merge_router_scalar<T: RouterScalar>(
 /// A single-occurrence `router` field [`merge_router_scalar`] can merge.
 ///
 /// The merge itself is the same for every one of them — Own always wins,
-/// `defaults` always loses, two explicit templates collide — and the
+/// two explicit templates collide — and the
 /// only thing it needs from the value is where it was written, for the
 /// collision diagnostic to name both sides. Six of the seven rows are
 /// [`Literal`]s; `rule` (#228) is a whole [`MatchExpr`], which is the
@@ -3339,9 +3279,6 @@ fn merge_depends_on(
                 (_, Tier::Own) => {
                     acc[pos] = (entry, Tier::Own);
                 }
-                (Tier::Defaults, _) => {
-                    acc[pos] = (entry, tier.clone());
-                }
                 (Tier::Explicit(first), Tier::Explicit(second)) => {
                     if acc[pos].0.effective_condition() == entry.effective_condition() {
                         // Same answer, given twice — not a collision;
@@ -3359,7 +3296,7 @@ fn merge_depends_on(
                         second: entry.span,
                     })));
                 }
-                _ => unreachable!("Own is always merged last; Defaults is always merged first"),
+                _ => unreachable!("Own is always merged last, so it is never the existing tier"),
             }
         } else {
             acc.push((entry, tier.clone()));
@@ -3370,9 +3307,8 @@ fn merge_depends_on(
 
 /// Merges one scalar (or scalar-*like*, see [`ScalarValue`]) collision
 /// point, keyed by `field` (e.g. `"expose.port"`, `"healthcheck.test"`,
-/// `"privileged"`), into `acc`. `Own` always wins unconditionally;
-/// `Defaults` is silently overridden by anything; two `Explicit` tiers
-/// setting the same key is a compile error. The single merge routine
+/// `"privileged"`), into `acc`. `Own` always wins unconditionally; two
+/// `Explicit` tiers setting the same key is a compile error. The single merge routine
 /// every scalar-shaped field in the language goes through — see
 /// [`MergeAcc`]'s own doc for why this replaced the old
 /// `Spanned`-generic, one-slot-per-field `merge_single`, and
@@ -3394,9 +3330,6 @@ fn merge_scalar(
             (_, Tier::Own) => {
                 acc.insert(field, (value, Tier::Own));
             }
-            (Tier::Defaults, _) => {
-                acc.insert(field, (value, tier.clone()));
-            }
             (Tier::Explicit(first), Tier::Explicit(second)) => {
                 return Err(ComposeError::FieldCollision {
                     field,
@@ -3406,7 +3339,7 @@ fn merge_scalar(
                     second: value.span(),
                 });
             }
-            _ => unreachable!("Own is always merged last; Defaults is always merged first"),
+            _ => unreachable!("Own is always merged last, so it is never the existing tier"),
         },
     }
     Ok(())
@@ -3433,9 +3366,6 @@ fn merge_map<E: Spanned>(
                 (_, Tier::Own) => {
                     acc[pos] = (entry, Tier::Own);
                 }
-                (Tier::Defaults, _) => {
-                    acc[pos] = (entry, tier.clone());
-                }
                 (Tier::Explicit(first), Tier::Explicit(second)) => {
                     let first_span = acc[pos].0.span();
                     return Err(ComposeError::MapKeyCollision(Box::new(MapKeyCollision {
@@ -3448,7 +3378,7 @@ fn merge_map<E: Spanned>(
                         second: entry.span(),
                     })));
                 }
-                _ => unreachable!("Own is always merged last; Defaults is always merged first"),
+                _ => unreachable!("Own is always merged last, so it is never the existing tier"),
             }
         } else {
             acc.push((entry, tier.clone()));
