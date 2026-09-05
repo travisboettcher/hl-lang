@@ -3320,6 +3320,19 @@ fn a_dollar_reference_is_matched_on_the_whole_identifier() {
     assert!(warnings.is_empty(), "got {warnings:?}");
 }
 
+/// That run holds `-` and `_` too, exactly as an `IDENT` does — the
+/// halves of the rule a purely alphanumeric name like `$hostname` above
+/// can't tell apart. Without them `$host-name` would scan as `host` and
+/// warn about a parameter nobody referenced.
+#[test]
+fn a_dollar_reference_run_holds_hyphens_and_underscores() {
+    let warnings = compose_warnings(
+        "template t(host) {\n  env H = \"$host-name $host_name\"\n}\n\
+         service s {\n  with t { host: \"a\" }\n  image \"x\"\n}\n",
+    );
+    assert!(warnings.is_empty(), "got {warnings:?}");
+}
+
 /// Two inert references in one body are reported in source order rather
 /// than in whatever order the argument map happens to iterate.
 #[test]

@@ -2063,29 +2063,32 @@ fn uninterpolable_kind(arg: &RawValue) -> &'static str {
 /// `${ident}` is deliberately not scanned: braces make it Compose's own
 /// interpolation spelling, which the generated YAML is read for after
 /// `hllc` is finished with it, and no parameter reference has ever
-/// looked like that.
+/// looked like that. It needs no special case — `{` simply isn't an
+/// identifier character, so the name after that `$` comes out empty and
+/// no parameter is ever named `""`.
+///
+/// Written over [`str::split`] rather than as an index scan on purpose.
+/// The obvious hand-rolled version — find a `$`, walk the identifier,
+/// resume past it — terminates only because of how its two cursors
+/// advance, which makes an off-by-one in either one an infinite loop
+/// rather than a wrong answer: `cargo mutants` turns each of those
+/// arithmetic operators over in turn and hangs, and the resulting
+/// TIMEOUTs would have to be excluded by name in `.cargo/mutants.toml`
+/// alongside the lexer's. An iterator over the pieces can't fail to
+/// terminate no matter what a mutant does to the body, so there is
+/// nothing to exclude.
 fn inert_param_refs<'a>(text: &'a str, args: &HashMap<&str, &RawValue>) -> Vec<&'a str> {
-    let mut found = Vec::new();
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while let Some(offset) = text[i..].find('$') {
-        let start = i + offset + 1;
-        let mut end = start;
-        while end < bytes.len()
-            && (bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'_' | b'-'))
-        {
-            end += 1;
-        }
-        let name = &text[start..end];
-        if !name.is_empty() && args.contains_key(name) {
-            found.push(name);
-        }
-        // `end` is `start` for a `$` followed by anything else (`${`, a
-        // space, end of string), so resuming here always moves past at
-        // least the `$` and the scan terminates either way.
-        i = end;
-    }
-    found
+    text.split('$')
+        // Everything before the first `$` is not after any `$`.
+        .skip(1)
+        .map(|after_sigil| {
+            let end = after_sigil
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                .unwrap_or(after_sigil.len());
+            &after_sigil[..end]
+        })
+        .filter(|name| args.contains_key(*name))
+        .collect()
 }
 
 /// Records `warning` unless an identical one is already there.
