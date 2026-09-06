@@ -30,6 +30,17 @@ pub enum LinkError {
         raw: String,
         span: Span,
     },
+    /// A `use "std:NAME"` names a module this compiler doesn't bundle.
+    /// `path` is the importing file, `name` the module as written
+    /// (without the `std:` prefix), and `available` every module the
+    /// compiler does carry — the only thing a reader can act on, since
+    /// nothing in their own tree explains the miss or could fix it.
+    UnknownStdModule {
+        path: PathBuf,
+        name: String,
+        available: Vec<String>,
+        span: Span,
+    },
     /// An error from the final [`hl_parser::compose_with_resolver`]
     /// pass, or from a duplicate declaration caught while building the
     /// module graph.
@@ -83,6 +94,30 @@ impl fmt::Display for LinkError {
                 span.line,
                 span.col,
             ),
+            LinkError::UnknownStdModule {
+                path,
+                name,
+                available,
+                span,
+            } => {
+                write!(
+                    f,
+                    "{}:{}:{}: unknown standard library module \"std:{name}\" — ",
+                    path.display(),
+                    span.line,
+                    span.col,
+                )?;
+                // The empty case is the shipped one until #269 lands a
+                // module, and "available: (none)" would read as a list
+                // that failed to print rather than as an answer.
+                if available.is_empty() {
+                    f.write_str("this compiler bundles no standard library modules")
+                } else {
+                    let names: Vec<String> =
+                        available.iter().map(|name| format!("std:{name}")).collect();
+                    write!(f, "this compiler bundles: {}", names.join(", "))
+                }
+            }
             LinkError::Compose { source, files } => write!(f, "{}", source.display(files)),
         }
     }
@@ -159,6 +194,36 @@ mod display_tests {
             "services/web.hll:1:17: import path \"../../../../etc/passwd\" escapes the \
              directory tree rooted at the entry file (absolute paths and `..` above the \
              root are not allowed)"
+        );
+    }
+
+    #[test]
+    fn unknown_std_module_display_with_nothing_bundled() {
+        let err = LinkError::UnknownStdModule {
+            path: PathBuf::from("services/web.hll"),
+            name: "traefik".to_string(),
+            available: Vec::new(),
+            span: span(1, 5),
+        };
+        assert_eq!(
+            err.to_string(),
+            "services/web.hll:1:5: unknown standard library module \"std:traefik\" — this \
+             compiler bundles no standard library modules"
+        );
+    }
+
+    #[test]
+    fn unknown_std_module_display_names_what_is_bundled() {
+        let err = LinkError::UnknownStdModule {
+            path: PathBuf::from("services/web.hll"),
+            name: "traefk".to_string(),
+            available: vec!["traefik".to_string(), "watchtower".to_string()],
+            span: span(1, 5),
+        };
+        assert_eq!(
+            err.to_string(),
+            "services/web.hll:1:5: unknown standard library module \"std:traefk\" — this \
+             compiler bundles: std:traefik, std:watchtower"
         );
     }
 

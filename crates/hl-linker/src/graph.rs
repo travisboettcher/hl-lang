@@ -10,6 +10,15 @@
 //! `B` each end up with an alias pointing at the other's already-loaded
 //! `ModuleId` — no special-casing needed, and no infinite loop, since a
 //! module already in `path_to_id` is never re-queued.
+//!
+//! A module bundled into the compiler ([`crate::stdlib`]) joins the same
+//! graph, memoized the same way, but through a second table keyed by
+//! module name rather than by path. Two tables rather than one keyed by
+//! some unspellable path is what makes a collision *unrepresentable*
+//! instead of merely unlikely: whatever a user names a file, and however
+//! a relative `use` spells it, that path can only ever land in
+//! `path_to_id`, so it can neither be mistaken for a bundled module nor
+//! shadow one.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -22,10 +31,75 @@ use hl_parser::{
 use crate::error::LinkError;
 use crate::loader::FileLoader;
 use crate::path::{normalize, resolve_relative};
+use crate::stdlib::{self, Registry};
 use crate::warning::LinkWarning;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ModuleId(usize);
+
+/// Where one queued module's bytes come from — the two namespaces a
+/// `use` can land in, kept apart as data rather than as a convention
+/// about path spelling.
+enum ModuleSource {
+    /// A file the [`FileLoader`] reads, at an already-normalized path
+    /// (see [`crate::path`]).
+    User(PathBuf),
+    /// A module compiled into this binary. It carries its own source
+    /// because the registry lookup that found it already happened, at
+    /// resolve time, where a miss still has a `use` span to point at —
+    /// so nothing here has to handle a module that turns out not to
+    /// exist.
+    Std { name: String, source: &'static str },
+}
+
+impl ModuleSource {
+    /// The path this module's spans resolve to: what a diagnostic
+    /// prints, and what the graph's [`SourceMap`] interns.
+    fn display_path(&self) -> PathBuf {
+        match self {
+            ModuleSource::User(path) => path.clone(),
+            ModuleSource::Std { name, .. } => stdlib::display_path(name),
+        }
+    }
+
+    /// This module's source text. Only the user half can fail, and it
+    /// fails the way it always did.
+    fn read(&self, loader: &dyn FileLoader) -> Result<String, LinkError> {
+        match self {
+            ModuleSource::User(path) => loader.read(path).map_err(|err| LinkError::Io {
+                path: path.clone(),
+                message: err.to_string(),
+            }),
+            ModuleSource::Std { source, .. } => Ok((*source).to_string()),
+        }
+    }
+}
+
+/// What a `use` path names, before anything is loaded.
+enum Import {
+    User(PathBuf),
+    Std(String),
+}
+
+/// Resolves one `use` path, as written, against the module that wrote
+/// it. `None` is a path that escapes its own tree — absolute, or
+/// climbing out through `..` — which stays rejected in both namespaces.
+///
+/// The `std:` prefix is matched *before* relative resolution, which is
+/// the whole of what makes the namespace unshadowable: a `std:` path
+/// never reaches [`resolve_relative`], so no file can answer to it.
+/// Inside a bundled module a relative path stays inside the standard
+/// library ([`stdlib::resolve_sibling`]) — a compiled-in module has no
+/// directory in the user's tree to be relative to.
+fn resolve_import(from: &ModuleSource, raw: &str) -> Option<Import> {
+    if let Some(name) = stdlib::strip_prefix(raw) {
+        return Some(Import::Std(name.to_string()));
+    }
+    match from {
+        ModuleSource::User(path) => resolve_relative(path, raw).map(Import::User),
+        ModuleSource::Std { name, .. } => stdlib::resolve_sibling(name, raw).map(Import::Std),
+    }
+}
 
 #[derive(Default)]
 struct Module {
@@ -95,7 +169,11 @@ impl Graph {
     }
 }
 
-pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, LinkError> {
+pub(crate) fn build(
+    entry: &Path,
+    loader: &dyn FileLoader,
+    registry: Registry,
+) -> Result<Graph, LinkError> {
     let mut modules: Vec<Module> = vec![Module::default()];
     // Grows alongside `modules`, one interned path per module, so a span
     // parsed out of a module can be traced back to the file it came
@@ -103,7 +181,11 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
     // borrowed fields from several files at once (#75).
     let mut files = SourceMap::default();
     let mut path_to_id: HashMap<PathBuf, ModuleId> = HashMap::new();
-    let mut queue: VecDeque<(ModuleId, PathBuf)> = VecDeque::new();
+    // The bundled namespace's half of the same memoization, keyed by
+    // module name — see this module's own doc comment for why it's a
+    // second table rather than a reserved corner of `path_to_id`.
+    let mut std_to_id: HashMap<String, ModuleId> = HashMap::new();
+    let mut queue: VecDeque<(ModuleId, ModuleSource)> = VecDeque::new();
     // What an imported file can declare that this stage then drops on
     // the floor: its own `service`s (#80). Not an error — the file is
     // still perfectly usable for the templates, networks, and volumes it
@@ -122,13 +204,15 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
     let entry_id = ModuleId(0);
     let entry_path = normalize(entry);
     path_to_id.insert(entry_path.clone(), entry_id);
-    queue.push_back((entry_id, entry_path));
+    queue.push_back((entry_id, ModuleSource::User(entry_path)));
 
-    while let Some((id, path)) = queue.pop_front() {
-        let source = loader.read(&path).map_err(|err| LinkError::Io {
-            path: path.clone(),
-            message: err.to_string(),
-        })?;
+    while let Some((id, module_source)) = queue.pop_front() {
+        // The path this module answers to from here on: the file's own
+        // for a user file, a `std:`-spelled stand-in for a bundled one,
+        // which is what gives a span inside a bundled module somewhere
+        // to point at.
+        let path = module_source.display_path();
+        let source = module_source.read(loader)?;
         let file = files.intern(path.clone());
         let program = parse_in_file(&source, file).map_err(|err| LinkError::Parse {
             path: path.clone(),
@@ -259,19 +343,51 @@ pub(crate) fn build(entry: &Path, loader: &dyn FileLoader) -> Result<Graph, Link
                             second: u.alias.span,
                         });
                     }
-                    let resolved = resolve_relative(&path, u.path.text()).ok_or_else(|| {
-                        LinkError::PathEscape {
-                            path: path.clone(),
-                            raw: u.path.text().to_string(),
-                            span: u.path.span(),
+                    let import =
+                        resolve_import(&module_source, u.path.text()).ok_or_else(|| {
+                            LinkError::PathEscape {
+                                path: path.clone(),
+                                raw: u.path.text().to_string(),
+                                span: u.path.span(),
+                            }
+                        })?;
+                    let target_id = match import {
+                        Import::User(resolved) => {
+                            *path_to_id.entry(resolved.clone()).or_insert_with(|| {
+                                let new_id = ModuleId(modules.len());
+                                modules.push(Module::default());
+                                queue.push_back((new_id, ModuleSource::User(resolved)));
+                                new_id
+                            })
                         }
-                    })?;
-                    let target_id = *path_to_id.entry(resolved.clone()).or_insert_with(|| {
-                        let new_id = ModuleId(modules.len());
-                        modules.push(Module::default());
-                        queue.push_back((new_id, resolved));
-                        new_id
-                    });
+                        Import::Std(name) => {
+                            // Looked up here rather than at read time so
+                            // the miss still has the `use` that asked
+                            // for it in hand — a module name is worth
+                            // nothing to a reader without the import
+                            // that named it.
+                            let bundled = stdlib::source(registry, &name).ok_or_else(|| {
+                                LinkError::UnknownStdModule {
+                                    path: path.clone(),
+                                    name: name.clone(),
+                                    available: stdlib::available(registry),
+                                    span: u.path.span(),
+                                }
+                            })?;
+                            *std_to_id.entry(name.clone()).or_insert_with(|| {
+                                let new_id = ModuleId(modules.len());
+                                modules.push(Module::default());
+                                queue.push_back((
+                                    new_id,
+                                    ModuleSource::Std {
+                                        name,
+                                        source: bundled,
+                                    },
+                                ));
+                                new_id
+                            })
+                        }
+                    };
                     alias_spans.insert(alias_name.clone(), u.alias.span);
                     module.aliases.insert(alias_name, target_id);
                 }

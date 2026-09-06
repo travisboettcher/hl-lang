@@ -44,6 +44,7 @@ mod error;
 mod graph;
 mod loader;
 mod path;
+mod stdlib;
 mod warning;
 
 pub use error::LinkError;
@@ -84,8 +85,29 @@ pub struct Linked {
 /// any span came from — including a field that a service inherited from
 /// a template in some imported file (#75). Errors and warnings raised
 /// here resolve their own spans the same way before rendering.
+///
+/// A `use "std:NAME"` bypasses `loader` entirely and reaches a module
+/// compiled into this binary instead — see this crate's `stdlib` module
+/// for what that namespace is and what it deliberately never becomes.
 pub fn link(entry: &Path, loader: &dyn FileLoader) -> Result<Linked, LinkError> {
-    let mut graph = graph::build(entry, loader)?;
+    link_with_std_registry(entry, loader, stdlib::BUNDLED)
+}
+
+/// [`link`], against a substituted table of bundled modules.
+///
+/// **Not API.** It exists so the tests can reach the half of resolution
+/// that only a *found* module reaches — loading it, memoizing it,
+/// resolving its own imports. The shipped table stays empty until #269
+/// lands the Traefik template, and code no test can run is code nothing
+/// holds to anything. Every caller outside this crate's own tests wants
+/// [`link`].
+#[doc(hidden)]
+pub fn link_with_std_registry(
+    entry: &Path,
+    loader: &dyn FileLoader,
+    registry: &'static [(&'static str, &'static str)],
+) -> Result<Linked, LinkError> {
+    let mut graph = graph::build(entry, loader, registry)?;
     let (networks, volumes, services) = graph.take_entry();
     let warnings = graph.take_warnings();
     let entry_scope = graph.entry_scope();

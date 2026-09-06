@@ -1,0 +1,2 @@
+--- error ---
+issue_267_unknown_std_module.hll:9:5: unknown standard library module "std:traefik" — this compiler bundles no standard library modules

@@ -1086,3 +1086,277 @@ fn an_ordinary_graph_produces_no_warnings() {
         linked.warnings
     );
 }
+
+// ---------------------------------------------------------------
+// `use "std:NAME"` — modules bundled into the compiler (#267).
+//
+// The shipped registry is empty until #269 lands the Traefik
+// template, so every test that needs a module to be *found* goes
+// through `link_with_std_registry`, the crate's test seam, and
+// substitutes one. That is the whole reason the seam exists: the
+// found-a-module half of resolution would otherwise ship with
+// nothing exercising it.
+// ---------------------------------------------------------------
+
+/// A stand-in for the modules #269 ships: one library module, one that
+/// imports it, and a `service` declaration so a repeated import is
+/// observable as a repeated warning.
+const REGISTRY: &[(&str, &str)] = &[
+    (
+        "net",
+        "network shared {\n  external\n}\nservice dropped {\n  image \"x\"\n}\n",
+    ),
+    (
+        "web",
+        "use \"net.hll\" as n\n\
+         template base {\n  networks [n.shared]\n  restart unless-stopped\n}\n",
+    ),
+];
+
+#[test]
+fn an_unbundled_std_module_is_an_error_saying_nothing_is_bundled() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "svc.hll",
+        "use \"std:traefik\" as t\nservice s {\n  image \"x\"\n}\n",
+    );
+
+    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
+    assert!(
+        matches!(&err, LinkError::UnknownStdModule { name, available, .. }
+            if name == "traefik" && available.is_empty()),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "svc.hll:1:5: unknown standard library module \"std:traefik\" — this compiler bundles \
+         no standard library modules"
+    );
+}
+
+#[test]
+fn an_unknown_std_module_names_every_module_that_is_bundled() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "svc.hll",
+        "use \"std:traefik\" as t\nservice s {\n  image \"x\"\n}\n",
+    );
+
+    let err = hl_linker::link_with_std_registry(Path::new("svc.hll"), &loader, REGISTRY)
+        .expect_err("expected a link error");
+    assert_eq!(
+        err.to_string(),
+        "svc.hll:1:5: unknown standard library module \"std:traefik\" — this compiler bundles: \
+         std:net, std:web"
+    );
+}
+
+#[test]
+fn a_bundled_module_resolves_and_composes_like_any_other_import() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "svc.hll",
+        "use \"std:web\" as common\n\
+         service jellyfin {\n  with common.base\n  image \"jellyfin/jellyfin\"\n}\n",
+    );
+
+    let linked = hl_linker::link_with_std_registry(Path::new("svc.hll"), &loader, REGISTRY)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+    let service = &linked.program.services[0];
+    assert_eq!(
+        service
+            .fields
+            .restart
+            .as_ref()
+            .unwrap()
+            .policy
+            .as_ref()
+            .unwrap()
+            .text(),
+        "unless-stopped"
+    );
+    // `web`'s own `use "net.hll"` resolved inside the standard library,
+    // and the reference it qualifies came across with the template.
+    assert!(service.fields.networks[0].qualifier().is_none());
+    assert_eq!(service.fields.networks[0].text(), "shared");
+}
+
+#[test]
+fn a_bundled_module_carries_its_own_path_into_a_diagnostic() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "svc.hll",
+        "use \"std:net\" as n\nservice s {\n  image \"x\"\n  networks [n.shared]\n}\n",
+    );
+
+    let linked = hl_linker::link_with_std_registry(Path::new("svc.hll"), &loader, REGISTRY)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+    // `net`'s dropped `service` is the warning, and where it points is
+    // what this pins: a span inside a bundled module resolves through
+    // the graph's `SourceMap` to a path spelled the way the import that
+    // reached it was.
+    assert_eq!(
+        linked.warnings[0]
+            .display(&linked.program.files)
+            .to_string(),
+        "std:net.hll:4:9: warning: service `dropped` is declared in an imported file and is \
+         not compiled — only the entry file's services are built"
+    );
+}
+
+#[test]
+fn importing_one_bundled_module_twice_loads_it_once() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "svc.hll",
+        "use \"std:net\" as a\n\
+         use \"std:net.hll\" as b\n\
+         service s {\n  image \"x\"\n  networks [a.shared]\n  dns \"1.1.1.1\"\n}\n",
+    );
+
+    let linked = hl_linker::link_with_std_registry(Path::new("svc.hll"), &loader, REGISTRY)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+    // `net`'s dropped `service` warned once rather than once per alias:
+    // the two spellings are one module, memoized like any other.
+    assert_eq!(
+        linked.warnings.len(),
+        1,
+        "expected one warning, got: {:?}",
+        linked.warnings
+    );
+}
+
+#[test]
+fn a_bundled_module_reached_two_ways_is_still_one_module() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "svc.hll",
+        "use \"std:web\" as w\n\
+         use \"std:net\" as n\n\
+         service s {\n  with w.base\n  image \"x\"\n}\n",
+    );
+
+    let linked = hl_linker::link_with_std_registry(Path::new("svc.hll"), &loader, REGISTRY)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+    // `net` is reached both by the entry file's `std:net` and by `web`'s
+    // own relative `use "net.hll"`. One module, so one warning.
+    assert_eq!(
+        linked.warnings.len(),
+        1,
+        "expected one warning, got: {:?}",
+        linked.warnings
+    );
+}
+
+#[test]
+fn a_cycle_between_bundled_modules_composes_successfully() {
+    const CYCLE: &[(&str, &str)] = &[
+        (
+            "a",
+            "use \"b.hll\" as b\ntemplate ta {\n  restart unless-stopped\n}\n",
+        ),
+        (
+            "b",
+            "use \"std:a\" as a\ntemplate tb {\n  env TZ = \"UTC\"\n}\n",
+        ),
+    ];
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "svc.hll",
+        "use \"std:a\" as a\nservice s {\n  with a.ta\n  image \"x\"\n}\n",
+    );
+
+    let linked = hl_linker::link_with_std_registry(Path::new("svc.hll"), &loader, CYCLE)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+    assert_eq!(
+        linked.program.services[0]
+            .fields
+            .restart
+            .as_ref()
+            .unwrap()
+            .policy
+            .as_ref()
+            .unwrap()
+            .text(),
+        "unless-stopped"
+    );
+}
+
+#[test]
+fn a_user_file_cannot_shadow_a_bundled_module() {
+    let mut loader = InMemoryLoader::default();
+    // A file named exactly what the bundled module renders as, sitting
+    // in the entry file's own directory and declaring the same network
+    // under different options.
+    loader.add("std:net.hll", "network shared {\n  name: \"shadowed\"\n}\n");
+    loader.add(
+        "svc.hll",
+        "use \"std:net\" as n\nservice s {\n  image \"x\"\n  networks [n.shared]\n}\n",
+    );
+
+    let linked = hl_linker::link_with_std_registry(Path::new("svc.hll"), &loader, REGISTRY)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"));
+    // The bundled `net` won: its `shared` is `external` with no `name`,
+    // and it dropped a `service` the shadowing file doesn't declare.
+    assert!(linked.program.networks[0].real_name.is_none());
+    assert_eq!(
+        linked.warnings.len(),
+        1,
+        "expected the bundled module's dropped service, got: {:?}",
+        linked.warnings
+    );
+}
+
+#[test]
+fn a_std_prefixed_path_is_never_a_filesystem_path() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "svc.hll",
+        "use \"std:../../etc/hostname\" as leak\nservice s {\n  image \"x\"\n}\n",
+    );
+
+    let err = hl_linker::link_with_std_registry(Path::new("svc.hll"), &loader, REGISTRY)
+        .expect_err("expected a link error");
+    // Not a path at all: the prefix takes it out of the filesystem
+    // namespace before resolution, so it fails as an unknown module
+    // rather than as an escape attempt.
+    assert!(
+        matches!(&err, LinkError::UnknownStdModule { name, .. } if name == "../../etc/hostname"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn a_relative_import_inside_a_bundled_module_cannot_escape_the_standard_library() {
+    const ESCAPER: &[(&str, &str)] = &[("bad", "use \"../../etc/hostname\" as leak\n")];
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "svc.hll",
+        "use \"std:bad\" as b\nservice s {\n  image \"x\"\n}\n",
+    );
+
+    let err = hl_linker::link_with_std_registry(Path::new("svc.hll"), &loader, ESCAPER)
+        .expect_err("expected a link error");
+    assert!(
+        matches!(&err, LinkError::PathEscape { path, raw, .. }
+            if path == Path::new("std:bad.hll") && raw == "../../etc/hostname"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn an_absolute_import_inside_a_bundled_module_is_rejected_too() {
+    const ESCAPER: &[(&str, &str)] = &[("bad", "use \"/etc/hostname\" as leak\n")];
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "svc.hll",
+        "use \"std:bad\" as b\nservice s {\n  image \"x\"\n}\n",
+    );
+
+    let err = hl_linker::link_with_std_registry(Path::new("svc.hll"), &loader, ESCAPER)
+        .expect_err("expected a link error");
+    assert!(
+        matches!(&err, LinkError::PathEscape { raw, .. } if raw == "/etc/hostname"),
+        "unexpected error: {err:?}"
+    );
+}
