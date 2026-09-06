@@ -1,0 +1,16 @@
+# #275: `name` is the whole of what a declaration exposes. `external`,
+# `driver` and `driver_opts` describe how Docker should make the thing
+# rather than naming it, and none of them is a string a value position
+# wants — so an unknown field is refused, and the message names the one
+# field there is rather than only refusing the one written.
+network proxy {
+  external
+}
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  networks [proxy]
+  labels {
+    "caddy.external": proxy.external
+  }
+}

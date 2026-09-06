@@ -4,10 +4,10 @@ use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnCondition, DependsOnEntry,
-    Entrypoint, EnvEntry, EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, LabelEntry,
-    LabelMap, Literal, MatchExpr, Network, Param, Program, QualifiedRef, RawEntry, RawMap,
-    RawValue, Restart, Router, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl,
-    Traefik, UseDecl, Volume, VolumeDriverOpt,
+    Entrypoint, EnvEntry, EnvMap, Expose, FieldAccess, Healthcheck, HealthcheckTest, Ident, Image,
+    LabelEntry, LabelMap, Literal, MatchExpr, Network, Param, Program, QualifiedRef, RawEntry,
+    RawMap, RawValue, Restart, Router, Service, ServiceFields, TemplateDecl, TemplateInvocation,
+    TopDecl, Traefik, UseDecl, Volume, VolumeDriverOpt,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -86,6 +86,26 @@ fn str_literal(tok: Token<'_>) -> Result<Literal, ParseError> {
     let text =
         hl_lexer::unescape(tok.lexeme, tok.span).map_err(|err| ParseError::Lex(vec![err]))?;
     Ok(Literal::Str(text.into_owned(), tok.span))
+}
+
+/// A dotted access spelled back out the way it was written, for the two
+/// diagnostics that quote one — [`ParseError::FieldAccessTooDeep`] and
+/// [`ParseError::FieldAccessInReferencePosition`].
+///
+/// Rendered from the tokens rather than from a parsed
+/// [`crate::ast::FieldAccess`], because neither diagnostic ever gets
+/// one: both fire on an access the grammar refused to build.
+fn dotted_text(head: &Literal, segments: &[Token<'_>]) -> String {
+    let mut text = match head {
+        Literal::Param(name, _) => format!("${name}"),
+        Literal::Qualified(q) => format!("{}.{}", q.qualifier.name, q.name),
+        other => other.text().to_string(),
+    };
+    for segment in segments {
+        text.push('.');
+        text.push_str(segment.lexeme);
+    }
+    text
 }
 
 /// One resolved field's accumulated value, keyed by field name inside a
@@ -261,6 +281,17 @@ impl<'src> Parser<'src> {
 
     // ---- literals, keys, references ----
 
+    /// `literal ::= STRING | NUMBER | IDENT field_access? | "$" IDENT
+    /// field_access?` — a value position's own grammar.
+    ///
+    /// The `field_access` suffix (#275) is the one thing this parses
+    /// that [`Self::parse_literal_reference`] deliberately doesn't: a
+    /// `.` there qualifies a reference by an import alias, and it can't
+    /// mean both. Which way each position reads a `.` is therefore
+    /// decided by which of the two functions the position calls, not by
+    /// anything about the tokens — see docs/DESIGN.md's Syntactic
+    /// grammar section, and [`Self::parse_field_access`] for how arity
+    /// tells the three field-access shapes apart once inside a value.
     fn parse_literal(&mut self) -> Result<Literal, ParseError> {
         let tok = *self.peek();
         match tok.kind {
@@ -270,7 +301,8 @@ impl<'src> Parser<'src> {
             }
             TokenKind::Ident => {
                 self.bump();
-                Ok(Literal::Ident(tok.lexeme.to_string(), tok.span))
+                let head = Literal::Ident(tok.lexeme.to_string(), tok.span);
+                self.parse_field_access(head)
             }
             TokenKind::Number => {
                 self.bump();
@@ -286,11 +318,97 @@ impl<'src> Parser<'src> {
                     }),
                 }
             }
-            TokenKind::Dollar => self.parse_param_reference(tok),
+            TokenKind::Dollar => {
+                let head = self.parse_param_reference(tok)?;
+                self.parse_field_access(head)
+            }
             _ => Err(self.unexpected(Expected::Description(
                 "a literal (string, number, or identifier)",
             ))),
         }
+    }
+
+    /// The optional `( "." IDENT )+` suffix on a value-position
+    /// literal, given the `head` already parsed — an `IDENT` or a
+    /// `$param`. Returns `head` untouched when no `.` follows, which is
+    /// every literal in the language but a field access.
+    ///
+    /// **Arity is what disambiguates**, and it can, because a `.` in a
+    /// value position had no meaning at all before #275:
+    ///
+    /// - `proxy.name` — two segments: a declaration in this program,
+    ///   and the field to read off it.
+    /// - `traefik.proxy.name` — three: an import alias, the declaration
+    ///   it exports, and the field. A bare `alias.decl` never meant
+    ///   anything in a value position, so reading the last segment as
+    ///   the field takes nothing away.
+    /// - `$net.name` — the bound declaration, and the field. A
+    ///   parameter already names one declaration, so there's no alias
+    ///   segment to spell and a second field segment has nothing to
+    ///   read off, which is why the `$` head allows only the one.
+    ///
+    /// Anything longer is [`ParseError::FieldAccessTooDeep`] rather
+    /// than a partial reading of the first three segments.
+    ///
+    /// Which *declaration* the base names, and whether the field exists
+    /// on it, are semantic questions this can't answer: `compose`
+    /// resolves the whole access into the declaration's real Docker
+    /// name — see `compose::resolve_field_access`.
+    fn parse_field_access(&mut self, head: Literal) -> Result<Literal, ParseError> {
+        if self.peek().kind != TokenKind::Dot {
+            return Ok(head);
+        }
+        // Every segment is collected before any is interpreted, so the
+        // arity check below sees the whole access and its diagnostic can
+        // quote it as written rather than reporting the first token past
+        // whatever prefix happened to parse.
+        let mut segments: Vec<Token<'src>> = Vec::new();
+        while self.peek().kind == TokenKind::Dot {
+            self.bump();
+            segments.push(self.expect(TokenKind::Ident)?);
+        }
+        // The access starts where its head does and ends at its last
+        // segment, so a diagnostic about the value underlines the whole
+        // thing rather than whichever piece happened to fail.
+        let span = Span {
+            end: segments.last().map_or(head.span().end, |t| t.span.end),
+            ..head.span()
+        };
+        let is_param = matches!(head, Literal::Param(_, _));
+        let (base, field) = match segments.as_slice() {
+            [field] => (head, *field),
+            [name, field] if !is_param => {
+                let qualifier = Ident {
+                    name: head.text().to_string(),
+                    span: head.span(),
+                };
+                let base_span = Span {
+                    end: name.span.end,
+                    ..qualifier.span
+                };
+                let base = Literal::Qualified(Box::new(QualifiedRef {
+                    qualifier,
+                    name: name.lexeme.to_string(),
+                    name_span: name.span,
+                    span: base_span,
+                }));
+                (base, *field)
+            }
+            _ => {
+                return Err(ParseError::FieldAccessTooDeep {
+                    text: dotted_text(&head, &segments),
+                    span,
+                });
+            }
+        };
+        Ok(Literal::Field(Box::new(FieldAccess {
+            base,
+            field: Ident {
+                name: field.lexeme.to_string(),
+                span: field.span,
+            },
+            span,
+        })))
     }
 
     /// `"$" IDENT` — a template parameter reference. `dollar` is the
@@ -372,7 +490,9 @@ impl<'src> Parser<'src> {
     pub(crate) fn parse_literal_reference(&mut self) -> Result<Literal, ParseError> {
         if self.peek().kind == TokenKind::Dollar {
             let dollar = *self.peek();
-            return self.parse_param_reference(dollar);
+            let param = self.parse_param_reference(dollar)?;
+            self.reject_field_access(&param)?;
+            return Ok(param);
         }
         let key = self.parse_key()?;
         if matches!(key, Literal::Ident(_, _)) && self.peek().kind == TokenKind::Dot {
@@ -389,14 +509,55 @@ impl<'src> Parser<'src> {
                 col: qualifier.span.col,
                 file: qualifier.span.file,
             };
-            return Ok(Literal::Qualified(Box::new(QualifiedRef {
+            let qualified = Literal::Qualified(Box::new(QualifiedRef {
                 qualifier,
                 name: name_tok.lexeme.to_string(),
                 name_span: name_tok.span,
                 span,
-            })));
+            }));
+            self.reject_field_access(&qualified)?;
+            return Ok(qualified);
         }
         Ok(key)
+    }
+
+    /// Refuses a field access written where a reference belongs — a
+    /// third dotted segment after an `alias.name`, or any segment after
+    /// a `$param` (#275).
+    ///
+    /// These positions name a declaration, and `.` in one already
+    /// qualifies that name by an import alias, so a field access here
+    /// can't be given the reading it has in a value position without
+    /// taking `alias.name` away from every `networks [...]` entry that
+    /// uses it. Refusing it by name beats letting the reference parse
+    /// and the leftover `.` surface as "expected `,`, found `.`" a
+    /// token later, which says nothing about what the author was
+    /// reaching for.
+    ///
+    /// The remaining segments are consumed before reporting, so the
+    /// message and span cover the whole thing as written. Parsing stops
+    /// at the first error anyway, so there's nothing left to resume for.
+    ///
+    /// A two-segment `proxy.name` can't reach here: it's
+    /// indistinguishable from the qualified reference it has always
+    /// been, and stays one.
+    fn reject_field_access(&mut self, head: &Literal) -> Result<(), ParseError> {
+        if self.peek().kind != TokenKind::Dot {
+            return Ok(());
+        }
+        let mut segments: Vec<Token<'src>> = Vec::new();
+        while self.peek().kind == TokenKind::Dot {
+            self.bump();
+            segments.push(self.expect(TokenKind::Ident)?);
+        }
+        let span = Span {
+            end: segments.last().map_or(head.span().end, |t| t.span.end),
+            ..head.span()
+        };
+        Err(ParseError::FieldAccessInReferencePosition {
+            text: dotted_text(head, &segments),
+            span,
+        })
     }
 
     fn parse_bracket_reference_list(&mut self) -> Result<Vec<Literal>, ParseError> {

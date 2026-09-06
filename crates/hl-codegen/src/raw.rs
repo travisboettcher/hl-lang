@@ -82,6 +82,15 @@ fn literal_to_yaml(
             param: name.clone(),
             span: *span,
         }),
+        // Composition resolves every field access into the declaration's
+        // real Docker name, so this is the same kind of invariant hole
+        // the arm above reports — a value slot composition's own walk
+        // missed — and gets the same treatment rather than emitting the
+        // field's own name as a `raw` value (#275).
+        Literal::Field(access) => Err(CodegenError::UnresolvedFieldAccess {
+            access: access.dotted(),
+            span: access.span,
+        }),
     }
 }
 
@@ -99,7 +108,7 @@ pub fn scalar_value(lit: &Literal) -> serde_yaml_ng::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hl_parser::{FileId, Span};
+    use hl_parser::{FieldAccess, FileId, Ident, Span};
 
     fn span() -> Span {
         Span {
@@ -160,6 +169,30 @@ mod tests {
         assert!(matches!(
             err,
             CodegenError::UnsubstitutedParameter { param, .. } if param == "x"
+        ));
+    }
+
+    /// A `Literal::Field` reaching codegen is the same kind of
+    /// invariant violation one step along (#275): composition resolves
+    /// every field access into the declaration's real Docker name, so
+    /// one arriving here means a value slot its walk didn't visit.
+    /// Reported rather than emitted, since emitting it would write the
+    /// field's own name — `name` — into the generated document.
+    #[test]
+    fn surviving_field_access_is_an_error_not_a_value() {
+        let access = FieldAccess {
+            base: Literal::Ident("proxy".to_string(), span()),
+            field: Ident {
+                name: "name".to_string(),
+                span: span(),
+            },
+            span: span(),
+        };
+        let lit = Literal::Field(Box::new(access));
+        let err = to_yaml(&RawValue::Literal(lit), &bindings()).unwrap_err();
+        assert!(matches!(
+            err,
+            CodegenError::UnresolvedFieldAccess { access, .. } if access == "proxy.name"
         ));
     }
 

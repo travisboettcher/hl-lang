@@ -1,0 +1,4 @@
+--- warnings ---
+issue_275_shared_network.hll:6:9: warning: network `proxy` is declared but no service references it, so it is not emitted — add it to a service's `networks [...]` list, or remove the declaration
+--- compose ---
+services: {}

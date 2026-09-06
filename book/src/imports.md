@@ -142,6 +142,47 @@ for whatever *it* references, and a service file needs `use` declarations
 only for what *it* references directly—importing a template doesn't
 also import that template's own imports.
 
+## Reading an imported declaration's name
+
+Add a third segment and the same alias reads a field off what it names
+rather than referencing it—`net.traefik-net.name` is the real Docker
+name of that imported network, `docker_default` in the preceding
+example. See [Reading a declaration's real
+name](./templates-and-composition.md#reading-a-declarations-real-name)
+for the field itself. Two things about it are specific to imports:
+
+```hll,file=proxy.hll,group=imported-name
+# proxy.hll
+network proxy {
+  external
+  name: "docker_default"
+}
+```
+
+```hll,file=caddy.hll,group=imported-name,entry
+# caddy.hll
+use "proxy.hll" as net
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  labels {
+    "caddy.network": net.proxy.name
+  }
+}
+```
+
+**Reading a name imports nothing.** The generated document here carries
+no `networks:` section at all: `networks [net.proxy]` is what pulls a
+declaration across an import, and reading its name yields a plain
+string. That also keeps it clear of the bare-name collision the next
+section describes, since no second declaration comes over to collide.
+
+**The alias resolves in the file holding the access.** Inside a template,
+`net.proxy.name` reads the `net` of the file that declared the
+template—the same lexical-scoping rule as any other reference, and it
+covers a `with`-invocation's arguments too, since those are values the
+calling file wrote.
+
 ## Two networks, or two volumes, can't share one bare name
 
 An imported `network` keeps its own bare name in the generated

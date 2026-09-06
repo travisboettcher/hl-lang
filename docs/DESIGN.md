@@ -63,10 +63,12 @@ Punctuation: { } [ ] ( ) : = -> , . $
   where the word is just a name—`service template { ... }`, a parameter
   called `template`—and left the lexical grammar with one exception to
   explain.
-- `.` separates an import alias from the name it qualifies (`alias.name`,
-  see Imports, below) and never appears anywhere else in the grammar—
-  `NUMBER` is integer-only, so there's no decimal-point ambiguity to
-  resolve.
+- `.` separates two names, and which two depends on where it's written:
+  an import alias from the name it qualifies (`alias.name`, see Imports,
+  below) in a reference position, and a declaration from the field being
+  read off it (`proxy.name`, see Syntactic grammar, below) in a value
+  position. It appears nowhere else—`NUMBER` is integer-only, so there's
+  no decimal-point ambiguity to resolve.
 - `$` prefixes a reference to a `template`'s own declared parameter
   (`$port`), see Composition, below. It's reserved for exactly that one
   purpose—not a general sigil for anything else. It's a *token*, so it
@@ -155,6 +157,11 @@ value          ::= literal | list | statement
 list           ::= "[" ( value ( "," value )* )? "]"
 
 literal        ::= STRING | NUMBER | IDENT | IDENT "." IDENT | "$" IDENT
+                  | field_access
+
+field_access   ::= IDENT "." IDENT              # local declaration, field
+                  | IDENT "." IDENT "." IDENT   # alias, declaration, field
+                  | "$" IDENT "." IDENT         # bound declaration, field
 
 rule_expr      ::= or_expr
 
@@ -283,6 +290,16 @@ matcher        ::= IDENT "(" ( literal ( "," literal )* )? ")"
   and whichever call site finally binds `host` resolves it. That mirrors
   what the whole-slot form already does, where forwarding replaces one
   `Literal::Param` with another.
+  A third form reads a field off whatever the parameter names rather
+  than substituting the parameter itself: `$net.name` as a whole value,
+  `{{net.name}}` inside string content. Both defer the same way a
+  forwarded parameter does—`{{net.name}}` becomes `{{proxy.name}}` once
+  an argument binds `net`, leaving a dotted binding for the pass that
+  resolves those—so one parameter serves both the `networks [$net]`
+  entry that wants the identifier and the label value that wants the
+  real Docker name. An argument with no declaration to name (a number, a
+  list, a nested map) draws an error at its own call site, the way the
+  reference-shape and `number` checks report theirs.
 - The `"$" IDENT` form of `literal`, a parameter reference such as
   `$port`, is only legal inside a `template`'s own body—including a
   nested `with`-invocation argument body written inside that template,
@@ -307,6 +324,52 @@ matcher        ::= IDENT "(" ( literal ( "," literal )* )? ")"
   host side resolve it against the aliased file's own declarations,
   while every other position rejects it outright, since none of them
   names something an `.hll` file declares in the first place.
+- `field_access` reads one field off a `network` or `volume`
+  declaration, and it's legal **in a value position only**—a `labels`
+  entry's value, an `env` value, a `raw` value, a `with`-invocation's
+  argument, and every other slot the `value` production reaches. A
+  declaration has two names, the identifier `.hll` refers to it by and
+  the real Docker name (`name:` when set, the identifier otherwise), and
+  this is what reads the second. `name` is the only field either kind
+  exposes: `external`, `driver` and `driver_opts` describe how Docker
+  should make the thing rather than naming it, so an unknown field draws
+  an error that names the one field there is.
+- **A reference-shaped position takes no field access, on purpose**,
+  which is what keeps the grammar unambiguous. `.` in a reference already means
+  `alias.name`, so `networks [proxy.name]` can only go on meaning the
+  network `name` that the file aliased `proxy` exports—and
+  `networks [$net]` has to go on taking the identifier, since attaching
+  a network is what that list does. The two spellings a reference
+  position *can* tell apart, a third segment and a `$param` base, draw a
+  diagnostic saying which position field access belongs in, rather than
+  a stray "expected `,`" a token later.
+- **Inside a value position, the segment count decides the shape.** Two
+  segments name a local declaration and a field, three name an alias, a
+  declaration and a field, and a `$param` base takes exactly one field,
+  since a parameter already names one declaration. A bare `alias.decl`
+  never meant anything in a value position, so reading the last segment
+  as a field takes nothing away. A fourth segment has no shape left to
+  be, so it draws an error rather than a partial reading of the first
+  three.
+- The same access interpolates into string content as a dotted
+  `{{binding}}`—`"prefix-{{proxy.name}}"`, `"{{alias.proxy.name}}"`,
+  `"{{net.name}}"` for a parameter—reading exactly as it does in source,
+  segment count included. `{{name}}`, the enclosing service's own name,
+  and every other binding without a dot keep their meaning: a dotted
+  binding is new syntax that never collided with them.
+- **Composition resolves every field access**, into a plain string
+  holding the declaration's real name, so codegen never learns the
+  syntax exists. Two passes do it, split by what each stage can answer.
+  A scope's own body resolves first, in the scope that wrote it, which
+  is the only place an import alias means anything: the lexical-scoping
+  rule in the following Imports section says a template's
+  `traefik.proxy.name` resolves against the file holding that template,
+  and after the invocation resolves, that file is no longer in hand.
+  Whatever is still a `$param` at that point resolves in a second pass
+  over each service's fully merged fields, once every argument has a
+  binding. Reading a name attaches nothing: `networks [...]` is what
+  attaches a network, so a label naming one leaves the generated
+  `networks:` section alone.
 
 `statement` is the whole language: a `named_decl` is one particular shape
 of it with a mandatory second name and mandatory body. Every field
@@ -1332,13 +1395,24 @@ use "docker.hll" as traefik
   qualified form in the first place—#167 made its entries plain
   literals, like `publish`'s and `env`'s, neither of which is
   reference-shaped either.
+- `alias.name.name` reads a field off an imported declaration, in a
+  value position, per the preceding Syntactic grammar section's
+  `field_access`. Unlike a qualified *reference*, it pulls nothing
+  across the import: it resolves to the declaration's real Docker name,
+  a string, so the importing program's own `networks:`/`volumes:`
+  sections stay as they were. That also means it never trips the "an
+  imported network keeps its own bare name" collision below, since no
+  second declaration comes over.
 - **Templates are lexically scoped, not dynamically scoped.** If a
   template declared in `templates.hll` writes
   `networks [traefik.traefik-net]`, that `traefik` resolves against
   *`templates.hll`'s own* `use` declarations—never whichever file
   happens to invoke the template with `with`. A template's references
   always resolve relative to where it was *written*, not where it was
-  *called from*.
+  *called from*. A field access follows the same rule for the same
+  reason, including one written in a `with`-invocation's arguments,
+  which is a value the calling file wrote and therefore resolves in the
+  calling file's own scope.
 - **Imports aren't transitive.** `use`-ing a file only makes *that
   file's* own top-level declarations available under your alias—not
   anything *it* in turn `use`s. If `service.hll` uses `templates.hll`,
@@ -1579,9 +1653,12 @@ readability choice, not a different construct.
    see the preceding Composition and Imports sections—purely syntactic,
    no name resolution.
 3. **Compose** (`crates/hl-parser`'s `compose` module)—resolves every
-   `with`-list into a fully merged `Service` with no templates or
-   unresolved parameters left, per the Composition section's 3-tier merge
-   rules. Generalized over a `SymbolResolver` trait so the same merge
+   `with`-list into a fully merged `Service` with no templates,
+   unresolved parameters, or unresolved field accesses left, per the
+   Composition section's 3-tier merge
+   rules. A `declaration.name` becomes the plain string holding that
+   declaration's real Docker name here, resolved in the scope that wrote
+   it, so codegen never learns the syntax exists. Generalized over a `SymbolResolver` trait so the same merge
    engine resolves both a single file's own templates (`compose`, no
    imports) and a whole `use` graph (`compose_with_resolver`, driven by
    the linker below).

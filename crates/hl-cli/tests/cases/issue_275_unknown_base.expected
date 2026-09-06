@@ -1,0 +1,2 @@
+--- error ---
+issue_275_unknown_base.hll:13:22: `proxy` names no `network` or `volume` declared in this program, so `proxy.name` has no name to read — declare one, or write `alias.proxy.name` to read an imported declaration

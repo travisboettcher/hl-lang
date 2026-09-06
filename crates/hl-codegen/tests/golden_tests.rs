@@ -3084,3 +3084,76 @@ fn a_newline_in_a_label_key_is_rejected() {
         "got {err:?}"
     );
 }
+
+// ---- #275: `.name` reads the real Docker name ----
+
+/// The shape #275 exists for, end to end: one parameter serves the
+/// `networks [$net]` entry, which wants the identifier, *and* the label
+/// value, which wants the real Docker name. The two differ here on
+/// purpose — an external network created by another Compose project
+/// almost always carries a `name:` — because that difference is exactly
+/// what the workaround this replaces got wrong, silently.
+#[test]
+fn a_field_access_emits_the_real_docker_network_name() {
+    let yaml = generate_from(
+        "network proxy {\n  external\n  name: \"docker_default\"\n}\n\
+         template caddy(net, port) {\n  \
+           networks [$net]\n  \
+           expose $port\n  \
+           labels {\n    \
+             \"caddy.network\": $net.name\n    \
+             \"caddy.upstream\": \"{{name}}:{{port}}\"\n  }\n\
+         }\n\
+         service jellyfin {\n  \
+           image \"jellyfin/jellyfin\"\n  \
+           with caddy { net: proxy, port: 8096 }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      jellyfin:
+        image: jellyfin/jellyfin
+        networks:
+          - proxy
+        expose:
+          - 8096
+        labels:
+          - traefik.docker.network=docker_default
+          - caddy.network=docker_default
+          - "caddy.upstream=jellyfin:8096"
+    networks:
+      proxy:
+        name: docker_default
+        external: true
+    "#);
+}
+
+/// A volume's name reads the same way, and the interpolated spelling
+/// puts it mid-string — the two halves of #275 that aren't about
+/// networks at all.
+#[test]
+fn a_volume_name_reads_and_interpolates_the_same_way() {
+    let yaml = generate_from(
+        "volume media {\n  name: \"media_store\"\n}\n\
+         service jellyfin {\n  \
+           image \"jellyfin/jellyfin\"\n  \
+           volume media -> \"/data\"\n  \
+           labels {\n    \
+             \"backup.volume\": media.name\n    \
+             \"backup.path\": \"/mnt/{{media.name}}\"\n  }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      jellyfin:
+        image: jellyfin/jellyfin
+        volumes:
+          - "media:/data"
+        labels:
+          - backup.volume=media_store
+          - backup.path=/mnt/media_store
+    volumes:
+      media:
+        name: media_store
+    "#);
+}

@@ -133,6 +133,34 @@ pub enum ParseError {
     /// `name` doesn't match any of that template's own declared
     /// parameters.
     UnknownTemplateParam { name: String, span: Span },
+    /// A field access in a value position carried more dotted segments
+    /// than any of its three shapes has (#275): `a.b.c.d`, or a
+    /// `$param` base with a second field after the first (`$net.a.b`).
+    ///
+    /// Arity is the whole of what tells the shapes apart —
+    /// `declaration.field` from `alias.declaration.field` — so a fourth
+    /// segment has no reading left to be given, and guessing one (the
+    /// first three, say, with the rest ignored) would silently drop
+    /// something the author wrote on purpose.
+    FieldAccessTooDeep { text: String, span: Span },
+    /// A field access was written where the grammar expects a
+    /// *reference* — a `networks`/`dns`/`env_file` entry, a
+    /// `depends_on` entry, a `router`'s `entrypoints`/`path_prefix`/
+    /// `middleware`, or a named-volume mount's host side (#275).
+    ///
+    /// Those positions name a declaration; a field access reads a
+    /// *value* off one, which is a different thing, and `.` there
+    /// already means the `alias.name` qualifier. So `networks
+    /// [traefik.proxy.name]` isn't a network this file could attach —
+    /// it's the string `traefik.proxy` resolves to, in a slot that
+    /// wants the declaration itself.
+    ///
+    /// Only the spellings that can't be read as `alias.name` reach
+    /// here: a third segment, or a `$param` base. A two-segment
+    /// `proxy.name` in one of these positions stays a qualified
+    /// reference, exactly as it always was — see docs/DESIGN.md's
+    /// Syntactic grammar section.
+    FieldAccessInReferencePosition { text: String, span: Span },
     /// A `raw` value nested lists/maps deeper than
     /// [`crate::parser::MAX_RAW_VALUE_DEPTH`].
     ///
@@ -236,6 +264,8 @@ impl ParseError {
             | ParseError::DuplicateTemplateParam { second: span, .. }
             | ParseError::ParamReferenceOutsideTemplate { span, .. }
             | ParseError::UnknownTemplateParam { span, .. }
+            | ParseError::FieldAccessTooDeep { span, .. }
+            | ParseError::FieldAccessInReferencePosition { span, .. }
             | ParseError::RawValueTooDeep { span, .. }
             | ParseError::MatchExprTooDeep { span, .. }
             | ParseError::UnknownMatcher { span, .. }
@@ -381,6 +411,22 @@ impl fmt::Display for ParseError {
                 f,
                 "{}:{}: `${name}` does not name a declared parameter of this template",
                 span.line, span.col
+            ),
+            ParseError::FieldAccessTooDeep { text, .. } => write!(
+                f,
+                "{}:{}: `{text}` has too many parts to be a field access — write \
+                 `declaration.field`, `alias.declaration.field` for an imported \
+                 declaration, or `$param.field` for one a parameter is bound to",
+                span.line, span.col
+            ),
+            ParseError::FieldAccessInReferencePosition { text, .. } => write!(
+                f,
+                "{}:{}: `{text}` reads a field, and this position names a declaration \
+                 instead — drop the `.{}` to name the declaration itself, or move the \
+                 field access to a value position such as a `labels` entry",
+                span.line,
+                span.col,
+                text.rsplit('.').next().unwrap_or_default()
             ),
             ParseError::RawValueTooDeep { limit, .. } => write!(
                 f,
@@ -672,6 +718,40 @@ mod display_tests {
         assert_eq!(
             err.to_string(),
             "4:12: `raw` value nested more than 128 levels deep"
+        );
+    }
+
+    /// The message names all three shapes a field access can take,
+    /// since which one the author meant is exactly what the extra
+    /// segment leaves unanswerable (#275).
+    #[test]
+    fn field_access_too_deep_display() {
+        let err = ParseError::FieldAccessTooDeep {
+            text: "a.b.c.d".to_string(),
+            span: span(7, 10),
+        };
+        assert_eq!(
+            err.to_string(),
+            "7:10: `a.b.c.d` has too many parts to be a field access — write \
+             `declaration.field`, `alias.declaration.field` for an imported declaration, or \
+             `$param.field` for one a parameter is bound to"
+        );
+    }
+
+    /// Quotes the trailing segment back, since dropping it is the
+    /// smaller of the two fixes offered and the one that keeps the
+    /// reference the position asked for (#275).
+    #[test]
+    fn field_access_in_reference_position_display() {
+        let err = ParseError::FieldAccessInReferencePosition {
+            text: "traefik.proxy.name".to_string(),
+            span: span(5, 13),
+        };
+        assert_eq!(
+            err.to_string(),
+            "5:13: `traefik.proxy.name` reads a field, and this position names a declaration \
+             instead — drop the `.name` to name the declaration itself, or move the field \
+             access to a value position such as a `labels` entry"
         );
     }
 

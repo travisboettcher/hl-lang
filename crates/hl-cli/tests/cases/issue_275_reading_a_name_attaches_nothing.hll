@@ -1,0 +1,19 @@
+# #275: reading a declaration's name is not referencing the declaration.
+# `networks [...]` is what attaches a network to a service, and a label
+# that names one must not attach it as a side effect — the generated
+# document would then join a network the author never asked to join.
+#
+# Pinned across an import, where the difference is visible twice over:
+# the `networks:` section stays absent (a qualified `networks` entry
+# would have pulled the declaration into this program), and no
+# `UnusedNetwork` warning appears, since nothing was pulled in to go
+# unused. Composition resolves the access to a plain string, so this
+# falls out rather than being arranged.
+use "issue_275_shared_network.hll" as ext
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  labels {
+    "caddy.network": ext.proxy.name
+  }
+}

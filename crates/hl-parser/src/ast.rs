@@ -107,6 +107,34 @@ pub enum Literal {
     /// `MAX_TEMPLATE_DEPTH`, well short of the margin that constant's own
     /// doc promises.
     Qualified(Box<QualifiedRef>),
+    /// `declaration.field` — reading one field off a `network` or
+    /// `volume` declaration, in a *value* position (#275). The three
+    /// spellings differ only in what [`FieldAccess::base`] holds:
+    /// `proxy.name` (a [`Self::Ident`] base, a declaration in this
+    /// program), `traefik.proxy.name` (a [`Self::Qualified`] base, an
+    /// imported one), and `$net.name` (a [`Self::Param`] base, whatever
+    /// the invocation binds `net` to).
+    ///
+    /// Only the parser's value grammar produces this;
+    /// `parse_literal_reference` deliberately doesn't, so `.` keeps
+    /// meaning `alias.name` in every reference-shaped position and
+    /// `networks [$net]` keeps meaning the identifier rather than the
+    /// Docker name — see docs/DESIGN.md's Syntactic grammar section.
+    ///
+    /// Composition resolves every one of these into a plain
+    /// [`Self::Str`] holding the declaration's real Docker name, so
+    /// codegen never sees this variant; one reaching it would be a bug
+    /// in that resolution, the same way a surviving [`Self::Param`] is.
+    ///
+    /// Boxed for exactly [`Self::Qualified`]'s reason, which its own doc
+    /// spells out at length: this payload is larger still (a whole
+    /// `Literal` plus an [`Ident`] plus a [`Span`]), an enum is as big
+    /// as its largest variant, and composition recurses over
+    /// `ServiceFields`-shaped values — so an unboxed variant would pay
+    /// for itself in a bigger stack frame at *every* level of that
+    /// recursion, which is how #72's stack-overflow class was
+    /// reproduced once already.
+    Field(Box<FieldAccess>),
     /// A `$name` parameter reference inside a `template`'s own body,
     /// naming one of that *same* template's own declared parameters,
     /// e.g. `$puid` in `template linuxserver_app(puid, pgid) { env PUID =
@@ -126,11 +154,20 @@ impl Literal {
     /// the qualifier names the file the declaration lives in, not the
     /// declaration itself, exactly as [`ArrowMapHost::text`] already
     /// documented before the two types merged.
+    ///
+    /// [`Self::Field`] answers with the trailing field name alone, by
+    /// the same rule: `proxy.name` reads `name` off `proxy`, and the
+    /// last segment is the one this returns. A field access has no
+    /// meaningful text form of its own before composition resolves it
+    /// into a [`Self::Str`], and it never survives composition, so
+    /// nothing downstream ever asks — the pieces a diagnostic wants are
+    /// on [`FieldAccess`] itself.
     pub fn text(&self) -> &str {
         match self {
             Literal::Str(s, _) | Literal::Ident(s, _) | Literal::Param(s, _) => s,
             Literal::Number { text, .. } => text,
             Literal::Qualified(q) => &q.name,
+            Literal::Field(f) => &f.field.name,
         }
     }
 
@@ -142,6 +179,7 @@ impl Literal {
             Literal::Str(_, span) | Literal::Ident(_, span) | Literal::Param(_, span) => *span,
             Literal::Number { span, .. } => *span,
             Literal::Qualified(q) => q.span,
+            Literal::Field(f) => f.span,
         }
     }
 
@@ -149,6 +187,16 @@ impl Literal {
     /// other kind. The single question
     /// `compose::reject_qualified`/`resolve_qualified_references`
     /// ask of every reference-shaped position — see [`Self`]'s own doc.
+    ///
+    /// A [`Self::Field`] answers `None` even when its base *is* a
+    /// [`Self::Qualified`], and that's the point: the alias in
+    /// `traefik.proxy.name` says which file to resolve the base
+    /// declaration in, so it's an input to composition's own
+    /// resolution rather than a qualifier on the reference the
+    /// surrounding position holds. `reject_qualified` asks this
+    /// question to refuse a *reference* it can't resolve across files;
+    /// a field access resolves itself and hands the position a plain
+    /// string, so there is nothing left there to refuse.
     pub fn qualifier(&self) -> Option<&Ident> {
         match self {
             Literal::Qualified(q) => Some(&q.qualifier),
@@ -168,6 +216,43 @@ pub struct QualifiedRef {
     /// qualifier.
     pub name_span: Span,
     pub span: Span,
+}
+
+/// [`Literal::Field`]'s boxed-out payload — see that variant's own doc
+/// for why it's boxed rather than inline.
+///
+/// `base` is always a [`Literal::Ident`], a [`Literal::Qualified`], or a
+/// [`Literal::Param`] as parsed; substitution can leave a
+/// [`Literal::Str`] there too, when an invocation binds the parameter to
+/// a quoted name (`with caddy { net: "proxy" }`), which resolves by the
+/// same text a bare identifier would. Nothing else can carry a field,
+/// and `compose` says so at the argument's own call site.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldAccess {
+    pub base: Literal,
+    pub field: Ident,
+    /// The whole access, `base` and field alike — what
+    /// [`Literal::span`] reports, and what the resolved string inherits,
+    /// so a later diagnostic about the value points at where it was
+    /// written rather than at the declaration it came from.
+    pub span: Span,
+}
+
+impl FieldAccess {
+    /// How the access is spelled, as written: `proxy.name`,
+    /// `traefik.proxy.name`, `$net.name`.
+    ///
+    /// Used by diagnostics and by the deferred-interpolation rewrite in
+    /// `compose`, which rebuilds a `{{p.name}}` binding around the
+    /// argument bound to `p` — so the two can't describe the same access
+    /// differently.
+    pub fn dotted(&self) -> String {
+        match &self.base {
+            Literal::Qualified(q) => format!("{}.{}.{}", q.qualifier.name, q.name, self.field.name),
+            Literal::Param(name, _) => format!("${name}.{}", self.field.name),
+            base => format!("{}.{}", base.text(), self.field.name),
+        }
+    }
 }
 
 /// One declared template parameter: just its name. Parameters carried an
@@ -293,6 +378,25 @@ pub struct Network {
     pub span: Span,
 }
 
+impl Network {
+    /// The real Docker name: the `name:` override when one is set, the
+    /// declaration's own identifier otherwise.
+    ///
+    /// The two names are what makes this worth a method rather than a
+    /// `map_or` at each site. `hll` refers to the network by its
+    /// identifier — `networks [proxy]` — while Compose reads the real
+    /// one, and a generated label that has to name a Docker network
+    /// needs the second (#275). Codegen derives
+    /// `traefik.docker.network` from this, `.name` in a value position
+    /// reads it, and both go through here so the language and the
+    /// compiler can't answer the same question differently.
+    pub fn docker_name(&self) -> &str {
+        self.real_name
+            .as_ref()
+            .map_or(self.name.name.as_str(), |lit| lit.text())
+    }
+}
+
 /// A parsed top-level `volume` declaration — the named Docker volume a
 /// service's `volume name -> "/path"` entry refers to. Deliberately the
 /// same shape as [`Network`] (`external` flag plus an optional
@@ -324,6 +428,17 @@ pub struct Volume {
     /// carried through verbatim rather than checked against any schema.
     pub driver_opts: Vec<VolumeDriverOpt>,
     pub span: Span,
+}
+
+impl Volume {
+    /// The real Docker name, mirroring [`Network::docker_name`] exactly
+    /// — same two names, same rule for choosing between them, on the
+    /// other of the two Compose sections that has one.
+    pub fn docker_name(&self) -> &str {
+        self.real_name
+            .as_ref()
+            .map_or(self.name.name.as_str(), |lit| lit.text())
+    }
 }
 
 /// One `key: value` entry inside a top-level `volume`'s `driver_opts`

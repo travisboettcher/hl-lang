@@ -166,6 +166,16 @@ pub enum CodegenError {
     /// degrade to a located error message the user can act on, never
     /// take the process down.
     UnsubstitutedParameter { param: String, span: Span },
+    /// A `declaration.name` field access survived composition and
+    /// reached codegen (#275). Composition resolves every one of them
+    /// into the declaration's real Docker name (see
+    /// [`hl_parser::Literal::Field`]'s doc), so like
+    /// [`Self::UnsubstitutedParameter`] beside it this reports a hole in
+    /// a compiler invariant rather than anything the user wrote wrong —
+    /// a value slot composition's own walk forgot to visit — and reports
+    /// it as a located diagnostic rather than emitting the field's name
+    /// into the generated document.
+    UnresolvedFieldAccess { access: String, span: Span },
     /// A value destined for a Traefik label contains a character that
     /// would change the meaning of the label it's spliced into — the
     /// canonical case being a backtick in a router's `host`, which closes
@@ -470,6 +480,7 @@ impl CodegenError {
             | CodegenError::MissingImageOrBuild { span, .. }
             | CodegenError::BuildWithoutContext { span, .. }
             | CodegenError::UnsubstitutedParameter { span, .. }
+            | CodegenError::UnresolvedFieldAccess { span, .. }
             | CodegenError::UnsafeLabelValue { span, .. }
             | CodegenError::UnknownRouterProtocol { span, .. }
             | CodegenError::TcpRouterWithHttpOnlyField { span, .. }
@@ -542,6 +553,10 @@ impl CodegenError {
             CodegenError::UnsubstitutedParameter { param, .. } => write!(
                 f,
                 "{at}: template parameter `${param}` was never bound to an argument"
+            ),
+            CodegenError::UnresolvedFieldAccess { access, .. } => write!(
+                f,
+                "{at}: field access `{access}` was never resolved to a declaration"
             ),
             // The offending character is rendered with `Debug` rather
             // than wrapped in backticks like every other quoted name
@@ -1432,11 +1447,10 @@ fn push_declared_network(
 ) {
     compose_networks.push(decl.name.name.clone());
     let is_external = decl.external.is_some();
-    let real_name = decl
-        .real_name
-        .as_ref()
-        .map(|l| l.text().to_string())
-        .unwrap_or_else(|| decl.name.name.clone());
+    // The same derivation `.name` reads in a value position (#275), from
+    // the same method, so the label this feeds and the language can't
+    // answer "what is this network called to Docker" differently.
+    let real_name = decl.docker_name().to_string();
     // By *distinct* real name (#69): naming one external network
     // more than once is not an ambiguity between it and itself,
     // it's one answer given twice. Composition already drops
@@ -1627,6 +1641,21 @@ mod error_display_tests {
         assert_eq!(
             err.to_string(),
             "3:5: template parameter `$puid` was never bound to an argument"
+        );
+    }
+
+    /// The field access's twin of the preceding diagnostic, and read
+    /// the same way: both name a compiler invariant composition is
+    /// supposed to have made true, so both quote what survived (#275).
+    #[test]
+    fn unresolved_field_access_display() {
+        let err = CodegenError::UnresolvedFieldAccess {
+            access: "proxy.name".to_string(),
+            span: span(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "3:5: field access `proxy.name` was never resolved to a declaration"
         );
     }
 

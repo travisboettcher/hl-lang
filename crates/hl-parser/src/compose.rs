@@ -24,9 +24,9 @@ use hl_lexer::{SourceMap, Span};
 
 use crate::ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnEntry, Entrypoint, EnvEntry,
-    EnvMap, Expose, Healthcheck, HealthcheckTest, Ident, Image, LabelEntry, LabelMap, Literal,
-    MatchExpr, Network, Program, RawEntry, RawMap, RawValue, Restart, Router, Service,
-    ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, Volume,
+    EnvMap, Expose, FieldAccess, Healthcheck, HealthcheckTest, Ident, Image, LabelEntry, LabelMap,
+    Literal, MatchExpr, Network, Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart,
+    Router, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, Volume,
 };
 use crate::interp;
 use crate::schema::{self, MapSide};
@@ -281,6 +281,85 @@ pub enum ComposeError {
         found: &'static str,
         span: Span,
     },
+    /// A field access whose base names nothing this program declares —
+    /// `proxy.name` with no `network proxy` and no `volume proxy`
+    /// anywhere in it (#275).
+    ///
+    /// A bare base is resolved against one flat namespace of the
+    /// program's own `network` and `volume` declarations, exactly as a
+    /// `networks [proxy]` entry is at codegen: an imported declaration
+    /// is reached by naming its alias (`traefik.proxy.name`), which is
+    /// what the message points at, since that spelling also says which
+    /// file the name is expected to come from.
+    FieldBaseNotDeclared { base: String, span: Span },
+    /// A field access whose base names something real that has no
+    /// fields to read — a `service` (#275).
+    ///
+    /// Told apart from [`Self::FieldBaseNotDeclared`] because the fix is
+    /// a different one: nothing is misspelled and nothing is missing,
+    /// the name simply belongs to a kind of declaration that carries no
+    /// Docker name of its own. A service's name *is* its Compose key,
+    /// with no override to read.
+    FieldBaseNotDeclaration {
+        base: String,
+        found: &'static str,
+        span: Span,
+    },
+    /// A field access naming a field the declaration doesn't have —
+    /// `proxy.driver`, `media.external` (#275).
+    ///
+    /// `name` is the whole of what a declaration exposes, deliberately:
+    /// it's the one thing a `network`/`volume` knows that a value
+    /// position can't already write for itself, and every other setting
+    /// on one (`external`, `driver`, `driver_opts`) describes how Docker
+    /// should make the thing rather than naming it. The message says so
+    /// rather than only refusing, since the whole available set is one
+    /// word long.
+    UnknownDeclarationField {
+        kind: &'static str,
+        decl: String,
+        field: String,
+        span: Span,
+    },
+    /// A field access whose alias resolved to a real imported scope,
+    /// but that scope declares no `network` *or* `volume` under the
+    /// base's name (#275).
+    ///
+    /// The field-access counterpart of
+    /// [`Self::UnknownQualifiedNetwork`]/[`Self::UnknownQualifiedVolume`],
+    /// which each answer for one kind because the position that raised
+    /// them (`networks [...]`, a named-volume mount) can only mean that
+    /// kind. `traefik.proxy.name` names neither kind in particular —
+    /// both carry a `name` — so it reports the one question that was
+    /// actually asked.
+    UnknownQualifiedDeclaration {
+        alias: String,
+        name: String,
+        span: Span,
+    },
+    /// A `$param.name` whose bound argument can't carry a field: a
+    /// number, a list, a nested map (#275).
+    ///
+    /// Names the argument at its own call site, matching
+    /// [`Self::ArgumentNotReferenceShaped`] and
+    /// [`Self::ArgumentNotNumeric`]: substitution overwrites the base
+    /// slot, span included, so what's left to report is the caller's own
+    /// literal — which is also the thing that has to change, since one
+    /// template body is reached from many call sites.
+    ArgumentCantCarryField {
+        template: String,
+        param: String,
+        found: &'static str,
+        span: Span,
+    },
+    /// An interpolated field access with more dotted segments than any
+    /// of its shapes has — `"{{a.b.c.d}}"` (#275).
+    ///
+    /// [`crate::ParseError::FieldAccessTooDeep`]'s twin for the
+    /// interpolated spelling, which the parser never sees: `{{...}}` is
+    /// ordinary string content, so arity is only counted once
+    /// composition scans it.
+    InterpolatedFieldAccessTooDeep { text: String, span: Span },
     /// Two `with`-listed templates both set the same scalar/struct
     /// field (`image`/`expose`/`restart`). Per docs/DESIGN.md: "a
     /// collision between two of these on the same scalar/map field is a
@@ -427,6 +506,12 @@ impl ComposeError {
             | ComposeError::ArgumentNotNumeric { span, .. }
             | ComposeError::ArgumentNotInterpolable { span, .. }
             | ComposeError::FieldNotNumeric { span, .. }
+            | ComposeError::FieldBaseNotDeclared { span, .. }
+            | ComposeError::FieldBaseNotDeclaration { span, .. }
+            | ComposeError::UnknownDeclarationField { span, .. }
+            | ComposeError::UnknownQualifiedDeclaration { span, .. }
+            | ComposeError::ArgumentCantCarryField { span, .. }
+            | ComposeError::InterpolatedFieldAccessTooDeep { span, .. }
             | ComposeError::FieldCollision { second: span, .. }
             | ComposeError::UnknownAlias { span, .. }
             | ComposeError::UnsupportedQualifiedReference { span, .. }
@@ -548,6 +633,43 @@ impl ComposeError {
             ComposeError::FieldNotNumeric { field, found, .. } => {
                 write!(f, "{at}: `{field}` must be a number (found {found})")
             }
+            ComposeError::FieldBaseNotDeclared { base, .. } => write!(
+                f,
+                "{at}: `{base}` names no `network` or `volume` declared in this program, so \
+                 `{base}.name` has no name to read — declare one, or write \
+                 `alias.{base}.name` to read an imported declaration"
+            ),
+            ComposeError::FieldBaseNotDeclaration { base, found, .. } => write!(
+                f,
+                "{at}: `{base}` is {found}, and only a `network` or `volume` declaration \
+                 carries a name to read — name one of those instead"
+            ),
+            ComposeError::UnknownDeclarationField {
+                kind, decl, field, ..
+            } => write!(
+                f,
+                "{at}: `{kind} {decl}` has no field `{field}` — `name` is the only field a \
+                 declaration exposes, holding its real Docker name"
+            ),
+            ComposeError::UnknownQualifiedDeclaration { alias, name, .. } => {
+                write!(f, "{at}: no network or volume `{name}` in `{alias}`")
+            }
+            ComposeError::ArgumentCantCarryField {
+                template,
+                param,
+                found,
+                ..
+            } => write!(
+                f,
+                "{at}: argument `{param}` for template `{template}` must name a `network` or \
+                 `volume` declaration to read a field off it (found {found})"
+            ),
+            ComposeError::InterpolatedFieldAccessTooDeep { text, .. } => write!(
+                f,
+                "{at}: `{{{{{text}}}}}` has too many parts to be a field access — write \
+                 `{{{{declaration.name}}}}`, or `{{{{alias.declaration.name}}}}` for an \
+                 imported declaration"
+            ),
             ComposeError::FieldCollision {
                 field,
                 first_template,
@@ -873,6 +995,102 @@ mod error_display_tests {
         assert_eq!(
             err.to_string(),
             "3:3: `expose.port` must be a number (found a quoted string)"
+        );
+    }
+
+    /// Offers the qualified spelling by name, since a base that names
+    /// nothing locally is most often one that lives in an imported file
+    /// (#275).
+    #[test]
+    fn field_base_not_declared_display() {
+        let err = ComposeError::FieldBaseNotDeclared {
+            base: "proxy".to_string(),
+            span: span(5, 17),
+        };
+        assert_eq!(
+            err.to_string(),
+            "5:17: `proxy` names no `network` or `volume` declared in this program, so \
+             `proxy.name` has no name to read — declare one, or write `alias.proxy.name` to \
+             read an imported declaration"
+        );
+    }
+
+    #[test]
+    fn field_base_not_declaration_display() {
+        let err = ComposeError::FieldBaseNotDeclaration {
+            base: "jellyfin".to_string(),
+            found: "a service",
+            span: span(4, 10),
+        };
+        assert_eq!(
+            err.to_string(),
+            "4:10: `jellyfin` is a service, and only a `network` or `volume` declaration \
+             carries a name to read — name one of those instead"
+        );
+    }
+
+    /// The available set is one word long, so the message names it
+    /// rather than only refusing the one that was written.
+    #[test]
+    fn unknown_declaration_field_display() {
+        let err = ComposeError::UnknownDeclarationField {
+            kind: "network",
+            decl: "proxy".to_string(),
+            field: "driver".to_string(),
+            span: span(7, 16),
+        };
+        assert_eq!(
+            err.to_string(),
+            "7:16: `network proxy` has no field `driver` — `name` is the only field a \
+             declaration exposes, holding its real Docker name"
+        );
+    }
+
+    /// Names both kinds, because a field access asks for either — see
+    /// the variant's own doc for why this isn't
+    /// `UnknownQualifiedNetwork`.
+    #[test]
+    fn unknown_qualified_declaration_display() {
+        let err = ComposeError::UnknownQualifiedDeclaration {
+            alias: "traefik".to_string(),
+            name: "proxy".to_string(),
+            span: span(6, 10),
+        };
+        assert_eq!(
+            err.to_string(),
+            "6:10: no network or volume `proxy` in `traefik`"
+        );
+    }
+
+    #[test]
+    fn argument_cant_carry_field_display() {
+        let err = ComposeError::ArgumentCantCarryField {
+            template: "caddy".to_string(),
+            param: "net".to_string(),
+            found: "a number",
+            span: span(12, 15),
+        };
+        assert_eq!(
+            err.to_string(),
+            "12:15: argument `net` for template `caddy` must name a `network` or `volume` \
+             declaration to read a field off it (found a number)"
+        );
+    }
+
+    /// Renders the binding with its braces, since that's how it was
+    /// written and what distinguishes this from the parser's own
+    /// too-deep diagnostic.
+    #[test]
+    fn interpolated_field_access_too_deep_display() {
+        let err = ComposeError::InterpolatedFieldAccessTooDeep {
+            text: "a.b.c.d".to_string(),
+            span: span(9, 12),
+        };
+        assert_eq!(
+            err.to_string(),
+            "9:12: `{{a.b.c.d}}` has too many parts to be a field access — write \
+             `{{declaration.name}}`, or `{{alias.declaration.name}}` for an imported \
+             declaration"
         );
     }
 
@@ -1226,11 +1444,23 @@ pub fn compose_with_resolver<R: SymbolResolver>(
     let mut imports = Imports::default();
     let mut warnings = Vec::new();
     let mut composed = Vec::with_capacity(services.len());
+    // Collected before the services are consumed below, and only so
+    // that a field access whose base names one of them can say so — see
+    // [`Declarations::services`].
+    let service_names: Vec<String> = services.iter().map(|s| s.name.name.clone()).collect();
+    let symbols = Symbols {
+        resolver,
+        decls: Declarations {
+            networks: &networks,
+            volumes: &volumes,
+            services: &service_names,
+        },
+    };
     for service in services {
         composed.push(compose_service(
             service,
             entry_scope,
-            resolver,
+            &symbols,
             &mut cache,
             &mut imports,
             &mut warnings,
@@ -1281,18 +1511,34 @@ struct Imports {
 /// A top-level declaration a qualified reference can import: one that
 /// codegen later re-resolves *by bare name* against one flat list, which
 /// is exactly what makes two same-named imports a problem worth naming.
+///
+/// It doubles as the pair of declarations a field access can read a
+/// field off (#275) — the same two kinds, for the same underlying
+/// reason: they're the two an `.hll` file declares that Docker knows
+/// under a name of its own.
 trait ImportableDecl: Clone + PartialEq {
+    /// How this kind of declaration is spelled in a diagnostic, and in
+    /// the source that declares one.
+    const KIND: &'static str;
     /// What this declaration is called, and what a Compose section keys
     /// it under.
     fn decl_name(&self) -> &str;
+    /// The declaration's real Docker name — what `.name` reads.
+    fn docker_name(&self) -> &str;
     /// The error to raise when a different declaration already holds
     /// this bare name.
     fn collision(alias: String, name: String, span: Span) -> ComposeError;
 }
 
 impl ImportableDecl for Network {
+    const KIND: &'static str = "network";
+
     fn decl_name(&self) -> &str {
         &self.name.name
+    }
+
+    fn docker_name(&self) -> &str {
+        Network::docker_name(self)
     }
 
     fn collision(alias: String, name: String, span: Span) -> ComposeError {
@@ -1301,8 +1547,14 @@ impl ImportableDecl for Network {
 }
 
 impl ImportableDecl for Volume {
+    const KIND: &'static str = "volume";
+
     fn decl_name(&self) -> &str {
         &self.name.name
+    }
+
+    fn docker_name(&self) -> &str {
+        Volume::docker_name(self)
     }
 
     fn collision(alias: String, name: String, span: Span) -> ComposeError {
@@ -1344,9 +1596,9 @@ fn merge_imported<D: ImportableDecl>(
 }
 
 fn compose_service<R: SymbolResolver>(
-    service: Service,
+    mut service: Service,
     scope: R::Scope,
-    resolver: &R,
+    symbols: &Symbols<'_, R>,
     cache: &mut HashMap<(R::Scope, String), ServiceFields>,
     imports: &mut Imports,
     warnings: &mut Vec<ComposeWarning>,
@@ -1354,11 +1606,15 @@ fn compose_service<R: SymbolResolver>(
     let mut acc = MergeAcc::default();
     let mut in_progress = Vec::new();
 
+    // Ahead of the `with`-list, since the arguments in it are values
+    // written in *this* scope — see `resolve_scoped_field_accesses`.
+    resolve_scoped_field_accesses(&mut service.fields, scope, symbols)?;
+
     for inv in &service.fields.with {
         let resolved = resolve_invocation(
             inv,
             scope,
-            resolver,
+            symbols,
             cache,
             &mut in_progress,
             imports,
@@ -1369,10 +1625,11 @@ fn compose_service<R: SymbolResolver>(
 
     let mut own = service.fields;
     own.with.clear();
-    resolve_qualified_references(&mut own, scope, resolver, imports)?;
+    resolve_qualified_references(&mut own, scope, symbols.resolver, imports)?;
     merge_tier(&mut acc, own, &Tier::Own)?;
 
-    let fields = acc.into_service_fields();
+    let mut fields = acc.into_service_fields();
+    resolve_bound_field_accesses(&mut fields, scope, symbols)?;
     check_numeric_fields(&fields)?;
     Ok(Service {
         name: service.name,
@@ -1397,7 +1654,7 @@ fn compose_service<R: SymbolResolver>(
 fn resolve_template<'r, R: SymbolResolver>(
     decl: &'r TemplateDecl,
     scope: R::Scope,
-    resolver: &'r R,
+    symbols: &Symbols<'r, R>,
     cache: &mut HashMap<(R::Scope, String), ServiceFields>,
     in_progress: &mut Vec<(R::Scope, String)>,
     imports: &mut Imports,
@@ -1440,15 +1697,23 @@ fn resolve_template<'r, R: SymbolResolver>(
     }
     in_progress.push((scope, name.clone()));
 
+    // Cloned before the `with`-list rather than after it, so that this
+    // template's own field accesses — the ones in its invocation
+    // arguments included — resolve against the file it was *declared*
+    // in, which is `scope` here and gone by the time an argument
+    // reaches the body it is substituted into.
+    let mut fields = decl.fields.clone();
+    resolve_scoped_field_accesses(&mut fields, scope, symbols)?;
+
     let mut acc = MergeAcc::default();
-    for inv in &decl.fields.with {
+    for inv in &fields.with {
         let resolved =
-            resolve_invocation(inv, scope, resolver, cache, in_progress, imports, warnings)?;
+            resolve_invocation(inv, scope, symbols, cache, in_progress, imports, warnings)?;
         merge_tier(&mut acc, resolved, &Tier::Explicit(inv.name.name.clone()))?;
     }
-    let mut own = decl.fields.clone();
+    let mut own = fields;
     own.with.clear();
-    resolve_qualified_references(&mut own, scope, resolver, imports)?;
+    resolve_qualified_references(&mut own, scope, symbols.resolver, imports)?;
     merge_tier(&mut acc, own, &Tier::Own)?;
 
     in_progress.pop();
@@ -1468,14 +1733,18 @@ fn resolve_template<'r, R: SymbolResolver>(
 fn resolve_invocation<R: SymbolResolver>(
     inv: &TemplateInvocation,
     scope: R::Scope,
-    resolver: &R,
+    symbols: &Symbols<'_, R>,
     cache: &mut HashMap<(R::Scope, String), ServiceFields>,
     in_progress: &mut Vec<(R::Scope, String)>,
     imports: &mut Imports,
     warnings: &mut Vec<ComposeWarning>,
 ) -> Result<ServiceFields, ComposeError> {
-    let (target_scope, decl) =
-        resolver.resolve_template(scope, inv.qualifier.as_ref(), &inv.name.name, inv.span)?;
+    let (target_scope, decl) = symbols.resolver.resolve_template(
+        scope,
+        inv.qualifier.as_ref(),
+        &inv.name.name,
+        inv.span,
+    )?;
 
     let mut seen: HashMap<&str, Span> = HashMap::new();
     let mut args: HashMap<&str, &RawValue> = HashMap::new();
@@ -1512,7 +1781,7 @@ fn resolve_invocation<R: SymbolResolver>(
     let mut fields = resolve_template(
         decl,
         target_scope,
-        resolver,
+        symbols,
         cache,
         in_progress,
         imports,
@@ -1642,6 +1911,493 @@ fn reject_qualified<'a>(
                 alias: q.name.clone(),
                 span: v.span(),
             });
+        }
+    }
+    Ok(())
+}
+
+// ---- field access (#275) ----
+//
+// `proxy.name`, `traefik.proxy.name` and `$net.name` each read one field
+// off a `network`/`volume` declaration in a value position, and all
+// three are resolved here into a plain `Literal::Str` holding the real
+// Docker name. Codegen never learns the syntax exists.
+//
+// The work splits across two passes, by what each stage can answer:
+//
+// - `resolve_scoped_field_accesses` runs on a scope's own body, in the
+//   scope it was *written* in, before anything is substituted. That's
+//   the only place an import alias means anything: docs/DESIGN.md's
+//   lexical-scoping rule says a template's `traefik.` resolves against
+//   the file the template was written in, never the file that invoked
+//   it, and once the invocation is resolved that scope is gone.
+// - `resolve_bound_field_accesses` runs on a service's fully merged
+//   fields, once every `$param` has been substituted, and resolves what
+//   was still a parameter when the first pass ran.
+//
+// A bare base needs neither the writing scope nor a binding — it names
+// one flat namespace of the program's own declarations, the same one
+// codegen resolves `networks [proxy]` against — so the first pass takes
+// it as well, which is what lets an argument written `net: proxy.name`
+// arrive at a `{{net}}` interpolation as ordinary text.
+
+/// The one field a `network`/`volume` declaration exposes.
+///
+/// `external`, `driver` and `driver_opts` describe how Docker should
+/// make the thing rather than naming it, and none of them is a string a
+/// value position wants; leaving them out keeps the door open without
+/// opening it. Both kinds carry this one field identically — see
+/// [`Network::docker_name`] — so this is one rule covering two kinds
+/// rather than a carve-out for either.
+const DECLARATION_NAME_FIELD: &str = "name";
+
+/// The program's own top-level declarations, as a bare field-access
+/// base sees them: one flat namespace, the same one codegen resolves
+/// `networks [...]` entries and named-volume mounts against.
+///
+/// `services` is carried only so that `jellyfin.name` — a base that
+/// names something real with no name of its own to read — gets a
+/// diagnostic saying that, rather than one saying nothing declares it.
+struct Declarations<'a> {
+    networks: &'a [Network],
+    volumes: &'a [Volume],
+    services: &'a [String],
+}
+
+/// Everything composition resolves a name against: `resolver` for
+/// anything that crosses a `use` boundary, `decls` for the program's
+/// own declarations.
+///
+/// One value rather than two parameters because
+/// [`compose_service`]/[`resolve_template`]/[`resolve_invocation`]
+/// already thread seven of those through their mutual recursion, and
+/// these two are only ever wanted together.
+struct Symbols<'a, R: SymbolResolver> {
+    resolver: &'a R,
+    decls: Declarations<'a>,
+}
+
+/// Resolves one field access to the text it stands for, or `None` when
+/// it can't be resolved *yet* — a base still naming a template
+/// parameter, which only [`resolve_scoped_field_accesses`] ever sees and
+/// which substitution makes concrete before the second pass runs.
+fn resolve_field_access<R: SymbolResolver>(
+    access: &FieldAccess,
+    scope: R::Scope,
+    symbols: &Symbols<'_, R>,
+) -> Result<Option<String>, ComposeError> {
+    match &access.base {
+        Literal::Param(_, _) => Ok(None),
+        // An alias-qualified base is asked of both kinds:
+        // `traefik.proxy.name` says nothing about which one `proxy` is,
+        // and both answer the same field. Matching on the resolver's own
+        // "no such network"/"no such volume" is what tells "this scope
+        // declares neither" apart from "the alias itself doesn't
+        // resolve" — the second is a different mistake with a different
+        // fix, so it's reported as it stands rather than folded in.
+        Literal::Qualified(q) => {
+            match symbols
+                .resolver
+                .resolve_qualified_network(scope, &q.qualifier, &q.name, q.span)
+            {
+                Ok(decl) => declaration_field(decl, &access.field).map(Some),
+                Err(ComposeError::UnknownQualifiedNetwork { .. }) => match symbols
+                    .resolver
+                    .resolve_qualified_volume(scope, &q.qualifier, &q.name, q.span)
+                {
+                    Ok(decl) => declaration_field(decl, &access.field).map(Some),
+                    Err(ComposeError::UnknownQualifiedVolume { .. }) => {
+                        Err(ComposeError::UnknownQualifiedDeclaration {
+                            alias: q.qualifier.name.clone(),
+                            name: q.name.clone(),
+                            span: access.span,
+                        })
+                    }
+                    Err(other) => Err(other),
+                },
+                Err(other) => Err(other),
+            }
+        }
+        // Everything else resolves by its own text: a bare identifier as
+        // written, and a quoted string for an invocation that bound the
+        // parameter to one (`with caddy { net: "proxy" }`) — which names
+        // a declaration exactly as the bare spelling does in every other
+        // position that takes a reference.
+        base => {
+            let name = base.text();
+            if let Some(decl) = symbols.decls.networks.iter().find(|n| n.name.name == name) {
+                return declaration_field(decl, &access.field).map(Some);
+            }
+            if let Some(decl) = symbols.decls.volumes.iter().find(|v| v.name.name == name) {
+                return declaration_field(decl, &access.field).map(Some);
+            }
+            if symbols.decls.services.iter().any(|s| s == name) {
+                return Err(ComposeError::FieldBaseNotDeclaration {
+                    base: name.to_string(),
+                    found: "a service",
+                    span: access.span,
+                });
+            }
+            Err(ComposeError::FieldBaseNotDeclared {
+                base: name.to_string(),
+                span: access.span,
+            })
+        }
+    }
+}
+
+/// Reads one field off a resolved declaration, or names the fields it
+/// hasn't got. The span reported is the *field*'s own rather than the
+/// whole access's: the base resolved fine, so the field is the half to
+/// edit.
+fn declaration_field<D: ImportableDecl>(decl: &D, field: &Ident) -> Result<String, ComposeError> {
+    if field.name != DECLARATION_NAME_FIELD {
+        return Err(ComposeError::UnknownDeclarationField {
+            kind: D::KIND,
+            decl: decl.decl_name().to_string(),
+            field: field.name.clone(),
+            span: field.span,
+        });
+    }
+    Ok(decl.docker_name().to_string())
+}
+
+/// Reads a dotted `{{binding}}` as the field access it spells, or
+/// `None` for a binding with no `.` in it — `{{name}}` and every other
+/// undotted binding mean what they always meant, and belong to whichever
+/// stage answers them.
+///
+/// Every span in the result is the enclosing string literal's: a binding
+/// is string *content*, with no tokens of its own to draw a narrower one
+/// from. Arity reads exactly as it does in source — see
+/// `parser::Parser::parse_field_access` — since two spellings of one
+/// thing that disagreed about what `a.b.c` means would be a trap rather
+/// than a convenience.
+fn binding_field_access(binding: &str, span: Span) -> Result<Option<FieldAccess>, ComposeError> {
+    let segments: Vec<&str> = binding.split('.').collect();
+    let ident = |name: &str| Ident {
+        name: name.to_string(),
+        span,
+    };
+    let (base, field) = match segments.as_slice() {
+        [_] => return Ok(None),
+        [base, field] => (Literal::Ident((*base).to_string(), span), *field),
+        [alias, name, field] => (
+            Literal::Qualified(Box::new(QualifiedRef {
+                qualifier: ident(alias),
+                name: (*name).to_string(),
+                name_span: span,
+                span,
+            })),
+            *field,
+        ),
+        _ => {
+            return Err(ComposeError::InterpolatedFieldAccessTooDeep {
+                text: binding.to_string(),
+                span,
+            });
+        }
+    };
+    Ok(Some(FieldAccess {
+        base,
+        field: ident(field),
+        span,
+    }))
+}
+
+/// Resolves every field access a scope can answer on its own, over that
+/// scope's own written body: an alias-qualified base, which only means
+/// something here, and a bare one, which means the same thing
+/// everywhere.
+///
+/// Runs before the body's `with`-list is resolved, and therefore over
+/// the invocation arguments too — an argument is written at the call
+/// site, so `with inner { n: traefik.proxy.name }` inside a template
+/// must resolve `traefik` against that template's own file, and by the
+/// time the argument reaches `inner`'s body the file it came from is no
+/// longer in hand. That's why this isn't folded into
+/// [`resolve_qualified_references`], which runs one step later, on a
+/// body whose `with`-list has already been cleared.
+///
+/// A `$param` base is left for [`resolve_bound_field_accesses`], and so
+/// is a two-segment `{{binding}}`: at this point `{{net.name}}` can't be
+/// told apart from a declaration called `net`, since a parameter is
+/// spelled without its sigil inside string content. Only the
+/// three-segment `{{alias.decl.field}}` spelling is claimed here, and it
+/// can't collide with a parameter — a parameter names one declaration
+/// already, so nothing legal follows its own field.
+fn resolve_scoped_field_accesses<R: SymbolResolver>(
+    fields: &mut ServiceFields,
+    scope: R::Scope,
+    symbols: &Symbols<'_, R>,
+) -> Result<(), ComposeError> {
+    visit_literals_mut(fields, &mut |lit| {
+        resolve_literal_field_access(lit, scope, symbols, BindingArity::QualifiedOnly)
+    })
+}
+
+/// Resolves every field access left once substitution has bound each
+/// `$param` to a concrete value, over a service's fully merged fields —
+/// `$net.name`, and the `{{net.name}}` interpolation substitution
+/// rewrote to `{{proxy.name}}` on its way here.
+///
+/// Runs beside [`check_numeric_fields`], and before it: both ask what a
+/// finished service holds, and a field access has to be the string it
+/// resolves to before anything judges the literal sitting in a field.
+fn resolve_bound_field_accesses<R: SymbolResolver>(
+    fields: &mut ServiceFields,
+    scope: R::Scope,
+    symbols: &Symbols<'_, R>,
+) -> Result<(), ComposeError> {
+    visit_literals_mut(fields, &mut |lit| {
+        resolve_literal_field_access(lit, scope, symbols, BindingArity::Any)
+    })
+}
+
+/// Which dotted `{{bindings}}` a pass claims — the one thing the two
+/// passes differ about, since a binding's head carries no sigil to say
+/// whether it names a parameter or a declaration.
+#[derive(Clone, Copy, PartialEq)]
+enum BindingArity {
+    /// Only `{{alias.decl.field}}`, whose head can't be a parameter.
+    QualifiedOnly,
+    /// Every dotted binding, parameters having been substituted away.
+    Any,
+}
+
+/// Resolves whatever field access one literal slot holds: the slot
+/// itself, when it *is* a field access, and any dotted binding inside a
+/// string's content.
+///
+/// A resolved access becomes a [`Literal::Str`] carrying the whole
+/// access's span, so a later diagnostic about the value points at where
+/// the access was written rather than at the declaration it read.
+fn resolve_literal_field_access<R: SymbolResolver>(
+    lit: &mut Literal,
+    scope: R::Scope,
+    symbols: &Symbols<'_, R>,
+    arity: BindingArity,
+) -> Result<(), ComposeError> {
+    match lit {
+        Literal::Field(access) => {
+            debug_assert!(
+                arity == BindingArity::QualifiedOnly
+                    || !matches!(access.base, Literal::Param(_, _)),
+                "substitution binds every parameter base before the second pass runs"
+            );
+            if let Some(resolved) = resolve_field_access(access, scope, symbols)? {
+                *lit = Literal::Str(resolved, access.span);
+            }
+            Ok(())
+        }
+        Literal::Str(text, span) => {
+            let span = *span;
+            let resolved = interp::resolve_with(text, |binding| {
+                let Some(access) = binding_field_access(binding, span)? else {
+                    return Ok(None);
+                };
+                if arity == BindingArity::QualifiedOnly
+                    && !matches!(access.base, Literal::Qualified(_))
+                {
+                    return Ok(None);
+                }
+                resolve_field_access(&access, scope, symbols)
+            })?;
+            *text = resolved;
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Hands `visit` every [`Literal`] slot in `fields`, in source-ish
+/// order, recursing into the [`RawValue`] trees a `raw` body and a
+/// `with`-invocation's arguments hold.
+///
+/// The same set of slots [`substitute_params`] walks, and the same
+/// reason to be exhaustive: a slot missing from that walk leaves a
+/// `$param` for codegen to emit as its own name (#168's bug class), and
+/// a slot missing from this one leaves a `Literal::Field` for codegen to
+/// emit as the field's name. The two stay separate walks because
+/// `substitute_params` treats its slots *differently* — reference-shaped,
+/// `number`-typed, or plain — while every slot here answers the same
+/// question, and threading that distinction through a shared walk would
+/// buy uniformity at the price of a callback that has to re-derive it.
+/// Adding a literal-carrying field to [`ServiceFields`] means adding it
+/// to both.
+fn visit_literals_mut(
+    fields: &mut ServiceFields,
+    visit: &mut impl FnMut(&mut Literal) -> Result<(), ComposeError>,
+) -> Result<(), ComposeError> {
+    if let Some(img) = &mut fields.image
+        && let Some(r) = &mut img.reference
+    {
+        visit(r)?;
+    }
+    if let Some(b) = &mut fields.build {
+        for lit in [b.context.as_mut(), b.dockerfile.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            visit(lit)?;
+        }
+    }
+    if let Some(e) = &mut fields.expose
+        && let Some(p) = &mut e.port
+    {
+        visit(p)?;
+    }
+    for router in &mut fields.routers {
+        for lit in [
+            router.host.as_mut(),
+            router.priority.as_mut(),
+            router.port.as_mut(),
+            router.protocol.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            visit(lit)?;
+        }
+        for lit in router
+            .entrypoints
+            .iter_mut()
+            .chain(&mut router.path_prefix)
+            .chain(&mut router.middleware)
+        {
+            visit(lit)?;
+        }
+        if let Some(rule) = &mut router.rule {
+            for arg in rule.args_mut() {
+                visit(arg)?;
+            }
+        }
+    }
+    if let Some(r) = &mut fields.restart
+        && let Some(p) = &mut r.policy
+    {
+        visit(p)?;
+    }
+    if let Some(cn) = &mut fields.container_name {
+        visit(cn)?;
+    }
+    match &mut fields.command {
+        Some(Command::Shell(lit)) => visit(lit)?,
+        Some(Command::Exec(items, _)) => {
+            for item in items {
+                visit(item)?;
+            }
+        }
+        None => {}
+    }
+    match &mut fields.entrypoint {
+        Some(Entrypoint::Shell(lit)) => visit(lit)?,
+        Some(Entrypoint::Exec(items, _)) => {
+            for item in items {
+                visit(item)?;
+            }
+        }
+        None => {}
+    }
+    if let Some(hc) = &mut fields.healthcheck {
+        match &mut hc.test {
+            Some(HealthcheckTest::Shell(lit)) => visit(lit)?,
+            Some(HealthcheckTest::Exec(items, _)) => {
+                for item in items {
+                    visit(item)?;
+                }
+            }
+            None => {}
+        }
+        for lit in [
+            hc.interval.as_mut(),
+            hc.timeout.as_mut(),
+            hc.retries.as_mut(),
+            hc.start_period.as_mut(),
+            hc.start_interval.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            visit(lit)?;
+        }
+    }
+    for entries in [
+        &mut fields.volumes.entries,
+        &mut fields.publish.entries,
+        &mut fields.devices.entries,
+    ] {
+        for entry in entries.iter_mut() {
+            // A named-volume host resolves to a `volume` declaration, so
+            // it's a reference rather than a value and can hold no field
+            // access — but it's a `Literal` slot like any other, and
+            // visiting it costs nothing beyond one `match` that finds
+            // neither a field access nor a string to scan.
+            match &mut entry.host {
+                ArrowMapHost::BindMount(host) | ArrowMapHost::Named(host) => visit(host)?,
+            }
+            visit(&mut entry.container)?;
+        }
+    }
+    for e in &mut fields.env.entries {
+        visit(&mut e.key)?;
+        visit(&mut e.value)?;
+    }
+    for e in &mut fields.labels.entries {
+        visit(&mut e.key)?;
+        visit(&mut e.value)?;
+    }
+    for entry in &mut fields.raw.entries {
+        visit(&mut entry.key)?;
+        visit_raw_literals_mut(&mut entry.value, visit)?;
+    }
+    // A `with`-invocation's arguments are values written at the call
+    // site, so they carry field accesses like any other value — and
+    // resolving them where they were written is the whole reason
+    // `resolve_scoped_field_accesses` runs before the `with`-list does.
+    for inv in &mut fields.with {
+        for entry in &mut inv.args.entries {
+            visit(&mut entry.key)?;
+            visit_raw_literals_mut(&mut entry.value, visit)?;
+        }
+    }
+    for lit in fields
+        .networks
+        .iter_mut()
+        .chain(&mut fields.dns)
+        .chain(&mut fields.env_file)
+    {
+        visit(lit)?;
+    }
+    for entry in &mut fields.depends_on {
+        visit(&mut entry.reference)?;
+    }
+    Ok(())
+}
+
+/// [`visit_literals_mut`]'s recursion into one schema-free
+/// [`RawValue`] tree — a `raw` entry's value, or a `with`-invocation
+/// argument. Both halves of a nested map are visited, keys included,
+/// for the reason [`substitute_params`] gives at the same spot: codegen
+/// resolves interpolation on both sides of every `raw` entry it emits,
+/// so anything less would leave the two stages disagreeing about which
+/// halves a value may be written into.
+fn visit_raw_literals_mut(
+    value: &mut RawValue,
+    visit: &mut impl FnMut(&mut Literal) -> Result<(), ComposeError>,
+) -> Result<(), ComposeError> {
+    match value {
+        RawValue::Literal(lit) => visit(lit)?,
+        RawValue::List(items, _) => {
+            for item in items {
+                visit_raw_literals_mut(item, visit)?;
+            }
+        }
+        RawValue::Map(entries, _) => {
+            for (key, v) in entries {
+                visit(key)?;
+                visit_raw_literals_mut(v, visit)?;
+            }
         }
     }
     Ok(())
@@ -1901,15 +2657,21 @@ fn substitute_literal(
         _ => None,
     };
     let Some(name) = param_name else {
-        // Not a whole-slot `$param`, so this is where the *other* way a
-        // parameter reaches a value gets its turn: `{{param}}` inside
-        // string content (#266). Only a `Str` can hold one — an `Ident`
-        // can't contain `{`, and a `Number` can't contain anything but
-        // digits.
-        if let Literal::Str(text, span) = lit {
-            let span = *span;
-            let resolved = substitute_string_content(text, span, args, template_name, warnings)?;
-            *text = resolved;
+        // Not a whole-slot `$param`, so this is where the *other* two
+        // ways a parameter reaches a value get their turn: `{{param}}`
+        // inside string content (#266), and a `$param.name` field access
+        // whose base is what the argument binds (#275). Only a `Str` can
+        // hold the first — an `Ident` can't contain `{`, and a `Number`
+        // can't contain anything but digits.
+        match lit {
+            Literal::Str(text, span) => {
+                let span = *span;
+                let resolved =
+                    substitute_string_content(text, span, args, template_name, warnings)?;
+                *text = resolved;
+            }
+            Literal::Field(access) => substitute_field_base(access, args, template_name)?,
+            _ => {}
         }
         return Ok(());
     };
@@ -1929,6 +2691,51 @@ fn substitute_literal(
                 span,
             })
         }
+    }
+}
+
+/// Binds a `$param.name` field access's base to the invocation's
+/// argument, leaving the access itself for
+/// [`resolve_bound_field_accesses`] to read once the base names
+/// something concrete (#275).
+///
+/// Only a name can carry a field, so anything else the caller passed is
+/// rejected here rather than left to resolve into nothing later —
+/// reported at the argument's own call site, exactly as
+/// [`substitute_reference_literal`] and [`substitute_numeric_literal`]
+/// report theirs, and for the same reason: the argument is the half
+/// that has to change, and one template body is reached from many call
+/// sites.
+///
+/// A forwarded parameter (`with inner { n: $net }`) replaces one
+/// [`Literal::Param`] base with another, so the access resolves at
+/// whichever call site finally binds a real declaration — the same
+/// deferral a whole-slot `$param` already gets.
+fn substitute_field_base(
+    access: &mut FieldAccess,
+    args: &HashMap<&str, &RawValue>,
+    template_name: &str,
+) -> Result<(), ComposeError> {
+    let Literal::Param(param, _) = &access.base else {
+        return Ok(());
+    };
+    let param = param.clone();
+    let replacement = args
+        .get(param.as_str())
+        .expect("param name was already validated against the template's declared params");
+    match replacement {
+        RawValue::Literal(
+            lit @ (Literal::Ident(_, _) | Literal::Str(_, _) | Literal::Param(_, _)),
+        ) => {
+            access.base = lit.clone();
+            Ok(())
+        }
+        other => Err(ComposeError::ArgumentCantCarryField {
+            template: template_name.to_string(),
+            param,
+            found: argument_kind(other),
+            span: other.span(),
+        }),
     }
 }
 
@@ -1985,6 +2792,29 @@ fn substitute_string_content(
             }
             return Ok(None);
         }
+        // A dotted binding is an interpolated field access (#275), and
+        // what an argument binds is its *head* — `{{net.name}}` reads
+        // `name` off whatever `net` names, not off a parameter called
+        // `net.name`. So this rewrites the head and hands the shortened
+        // access on: `{{proxy.name}}` for a concrete argument, resolved
+        // once the service's fields are merged, or `{{outer.name}}` for
+        // a forwarded parameter, which is exactly the rename an
+        // undotted forwarded `{{h}}` already gets from
+        // [`interpolated_text`].
+        if let Some((head, field)) = binding.split_once('.') {
+            let Some(arg) = args.get(head) else {
+                return Ok(None);
+            };
+            let Some(base) = field_base_text(arg) else {
+                return Err(ComposeError::ArgumentCantCarryField {
+                    template: template_name.to_string(),
+                    param: head.to_string(),
+                    found: argument_kind(arg),
+                    span: arg.span(),
+                });
+            };
+            return Ok(Some(format!("{{{{{base}.{field}}}}}")));
+        }
         let Some(arg) = args.get(binding) else {
             return Ok(None);
         };
@@ -1993,7 +2823,7 @@ fn substitute_string_content(
             .ok_or_else(|| ComposeError::ArgumentNotInterpolable {
                 template: template_name.to_string(),
                 param: binding.to_string(),
-                found: uninterpolable_kind(arg),
+                found: argument_kind(arg),
                 span: arg.span(),
             })
     })
@@ -2027,24 +2857,62 @@ fn interpolated_text(arg: &RawValue) -> Option<String> {
         RawValue::Literal(Literal::Str(text, _)) => Some(text.clone()),
         RawValue::Literal(Literal::Number { text, .. }) => Some(text.clone()),
         RawValue::Literal(Literal::Ident(name, _)) => Some(name.clone()),
+        // A field-access argument defers exactly the way a forwarded
+        // parameter does, as the dotted binding it already spells
+        // (#275): `{{p}}` bound to `proxy.name` becomes
+        // `{{proxy.name}}`, which `resolve_bound_field_accesses` reads
+        // once the service's fields are merged. Reading the declaration
+        // here instead would resolve it in whichever scope this
+        // interpolation happens to be resolved in, rather than the one
+        // the argument was written in.
+        RawValue::Literal(Literal::Field(access)) => Some(format!("{{{{{}}}}}", access.dotted())),
         RawValue::Literal(Literal::Qualified(_)) | RawValue::List(_, _) | RawValue::Map(_, _) => {
             None
         }
     }
 }
 
-/// The `found` text naming why [`interpolated_text`] refused an
-/// argument, in the same vocabulary [`numeric_mismatch`] uses for its
-/// own mismatches. The qualified arm is
-/// [`ComposeError::ArgumentNotInterpolable`]'s documented backstop —
-/// unreachable while an argument body's grammar has no `alias.name`
-/// form, and live the moment it gains one.
-fn uninterpolable_kind(arg: &RawValue) -> &'static str {
+/// The text one bound argument contributes as a field-access *base* —
+/// `None` for an argument that can't name a declaration at all, which
+/// [`substitute_string_content`] and [`substitute_field_base`] both turn
+/// into [`ComposeError::ArgumentCantCarryField`].
+///
+/// A [`Literal::Param`] answers with its own name, sigil-free, because
+/// what the caller builds from this is a `{{binding}}`: forwarding `net`
+/// into a nested invocation leaves `{{net.name}}` for the call site that
+/// finally binds `net`, which reads the head exactly as this one did.
+fn field_base_text(arg: &RawValue) -> Option<String> {
     match arg {
+        RawValue::Literal(
+            Literal::Ident(name, _) | Literal::Str(name, _) | Literal::Param(name, _),
+        ) => Some(name.clone()),
+        _ => None,
+    }
+}
+
+/// What one bound argument *is*, in the vocabulary
+/// [`numeric_mismatch`] already uses for its own mismatches — the
+/// `found` half of every diagnostic that has to say why an argument
+/// couldn't be used where it was: [`ComposeError::ArgumentNotInterpolable`]
+/// (no text form to splice) and [`ComposeError::ArgumentCantCarryField`]
+/// (nothing a field could be read off).
+///
+/// Total rather than scoped to the kinds one of those refuses, so that
+/// neither has to be re-taught the vocabulary when the other's set of
+/// refused kinds changes. The qualified arm stays
+/// `ArgumentNotInterpolable`'s documented backstop — unreachable while
+/// an argument body's grammar has no bare `alias.name` form, and live
+/// the moment it gains one.
+fn argument_kind(arg: &RawValue) -> &'static str {
+    match arg {
+        RawValue::Literal(Literal::Str(_, _)) => "a quoted string",
+        RawValue::Literal(Literal::Number { .. }) => "a number",
+        RawValue::Literal(Literal::Ident(_, _)) => "a bare identifier",
+        RawValue::Literal(Literal::Param(_, _)) => "a parameter",
+        RawValue::Literal(Literal::Field(_)) => "a field access",
         RawValue::Literal(Literal::Qualified(_)) => "a qualified reference",
         RawValue::List(_, _) => "a list",
         RawValue::Map(_, _) => "a nested map",
-        RawValue::Literal(_) => unreachable!("every other literal kind has a text form"),
     }
 }
 
@@ -2179,6 +3047,11 @@ fn numeric_mismatch(lit: &Literal) -> Option<&'static str> {
         Literal::Str(_, _) => Some("a quoted string"),
         Literal::Ident(_, _) => Some("a bare identifier"),
         Literal::Qualified(_) => Some("a qualified reference"),
+        // A field access reads a declaration's Docker name, which is
+        // text, so a `number`-typed field can't take one however it
+        // resolves — worth saying at the argument that passed it rather
+        // than reporting the string it becomes a pass later.
+        Literal::Field(_) => Some("a field access"),
     }
 }
 

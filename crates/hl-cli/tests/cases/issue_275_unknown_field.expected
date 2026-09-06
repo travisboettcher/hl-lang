@@ -1,0 +1,2 @@
+--- error ---
+issue_275_unknown_field.hll:14:29: `network proxy` has no field `external` — `name` is the only field a declaration exposes, holding its real Docker name

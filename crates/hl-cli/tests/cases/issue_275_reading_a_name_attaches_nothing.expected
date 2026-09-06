@@ -1,0 +1,6 @@
+--- compose ---
+services:
+  jellyfin:
+    image: jellyfin/jellyfin
+    labels:
+    - caddy.network=docker_default
