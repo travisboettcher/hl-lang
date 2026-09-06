@@ -203,6 +203,27 @@ ordinary content: `command` and `env` values carry `$HOME` through to a
 shell, and Compose reads its own `${VAR}` interpolation out of the
 generated file once `hllc` has written it. The warning skips both.
 
+### An interpolated value lands as written
+
+`{{host}}` puts the argument into the string as it stands. Nothing
+inspects it on the way, so a template that renders a Traefik rule from a
+parameter trusts whoever calls it:
+
+```hll
+template traefik_http(host) {
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`{{host}}`)"
+  }
+}
+```
+
+Pass ``ok.example.com`) || HostRegexp(`{any:.+}`` as `host` and the rule
+matches every host instead of one. `hllc` can't catch that, because it
+no longer knows the label holds a rule—see [a value goes through as
+written](./built-in-fields.md#a-value-goes-through-as-written). A
+template that splices a parameter into a value with a syntax of its own
+owns that syntax.
+
 ## Reading a declaration's real name
 
 A `network` or `volume` answers to two names: the identifier your `.hll`
