@@ -70,11 +70,18 @@ pub(crate) const BUNDLED: Registry = &[];
 /// This is what reserves the prefix: `use "std:traefik"` names the
 /// bundled module whether or not a file called `std:traefik.hll` sits
 /// beside the importing one, so the two namespaces can't be made to
-/// collide by naming a file adversarially. The cost is that a file
-/// literally named `std:something.hll` becomes unreachable — an
-/// accepted, documented trade (docs/DESIGN.md's Imports section), since
-/// `:` in a file name is rare enough to be a curiosity and the
-/// alternative is a namespace a user file can shadow.
+/// collide by naming a file adversarially.
+///
+/// The cost is that the bare spelling is taken: a file literally named
+/// `std:traefik.hll` no longer answers to `use "std:traefik.hll"`.
+/// Reaching it takes an explicit relative path, `use
+/// "./std:traefik.hll"` — which this deliberately leaves alone, since
+/// rejecting it would remove a capability to buy nothing — and even
+/// then the two render alike, because [`display_path`] spells a bundled
+/// module the same way. An accepted, documented trade
+/// (docs/DESIGN.md's Imports section): a `:` in a file name is rare
+/// enough to make that a curiosity, and the alternative is a namespace
+/// any user file can shadow by name.
 pub(crate) fn strip_prefix(raw: &str) -> Option<&str> {
     raw.strip_prefix(PREFIX).map(canonical_name)
 }
