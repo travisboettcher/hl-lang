@@ -1,0 +1,2 @@
+--- error ---
+issue_275_unknown_field_name.hll:13:26: `network proxy` has no field `ports` — a network exposes `name`

@@ -319,6 +319,38 @@ pub enum ComposeError {
         kind: &'static str,
         decl: String,
         field: String,
+        /// What this kind *does* expose — the declaration kind's own
+        /// list of readable fields, carried so the message
+        /// can list it rather than restating one kind's fields in prose
+        /// that the next kind would contradict.
+        readable: &'static [&'static str],
+        span: Span,
+    },
+    /// A field the declaration's kind has, that this declaration leaves
+    /// unset — a `volume`'s `driver` when it lets Docker choose (#275).
+    ///
+    /// Its own error rather than an empty string, because there is no
+    /// honest text for "whatever Docker picks" to splice into a label,
+    /// and no reason to think the user wanted the empty one.
+    DeclarationFieldUnset {
+        kind: &'static str,
+        decl: String,
+        field: String,
+        span: Span,
+    },
+    /// A field that exists on the declaration but never holds a value:
+    /// a bare-presence flag such as `external`, or a nested map such as
+    /// a `volume`'s `driver_opts` (#275).
+    ///
+    /// Distinct from [`Self::UnknownDeclarationField`] because the field
+    /// is real — saying "no such field" of something written three lines
+    /// up sends the reader looking for a typo that isn't there.
+    DeclarationFieldNotAValue {
+        kind: &'static str,
+        decl: String,
+        field: String,
+        /// Why it holds no value, phrased to sit after "is".
+        what: &'static str,
         span: Span,
     },
     /// A field access whose alias resolved to a real imported scope,
@@ -509,6 +541,8 @@ impl ComposeError {
             | ComposeError::FieldBaseNotDeclared { span, .. }
             | ComposeError::FieldBaseNotDeclaration { span, .. }
             | ComposeError::UnknownDeclarationField { span, .. }
+            | ComposeError::DeclarationFieldUnset { span, .. }
+            | ComposeError::DeclarationFieldNotAValue { span, .. }
             | ComposeError::UnknownQualifiedDeclaration { span, .. }
             | ComposeError::ArgumentCantCarryField { span, .. }
             | ComposeError::InterpolatedFieldAccessTooDeep { span, .. }
@@ -645,11 +679,32 @@ impl ComposeError {
                  carries a name to read — name one of those instead"
             ),
             ComposeError::UnknownDeclarationField {
+                kind,
+                decl,
+                field,
+                readable,
+                ..
+            } => write!(
+                f,
+                "{at}: `{kind} {decl}` has no field `{field}` — a {kind} exposes {}",
+                readable_field_list(readable)
+            ),
+            ComposeError::DeclarationFieldUnset {
                 kind, decl, field, ..
             } => write!(
                 f,
-                "{at}: `{kind} {decl}` has no field `{field}` — `name` is the only field a \
-                 declaration exposes, holding its real Docker name"
+                "{at}: `{kind} {decl}` sets no `{field}`, so there is no value to read — set one \
+                 on the declaration, or write the value here directly"
+            ),
+            ComposeError::DeclarationFieldNotAValue {
+                kind,
+                decl,
+                field,
+                what,
+                ..
+            } => write!(
+                f,
+                "{at}: `{kind} {decl}`'s `{field}` is {what}, so it can't fill a value here"
             ),
             ComposeError::UnknownQualifiedDeclaration { alias, name, .. } => {
                 write!(f, "{at}: no network or volume `{name}` in `{alias}`")
@@ -1036,13 +1091,67 @@ mod error_display_tests {
         let err = ComposeError::UnknownDeclarationField {
             kind: "network",
             decl: "proxy".to_string(),
-            field: "driver".to_string(),
+            field: "ports".to_string(),
+            readable: Network::READABLE_FIELDS,
             span: span(7, 16),
         };
         assert_eq!(
             err.to_string(),
-            "7:16: `network proxy` has no field `driver` — `name` is the only field a \
-             declaration exposes, holding its real Docker name"
+            "7:16: `network proxy` has no field `ports` — a network exposes `name`"
+        );
+    }
+
+    /// The same message over a kind with more than one readable field,
+    /// since a list is where a hand-written sentence would have gone
+    /// stale the moment a field was added.
+    #[test]
+    fn unknown_declaration_field_lists_every_readable_field() {
+        let err = ComposeError::UnknownDeclarationField {
+            kind: "volume",
+            decl: "media".to_string(),
+            field: "ports".to_string(),
+            readable: Volume::READABLE_FIELDS,
+            span: span(7, 16),
+        };
+        assert_eq!(
+            err.to_string(),
+            "7:16: `volume media` has no field `ports` — a volume exposes `name` and `driver`"
+        );
+    }
+
+    /// A field the kind has but the declaration leaves unset reads
+    /// differently from one the kind hasn't got: the fix is on the
+    /// declaration, not on the spelling.
+    #[test]
+    fn declaration_field_unset_display() {
+        let err = ComposeError::DeclarationFieldUnset {
+            kind: "volume",
+            decl: "media".to_string(),
+            field: "driver".to_string(),
+            span: span(4, 20),
+        };
+        assert_eq!(
+            err.to_string(),
+            "4:20: `volume media` sets no `driver`, so there is no value to read — set one on \
+             the declaration, or write the value here directly"
+        );
+    }
+
+    /// And a field that never holds a value says so, rather than
+    /// claiming a field written three lines up doesn't exist.
+    #[test]
+    fn declaration_field_not_a_value_display() {
+        let err = ComposeError::DeclarationFieldNotAValue {
+            kind: "network",
+            decl: "proxy".to_string(),
+            field: "external".to_string(),
+            what: PRESENCE_FLAG,
+            span: span(9, 11),
+        };
+        assert_eq!(
+            err.to_string(),
+            "9:11: `network proxy`'s `external` is a bare-presence flag rather than a value, so \
+             it can't fill a value here"
         );
     }
 
@@ -1520,11 +1629,21 @@ trait ImportableDecl: Clone + PartialEq {
     /// How this kind of declaration is spelled in a diagnostic, and in
     /// the source that declares one.
     const KIND: &'static str;
+    /// Every field of this kind a value position can read, in the order
+    /// a diagnostic should list them. What makes a field readable is
+    /// that it *has* a value: a bare-presence flag and a nested map
+    /// have nothing a string position could hold, so they answer
+    /// [`FieldValue::NotAValue`] rather than appearing here.
+    const READABLE_FIELDS: &'static [&'static str];
     /// What this declaration is called, and what a Compose section keys
     /// it under.
     fn decl_name(&self) -> &str;
-    /// The declaration's real Docker name — what `.name` reads.
-    fn docker_name(&self) -> &str;
+    /// What `field` holds on this declaration, or `None` when this kind
+    /// has no such field at all. The three answers are distinct on
+    /// purpose: "no such field", "a field you left unset", and "a field
+    /// that never holds a value" are three different mistakes with three
+    /// different fixes.
+    fn read_field(&self, field: &str) -> Option<FieldValue>;
     /// The error to raise when a different declaration already holds
     /// this bare name.
     fn collision(alias: String, name: String, span: Span) -> ComposeError;
@@ -1533,12 +1652,18 @@ trait ImportableDecl: Clone + PartialEq {
 impl ImportableDecl for Network {
     const KIND: &'static str = "network";
 
+    const READABLE_FIELDS: &'static [&'static str] = &["name"];
+
     fn decl_name(&self) -> &str {
         &self.name.name
     }
 
-    fn docker_name(&self) -> &str {
-        Network::docker_name(self)
+    fn read_field(&self, field: &str) -> Option<FieldValue> {
+        match field {
+            "name" => Some(FieldValue::Set(self.docker_name().to_string())),
+            "external" => Some(FieldValue::NotAValue(PRESENCE_FLAG)),
+            _ => None,
+        }
     }
 
     fn collision(alias: String, name: String, span: Span) -> ComposeError {
@@ -1549,12 +1674,32 @@ impl ImportableDecl for Network {
 impl ImportableDecl for Volume {
     const KIND: &'static str = "volume";
 
+    /// `driver` joins `name` because it holds one, and only because of
+    /// that: a `volume` names its driver with an ordinary literal, so
+    /// there is a value to read. `driver_opts` is a map and `external` a
+    /// flag, so neither can answer.
+    const READABLE_FIELDS: &'static [&'static str] = &["name", "driver"];
+
     fn decl_name(&self) -> &str {
         &self.name.name
     }
 
-    fn docker_name(&self) -> &str {
-        Volume::docker_name(self)
+    fn read_field(&self, field: &str) -> Option<FieldValue> {
+        match field {
+            "name" => Some(FieldValue::Set(self.docker_name().to_string())),
+            // Unset rather than empty: a `volume` with no `driver` leaves
+            // the choice to Docker, and there is no honest string for
+            // "whatever Docker picks" to splice into a label.
+            "driver" => Some(match &self.driver {
+                Some(driver) => FieldValue::Set(driver.text().to_string()),
+                None => FieldValue::Unset,
+            }),
+            "external" => Some(FieldValue::NotAValue(PRESENCE_FLAG)),
+            "driver_opts" => Some(FieldValue::NotAValue(
+                "a map of driver options rather than one value",
+            )),
+            _ => None,
+        }
     }
 
     fn collision(alias: String, name: String, span: Span) -> ComposeError {
@@ -1941,15 +2086,29 @@ fn reject_qualified<'a>(
 // it as well, which is what lets an argument written `net: proxy.name`
 // arrive at a `{{net}}` interpolation as ordinary text.
 
-/// The one field a `network`/`volume` declaration exposes.
+/// What a `network`/`volume` declaration answers when a value position
+/// reads one of its fields.
 ///
-/// `external`, `driver` and `driver_opts` describe how Docker should
-/// make the thing rather than naming it, and none of them is a string a
-/// value position wants; leaving them out keeps the door open without
-/// opening it. Both kinds carry this one field identically — see
-/// [`Network::docker_name`] — so this is one rule covering two kinds
-/// rather than a carve-out for either.
-const DECLARATION_NAME_FIELD: &str = "name";
+/// The rule the three arms encode: a field is readable when it *holds a
+/// value*. That is a property of the field, not a list this language
+/// keeps — `name` and a `volume`'s `driver` are ordinary literals, while
+/// a bare-presence flag and a nested map have nothing a string position
+/// could hold. Adding a field to a declaration therefore makes it
+/// readable by writing one arm in that kind's
+/// [`ImportableDecl::read_field`], with no separate permission to grant.
+enum FieldValue {
+    /// The field's value, as the string a value position receives.
+    Set(String),
+    /// A field this kind has, that this declaration leaves unset.
+    Unset,
+    /// A field that never holds a value, and why — phrased to sit after
+    /// "is" in a diagnostic sentence.
+    NotAValue(&'static str),
+}
+
+/// The reason a bare-presence flag can't be read. Shared by every such
+/// field so the two kinds describe `external` the same way.
+const PRESENCE_FLAG: &str = "a bare-presence flag rather than a value";
 
 /// The program's own top-level declarations, as a bare field-access
 /// base sees them: one flat namespace, the same one codegen resolves
@@ -2051,15 +2210,41 @@ fn resolve_field_access<R: SymbolResolver>(
 /// whole access's: the base resolved fine, so the field is the half to
 /// edit.
 fn declaration_field<D: ImportableDecl>(decl: &D, field: &Ident) -> Result<String, ComposeError> {
-    if field.name != DECLARATION_NAME_FIELD {
-        return Err(ComposeError::UnknownDeclarationField {
+    match decl.read_field(&field.name) {
+        Some(FieldValue::Set(value)) => Ok(value),
+        Some(FieldValue::Unset) => Err(ComposeError::DeclarationFieldUnset {
             kind: D::KIND,
             decl: decl.decl_name().to_string(),
             field: field.name.clone(),
             span: field.span,
-        });
+        }),
+        Some(FieldValue::NotAValue(what)) => Err(ComposeError::DeclarationFieldNotAValue {
+            kind: D::KIND,
+            decl: decl.decl_name().to_string(),
+            field: field.name.clone(),
+            what,
+            span: field.span,
+        }),
+        None => Err(ComposeError::UnknownDeclarationField {
+            kind: D::KIND,
+            decl: decl.decl_name().to_string(),
+            field: field.name.clone(),
+            readable: D::READABLE_FIELDS,
+            span: field.span,
+        }),
     }
-    Ok(decl.docker_name().to_string())
+}
+
+/// Renders a kind's readable fields the way a sentence wants them:
+/// ``\`name\``, or ``\`name\` and \`driver\``. Kept beside
+/// [`declaration_field`] because it exists only for that diagnostic.
+fn readable_field_list(fields: &[&str]) -> String {
+    let quoted: Vec<String> = fields.iter().map(|f| format!("`{f}`")).collect();
+    match quoted.as_slice() {
+        [] => "no fields".to_string(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// Reads a dotted `{{binding}}` as the field access it spells, or

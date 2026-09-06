@@ -1,8 +1,9 @@
-# #275: `name` is the whole of what a declaration exposes. `external`,
-# `driver` and `driver_opts` describe how Docker should make the thing
-# rather than naming it, and none of them is a string a value position
-# wants — so an unknown field is refused, and the message names the one
-# field there is rather than only refusing the one written.
+# #275: a field is readable when it holds a value, so a bare-presence
+# flag is refused — and refused as what it is. `external` is written
+# three lines up, so telling the reader there is no such field would
+# send them hunting a typo that isn't there; the message says the field
+# is real and holds nothing instead. An unknown *name* gets the other
+# message, in issue_275_unknown_field_name.
 network proxy {
   external
 }

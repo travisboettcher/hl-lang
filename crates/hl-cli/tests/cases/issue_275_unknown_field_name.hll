@@ -1,0 +1,15 @@
+# #275: a field the kind hasn't got at all names what it does have, so
+# the reader learns the vocabulary from the refusal rather than going to
+# look it up. The list comes from the kind itself, which is what stops
+# it going stale the next time a declaration grows a field.
+network proxy {
+  external
+}
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  networks [proxy]
+  labels {
+    "caddy.ports": proxy.ports
+  }
+}

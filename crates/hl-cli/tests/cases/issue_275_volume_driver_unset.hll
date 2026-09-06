@@ -1,0 +1,13 @@
+# #275: a `volume` with no `driver` leaves the choice to Docker, so
+# there is no honest string for `.driver` to produce. Refused rather
+# than read as the empty string — an empty label value is a silently
+# wrong deployment, and nothing suggests the user wanted one.
+volume media {}
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  volume media -> "/data"
+  labels {
+    "backup.driver": media.driver
+  }
+}

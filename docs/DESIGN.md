@@ -330,10 +330,20 @@ matcher        ::= IDENT "(" ( literal ( "," literal )* )? ")"
   argument, and every other slot the `value` production reaches. A
   declaration has two names, the identifier `.hll` refers to it by and
   the real Docker name (`name:` when set, the identifier otherwise), and
-  this is what reads the second. `name` is the only field either kind
-  exposes: `external`, `driver` and `driver_opts` describe how Docker
-  should make the thing rather than naming it, so an unknown field draws
-  an error that names the one field there is.
+  reading the second is what the feature exists for.
+- **A field is readable when it holds a value**, which is a property of
+  the field rather than a list this language keeps. `name` holds one on
+  both kinds, and so does a `volume`'s `driver`. A bare-presence flag
+  such as `external` and a nested map such as `driver_opts` hold nothing
+  a value position could take, so each says so and names itself: a field
+  written three lines up is real, and refusing it as "no such field"
+  sends the reader hunting a typo that isn't there. A field the kind
+  genuinely hasn't got draws the other error, which lists what the kind
+  does expose—read off the kind itself, so it can't go stale the next
+  time a declaration grows a field. A field the kind has that this
+  declaration leaves unset (a `volume` with no `driver`) draws an error
+  rather than reading as the empty string. Docker picks the default in
+  that case, and no honest text spells the default it picks.
 - **A reference-shaped position takes no field access, on purpose**,
   which is what keeps the grammar unambiguous. `.` in a reference already means
   `alias.name`, so `networks [proxy.name]` can only go on meaning the

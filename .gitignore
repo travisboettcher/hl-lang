@@ -25,3 +25,7 @@
 # from that job.
 /mutants.out/
 /mutants.out.old/
+
+# Scratch git worktrees the agent harness checks out for subagents, one
+# per agent, removed when the harness releases them. Never source.
+/.claude/worktrees/

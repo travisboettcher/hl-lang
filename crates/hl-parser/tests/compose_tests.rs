@@ -3620,37 +3620,122 @@ fn a_field_access_base_naming_a_service_is_a_different_error() {
 }
 
 #[test]
-fn an_unknown_field_on_a_network_is_an_error() {
+fn an_unknown_field_is_an_error_naming_what_the_kind_exposes() {
     let err = compose_err(
         "network proxy {\n  external\n}\n\
-         service s {\n  image \"x\"\n  labels { \"k\": proxy.external }\n}\n",
+         service s {\n  image \"x\"\n  labels { \"k\": proxy.ports }\n}\n",
     );
     match err {
         ComposeError::UnknownDeclarationField {
-            kind, decl, field, ..
+            kind,
+            decl,
+            field,
+            readable,
+            ..
         } => {
             assert_eq!(kind, "network");
             assert_eq!(decl, "proxy");
-            assert_eq!(field, "external");
+            assert_eq!(field, "ports");
+            assert_eq!(readable, ["name"]);
         }
         other => panic!("expected UnknownDeclarationField, got {other:?}"),
     }
 }
 
-/// The volume side reports its own kind, so the message names the
-/// declaration a reader would go and edit.
+/// A `volume`'s `driver` holds an ordinary literal, so it reads like any
+/// other value — the rule is "a field that holds a value is readable",
+/// not a list of blessed names.
 #[test]
-fn an_unknown_field_on_a_volume_is_an_error() {
-    let err = compose_err(
+fn a_field_access_reads_a_volumes_driver() {
+    let composed = compose_ok(
         "volume media {\n  driver: \"local\"\n}\n\
          service s {\n  image \"x\"\n  labels { \"k\": media.driver }\n}\n",
     );
+    let service = single_service(&composed);
+    assert_eq!(label_value(service, "k"), "local");
+}
+
+/// …and interpolates, since a field access is one concept in both
+/// spellings.
+#[test]
+fn a_volumes_driver_interpolates() {
+    let composed = compose_ok(
+        "volume media {\n  driver: \"local\"\n}\n\
+         service s {\n  image \"x\"\n  labels { \"k\": \"via-{{media.driver}}\" }\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(label_value(service, "k"), "via-local");
+}
+
+/// A field the kind has but the declaration leaves unset is its own
+/// error, not the empty string: there is no honest text for "whatever
+/// Docker picks" to splice into a label.
+#[test]
+fn an_unset_field_is_an_error_rather_than_an_empty_value() {
+    let err = compose_err(
+        "volume media {}\n\
+         service s {\n  image \"x\"\n  labels { \"k\": media.driver }\n}\n",
+    );
     match err {
-        ComposeError::UnknownDeclarationField { kind, field, .. } => {
+        ComposeError::DeclarationFieldUnset {
+            kind, decl, field, ..
+        } => {
             assert_eq!(kind, "volume");
+            assert_eq!(decl, "media");
             assert_eq!(field, "driver");
         }
-        other => panic!("expected UnknownDeclarationField, got {other:?}"),
+        other => panic!("expected DeclarationFieldUnset, got {other:?}"),
+    }
+}
+
+/// A bare-presence flag is real, so saying "no such field" of it would
+/// send the reader hunting a typo that isn't there.
+#[test]
+fn a_presence_flag_reports_that_it_holds_no_value() {
+    let err = compose_err(
+        "network proxy {\n  external\n}\n\
+         service s {\n  image \"x\"\n  labels { \"k\": proxy.external }\n}\n",
+    );
+    match err {
+        ComposeError::DeclarationFieldNotAValue { kind, field, .. } => {
+            assert_eq!(kind, "network");
+            assert_eq!(field, "external");
+        }
+        other => panic!("expected DeclarationFieldNotAValue, got {other:?}"),
+    }
+}
+
+/// Both kinds answer for `external` themselves, so the volume side is
+/// pinned too: one kind's arm covering for the other's absence would
+/// turn a "holds no value" into a "no such field" on volumes alone.
+#[test]
+fn a_presence_flag_on_a_volume_reports_that_it_holds_no_value() {
+    let err = compose_err(
+        "volume media {\n  external\n}\n\
+         service s {\n  image \"x\"\n  labels { \"k\": media.external }\n}\n",
+    );
+    match err {
+        ComposeError::DeclarationFieldNotAValue { kind, field, .. } => {
+            assert_eq!(kind, "volume");
+            assert_eq!(field, "external");
+        }
+        other => panic!("expected DeclarationFieldNotAValue, got {other:?}"),
+    }
+}
+
+/// The same answer for a nested map, which has no single value either.
+#[test]
+fn a_nested_map_field_reports_that_it_holds_no_value() {
+    let err = compose_err(
+        "volume media {\n  driver: \"local\"\n  driver_opts {\n    type: \"nfs\"\n  }\n}\n\
+         service s {\n  image \"x\"\n  labels { \"k\": media.driver_opts }\n}\n",
+    );
+    match err {
+        ComposeError::DeclarationFieldNotAValue { kind, field, .. } => {
+            assert_eq!(kind, "volume");
+            assert_eq!(field, "driver_opts");
+        }
+        other => panic!("expected DeclarationFieldNotAValue, got {other:?}"),
     }
 }
 

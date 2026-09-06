@@ -259,10 +259,21 @@ Three spellings read the same field:
 | `net.proxy.name` | one an [imported file](./imports.md) declares |
 | `$net.name` | whichever declaration the invocation binds `net` to |
 
-`name` is the only field either kind exposes. `external`, `driver` and
-`driver_opts` say how Docker should make the thing rather than naming
-it, and `hllc` names the field you can read when you ask for one of
-those.
+A field is readable when it holds a value. `name` holds one on both
+kinds, and a `volume`'s `driver` holds one too:
+
+| written in a value | reads |
+| --- | --- |
+| `media.name` | the volume's real Docker name |
+| `media.driver` | the driver it names, when it sets one |
+
+The fields that hold nothing say so rather than pretending not to
+exist. `external` is a bare-presence flag and `driver_opts` is a map, so
+neither fills a value, and `hllc` names the field and why. Ask for a
+field the kind hasn't got at all and it lists the ones it has. Ask for
+one the declaration leaves unset—a `volume` with no `driver`—and it
+refuses rather than handing back an empty string, since Docker picks the
+default and no text spells the default it picks.
 
 The access also goes inside string content, as a dotted binding
 alongside the `{{param}}` form:
