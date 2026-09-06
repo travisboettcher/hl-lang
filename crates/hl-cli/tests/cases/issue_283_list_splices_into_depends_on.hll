@@ -1,0 +1,21 @@
+# #283: `depends_on` splices like the `networks`/`dns`/`env_file` family
+# the guide groups it with, but its entries carry a condition as well as
+# a name. An item spliced through a conditioned entry takes that
+# condition: dropping it would silently discard what the author wrote,
+# and there is no other entry left to carry it.
+service db {
+  image "postgres"
+}
+
+service cache {
+  image "redis"
+}
+
+template waits_for(deps) {
+  depends_on [$deps { condition: service_healthy }]
+}
+
+service web {
+  image "nginx"
+  with waits_for { deps: [db, cache] }
+}

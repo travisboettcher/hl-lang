@@ -2630,15 +2630,9 @@ fn substitute_params(
         if let Some(h) = &mut router.host {
             substitute_literal(h, args, template_name, warnings)?;
         }
-        for entry in &mut router.entrypoints {
-            substitute_reference_literal(entry, args, template_name, warnings)?;
-        }
-        for prefix in &mut router.path_prefix {
-            substitute_reference_literal(prefix, args, template_name, warnings)?;
-        }
-        for mw in &mut router.middleware {
-            substitute_reference_literal(mw, args, template_name, warnings)?;
-        }
+        substitute_reference_list(&mut router.entrypoints, args, template_name, warnings)?;
+        substitute_reference_list(&mut router.path_prefix, args, template_name, warnings)?;
+        substitute_reference_list(&mut router.middleware, args, template_name, warnings)?;
         // #225: `priority`/`port` are numbers, so they take the same
         // numeric-checked substitution `expose.port` does; `protocol`
         // is a plain literal, validated in codegen rather than here so
@@ -2810,18 +2804,38 @@ fn substitute_params(
     // would reproduce #168's bug class in a new position — a `$net` that
     // survives composition unresolved and reaches codegen as the literal
     // text `net`.
-    for lit in &mut fields.networks {
-        substitute_reference_literal(lit, args, template_name, warnings)?;
+    substitute_reference_list(&mut fields.networks, args, template_name, warnings)?;
+    substitute_reference_list(&mut fields.dns, args, template_name, warnings)?;
+    substitute_reference_list(&mut fields.env_file, args, template_name, warnings)?;
+    // `depends_on` splices like the three above (#283), but an entry
+    // carries a `condition` as well as a name, so an expanded item
+    // inherits the condition written on the parameter's own entry:
+    // `depends_on [$deps { condition: service_healthy }]` means every
+    // service `deps` names, healthy. Cloning it is the only reading that
+    // doesn't silently drop what the author wrote.
+    let mut depends_on = Vec::with_capacity(fields.depends_on.len());
+    for mut entry in std::mem::take(&mut fields.depends_on) {
+        let bound = match &entry.reference {
+            Literal::Param(name, _) => match args.get(name.as_str()) {
+                Some(RawValue::List(items, _)) => Some((name.clone(), items)),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((param, items)) = bound else {
+            substitute_reference_literal(&mut entry.reference, args, template_name, warnings)?;
+            depends_on.push(entry);
+            continue;
+        };
+        for item in items {
+            depends_on.push(DependsOnEntry {
+                reference: reference_list_item(item, &param, template_name)?.clone(),
+                condition: entry.condition,
+                span: entry.span,
+            });
+        }
     }
-    for lit in &mut fields.dns {
-        substitute_reference_literal(lit, args, template_name, warnings)?;
-    }
-    for lit in &mut fields.env_file {
-        substitute_reference_literal(lit, args, template_name, warnings)?;
-    }
-    for entry in &mut fields.depends_on {
-        substitute_reference_literal(&mut entry.reference, args, template_name, warnings)?;
-    }
+    fields.depends_on = depends_on;
     Ok(())
 }
 
@@ -3003,14 +3017,19 @@ fn substitute_string_content(
         let Some(arg) = args.get(binding) else {
             return Ok(None);
         };
-        interpolated_text(arg)
-            .map(Some)
-            .ok_or_else(|| ComposeError::ArgumentNotInterpolable {
+        // The `Err` names the value that couldn't answer, which is the
+        // argument itself for a plain one and the offending *item* for a
+        // list — so a bad item is reported where it is written rather
+        // than at the list that holds it.
+        match interpolated_text(arg) {
+            Ok(text) => Ok(Some(text)),
+            Err(bad) => Err(ComposeError::ArgumentNotInterpolable {
                 template: template_name.to_string(),
                 param: binding.to_string(),
-                found: argument_kind(arg),
-                span: arg.span(),
-            })
+                found: argument_kind(bad),
+                span: bad.span(),
+            }),
+        }
     })
 }
 
@@ -3036,12 +3055,56 @@ fn substitute_string_content(
 /// [`SERVICE_NAME_BINDING`] then hands to codegen as the service name.
 /// That collision is what [`ComposeWarning::NameParameterNotInterpolated`]
 /// exists to surface at the declaration that causes it.
-fn interpolated_text(arg: &RawValue) -> Option<String> {
+fn interpolated_text(arg: &RawValue) -> Result<String, &RawValue> {
+    let RawValue::List(items, _) = arg else {
+        return scalar_interpolated_text(arg);
+    };
+    // A list contributes its items, comma-joined (#283), each answering
+    // through [`scalar_interpolated_text`] — so a list of strings, of
+    // numbers, of bare identifiers, of forwarded parameters or of field
+    // accesses all work, and an item with no text form is refused as
+    // itself rather than as the list around it, putting the diagnostic
+    // on the item the author has to change.
+    //
+    // Items go through the *scalar* function rather than recursing here,
+    // which is what refuses a nested list instead of flattening it. A
+    // flatten would be the silent coercion
+    // [`ComposeError::TemplateArgumentNotScalar`] exists to refuse: this
+    // is a transpiler, and `[a, [b]]` and `[a, b]` are different values
+    // that would otherwise render alike.
+    //
+    // The comma is the whole join rule, with no way to ask for another
+    // separator. It's what both places the built-ins join use
+    // (`entrypoints`, `middlewares`), and a second spelling would be
+    // interpolation syntax to design and teach for a case no caller has
+    // yet had.
+    //
+    // An empty list joins to the empty string rather than drawing an
+    // error. The join of nothing is nothing, which is the honest answer,
+    // and the reason to refuse it would be that an empty string makes a
+    // bare `key=` label — a judgement about a use this function can't
+    // see, and one #270 has already settled the other way.
+    // `command "run {{args}}"` with no args is the same interpolation
+    // and plainly right.
+    let mut out = String::new();
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&scalar_interpolated_text(item)?);
+    }
+    Ok(out)
+}
+
+/// The text one *item* of an interpolated value contributes — every
+/// [`interpolated_text`] case except the list join itself, which is what
+/// keeps a nested list an error rather than a flatten.
+fn scalar_interpolated_text(arg: &RawValue) -> Result<String, &RawValue> {
     match arg {
-        RawValue::Literal(Literal::Param(name, _)) => Some(format!("{{{{{name}}}}}")),
-        RawValue::Literal(Literal::Str(text, _)) => Some(text.clone()),
-        RawValue::Literal(Literal::Number { text, .. }) => Some(text.clone()),
-        RawValue::Literal(Literal::Ident(name, _)) => Some(name.clone()),
+        RawValue::Literal(Literal::Param(name, _)) => Ok(format!("{{{{{name}}}}}")),
+        RawValue::Literal(Literal::Str(text, _)) => Ok(text.clone()),
+        RawValue::Literal(Literal::Number { text, .. }) => Ok(text.clone()),
+        RawValue::Literal(Literal::Ident(name, _)) => Ok(name.clone()),
         // A field-access argument defers exactly the way a forwarded
         // parameter does, as the dotted binding it already spells
         // (#275): `{{p}}` bound to `proxy.name` becomes
@@ -3050,9 +3113,9 @@ fn interpolated_text(arg: &RawValue) -> Option<String> {
         // here instead would resolve it in whichever scope this
         // interpolation happens to be resolved in, rather than the one
         // the argument was written in.
-        RawValue::Literal(Literal::Field(access)) => Some(format!("{{{{{}}}}}", access.dotted())),
+        RawValue::Literal(Literal::Field(access)) => Ok(format!("{{{{{}}}}}", access.dotted())),
         RawValue::Literal(Literal::Qualified(_)) | RawValue::List(_, _) | RawValue::Map(_, _) => {
-            None
+            Err(arg)
         }
     }
 }
@@ -3187,6 +3250,84 @@ fn warn(warnings: &mut Vec<ComposeWarning>, warning: ComposeWarning) {
 /// A slot that was never a `Literal::Param` to begin with (an ordinary
 /// `networks [foo]` entry, written directly) needs no check at all:
 /// `parse_literal_reference` already guarantees it can't be a number.
+/// Substitutes every element of a reference-shaped list field,
+/// expanding an element that is a `$param` bound to a list into that
+/// list's own items (#283).
+///
+/// `networks $nets` and `networks [$nets]` parse to the same
+/// one-element vector, so there is no distinction between them to
+/// honour: both splice, and so does `[a, $nets, b]`, which puts the
+/// items where the parameter stood. An empty list contributes no
+/// elements, which is what an empty list means — unlike an interpolation
+/// (see [`interpolated_text`]), where it contributes empty text.
+///
+/// Each spliced item faces the same two checks a written element does. A
+/// nested list or map can't be an element at all, and a bare number is
+/// [`ComposeError::ArgumentNotReferenceShaped`] here exactly as it is
+/// for a whole-slot substitution — a reference position's own grammar
+/// could never hold one, so arriving through a list doesn't make it
+/// legal. Both are reported against the *item*, since that is what the
+/// author has to change.
+fn substitute_reference_list(
+    list: &mut Vec<Literal>,
+    args: &HashMap<&str, &RawValue>,
+    template_name: &str,
+    warnings: &mut Vec<ComposeWarning>,
+) -> Result<(), ComposeError> {
+    let mut out = Vec::with_capacity(list.len());
+    for mut lit in std::mem::take(list) {
+        let bound = match &lit {
+            Literal::Param(name, _) => match args.get(name.as_str()) {
+                Some(RawValue::List(items, _)) => Some((name.clone(), items)),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((param, items)) = bound else {
+            substitute_reference_literal(&mut lit, args, template_name, warnings)?;
+            out.push(lit);
+            continue;
+        };
+        for item in items {
+            out.push(reference_list_item(item, &param, template_name)?.clone());
+        }
+    }
+    *list = out;
+    Ok(())
+}
+
+/// One item of a spliced list as the reference it has to be, or the
+/// error saying why it isn't (#283).
+///
+/// Shared by [`substitute_reference_list`] and `depends_on`'s own
+/// entry-shaped splice so the two can't come to disagree about what may
+/// be spliced. Both refusals name the item rather than the list: a
+/// nested list or map can't be one element at all, and a bare number is
+/// refused for the same reason [`substitute_reference_literal`] refuses
+/// a substituted one — a reference position's grammar could never hold
+/// it, so arriving inside a list doesn't make it legal.
+fn reference_list_item<'a>(
+    item: &'a RawValue,
+    param: &str,
+    template_name: &str,
+) -> Result<&'a Literal, ComposeError> {
+    let RawValue::Literal(lit) = item else {
+        return Err(ComposeError::TemplateArgumentNotScalar {
+            template: template_name.to_string(),
+            param: param.to_string(),
+            span: item.span(),
+        });
+    };
+    if let Literal::Number { span, .. } = lit {
+        return Err(ComposeError::ArgumentNotReferenceShaped {
+            template: template_name.to_string(),
+            param: param.to_string(),
+            span: *span,
+        });
+    }
+    Ok(lit)
+}
+
 fn substitute_reference_literal(
     lit: &mut Literal,
     args: &HashMap<&str, &RawValue>,

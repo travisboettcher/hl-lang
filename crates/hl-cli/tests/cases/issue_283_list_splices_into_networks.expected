@@ -1,0 +1,12 @@
+--- compose ---
+services:
+  web:
+    image: nginx
+    networks:
+    - a
+    - b
+    - c
+networks:
+  a: {}
+  b: {}
+  c: {}

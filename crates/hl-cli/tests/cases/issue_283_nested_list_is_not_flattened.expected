@@ -1,0 +1,2 @@
+--- error ---
+issue_283_nested_list_is_not_flattened.hll:13:23: argument `xs` for template `t` can't be interpolated into a string (found a list)

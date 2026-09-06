@@ -1,0 +1,6 @@
+--- compose ---
+services:
+  web:
+    image: nginx
+    labels:
+    - traefik.http.routers.web.middlewares=auth@file,compress@file

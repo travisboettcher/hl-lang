@@ -1,0 +1,17 @@
+# #283: a list argument fills a list-shaped field, putting its items
+# where the parameter stood. `networks [a, $nets, c]` splices rather
+# than nesting, because a reference list holds names and a name is all
+# an item can be — and `networks $nets` parses to the same one-element
+# vector, so both spellings behave alike.
+network a { }
+network b { }
+network c { }
+
+template attach(nets) {
+  networks [a, $nets, c]
+}
+
+service web {
+  image "nginx"
+  with attach { nets: [b] }
+}

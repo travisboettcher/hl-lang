@@ -272,6 +272,36 @@ matcher        ::= IDENT "(" ( literal ( "," literal )* )? ")"
   up: a parameter that never lands in a reference-shaped or
   `number`-typed position goes unchecked, the same as an untyped one
   always did, since there's no field-shape left to check it against.
+- **A list argument joins into text and splices into a list**, settled
+  at #283 as the two things a list can honestly mean in those two
+  positions. `{{items}}` renders the items separated by
+  commas, so a template takes `["auth@file", "compress@file"]` and
+  writes the one comma-joined label the built-in `middleware [...]`
+  field generates. In a reference list, `networks $nets` puts the items
+  where the parameter stood—as does `networks [$nets]`, which parses to
+  the same one-element vector, and `[a, $nets, c]`, which splices in
+  place. `dns`, `env_file` and `depends_on` behave the same, the guide
+  grouping all four together for the reason they share here, and a
+  `depends_on` entry carries a condition as well as a name—so each item
+  spliced through that entry takes the condition written on it, the only
+  reading that keeps what the author wrote.
+  The comma is the whole join rule: naming a separator would be
+  interpolation syntax to design for a caller that hasn't appeared, and
+  a template needing another one takes the joined string instead.
+  An empty list means what an empty list means in each position—no
+  characters when joined, no elements when spliced—rather than drawing
+  an error, since the reason to refuse it would be a judgement about
+  what a downstream consumer does with an empty value.
+  Both positions refuse nesting, and this is the load-bearing part: `[a,
+  [b]]` and `[a, b]` are different values, so flattening them together
+  would be exactly the silent coercion `TemplateArgumentNotScalar`
+  exists to refuse. A spliced item also faces the reference-shape check
+  a written element faces, since arriving inside a list doesn't make a
+  bare number legal where the grammar never allowed one. Both refusals
+  name the *item*, which is what the author has to change.
+  A single-value slot still takes no list at all: `container_name $xs`
+  is `TemplateArgumentNotScalar` however many items `xs` holds, because
+  there is no honest way to put several values where one belongs.
 - A parameter reaches a value two ways, and they aren't
   interchangeable. `$param` substitutes a whole `literal` slot, span
   included, so the argument's own literal kind is what lands in the
@@ -280,8 +310,8 @@ matcher        ::= IDENT "(" ( literal ( "," literal )* )? ")"
   the argument contributes its characters and the slot stays a string: a
   template can build ``Host(`media.example.com`)`` out of a `host`
   argument rather than taking the whole rendered rule. Composition
-  rejects an argument with no text form there—a list or a nested
-  map—with `ComposeError::ArgumentNotInterpolable`, though it remains a
+  rejects an argument with no text form there—a nested map—with
+  `ComposeError::ArgumentNotInterpolable`, though it remains a
   perfectly good whole-slot argument elsewhere.
   A parameter forwarded into a nested invocation (`with inner { h:
   $host }`) has nothing concrete to splice yet, so the interpolation is

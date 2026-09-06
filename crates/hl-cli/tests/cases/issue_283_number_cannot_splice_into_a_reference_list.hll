@@ -1,0 +1,12 @@
+# #283: a spliced item faces the checks a written one does. A reference
+# position's own grammar could never hold a bare number, so arriving
+# inside a list doesn't make it legal — reported at the item, which is
+# the thing to change.
+template attach(nets) {
+  networks $nets
+}
+
+service web {
+  image "nginx"
+  with attach { nets: [8080] }
+}
