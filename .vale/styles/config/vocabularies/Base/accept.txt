@@ -63,3 +63,4 @@ snake_case
 [Rr]etarget(s|ed|ing)?
 YAML's
 overridable
+[Vv]endor(s|ed|ing)?

@@ -3209,18 +3209,27 @@ fn a_map_argument_cannot_be_interpolated() {
 /// The third shape `ArgumentNotInterpolable` names — a qualified
 /// reference, whose qualifier is an import alias that means nothing in
 /// generated output — never reaches interpolation, because an argument
-/// body can't hold one in the first place. Pinned here so the backstop
-/// arm in `interpolated_text` is documented as unreachable-for-now
-/// rather than dead code someone deletes: it becomes live the moment an
-/// argument may be qualified.
+/// body still can't hold one. Pinned here so the backstop arm in
+/// `interpolated_text` is documented as unreachable-for-now rather than
+/// dead code someone deletes: it becomes live the moment an argument
+/// may be qualified.
+///
+/// #275 is what makes this worth restating rather than deleting. An
+/// argument body is a *value* position, so a dotted argument does parse
+/// now — as a field access, `thing` read off a declaration called
+/// `other`, never as `other`'s exported `thing`. Composition says so at
+/// the argument itself.
 #[test]
-fn a_qualified_argument_is_rejected_before_interpolation_sees_it() {
-    let program = parse(
+fn a_dotted_argument_is_a_field_access_not_a_qualified_reference() {
+    let err = compose_err(
         "use \"other.hll\" as other\n\
          template t(v) {\n  container_name \"{{v}}\"\n}\n\
          service s {\n  with t { v: other.thing }\n  image \"x\"\n}\n",
     );
-    assert!(program.is_err(), "a qualified argument should not parse");
+    match err {
+        ComposeError::FieldBaseNotDeclared { base, .. } => assert_eq!(base, "other"),
+        other => panic!("expected FieldBaseNotDeclared, got {other:?}"),
+    }
 }
 
 /// A list argument still *fills* a whole slot that accepts one, so the
@@ -3416,4 +3425,438 @@ fn the_name_binding_alone_is_not_warned_about() {
 fn a_program_without_templates_raises_no_warnings() {
     let warnings = compose_warnings("service s {\n  image \"x\"\n  env E = \"$HOME\"\n}\n");
     assert!(warnings.is_empty(), "got {warnings:?}");
+}
+
+// --- reading a declaration's real name: `.name` (#275) ---
+//
+// A `network`/`volume` has two names — the identifier `.hll` refers to
+// it by, and the real Docker name — and only the second belongs in a
+// generated label that has to name a real network. These pin all the
+// spellings of reading it, both places one can be written (a whole
+// value and interpolated into string content), and the diagnostics for
+// each way of getting it wrong. The alias-qualified spelling needs a
+// second scope to resolve against, so it lives in `multi_scope_tests.rs`
+// with the rest of the cross-file cases.
+
+/// The value a service's first `labels` entry ended up with — every
+/// case here reads through a label, since that's the position the
+/// feature exists for.
+fn first_label(program: &ComposedProgram) -> &str {
+    single_service(program).fields.labels.entries[0]
+        .value
+        .text()
+}
+
+#[test]
+fn a_field_access_reads_a_networks_name_override() {
+    let composed = compose_ok(
+        "network proxy {\n  external\n  name: \"docker_default\"\n}\n\
+         service s {\n  image \"x\"\n  networks [proxy]\n  \
+         labels { \"caddy.network\": proxy.name }\n}\n",
+    );
+    assert_eq!(first_label(&composed), "docker_default");
+}
+
+/// The override is optional, and its absence is the case the obvious
+/// workaround — passing the identifier — coincidentally survives, so
+/// it's worth pinning that reading the name answers here too rather
+/// than only when the two names differ.
+#[test]
+fn a_field_access_falls_back_to_the_identifier() {
+    let composed = compose_ok(
+        "network proxy {}\n\
+         service s {\n  image \"x\"\n  networks [proxy]\n  \
+         labels { \"caddy.network\": proxy.name }\n}\n",
+    );
+    assert_eq!(first_label(&composed), "proxy");
+}
+
+/// A volume carries the same field with the same meaning, so it takes
+/// the same rule rather than a second one.
+#[test]
+fn a_field_access_reads_a_volumes_name() {
+    let composed = compose_ok(
+        "volume media {\n  name: \"media_store\"\n}\n\
+         service s {\n  image \"x\"\n  labels { \"k\": media.name }\n}\n",
+    );
+    assert_eq!(first_label(&composed), "media_store");
+}
+
+/// The spelling the feature exists for: one parameter serving both the
+/// reference position that wants the identifier and the value position
+/// that wants the Docker name.
+#[test]
+fn a_parameter_supplies_the_declaration_a_field_is_read_off() {
+    let composed = compose_ok(
+        "network proxy {\n  external\n  name: \"docker_default\"\n}\n\
+         template caddy(net) {\n  networks [$net]\n  \
+         labels { \"caddy.network\": $net.name }\n}\n\
+         service s {\n  image \"x\"\n  with caddy { net: proxy }\n}\n",
+    );
+    assert_eq!(first_label(&composed), "docker_default");
+    let service = single_service(&composed);
+    assert_eq!(service.fields.networks[0].text(), "proxy");
+}
+
+/// A quoted argument names a declaration exactly as the bare spelling
+/// does in every other position that takes a reference, so it reads the
+/// same field.
+#[test]
+fn a_quoted_argument_names_a_declaration_too() {
+    let composed = compose_ok(
+        "network proxy {\n  name: \"docker_default\"\n}\n\
+         template caddy(net) {\n  labels { \"caddy.network\": $net.name }\n}\n\
+         service s {\n  image \"x\"\n  with caddy { net: \"proxy\" }\n}\n",
+    );
+    assert_eq!(first_label(&composed), "docker_default");
+}
+
+#[test]
+fn a_field_access_interpolates_into_string_content() {
+    let composed = compose_ok(
+        "network proxy {\n  name: \"docker_default\"\n}\n\
+         service s {\n  image \"x\"\n  labels { \"k\": \"prefix-{{proxy.name}}\" }\n}\n",
+    );
+    assert_eq!(first_label(&composed), "prefix-docker_default");
+}
+
+/// The interpolated spelling reaches a parameter the same way the
+/// whole-value one does: the binding's *head* is what an argument
+/// binds, so `{{net.name}}` becomes `{{proxy.name}}` and resolves once
+/// the service's fields are merged.
+#[test]
+fn a_parameter_field_access_interpolates_into_string_content() {
+    let composed = compose_ok(
+        "network proxy {\n  name: \"docker_default\"\n}\n\
+         template caddy(net) {\n  labels { \"k\": \"prefix-{{net.name}}\" }\n}\n\
+         service s {\n  image \"x\"\n  with caddy { net: proxy }\n}\n",
+    );
+    assert_eq!(first_label(&composed), "prefix-docker_default");
+}
+
+/// Forwarding through a nested `with` replaces one parameter base with
+/// another, so the access resolves at whichever call site finally binds
+/// a declaration — the deferral a whole-slot `$param` already gets.
+#[test]
+fn a_forwarded_parameter_carries_a_field_access_through_a_nested_with() {
+    let composed = compose_ok(
+        "network proxy {\n  name: \"docker_default\"\n}\n\
+         template inner(m) {\n  labels { \"whole\": $m.name }\n}\n\
+         template outer(n) {\n  with inner { m: $n }\n}\n\
+         service s {\n  image \"x\"\n  with outer { n: proxy }\n}\n",
+    );
+    assert_eq!(first_label(&composed), "docker_default");
+}
+
+/// The interpolated spelling forwards the same way, by renaming the
+/// binding's head into the enclosing template's namespace — which is
+/// what `{{h}}` becoming `{{host}}` already does for an undotted one.
+#[test]
+fn a_forwarded_parameter_carries_an_interpolated_field_access() {
+    let composed = compose_ok(
+        "network proxy {\n  name: \"docker_default\"\n}\n\
+         template inner(m) {\n  labels { \"interp\": \"x-{{m.name}}\" }\n}\n\
+         template outer(n) {\n  with inner { m: $n }\n}\n\
+         service s {\n  image \"x\"\n  with outer { n: proxy }\n}\n",
+    );
+    assert_eq!(first_label(&composed), "x-docker_default");
+}
+
+/// A field access is a value, so it resolves wherever a value can be
+/// written — `raw`'s schema-free tree included.
+#[test]
+fn a_field_access_resolves_inside_a_raw_value() {
+    let composed = compose_ok(
+        "network proxy {\n  name: \"docker_default\"\n}\n\
+         service s {\n  image \"x\"\n  raw { extra_hosts: [proxy.name] }\n}\n",
+    );
+    let service = single_service(&composed);
+    match &service.fields.raw.entries[0].value {
+        RawValue::List(items, _) => assert_eq!(raw_text(&items[0]), "docker_default"),
+        other => panic!("expected a list, got {other:?}"),
+    }
+}
+
+/// Reading a name is not attaching a network: the `networks` list is
+/// what attaches one, and a `.name` in a label leaves it alone.
+#[test]
+fn reading_a_name_does_not_attach_the_network() {
+    let composed = compose_ok(
+        "network proxy {\n  name: \"docker_default\"\n}\n\
+         service s {\n  image \"x\"\n  labels { \"k\": proxy.name }\n}\n",
+    );
+    let service = single_service(&composed);
+    assert!(
+        service.fields.networks.is_empty(),
+        "got {:?}",
+        service.fields.networks
+    );
+}
+
+// --- the ways a field access can be wrong (#275) ---
+
+#[test]
+fn a_field_access_base_naming_nothing_is_an_error() {
+    let err = compose_err("service s {\n  image \"x\"\n  labels { \"k\": nope.name }\n}\n");
+    match err {
+        ComposeError::FieldBaseNotDeclared { base, .. } => assert_eq!(base, "nope"),
+        other => panic!("expected FieldBaseNotDeclared, got {other:?}"),
+    }
+}
+
+/// A service is the name most likely to be reached for by mistake, and
+/// it has no Docker name of its own to read — its name *is* its Compose
+/// key.
+#[test]
+fn a_field_access_base_naming_a_service_is_a_different_error() {
+    let err = compose_err("service s {\n  image \"x\"\n  labels { \"k\": s.name }\n}\n");
+    match err {
+        ComposeError::FieldBaseNotDeclaration { base, found, .. } => {
+            assert_eq!(base, "s");
+            assert_eq!(found, "a service");
+        }
+        other => panic!("expected FieldBaseNotDeclaration, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_unknown_field_is_an_error_naming_what_the_kind_exposes() {
+    let err = compose_err(
+        "network proxy {\n  external\n}\n\
+         service s {\n  image \"x\"\n  labels { \"k\": proxy.ports }\n}\n",
+    );
+    match err {
+        ComposeError::UnknownDeclarationField {
+            kind,
+            decl,
+            field,
+            readable,
+            ..
+        } => {
+            assert_eq!(kind, "network");
+            assert_eq!(decl, "proxy");
+            assert_eq!(field, "ports");
+            assert_eq!(readable, ["name"]);
+        }
+        other => panic!("expected UnknownDeclarationField, got {other:?}"),
+    }
+}
+
+/// A `volume`'s `driver` holds an ordinary literal, so it reads like any
+/// other value — the rule is "a field that holds a value is readable",
+/// not a list of blessed names.
+#[test]
+fn a_field_access_reads_a_volumes_driver() {
+    let composed = compose_ok(
+        "volume media {\n  driver: \"local\"\n}\n\
+         service s {\n  image \"x\"\n  labels { \"k\": media.driver }\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(label_value(service, "k"), "local");
+}
+
+/// …and interpolates, since a field access is one concept in both
+/// spellings.
+#[test]
+fn a_volumes_driver_interpolates() {
+    let composed = compose_ok(
+        "volume media {\n  driver: \"local\"\n}\n\
+         service s {\n  image \"x\"\n  labels { \"k\": \"via-{{media.driver}}\" }\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(label_value(service, "k"), "via-local");
+}
+
+/// A field the kind has but the declaration leaves unset is its own
+/// error, not the empty string: there is no honest text for "whatever
+/// Docker picks" to splice into a label.
+#[test]
+fn an_unset_field_is_an_error_rather_than_an_empty_value() {
+    let err = compose_err(
+        "volume media {}\n\
+         service s {\n  image \"x\"\n  labels { \"k\": media.driver }\n}\n",
+    );
+    match err {
+        ComposeError::DeclarationFieldUnset {
+            kind, decl, field, ..
+        } => {
+            assert_eq!(kind, "volume");
+            assert_eq!(decl, "media");
+            assert_eq!(field, "driver");
+        }
+        other => panic!("expected DeclarationFieldUnset, got {other:?}"),
+    }
+}
+
+/// A bare-presence flag is real, so saying "no such field" of it would
+/// send the reader hunting a typo that isn't there.
+#[test]
+fn a_presence_flag_reports_that_it_holds_no_value() {
+    let err = compose_err(
+        "network proxy {\n  external\n}\n\
+         service s {\n  image \"x\"\n  labels { \"k\": proxy.external }\n}\n",
+    );
+    match err {
+        ComposeError::DeclarationFieldNotAValue { kind, field, .. } => {
+            assert_eq!(kind, "network");
+            assert_eq!(field, "external");
+        }
+        other => panic!("expected DeclarationFieldNotAValue, got {other:?}"),
+    }
+}
+
+/// Both kinds answer for `external` themselves, so the volume side is
+/// pinned too: one kind's arm covering for the other's absence would
+/// turn a "holds no value" into a "no such field" on volumes alone.
+#[test]
+fn a_presence_flag_on_a_volume_reports_that_it_holds_no_value() {
+    let err = compose_err(
+        "volume media {\n  external\n}\n\
+         service s {\n  image \"x\"\n  labels { \"k\": media.external }\n}\n",
+    );
+    match err {
+        ComposeError::DeclarationFieldNotAValue { kind, field, .. } => {
+            assert_eq!(kind, "volume");
+            assert_eq!(field, "external");
+        }
+        other => panic!("expected DeclarationFieldNotAValue, got {other:?}"),
+    }
+}
+
+/// The same answer for a nested map, which has no single value either.
+#[test]
+fn a_nested_map_field_reports_that_it_holds_no_value() {
+    let err = compose_err(
+        "volume media {\n  driver: \"local\"\n  driver_opts {\n    type: \"nfs\"\n  }\n}\n\
+         service s {\n  image \"x\"\n  labels { \"k\": media.driver_opts }\n}\n",
+    );
+    match err {
+        ComposeError::DeclarationFieldNotAValue { kind, field, .. } => {
+            assert_eq!(kind, "volume");
+            assert_eq!(field, "driver_opts");
+        }
+        other => panic!("expected DeclarationFieldNotAValue, got {other:?}"),
+    }
+}
+
+/// A number can't name a declaration, and the diagnostic points at the
+/// argument rather than at the `$n.name` inside the template body: the
+/// argument is the half that has to change, and one body is reached
+/// from many call sites.
+#[test]
+fn a_numeric_argument_cannot_carry_a_field() {
+    let err = compose_err(
+        "template t(n) {\n  labels { \"k\": $n.name }\n}\n\
+         service s {\n  image \"x\"\n  with t { n: 8080 }\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentCantCarryField {
+            template,
+            param,
+            found,
+            span,
+        } => {
+            assert_eq!(template, "t");
+            assert_eq!(param, "n");
+            assert_eq!(found, "a number");
+            assert_eq!(span.line, 6, "the span should name the argument's own line");
+        }
+        other => panic!("expected ArgumentCantCarryField, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_list_argument_cannot_carry_a_field() {
+    let err = compose_err(
+        "template t(n) {\n  labels { \"k\": $n.name }\n}\n\
+         service s {\n  image \"x\"\n  with t { n: [a, b] }\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentCantCarryField { found, .. } => assert_eq!(found, "a list"),
+        other => panic!("expected ArgumentCantCarryField, got {other:?}"),
+    }
+}
+
+/// The interpolated spelling asks the same question of the same
+/// argument, so it raises the same error rather than a second one that
+/// happens to mean the same thing.
+#[test]
+fn an_interpolated_field_access_rejects_the_same_arguments() {
+    let err = compose_err(
+        "template t(n) {\n  labels { \"k\": \"x-{{n.name}}\" }\n}\n\
+         service s {\n  image \"x\"\n  with t { n: { a: b } }\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentCantCarryField { param, found, .. } => {
+            assert_eq!(param, "n");
+            assert_eq!(found, "a nested map");
+        }
+        other => panic!("expected ArgumentCantCarryField, got {other:?}"),
+    }
+}
+
+/// A field read off a field access is one `.name` too many, and it's
+/// the argument that says so.
+#[test]
+fn an_argument_that_is_itself_a_field_access_cannot_carry_a_field() {
+    let err = compose_err(
+        "network proxy {}\n\
+         template inner(m) {\n  labels { \"k\": $m.name }\n}\n\
+         template outer(n) {\n  with inner { m: $n.name }\n}\n\
+         service s {\n  image \"x\"\n  with outer { n: proxy }\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentCantCarryField { found, .. } => assert_eq!(found, "a field access"),
+        other => panic!("expected ArgumentCantCarryField, got {other:?}"),
+    }
+}
+
+/// Arity reads the same in string content as it does in source, so a
+/// fourth segment is refused there too — and the parser never sees this
+/// one, a binding being ordinary string content.
+#[test]
+fn an_interpolated_field_access_can_be_too_deep() {
+    let err = compose_err("service s {\n  image \"x\"\n  labels { \"k\": \"{{a.b.c.d}}\" }\n}\n");
+    match err {
+        ComposeError::InterpolatedFieldAccessTooDeep { text, .. } => assert_eq!(text, "a.b.c.d"),
+        other => panic!("expected InterpolatedFieldAccessTooDeep, got {other:?}"),
+    }
+}
+
+/// An interpolated base that names nothing gets the field access's own
+/// diagnostic rather than codegen's `unknown interpolation`, which
+/// would say nothing about the declaration it was looking for.
+#[test]
+fn an_interpolated_field_access_with_an_unknown_base_names_the_base() {
+    let err = compose_err("service s {\n  image \"x\"\n  labels { \"k\": \"{{nope.name}}\" }\n}\n");
+    match err {
+        ComposeError::FieldBaseNotDeclared { base, .. } => assert_eq!(base, "nope"),
+        other => panic!("expected FieldBaseNotDeclared, got {other:?}"),
+    }
+}
+
+/// An undotted binding is untouched by all of this: `{{name}}` still
+/// means the enclosing service, and composition still hands it on.
+#[test]
+fn an_undotted_binding_is_left_for_codegen() {
+    let composed = compose_ok(
+        "network proxy {}\nservice s {\n  image \"x\"\n  labels { \"k\": \"{{name}}\" }\n}\n",
+    );
+    assert_eq!(first_label(&composed), "{{name}}");
+}
+
+/// A field access resolves to text, so a `number`-typed position can't
+/// take one however it resolves — said at the argument that passed it,
+/// rather than a pass later about the string it became.
+#[test]
+fn a_field_access_is_not_a_number() {
+    let err = compose_err(
+        "network proxy {}\n\
+         template t(p) {\n  expose $p\n}\n\
+         service s {\n  image \"x\"\n  with t { p: proxy.name }\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentNotNumeric { found, .. } => assert_eq!(found, "a quoted string"),
+        other => panic!("expected ArgumentNotNumeric, got {other:?}"),
+    }
 }

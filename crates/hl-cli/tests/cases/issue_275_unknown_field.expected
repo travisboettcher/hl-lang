@@ -1,0 +1,2 @@
+--- error ---
+issue_275_unknown_field.hll:15:29: `network proxy`'s `external` is a bare-presence flag rather than a value, so it can't fill a value here

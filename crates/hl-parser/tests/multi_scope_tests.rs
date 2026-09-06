@@ -81,10 +81,16 @@ impl SymbolResolver for FakeResolver {
         span: Span,
     ) -> Result<&Network, ComposeError> {
         let target_scope = self.alias_target(scope, qualifier)?;
+        // `UnknownQualifiedNetwork`, matching `hl_linker`'s own
+        // resolver, and load-bearing since #275: a field access asks
+        // this first and falls through to `resolve_qualified_volume` on
+        // exactly this variant, since `alias.proxy.name` says nothing
+        // about which of the two kinds `proxy` is.
         self.modules[&target_scope]
             .networks
             .get(name)
-            .ok_or_else(|| ComposeError::UnknownTemplate {
+            .ok_or_else(|| ComposeError::UnknownQualifiedNetwork {
+                alias: qualifier.name.clone(),
                 name: name.to_string(),
                 span,
             })
@@ -680,4 +686,191 @@ fn imported_volume_colliding_with_an_entry_volume_is_error() {
         ),
         "expected CollidingImportedVolume, got {err:?}"
     );
+}
+
+// --- reading an imported declaration's real name (#275) ---
+//
+// `alias.decl.name` is the third spelling of a field access, and the
+// only one that needs a second scope to mean anything — so these live
+// here for the reason the qualified-reference cases above do: the plain
+// `compose()` entry point has no aliases at all.
+
+/// Two networks, both called `proxy`, told apart by the Docker name
+/// each resolves to — the same decoy shape
+/// `template_qualified_reference_resolves_in_its_own_declaring_scope_not_the_invokers`
+/// uses, because a field access has to obey that same rule: which
+/// file's `traefik` alias answers is decided where the access is
+/// *written*, not where the template is invoked.
+fn decoy_modules(template: TemplateDecl) -> HashMap<Scope, Module> {
+    let real = parse_network(
+        "network proxy {\n  external\n  name: \"docker_default\"\n}\n",
+        "proxy",
+    );
+    let decoy = parse_network("network proxy {\n  name: \"decoy_network\"\n}\n", "proxy");
+    let media = parse_volume("volume media {\n  name: \"media_store\"\n}\n", "media");
+
+    let mut modules = HashMap::new();
+    modules.insert(
+        Scope::Docker,
+        Module {
+            networks: HashMap::from([("proxy".to_string(), real)]),
+            volumes: HashMap::from([("media".to_string(), media)]),
+            ..Default::default()
+        },
+    );
+    modules.insert(
+        Scope::Decoy,
+        Module {
+            networks: HashMap::from([("proxy".to_string(), decoy)]),
+            ..Default::default()
+        },
+    );
+    modules.insert(
+        Scope::Templates,
+        Module {
+            templates: HashMap::from([(template.name.name.clone(), template)]),
+            aliases: HashMap::from([("traefik".to_string(), Scope::Docker)]),
+            ..Default::default()
+        },
+    );
+    modules.insert(
+        Scope::Service,
+        Module {
+            aliases: HashMap::from([
+                ("templates".to_string(), Scope::Templates),
+                // The invoking scope's own `traefik` points at the
+                // decoy, so a field access resolved in the caller's
+                // scope reads `decoy_network` and fails the assertion.
+                ("traefik".to_string(), Scope::Decoy),
+            ]),
+            ..Default::default()
+        },
+    );
+    modules
+}
+
+/// Composes `service s { with templates.web }` against
+/// [`decoy_modules`] and hands back the label `web` contributed.
+fn decoy_label(template: TemplateDecl) -> String {
+    let resolver = FakeResolver {
+        modules: decoy_modules(template),
+    };
+    let s = parse_service("service s {\n  image \"x\"\n  with templates.web\n}\n", "s");
+    let composed =
+        compose_with_resolver(Vec::new(), Vec::new(), vec![s], Scope::Service, &resolver)
+            .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
+    assert!(
+        composed.networks.is_empty(),
+        "reading a name must not pull the declaration into the program: {:?}",
+        composed.networks
+    );
+    composed.services[0].fields.labels.entries[0]
+        .value
+        .text()
+        .to_string()
+}
+
+#[test]
+fn a_qualified_field_access_resolves_in_the_scope_it_was_written_in() {
+    let template = parse_template(
+        "template web {\n  labels { \"caddy.network\": traefik.proxy.name }\n}\n",
+        "web",
+    );
+    assert_eq!(decoy_label(template), "docker_default");
+}
+
+/// The interpolated spelling carries the same lexical-scoping
+/// requirement, and is resolved in the same place for that reason.
+#[test]
+fn a_qualified_interpolated_field_access_resolves_in_the_same_scope() {
+    let template = parse_template(
+        "template web {\n  labels { \"caddy.network\": \"x-{{traefik.proxy.name}}\" }\n}\n",
+        "web",
+    );
+    assert_eq!(decoy_label(template), "x-docker_default");
+}
+
+/// A `with`-invocation's arguments are values written at the call site,
+/// so one written inside a template resolves against that template's
+/// own file — which is why field access is resolved before the
+/// `with`-list rather than after it.
+#[test]
+fn a_qualified_field_access_in_an_invocation_argument_uses_the_writing_scope() {
+    let inner = parse_template(
+        "template inner(n) {\n  labels { \"caddy.network\": $n }\n}\n",
+        "inner",
+    );
+    let web = parse_template(
+        "template web {\n  with inner { n: traefik.proxy.name }\n}\n",
+        "web",
+    );
+    let mut modules = decoy_modules(web);
+    modules
+        .get_mut(&Scope::Templates)
+        .expect("templates module")
+        .templates
+        .insert("inner".to_string(), inner);
+
+    let resolver = FakeResolver { modules };
+    let s = parse_service("service s {\n  image \"x\"\n  with templates.web\n}\n", "s");
+    let composed =
+        compose_with_resolver(Vec::new(), Vec::new(), vec![s], Scope::Service, &resolver)
+            .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
+    assert_eq!(
+        composed.services[0].fields.labels.entries[0].value.text(),
+        "docker_default"
+    );
+}
+
+/// `alias.decl.name` says nothing about which kind `decl` is, and both
+/// kinds carry the field, so the volume side answers the same way.
+#[test]
+fn a_qualified_field_access_reads_an_imported_volumes_name() {
+    let template = parse_template(
+        "template web {\n  labels { \"k\": traefik.media.name }\n}\n",
+        "web",
+    );
+    assert_eq!(decoy_label(template), "media_store");
+}
+
+#[test]
+fn a_qualified_field_access_naming_neither_kind_is_an_error() {
+    let template = parse_template(
+        "template web {\n  labels { \"k\": traefik.nothing.name }\n}\n",
+        "web",
+    );
+    let resolver = FakeResolver {
+        modules: decoy_modules(template),
+    };
+    let s = parse_service("service s {\n  image \"x\"\n  with templates.web\n}\n", "s");
+    let err = compose_with_resolver(Vec::new(), Vec::new(), vec![s], Scope::Service, &resolver)
+        .expect_err("expected a compose error");
+    match err {
+        ComposeError::UnknownQualifiedDeclaration { alias, name, .. } => {
+            assert_eq!(alias, "traefik");
+            assert_eq!(name, "nothing");
+        }
+        other => panic!("expected UnknownQualifiedDeclaration, got {other:?}"),
+    }
+}
+
+/// An alias that resolves to nothing at all is a different mistake with
+/// a different fix, so it keeps its own diagnostic rather than being
+/// folded into "no such declaration."
+#[test]
+fn a_field_access_through_an_unknown_alias_names_the_alias() {
+    let template = parse_template(
+        "template web {\n  labels { \"k\": nope.proxy.name }\n}\n",
+        "web",
+    );
+    let resolver = FakeResolver {
+        modules: decoy_modules(template),
+    };
+    let s = parse_service("service s {\n  image \"x\"\n  with templates.web\n}\n", "s");
+    let err = compose_with_resolver(Vec::new(), Vec::new(), vec![s], Scope::Service, &resolver)
+        .expect_err("expected a compose error");
+    match err {
+        ComposeError::UnknownAlias { alias, .. } => assert_eq!(alias, "nope"),
+        other => panic!("expected UnknownAlias, got {other:?}"),
+    }
 }

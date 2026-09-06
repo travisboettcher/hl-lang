@@ -1,0 +1,17 @@
+# #275: `driver` reads like `name` does, because it holds a value the
+# same way — one rule ("a field that holds a value is readable") rather
+# than a blessed list of field names. Pinned alongside an unset `driver`
+# in issue_275_volume_driver_unset, which is refused rather than read as
+# the empty string.
+volume media {
+  driver: "local"
+}
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  volume media -> "/data"
+  labels {
+    "backup.driver": media.driver
+    "backup.both": "{{media.name}} via {{media.driver}}"
+  }
+}

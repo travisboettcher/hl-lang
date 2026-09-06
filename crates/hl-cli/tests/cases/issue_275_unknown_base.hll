@@ -1,0 +1,15 @@
+# #275: a bare base names one flat namespace of this program's own
+# `network` and `volume` declarations — the same one codegen resolves
+# `networks [proxy]` against. A base that names nothing there is refused
+# rather than resolved to its own text, which would emit a label naming
+# a Docker network that doesn't exist: the "looks right, never matches"
+# failure this feature exists to stop.
+#
+# The message offers the qualified spelling, since a name that resolves
+# to nothing locally is most often one that lives in an imported file.
+service jellyfin {
+  image "jellyfin/jellyfin"
+  labels {
+    "caddy.network": proxy.name
+  }
+}

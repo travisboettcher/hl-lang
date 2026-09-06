@@ -236,6 +236,12 @@ parameters: `{{port}}` puts the `port` argument into a string, where
 `{{name}}` always means the service, even in a template that declares a
 parameter of that name.
 
+A binding with a dot in it reads a field off a `network` or `volume`
+declaration—`{{proxy.name}}` puts that network's real Docker name into
+the string, and `proxy.name` on its own fills a whole value. See
+[Reading a declaration's real
+name](./templates-and-composition.md#reading-a-declarations-real-name).
+
 ## Numbers and strings
 
 Numbers are integers only—no sign, no decimal point, no exponent

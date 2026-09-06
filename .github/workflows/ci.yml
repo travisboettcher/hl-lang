@@ -254,8 +254,12 @@ jobs:
       # gates the whole tree rather than just diff-added lines — the
       # default `added` needs a git-diff reviewdog doesn't have under
       # `reporter: local` and errors out ("diff command is empty").
-      # `vale sync` (the action's default) fetches the Google style
-      # package at run time — it isn't vendored, see .gitignore.
+      # The Google style package is vendored under `.vale/styles`, and
+      # `.vale.ini` names no `Packages`, so the action's `vale sync`
+      # has nothing to fetch and this job needs no network beyond the
+      # checkout. It used to fetch the package at run time, which cost
+      # a red check on a PR whose diff touched no prose the moment that
+      # download failed on the runner.
       - uses: vale-cli/vale-action@518a9136acc6e6668ce7c00d367051e0941e87ff # v3.0.0
         with:
           version: 3.17.1

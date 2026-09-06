@@ -40,6 +40,11 @@ network traefik-net {
 }
 ```
 
+Whatever `name` ends up as, `traefik-net.name` reads it back from any
+value position—a label that has to carry the real Docker name, say. See
+[Reading a declaration's real
+name](./templates-and-composition.md#reading-a-declarations-real-name).
+
 ### `volume` declaration fields
 
 | Field | Accepts | Default |
@@ -49,11 +54,11 @@ network traefik-net {
 | `driver` | string | unset, matching Compose's own default of `local` |
 | `driver_opts` | map body, `key: value` | empty |
 
-`external` and `name` mean exactly what they mean on a `network`. The
-first marks a volume Docker already manages rather than one this file's
-own Compose output should create. The second is the real underlying
-Docker volume name, when it differs from the identifier you declared the
-volume under. `hllc` passes `driver` and `driver_opts` straight through
+`external` and `name` mean exactly what they mean on a `network`, down
+to `media.name` reading the second one back. The first marks a volume
+Docker already manages rather than one this file's own Compose output
+should create. The second is the real underlying Docker volume name,
+when it differs from the identifier you declared the volume under. `hllc` passes `driver` and `driver_opts` straight through
 to Compose:
 
 ```hll

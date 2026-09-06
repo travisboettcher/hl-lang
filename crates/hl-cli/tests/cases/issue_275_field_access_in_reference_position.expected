@@ -1,0 +1,2 @@
+--- error ---
+issue_275_field_access_in_reference_position.hll: 11:13: `$net.name` reads a field, and this position names a declaration instead — drop the `.name` to name the declaration itself, or move the field access to a value position such as a `labels` entry

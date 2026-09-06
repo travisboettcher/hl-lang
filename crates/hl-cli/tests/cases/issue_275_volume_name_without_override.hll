@@ -1,0 +1,21 @@
+# #275, the case the workaround this replaces survives: with no `name:`
+# override, a declaration's real name *is* its identifier, so reading
+# `.name` and passing the identifier agree. That agreement is why
+# passing the identifier looks correct in a small test and breaks on the
+# configs that need it — pinned here so the fallback keeps answering,
+# rather than only answering when the two names differ.
+#
+# The volume side is pinned rather than the network one because both
+# carry the field identically (`Volume::docker_name` mirrors
+# `Network::docker_name`), and one rule covering two kinds is worth a
+# case that says so. The interpolated spelling rides along.
+volume media {}
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  volume media -> "/data"
+  labels {
+    "backup.volume": media.name
+    "backup.path": "/mnt/{{media.name}}"
+  }
+}

@@ -282,10 +282,14 @@ kind that rots.
 [Vale](https://vale.sh) checks `README.md`, `CONTRIBUTING.md`,
 `docs/DESIGN.md`, and `book/src/*.md` against the Google developer
 documentation style guide. Install it with `go install
-github.com/errata-ai/vale/v3/cmd/vale@latest`, then run `vale sync` once to
-fetch the style rules—they aren't checked into the repo—and `vale .` from
-the repo root to lint. `.vale.ini` scopes the check to those files, so generated
-`CHANGELOG.md`s and the PR template aren't linted. A project-specific term
+github.com/errata-ai/vale/v3/cmd/vale@latest` and run `vale .` from the repo
+root to lint. The style rules live in `.vale/styles/Google`, vendored rather
+than fetched, so a fresh clone lints offline and an upstream rule change
+reaches this repo as a reviewable diff instead of quietly moving what CI
+enforces. To take such a change, add `Packages = Google` back to `.vale.ini`,
+run `vale sync`, drop the line again, and commit what moved. `.vale.ini`
+scopes the check to those files, so generated `CHANGELOG.md`s and the PR
+template aren't linted. A project-specific term
 (`homelab`, `codegen`, `Traefik`, and the like) belongs in
 `.vale/styles/config/vocabularies/Base/accept.txt`, not an inline
 suppression comment.

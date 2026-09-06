@@ -203,6 +203,97 @@ ordinary content: `command` and `env` values carry `$HOME` through to a
 shell, and Compose reads its own `${VAR}` interpolation out of the
 generated file once `hllc` has written it. The warning skips both.
 
+## Reading a declaration's real name
+
+A `network` or `volume` answers to two names: the identifier your `.hll`
+files refer to it by, and the real Docker name—the `name:` override when
+the declaration sets one, the identifier otherwise. A label that has to
+name a real Docker network needs the second. Write `.name` after the
+declaration to read it:
+
+```hll,build
+network proxy {
+  external
+  name: "docker_default"
+}
+
+template caddy(net, port) {
+  networks [$net]
+  expose $port
+  labels {
+    "caddy.network": $net.name
+    "caddy.upstream": "{{name}}:{{port}}"
+  }
+}
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  with caddy { net: proxy, port: 8096 }
+}
+```
+
+```yaml
+networks:
+- proxy
+labels:
+- traefik.docker.network=docker_default
+- caddy.network=docker_default
+- caddy.upstream=jellyfin:8096
+```
+
+One parameter serves both positions, and each takes what it needs:
+`networks [$net]` attaches the network, so it wants the identifier,
+while the label hands the network's name to the proxy that reads it, so
+it wants `docker_default`. Passing the identifier to both is the trap
+this replaces—it compiles, and the label reads `caddy.network=proxy`,
+which matches nothing. Drop the `name:` override and the two spellings
+agree, so the mistake survives a small test and breaks on exactly the
+files that need it: an external network another Compose project created
+almost always carries a `name:`.
+
+Three spellings read the same field:
+
+| written in a value | reads |
+| --- | --- |
+| `proxy.name` | a `network`/`volume` this program declares |
+| `net.proxy.name` | one an [imported file](./imports.md) declares |
+| `$net.name` | whichever declaration the invocation binds `net` to |
+
+A field is readable when it holds a value. `name` holds one on both
+kinds, and a `volume`'s `driver` holds one too:
+
+| written in a value | reads |
+| --- | --- |
+| `media.name` | the volume's real Docker name |
+| `media.driver` | the driver it names, when it sets one |
+
+The fields that hold nothing say so rather than pretending not to
+exist. `external` is a bare-presence flag and `driver_opts` is a map, so
+neither fills a value, and `hllc` names the field and why. Ask for a
+field the kind hasn't got at all and it lists the ones it has. Ask for
+one the declaration leaves unset—a `volume` with no `driver`—and it
+refuses rather than handing back an empty string, since Docker picks the
+default and no text spells the default it picks.
+
+The access also goes inside string content, as a dotted binding
+alongside the `{{param}}` form:
+
+```hll,fragment
+labels { "caddy.upstream": "http://{{net.name}}:8096" }
+```
+
+Two rules keep this unambiguous, and both are worth knowing before you
+hit them:
+
+- **Value positions only.** `networks [...]`, `dns`, `env_file`,
+  `depends_on`, a router's `entrypoints`/`path_prefix`/`middleware`, and
+  a named-volume mount's host side all name a *declaration*, and a `.`
+  there already qualifies that name by an import alias. Writing
+  `networks [$net.name]` is an error that says so.
+- **At most three parts.** Two name a declaration and a field, three
+  name an alias, a declaration and a field, and `$param` takes exactly
+  one field. A fourth part has no reading left.
+
 ## Every template needs a `with`
 
 A template reaches a service only through that service's own `with`.

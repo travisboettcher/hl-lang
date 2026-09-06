@@ -1,0 +1,9 @@
+# #275: the imported half of `issue_275_reading_a_name_attaches_nothing`
+# — a file declaring the external network that case reads the name of.
+# It carries no service of its own, so compiled on its own (which the
+# corpus does to every `.hll` file it finds) it emits an empty document
+# and warns that nothing references the declaration.
+network proxy {
+  external
+  name: "docker_default"
+}

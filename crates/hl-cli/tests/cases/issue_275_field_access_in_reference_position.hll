@@ -1,0 +1,17 @@
+# #275: field access is legal in value positions only. A
+# reference-shaped position names a declaration, and `.` there already
+# qualifies that name by an import alias (`networks [traefik.proxy]`),
+# so the two readings can't both be had — `networks [$net]` has to go on
+# meaning the identifier.
+#
+# The `$param` spelling is one of the two a reference position can tell
+# apart from `alias.name`, so it draws the diagnostic rather than a
+# stray "expected `,`, found `.`" a token later.
+template caddy(net) {
+  networks [$net.name]
+}
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  with caddy { net: proxy }
+}

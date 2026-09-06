@@ -1,9 +1,6 @@
 /target
 /book/book
 
-# Fetched by `vale sync`; not vendored. Run `vale sync` after cloning.
-/.vale/styles/Google
-
 # Written by `insta` when an inline snapshot fails locally, and consumed
 # by `cargo insta review`; it's scratch state for that one run, not
 # something to commit. CI never produces one — INSTA_UPDATE=no in
@@ -25,3 +22,7 @@
 # from that job.
 /mutants.out/
 /mutants.out.old/
+
+# Scratch git worktrees the agent harness checks out for subagents, one
+# per agent, removed when the harness releases them. Never source.
+/.claude/worktrees/

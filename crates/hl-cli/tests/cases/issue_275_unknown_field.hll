@@ -1,0 +1,17 @@
+# #275: a field is readable when it holds a value, so a bare-presence
+# flag is refused — and refused as what it is. `external` is written
+# three lines up, so telling the reader there is no such field would
+# send them hunting a typo that isn't there; the message says the field
+# is real and holds nothing instead. An unknown *name* gets the other
+# message, in issue_275_unknown_field_name.
+network proxy {
+  external
+}
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  networks [proxy]
+  labels {
+    "caddy.external": proxy.external
+  }
+}

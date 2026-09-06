@@ -1,0 +1,11 @@
+--- compose ---
+services:
+  jellyfin:
+    image: jellyfin/jellyfin
+    volumes:
+    - media:/data
+    labels:
+    - backup.volume=media
+    - backup.path=/mnt/media
+volumes:
+  media: null

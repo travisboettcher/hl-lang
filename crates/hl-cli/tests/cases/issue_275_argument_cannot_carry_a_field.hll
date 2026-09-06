@@ -1,0 +1,17 @@
+# #275: a `$param.name` reads a field off whatever the invocation binds,
+# so an argument that can't name a declaration has no field to give.
+# Reported at the argument's own call site rather than at the `$net.name`
+# inside the template body — the argument is the half that has to
+# change, and one template body is reached from many call sites, which
+# is the same span rule `ArgumentNotReferenceShaped` and
+# `ArgumentNotNumeric` already follow.
+template caddy(net) {
+  labels {
+    "caddy.network": $net.name
+  }
+}
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  with caddy { net: 8096 }
+}

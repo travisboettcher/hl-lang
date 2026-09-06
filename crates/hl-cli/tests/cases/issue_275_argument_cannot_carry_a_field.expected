@@ -1,0 +1,2 @@
+--- error ---
+issue_275_argument_cannot_carry_a_field.hll:16:21: argument `net` for template `caddy` must name a `network` or `volume` declaration to read a field off it (found a number)

@@ -2747,6 +2747,175 @@ fn qualified_zero_arg_template_invocation() {
     assert!(inv.args.entries.is_empty());
 }
 
+// --- field access in a value position (#275) ---
+//
+// `.` parses two ways now, and which one a position gets is decided by
+// the position, not by the tokens: a *value* reads `a.b` as a field
+// access, a *reference* reads it as `alias.name`. These pin both halves,
+// since the whole design rests on the two never competing.
+
+/// The value the field access resolves to is composition's business —
+/// what the parser has to get right is the shape.
+fn field_access(lit: &Literal) -> &hl_parser::FieldAccess {
+    match lit {
+        Literal::Field(access) => access,
+        other => panic!("expected a field access, got {other:?}"),
+    }
+}
+
+fn first_label_value(program: &hl_parser::Program) -> &Literal {
+    &as_service(&program.decls[0]).fields.labels.entries[0].value
+}
+
+#[test]
+fn two_segment_field_access_names_a_local_declaration() {
+    let program =
+        parse_ok("service s {\n  image \"x\"\n  labels { \"caddy.network\": proxy.name }\n}\n");
+    let access = field_access(first_label_value(&program));
+    assert_eq!(
+        access.base,
+        Literal::Ident("proxy".to_string(), access.base.span())
+    );
+    assert_eq!(access.field.name, "name");
+    assert_eq!(access.dotted(), "proxy.name");
+}
+
+#[test]
+fn three_segment_field_access_names_an_imported_declaration() {
+    let source =
+        "service s {\n  image \"x\"\n  labels { \"caddy.network\": traefik.proxy.name }\n}\n";
+    let program = parse_ok(source);
+    let access = field_access(first_label_value(&program));
+    assert_eq!(access.base.qualifier().unwrap().name, "traefik");
+    assert_eq!(access.base.text(), "proxy");
+    assert_eq!(access.field.name, "name");
+    assert_eq!(access.dotted(), "traefik.proxy.name");
+    // The base is the alias-and-declaration half, and its span says so:
+    // it stops before the field, so a diagnostic about resolving the
+    // declaration underlines only the part that names one.
+    let base = access.base.span();
+    assert_eq!(
+        &source[base.start as usize..base.end as usize],
+        "traefik.proxy"
+    );
+}
+
+/// The access's span runs from its head through its last segment, so a
+/// diagnostic about the value underlines what the author wrote rather
+/// than the declaration half alone.
+#[test]
+fn a_field_access_span_covers_the_whole_access() {
+    let source = "service s {\n  image \"x\"\n  labels { \"k\": traefik.proxy.name }\n}\n";
+    let program = parse_ok(source);
+    let span = first_label_value(&program).span();
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        "traefik.proxy.name"
+    );
+}
+
+#[test]
+fn a_parameter_can_carry_a_field_access() {
+    let program = parse_ok("template t(net) {\n  labels { \"caddy.network\": $net.name }\n}\n");
+    let template = as_template(&program.decls[0]);
+    let access = field_access(&template.fields.labels.entries[0].value);
+    assert!(matches!(access.base, Literal::Param(ref name, _) if name == "net"));
+    assert_eq!(access.dotted(), "$net.name");
+}
+
+/// A fourth segment has no shape left to be — see
+/// `Parser::parse_field_access` — so it's refused rather than read as
+/// the first three with the rest dropped.
+#[test]
+fn four_segment_field_access_is_too_deep() {
+    let err = parse("service s {\n  image \"x\"\n  labels { \"k\": a.b.c.d }\n}\n")
+        .expect_err("four dotted segments should not parse");
+    match err {
+        ParseError::FieldAccessTooDeep { text, .. } => assert_eq!(text, "a.b.c.d"),
+        other => panic!("expected FieldAccessTooDeep, got {other:?}"),
+    }
+}
+
+/// A parameter already names one declaration, so it has no alias
+/// segment to spell — `$net.a.b` is one field too many, not three
+/// segments' worth of something else.
+#[test]
+fn a_parameter_base_takes_exactly_one_field() {
+    let err = parse("template t(net) {\n  labels { \"k\": $net.a.b }\n}\n")
+        .expect_err("two fields after a parameter should not parse");
+    match err {
+        ParseError::FieldAccessTooDeep { text, .. } => assert_eq!(text, "$net.a.b"),
+        other => panic!("expected FieldAccessTooDeep, got {other:?}"),
+    }
+}
+
+#[test]
+fn field_access_is_rejected_in_a_reference_position() {
+    let err = parse("service s {\n  image \"x\"\n  networks [traefik.proxy.name]\n}\n")
+        .expect_err("a field access should not parse as a network reference");
+    match err {
+        ParseError::FieldAccessInReferencePosition { text, .. } => {
+            assert_eq!(text, "traefik.proxy.name");
+        }
+        other => panic!("expected FieldAccessInReferencePosition, got {other:?}"),
+    }
+}
+
+/// The rejection consumes the trailing segments before reporting, so
+/// its span covers the whole access rather than stopping at the
+/// reference that parsed — the message quotes the same text the span
+/// underlines.
+#[test]
+fn the_reference_position_rejection_spans_the_whole_access() {
+    let source = "service s {\n  image \"x\"\n  networks [traefik.proxy.name]\n}\n";
+    let err = parse(source).expect_err("a field access should not parse as a network reference");
+    let span = err.span();
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        "traefik.proxy.name"
+    );
+}
+
+/// The `$param` spelling is the other one a reference position can tell
+/// apart from `alias.name`, and it's refused for the same reason.
+#[test]
+fn a_parameter_field_access_is_rejected_in_a_reference_position() {
+    let err = parse("template t(net) {\n  networks [$net.name]\n}\n")
+        .expect_err("a field access should not parse as a network reference");
+    match err {
+        ParseError::FieldAccessInReferencePosition { text, .. } => {
+            assert_eq!(text, "$net.name");
+        }
+        other => panic!("expected FieldAccessInReferencePosition, got {other:?}"),
+    }
+}
+
+/// Every reference-shaped position rejects it, not just `networks` —
+/// they all reach one parsing function. A named-volume mount's host
+/// side is the other position that resolves a qualifier, so it's the
+/// one worth pinning beside `networks`.
+#[test]
+fn field_access_is_rejected_in_a_volume_mount_host() {
+    let err = parse("service s {\n  image \"x\"\n  volume storage.media.name -> \"/data\"\n}\n")
+        .expect_err("a field access should not parse as a volume reference");
+    assert!(matches!(
+        err,
+        ParseError::FieldAccessInReferencePosition { .. }
+    ));
+}
+
+/// The two-segment spelling is what a reference position keeps: it's
+/// indistinguishable from the `alias.name` it has always been, so
+/// `networks [traefik.proxy]` goes on meaning the imported network.
+#[test]
+fn a_two_segment_reference_is_still_a_qualified_reference() {
+    let program = parse_ok("service s {\n  image \"x\"\n  networks [traefik.proxy]\n}\n");
+    let service = as_service(&program.decls[0]);
+    let r = &service.fields.networks[0];
+    assert_eq!(r.qualifier().unwrap().name, "traefik");
+    assert_eq!(r.text(), "proxy");
+}
+
 // --- raw nesting depth (#72) ---
 
 /// Wraps `k: <value>` in `n` nested `[ ]`, the shape the issue used to

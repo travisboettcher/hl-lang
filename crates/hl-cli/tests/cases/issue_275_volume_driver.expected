@@ -1,0 +1,12 @@
+--- compose ---
+services:
+  jellyfin:
+    image: jellyfin/jellyfin
+    volumes:
+    - media:/data
+    labels:
+    - backup.driver=local
+    - backup.both=media via local
+volumes:
+  media:
+    driver: local
