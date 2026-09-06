@@ -1905,6 +1905,24 @@ the service already answered:
   #181's string escapes made a newline writable, and no label key holds
   one on purpose.
 
+- A hand-written label **value** draws no check at all, settled at #270
+  as a decision rather than a gap. The metacharacter guard on
+  `router.host` works because codegen knows the grammar that host lands
+  in: a backtick there closes the `Host(` call early and widens the rule
+  to match everything, which is #65. A `labels` value has no such
+  grammar to know. A legitimate Traefik rule is mostly backticks,
+  parentheses and `||`, so any guard strict enough to stop the dangerous
+  string also refuses the ordinary one, and a guard tuned to Traefik's
+  grammar is the Traefik coupling this design spent #259 removing. Two
+  things make accepting that defensible. The text sits in the author's
+  own `.hll` source rather than arriving from a stranger, so a bad value
+  breaks the author's own homelab instead of opening it, and the same
+  author already reaches for `raw` when they want codegen to stand
+  aside. The duty this shifts—vetting anything spliced into a value with
+  a syntax of its own, a template parameter most of all—belongs to
+  whoever writes the template, and `book/src/` says so where it teaches
+  both `labels` and interpolation.
+
 A `labels` key repeated within one body is the parser's business
 instead, as `ParseError::DuplicateMapKey`—the same error a repeated
 `env`, `volume`, `publish` or `raw` key raises, from the same

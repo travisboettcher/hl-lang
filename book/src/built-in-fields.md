@@ -1052,6 +1052,57 @@ containing one would name a different label than the one written. `hllc`
 rejects that rather than emitting it, the same way it rejects an `=` in a
 [`router`](#router) name.
 
+### A value goes through as written
+
+`hllc` checks the key and leaves the value alone. That's deliberate. A
+Traefik rule is mostly backticks, parentheses and `||`, so a guard
+strict enough to be worth having would reject the labels this field
+exists to write:
+
+```hll,build
+service web {
+  image "nginx"
+  labels {
+    "traefik.http.routers.web.rule": "Host(`web.example.com`) || Host(`www.example.com`)"
+  }
+}
+```
+
+```yaml
+labels:
+- traefik.http.routers.web.rule=Host(`web.example.com`) || Host(`www.example.com`)
+```
+
+The cost is that a value here carries none of the protection
+[`router`](#router) gives you. `router.host` refuses a backtick, because
+`hllc` knows the rule grammar the host lands in and can see that a
+backtick closes the `Host(` call early:
+
+```hll,ignore
+router {
+  host: "ok.example.com`) || HostRegexp(`{any:.+}"
+}
+```
+
+```text
+4:11: `router.host` must not contain '`' — it would change the meaning of the generated Traefik label
+```
+
+Write the rule yourself and `hllc` loses that knowledge. The same string
+reaches Traefik intact, as a rule matching every host rather than one:
+
+```hll,ignore
+labels {
+  "traefik.http.routers.web.rule": "Host(`ok.example.com`) || HostRegexp(`{any:.+}`)"
+}
+```
+
+So a value you assemble from somewhere else—a template parameter, most
+of all—is yours to vet. The check `hllc` drops here applies at compile
+time to text sitting in your own `.hll` source, which is what makes
+leaving it out defensible: a bad value breaks your own homelab rather
+than opening it to a stranger.
+
 ### A key written twice is an error
 
 Two entries claiming one key is a compile error naming both, exactly as
