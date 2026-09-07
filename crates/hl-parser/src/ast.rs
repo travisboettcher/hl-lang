@@ -1097,11 +1097,90 @@ pub struct LabelMap {
     pub entries: Vec<LabelEntry>,
 }
 
+/// What one `labels` entry holds: a single value, or several.
+///
+/// The distinction is the whole of #288, and it is a statement about
+/// merging rather than about rendering. A scalar says "this key holds
+/// one thing", so two templates setting it are two answers to one
+/// question and collide. A list says "this key holds several things",
+/// so several places contributing to it compose — the same reasoning
+/// `networks` and `dns` already merge by, and what `router.middleware`
+/// did before routing left the compiler.
+///
+/// Both render the same way, comma-joined, matching the separator a
+/// list argument interpolates with (#283) so one convention covers both.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LabelValue {
+    Scalar(Literal),
+    /// The list's own span, covering the brackets — what a diagnostic
+    /// points at when the *shape* is what's wrong, rather than any one
+    /// item.
+    List(Vec<Literal>, Span),
+}
+
+impl LabelValue {
+    /// Where this value was written.
+    pub fn span(&self) -> Span {
+        match self {
+            LabelValue::Scalar(lit) => lit.span(),
+            LabelValue::List(_, span) => *span,
+        }
+    }
+
+    /// Every literal this value holds, for the walks that substitute
+    /// parameters into them.
+    pub fn literals_mut(&mut self) -> Vec<&mut Literal> {
+        match self {
+            LabelValue::Scalar(lit) => vec![lit],
+            LabelValue::List(items, _) => items.iter_mut().collect(),
+        }
+    }
+
+    /// This value as the one string a label holds, with `render` applied
+    /// to each literal on the way.
+    ///
+    /// The single place a list becomes text, so codegen — which renders
+    /// each item through its own interpolation — and any plainer caller
+    /// can't come to disagree about the separator. The comma matches
+    /// what a list argument interpolates with (#283).
+    pub fn join<E>(
+        &self,
+        mut render: impl FnMut(&Literal) -> Result<String, E>,
+    ) -> Result<String, E> {
+        match self {
+            LabelValue::Scalar(lit) => render(lit),
+            LabelValue::List(items, _) => {
+                let mut parts = Vec::with_capacity(items.len());
+                for item in items {
+                    parts.push(render(item)?);
+                }
+                Ok(parts.join(","))
+            }
+        }
+    }
+
+    /// This value's own source text, joined but not interpolated — what
+    /// a caller with no bindings to apply sees.
+    pub fn text(&self) -> String {
+        self.join(|lit| Ok::<_, std::convert::Infallible>(lit.text().to_string()))
+            .expect("rendering a literal's own text cannot fail")
+    }
+
+    /// How this value names its own shape in a diagnostic, for the one
+    /// case where two tiers disagree about which it is.
+    pub fn shape(&self) -> &'static str {
+        match self {
+            LabelValue::Scalar(_) => "a single value",
+            LabelValue::List(_, _) => "a list",
+        }
+    }
+}
+
 /// One `"key": "value"` label entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LabelEntry {
     pub key: Literal,
-    pub value: Literal,
+    pub value: LabelValue,
     pub span: Span,
 }
 

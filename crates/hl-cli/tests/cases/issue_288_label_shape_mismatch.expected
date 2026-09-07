@@ -1,0 +1,2 @@
+--- error ---
+issue_288_label_shape_mismatch.hll:10:12: `labels` key "com.example.tags" is a single value here but a list at issue_288_label_shape_mismatch.hll:6:12 — a list composes across templates and a single value doesn't, so the two say different things about what this key holds

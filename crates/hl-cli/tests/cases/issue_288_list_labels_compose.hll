@@ -1,0 +1,26 @@
+# #288: two independent templates each contributing one entry to the
+# same label key. A list value says "this key holds several things", so
+# several places contributing to it compose — which is what
+# `router.middleware` did before routing left the compiler, and the
+# pattern this repo's own fixtures teach. A scalar under the same key
+# would still collide, and that difference is the whole point: a list is
+# how you say the question takes more than one answer.
+use "std:traefik" as traefik
+
+template internal_web(port) {
+  expose $port
+  labels {
+    "traefik.http.routers.{{name}}.middlewares": ["local-ipwhitelist@file"]
+  }
+}
+
+template authenticated {
+  labels {
+    "traefik.http.routers.{{name}}.middlewares": ["forwardAuth-authentik@file"]
+  }
+}
+
+service syncthing {
+  image "lscr.io/linuxserver/syncthing"
+  with internal_web { port: 8384 }, authenticated
+}

@@ -25,8 +25,9 @@ use hl_lexer::{SourceMap, Span};
 use crate::ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnEntry, Entrypoint, EnvEntry,
     EnvMap, Expose, FieldAccess, Healthcheck, HealthcheckTest, Ident, Image, LabelEntry, LabelMap,
-    Literal, MatchExpr, Network, Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart,
-    Router, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik, Volume,
+    LabelValue, Literal, MatchExpr, Network, Program, QualifiedRef, RawEntry, RawMap, RawValue,
+    Restart, Router, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik,
+    Volume,
 };
 use crate::interp;
 use crate::schema::{self, MapSide};
@@ -404,6 +405,22 @@ pub enum ComposeError {
         first: Span,
         second: Span,
     },
+    /// One `labels` key written as a list in one place and a single
+    /// value in another (#288).
+    ///
+    /// The two disagree about what the key holds, and neither resolution
+    /// is honest: concatenating a scalar into a list invents a list the
+    /// author didn't write, and letting either win silently discards the
+    /// other. The shapes mean different things about merging — a list
+    /// composes across tiers, a scalar collides — so this is a real
+    /// disagreement rather than a formatting difference.
+    LabelShapeMismatch {
+        key: String,
+        first_shape: &'static str,
+        second_shape: &'static str,
+        first: Span,
+        second: Span,
+    },
     /// Same rule as [`Self::FieldCollision`], for a map field
     /// (`env`/`volume`/`publish`) — two explicit templates set the same
     /// key (`env`), container path (`volume`), or container port
@@ -554,6 +571,7 @@ impl ComposeError {
             | ComposeError::UnknownQualifiedVolume { span, .. }
             | ComposeError::CollidingImportedVolume { span, .. } => *span,
             ComposeError::MapKeyCollision(details) => details.second,
+            ComposeError::LabelShapeMismatch { second, .. } => *second,
         }
     }
 
@@ -734,6 +752,19 @@ impl ComposeError {
             } => write!(
                 f,
                 "{at}: field `{field}` set by both template `{first_template}` (at {}) and template `{second_template}`—explicit templates must not conflict",
+                first.locate(files)
+            ),
+            ComposeError::LabelShapeMismatch {
+                key,
+                first_shape,
+                second_shape,
+                first,
+                ..
+            } => write!(
+                f,
+                "{at}: `labels` key {key:?} is {second_shape} here but {first_shape} at {} — a \
+                 list composes across templates and a single value doesn't, so the two say \
+                 different things about what this key holds",
                 first.locate(files)
             ),
             ComposeError::MapKeyCollision(details) => {
@@ -2530,7 +2561,11 @@ fn visit_literals_mut(
     }
     for e in &mut fields.labels.entries {
         visit(&mut e.key)?;
-        visit(&mut e.value)?;
+        // A label value may be a list since #288, so this walks whatever
+        // it holds rather than the one literal it used to be.
+        for lit in e.value.literals_mut() {
+            visit(lit)?;
+        }
     }
     for entry in &mut fields.raw.entries {
         visit(&mut entry.key)?;
@@ -2775,7 +2810,9 @@ fn substitute_params(
     // either a label's key or its value.
     for e in &mut fields.labels.entries {
         substitute_literal(&mut e.key, args, template_name, warnings)?;
-        substitute_literal(&mut e.value, args, template_name, warnings)?;
+        for lit in e.value.literals_mut() {
+            substitute_literal(lit, args, template_name, warnings)?;
+        }
     }
     for entry in &mut fields.raw.entries {
         substitute_literal(&mut entry.key, args, template_name, warnings)?;
@@ -4472,18 +4509,12 @@ fn merge_tier(
         tier,
         |e| e.key.text().to_string(),
     )?;
-    // Keyed exactly like `env` above — same side, same rules (#243). The
-    // accumulated order is tier order (each `with` target left to
-    // right, then the body's own), which is what makes
-    // the emitted label order a stable function of the source.
-    merge_map(
-        &mut acc.labels,
-        "labels",
-        MapSide::Key,
-        incoming.labels.entries,
-        tier,
-        |e| e.key.text().to_string(),
-    )?;
+    // Keyed like `env` above, but with one rule of its own (#288): a
+    // list-valued entry concatenates across tiers instead of colliding.
+    // See `merge_labels`. The accumulated order is tier order (each
+    // `with` target left to right, then the body's own), which is what
+    // makes the emitted label order a stable function of the source.
+    merge_labels(&mut acc.labels, incoming.labels.entries, tier)?;
     // Keyed by the referenced service's own name, like `env`'s key
     // side — not concatenated through `LIST_FIELDS` above, even though
     // its surface syntax is still a comma/bracket list. Not plain
@@ -4826,6 +4857,90 @@ fn merge_scalar(
             }
             _ => unreachable!("Own is always merged last, so it is never the existing tier"),
         },
+    }
+    Ok(())
+}
+
+/// Merges `labels` entries across tiers, with the one rule that makes
+/// composable templates possible again (#288).
+///
+/// A **list-valued** entry concatenates: several places contributing to
+/// one key is what a list means, so a template supplying a base list and
+/// another adding to it compose rather than conflict. That is what
+/// `router.middleware` did before routing left the compiler, and losing
+/// it was the migration's real cost until this. Items dedupe by text —
+/// naming one middleware twice is one answer given twice, not two.
+///
+/// A **scalar-valued** entry keeps [`merge_map`]'s rules exactly: the
+/// service's own body overrides a template, and two explicit templates
+/// setting it collide. Two answers to a question that takes one answer
+/// is the collision #243 exists to catch, and a list is the only way to
+/// say the question takes several.
+///
+/// A list in one tier and a scalar in another is
+/// [`ComposeError::LabelShapeMismatch`]: they disagree about what kind
+/// of thing the key holds, and either resolution silently discards what
+/// the other said.
+fn merge_labels(
+    acc: &mut Vec<(LabelEntry, Tier)>,
+    incoming: Vec<LabelEntry>,
+    tier: &Tier,
+) -> Result<(), ComposeError> {
+    for entry in incoming {
+        let key = entry.key.text().to_string();
+        let Some(pos) = acc.iter().position(|(e, _)| e.key.text() == key) else {
+            acc.push((entry, tier.clone()));
+            continue;
+        };
+        let held_span = acc[pos].0.span;
+        let existing_tier = acc[pos].1.clone();
+        let mut overridden = None;
+        match (&mut acc[pos].0.value, entry.value) {
+            (LabelValue::List(held, _), LabelValue::List(items, _)) => {
+                for item in items {
+                    if !held.iter().any(|h| h.text() == item.text()) {
+                        held.push(item);
+                    }
+                }
+                // The accumulated entry keeps the tier it was first seen
+                // at: a concatenating entry has no single tier, and
+                // nothing downstream asks which one won, because none
+                // did.
+            }
+            (held @ LabelValue::Scalar(_), incoming_value @ LabelValue::Scalar(_)) => {
+                match (&existing_tier, tier) {
+                    (_, Tier::Own) => {
+                        *held = incoming_value;
+                        overridden = Some(entry.span);
+                    }
+                    (Tier::Explicit(first), Tier::Explicit(second)) => {
+                        return Err(ComposeError::MapKeyCollision(Box::new(MapKeyCollision {
+                            field: "labels",
+                            side: MapSide::Key,
+                            key,
+                            first_template: first.clone(),
+                            second_template: second.clone(),
+                            first: held_span,
+                            second: entry.span,
+                        })));
+                    }
+                    (Tier::Own, Tier::Explicit(_)) => {}
+                }
+            }
+            (held, incoming_value) => {
+                return Err(ComposeError::LabelShapeMismatch {
+                    key,
+                    first_shape: held.shape(),
+                    second_shape: incoming_value.shape(),
+                    first: held_span,
+                    second: entry.span,
+                });
+            }
+        }
+        if let Some(span) = overridden {
+            acc[pos].0.span = span;
+            acc[pos].1 = Tier::Own;
+        }
     }
     Ok(())
 }

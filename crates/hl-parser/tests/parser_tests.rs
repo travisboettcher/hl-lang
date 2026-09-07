@@ -1353,21 +1353,21 @@ fn labels_body_keeps_dotted_and_bracketed_keys_intact() {
         "service s {\n  labels {\n               \"traefik.http.routers.s.tls.domains[0].main\": \"internal.example.com\"\n               \"com.example.owner\": \"platform-team\"\n  }\n}\n",
     );
     let service = as_service(&program.decls[0]);
-    let entries: Vec<(&str, &str)> = service
+    let entries: Vec<(String, String)> = service
         .fields
         .labels
         .entries
         .iter()
-        .map(|e| (e.key.text(), e.value.text()))
+        .map(|e| (e.key.text().to_string(), e.value.text()))
         .collect();
     assert_eq!(
         entries,
         vec![
             (
-                "traefik.http.routers.s.tls.domains[0].main",
-                "internal.example.com"
+                "traefik.http.routers.s.tls.domains[0].main".to_string(),
+                "internal.example.com".to_string()
             ),
-            ("com.example.owner", "platform-team"),
+            ("com.example.owner".to_string(), "platform-team".to_string()),
         ]
     );
 }
@@ -2763,8 +2763,24 @@ fn field_access(lit: &Literal) -> &hl_parser::FieldAccess {
     }
 }
 
+/// The literal a service's first `labels` entry holds, for the cases
+/// that care about its *kind* rather than its text. A list-valued entry
+/// (#288) has no single literal, so those cases would be asking the
+/// wrong question — they all write a scalar.
 fn first_label_value(program: &hl_parser::Program) -> &Literal {
-    &as_service(&program.decls[0]).fields.labels.entries[0].value
+    scalar_label_value(&as_service(&program.decls[0]).fields.labels.entries[0].value)
+}
+
+/// The one literal a scalar-valued `labels` entry holds. A list-valued
+/// entry (#288) has none, and every case reaching for this writes a
+/// single value — asking for the literal is the question.
+fn scalar_label_value(value: &hl_parser::LabelValue) -> &Literal {
+    match value {
+        hl_parser::LabelValue::Scalar(lit) => lit,
+        hl_parser::LabelValue::List(_, _) => {
+            panic!("this case writes a single label value, not a list")
+        }
+    }
 }
 
 #[test]
@@ -2818,7 +2834,7 @@ fn a_field_access_span_covers_the_whole_access() {
 fn a_parameter_can_carry_a_field_access() {
     let program = parse_ok("template t(net) {\n  labels { \"caddy.network\": $net.name }\n}\n");
     let template = as_template(&program.decls[0]);
-    let access = field_access(&template.fields.labels.entries[0].value);
+    let access = field_access(scalar_label_value(&template.fields.labels.entries[0].value));
     assert!(matches!(access.base, Literal::Param(ref name, _) if name == "net"));
     assert_eq!(access.dotted(), "$net.name");
 }

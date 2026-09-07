@@ -1149,15 +1149,58 @@ effect or gets a diagnostic.
 
 ### Merging across templates
 
-`labels` merges exactly the way `env` does. A template's entries reach
-the service, the service's own body wins over a template that set the
-same key, and two `with`-listed templates setting one key is a
-`MapKeyCollision`—see [Templates &
+A single-valued entry merges exactly the way `env` does. A template's
+entries reach the service, the service's own body wins over a template
+that set the same key, and two `with`-listed templates setting one key
+is a `MapKeyCollision`—see [Templates &
 Composition](./templates-and-composition.md).
 
 `{{name}}` resolves in both halves of an entry, so
 `"com.example.{{name}}.owner": "{{name}}-team"` works the way it does
 under `env`.
+
+### A list value composes instead of colliding
+
+Write a bracketed list and the entry means something different when two
+places set it: the values join rather than conflict.
+
+```hll,build
+template internal_web(port) {
+  expose $port
+  labels { "traefik.http.routers.{{name}}.middlewares": ["local-ipwhitelist@file"] }
+}
+
+template authenticated {
+  labels { "traefik.http.routers.{{name}}.middlewares": ["forwardAuth-authentik@file"] }
+}
+
+service syncthing {
+  image "lscr.io/linuxserver/syncthing"
+  with internal_web { port: 8384 }, authenticated
+}
+```
+
+```yaml
+labels:
+- traefik.http.routers.syncthing.middlewares=local-ipwhitelist@file,forwardAuth-authentik@file
+```
+
+The list renders comma-joined, the same separator a
+[list argument](./templates-and-composition.md#passing-a-list)
+interpolates with. Entries dedupe, so naming one twice across two
+templates gets you one. Your service body adds to what its templates
+supplied rather than replacing it.
+
+That difference between the two shapes is the point of having both. A
+single value says the key holds one thing, so two templates setting it
+are two answers to one question and the collision is right. A list says
+the key holds several, so several places contributing is the whole idea.
+Writing one key as a list in one place and a single value in another is
+an error—the two disagree about which kind of thing the key holds:
+
+```text
+10:12: `labels` key "com.example.tags" is a single value here but a list at 6:12 — a list composes across templates and a single value doesn't, so the two say different things about what this key holds
+```
 
 ## `restart`
 
