@@ -1,15 +1,19 @@
 # #267: a `use` path starting `std:` names a module compiled into the
 # compiler, not a file next to this one, so it never reaches relative
-# resolution and never touches the filesystem. No module ships yet —
-# the Traefik template of #259 arrives with #269 — which makes the
-# diagnostic the whole of what a user can see today, and the thing
-# worth pinning: it has to name what was asked for and say what this
-# compiler actually carries, rather than leaving someone hunting for a
-# `std:traefik.hll` they were never meant to have on disk.
-use "std:traefik" as traefik
+# resolution and never touches the filesystem. The diagnostic has to
+# name what was asked for and say what this compiler actually carries,
+# rather than leaving someone hunting for a `std:caddy.hll` they were
+# never meant to have on disk.
+#
+# #269 filled the registry, so the name here is one that isn't bundled
+# rather than `std:traefik`, which now resolves. That the message lists
+# `std:traefik` is the point: it answers "what can I write here?" from
+# the registry itself, so it can't go stale the next time a module
+# lands.
+use "std:caddy" as caddy
 
 service web {
-  with traefik.labels
+  with caddy.labels
   image "nginx"
   expose 80
 }

@@ -52,16 +52,17 @@ pub(crate) type Registry = &'static [(&'static str, &'static str)];
 
 /// Every module this compiler bundles.
 ///
-/// Empty on purpose. The mechanism ships ahead of its first module
-/// because that module — the Traefik template of #259 — has to be
-/// proven to reproduce the compiler's built-in label output byte for
-/// byte before it can replace it, which is #269's job rather than this
-/// one's. Adding a module is one line here:
+/// `traefik` arrived with #269, which is why the mechanism shipped a
+/// release ahead of it: the module has to reproduce the compiler's own
+/// built-in label output byte for byte before it can replace it, and
+/// proving that is a stage of its own. Both spellings still compile —
+/// the built-in `router`/`traefik` fields go at #271, and until they do
+/// this module is a second way to say the same thing rather than the
+/// only way.
 ///
-/// ```ignore
-/// pub(crate) const BUNDLED: Registry = &[("traefik", include_str!("stdlib/traefik.hll"))];
-/// ```
-pub(crate) const BUNDLED: Registry = &[];
+/// Adding another module is one line here plus the file beside this
+/// one.
+pub(crate) const BUNDLED: Registry = &[("traefik", include_str!("stdlib/traefik.hll"))];
 
 /// The module name a `std:`-prefixed `use` path names, or `None` for
 /// any other path (which stays a relative path, resolved as it always
@@ -195,13 +196,14 @@ mod tests {
     fn source_is_found_by_name() {
         assert_eq!(source(REGISTRY, "net"), Some("network n {}\n"));
         assert_eq!(source(REGISTRY, "nope"), None);
-        assert_eq!(source(BUNDLED, "traefik"), None);
+        assert!(source(BUNDLED, "traefik").is_some());
+        assert_eq!(source(BUNDLED, "nope"), None);
     }
 
     #[test]
     fn available_lists_every_bundled_name() {
         assert_eq!(available(REGISTRY), vec!["traefik", "net"]);
-        assert!(available(BUNDLED).is_empty());
+        assert_eq!(available(BUNDLED), vec!["traefik"]);
     }
 
     #[test]

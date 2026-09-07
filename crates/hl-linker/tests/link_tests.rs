@@ -1113,15 +1113,44 @@ const REGISTRY: &[(&str, &str)] = &[
     ),
 ];
 
+/// Against the *real* registry, so this pins what a user actually sees
+/// rather than what a fixture would say. `traefik` is bundled since
+/// #269, so the unknown name here is one that isn't.
 #[test]
-fn an_unbundled_std_module_is_an_error_saying_nothing_is_bundled() {
+fn an_unknown_std_module_names_what_this_compiler_bundles() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "svc.hll",
+        "use \"std:caddy\" as c\nservice s {\n  image \"x\"\n}\n",
+    );
+
+    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
+    assert!(
+        matches!(&err, LinkError::UnknownStdModule { name, .. } if name == "caddy"),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "svc.hll:1:5: unknown standard library module \"std:caddy\" — this compiler bundles: \
+         std:traefik"
+    );
+}
+
+/// The other half of that message, which the shipped registry can no
+/// longer produce. Reached through the test seam rather than deleted:
+/// an empty registry is still a state the formatter can be asked about,
+/// and "bundles: " with nothing after it would be the bug this branch
+/// exists to prevent.
+#[test]
+fn an_empty_registry_says_so_rather_than_listing_nothing() {
     let mut loader = InMemoryLoader::default();
     loader.add(
         "svc.hll",
         "use \"std:traefik\" as t\nservice s {\n  image \"x\"\n}\n",
     );
 
-    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
+    let err = hl_linker::link_with_std_registry(Path::new("svc.hll"), &loader, &[])
+        .expect_err("expected a link error");
     assert!(
         matches!(&err, LinkError::UnknownStdModule { name, available, .. }
             if name == "traefik" && available.is_empty()),

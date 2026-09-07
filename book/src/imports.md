@@ -288,26 +288,26 @@ use "std:traefik" as traefik
 ```
 
 That path resolves against the compiler's own modules rather than
-against your tree. This compiler bundles none yet, so every `std:` path
-you can write today ends in one diagnostic:
+against your tree. This compiler bundles one, `std:traefik`, whose
+templates write the same Traefik labels a
+[`router`](./built-in-fields.md#router) block generates. See
+[Routing with `std:traefik`](./templates-and-composition.md#routing-with-stdtraefik).
+Ask for a name it doesn't carry and the diagnostic says what it does:
 
 ```text
-service.hll:1:5: unknown standard library module "std:traefik" — this compiler bundles no standard library modules
+service.hll:1:5: unknown standard library module "std:caddy" — this compiler bundles: std:traefik
 ```
 
-The first module to ship there is a Traefik template that reproduces the
-labels `hllc` generates for a `router` block, and it arrives with that
-migration rather than ahead of it. Until it does, the prefix earns its
-place in this page for one reason: `std:` belongs to the compiler. A
-file of your own named `std:something.hll` no longer answers to
-`use "std:something.hll"`, and reaching it takes an explicit relative
+The prefix belongs to the compiler, which is the other thing to know
+about it. A file of your own named `std:something.hll` no longer answers
+to `use "std:something.hll"`, and reaching it takes an explicit relative
 spelling, `use "./std:something.hll"`.
 
-Once a module does ship, it behaves like any other import. An alias
-qualifies its declarations the same way, its templates resolve against
-the module that declared them, and its own imports stay its own. The one
-thing it never does: come from anywhere but the binary. No search path,
-no environment variable, no directory in your home, nothing fetched over
+A bundled module behaves like any other import. An alias qualifies its
+declarations the same way, its templates resolve against the module that
+declared them, and its own imports stay its own. The one thing it never
+does: come from anywhere but the binary. No search path, no environment
+variable, no directory in your home, nothing fetched over
 a network. A bundled module and the compiler that reads it ship as one
 artifact and move together, which also means a compiler upgrade can
 change what one of them generates.

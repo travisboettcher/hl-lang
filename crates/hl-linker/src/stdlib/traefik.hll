@@ -1,0 +1,135 @@
+# Traefik router and service labels, as templates over `labels`.
+#
+# Every template here writes label keys and values and nothing else. The
+# compiler has no Traefik-shaped knowledge to contribute — that's the
+# point of #259 — so what a router *is* lives in this file, in the same
+# language a homelab writes its own templates in.
+#
+# The set is deliberately fine-grained: one template per label, because
+# a `labels` block emits every key it lists and the language has no way
+# to omit one. A single `router` template taking every optional field
+# would write `entrypoints=` for a router that has no entrypoints, so
+# each label a router may or may not carry gets its own template and a
+# caller lists the ones it wants. The composites at the bottom cover the
+# common shapes over those primitives.
+#
+# `router` is the full router id, which is what a caller passes rather
+# than a name this file derives: `"{{name}}"` for the one unnamed router
+# a service may have, `"{{name}}-api"` for a named one. That mirrors the
+# ids the built-ins generate, and `{{name}}` resolves in an argument, so
+# the caller writes it once per invocation.
+
+## HTTP routers
+
+# A router's rule, which is the one label every router has.
+template http_rule(router, rule) {
+  labels {
+    "traefik.http.routers.{{router}}.rule": "{{rule}}"
+  }
+}
+
+# The entrypoints a router listens on, comma-joined into one label.
+template http_entrypoints(router, entrypoints) {
+  labels {
+    "traefik.http.routers.{{router}}.entrypoints": "{{entrypoints}}"
+  }
+}
+
+# The middleware chain, comma-joined. Each entry carries its own
+# provider suffix — `"auth@file"` — since a plain string is all this
+# file can hold.
+template http_middlewares(router, middlewares) {
+  labels {
+    "traefik.http.routers.{{router}}.middlewares": "{{middlewares}}"
+  }
+}
+
+# A router's priority, for when two rules both match.
+template http_priority(router, priority) {
+  labels {
+    "traefik.http.routers.{{router}}.priority": "{{priority}}"
+  }
+}
+
+# A Traefik service of this router's own, for a router that shouldn't
+# share the service-wide port. Writes the pair: the router's `.service`
+# pointer and that service's load-balancer port.
+template http_service(router, port) {
+  labels {
+    "traefik.http.routers.{{router}}.service": "{{router}}"
+    "traefik.http.services.{{router}}.loadbalancer.server.port": "{{port}}"
+  }
+}
+
+## TCP routers
+
+# The TCP namespace, one label at a time, mirroring the HTTP set above.
+# A separate set rather than a `protocol` parameter because the
+# namespace is part of the label *key*, and a template can't choose a
+# key by condition.
+template tcp_rule(router, rule) {
+  labels {
+    "traefik.tcp.routers.{{router}}.rule": "{{rule}}"
+  }
+}
+
+template tcp_entrypoints(router, entrypoints) {
+  labels {
+    "traefik.tcp.routers.{{router}}.entrypoints": "{{entrypoints}}"
+  }
+}
+
+template tcp_middlewares(router, middlewares) {
+  labels {
+    "traefik.tcp.routers.{{router}}.middlewares": "{{middlewares}}"
+  }
+}
+
+template tcp_priority(router, priority) {
+  labels {
+    "traefik.tcp.routers.{{router}}.priority": "{{priority}}"
+  }
+}
+
+template tcp_service(router, port) {
+  labels {
+    "traefik.tcp.routers.{{router}}.service": "{{router}}"
+    "traefik.tcp.services.{{router}}.loadbalancer.server.port": "{{port}}"
+  }
+}
+
+## Service-wide
+
+# The one load-balancer target a service's routers fall back to when
+# none names a port of its own.
+template port(port) {
+  labels {
+    "traefik.http.services.{{name}}.loadbalancer.server.port": "{{port}}"
+  }
+}
+
+# Keep Traefik away from this container entirely.
+template disable() {
+  labels {
+    "traefik.enable": "false"
+  }
+}
+
+## Composites
+
+# The common case: one unnamed HTTP router matching a host, and the
+# port behind it. Writes `expose` as well as the label, so the port is
+# written once rather than twice — the built-in `router` block derived
+# its label from `expose.port` for the same reason.
+template http(host, port) {
+  expose $port
+  with http_rule { router: "{{name}}", rule: "Host(`{{host}}`)" },
+       port { port: $port }
+}
+
+# The same, for one of several named routers on a service.
+template http_named(router, host, port) {
+  expose $port
+  with http_rule { router: "{{name}}-{{router}}", rule: "Host(`{{host}}`)" },
+       port { port: $port }
+}

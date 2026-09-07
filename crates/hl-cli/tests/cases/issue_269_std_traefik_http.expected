@@ -1,0 +1,16 @@
+--- compose ---
+services:
+  web:
+    image: nginx
+    networks:
+    - proxy
+    expose:
+    - 8123
+    labels:
+    - traefik.docker.network=docker_default
+    - traefik.http.routers.web.rule=Host(`web.example.com`)
+    - traefik.http.services.web.loadbalancer.server.port=8123
+networks:
+  proxy:
+    name: docker_default
+    external: true
