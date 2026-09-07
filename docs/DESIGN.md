@@ -1317,6 +1317,26 @@ emitted rule. A collision names the router as well as the field, through
 the same `MapKeyCollision` a colliding `env` key raises, since a message
 about `router.host` alone doesn't say *which* router—#184.
 
+`labels` merges by key like `env`, with one rule of its own, settled at
+#288: a **list-valued** entry concatenates across tiers instead of
+colliding, dropping a repeat of a value it already holds, while a
+**single-valued** one keeps `env`'s rules exactly—the service's own body
+wins over a template, and two explicit templates collide. The shapes
+mean different things about merging, and that's what the distinction is
+for. A single value says the key holds one thing, so two templates
+setting it are two answers to a one-answer question, which is the
+collision #243 exists to raise. A list says the key holds several, so
+several places contributing is the whole idea. Generic rather than a
+carve-out: the rule is about lists, and it's the same reasoning
+`networks`, `dns` and `entrypoints` already merge by. It exists because
+#271 took `router.middleware` out of the compiler, and with it the only
+way two independent templates could each contribute one middleware to a
+service—a composition pattern this repo's own fixtures teach, and one a
+checked map can't express without it. One key written as a list in one
+place and a single value in another is
+`ComposeError::LabelShapeMismatch`: they disagree about what the key
+holds, and either resolution silently discards what the other said.
+
 `healthcheck`, the built-in struct field
 with more than one sub-field, merges per sub-field
 (`test`/`interval`/`timeout`/`retries`/`start_period`/`start_interval`/

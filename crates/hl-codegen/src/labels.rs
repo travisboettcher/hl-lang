@@ -870,7 +870,14 @@ fn push_explicit_labels(
         // that's the text the safety check and the collision check both
         // have to see.
         let key = interp::resolve(entry.key.text(), bindings, entry.key.span())?;
-        let value = interp::resolve(entry.value.text(), bindings, entry.value.span())?;
+        // A list value renders comma-joined (#288), which is the same
+        // separator a list argument interpolates with — one convention,
+        // so a reader who has met either has met both. Each item
+        // interpolates on its own, so `{{name}}` works inside a list
+        // exactly as it does in a single value.
+        let value = entry
+            .value
+            .join(|lit| interp::resolve(lit.text(), bindings, lit.span()))?;
         reject_unsafe_label_key(&key, entry.key.span())?;
         labels.push_explicit(key, value, entry.span)?;
     }

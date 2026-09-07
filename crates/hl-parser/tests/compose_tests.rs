@@ -126,12 +126,12 @@ fn labels_merge_across_tiers_like_env() {
          service s {\n  image \"x\"\n  with base, t\n  labels { \"tier\": \"own\" }\n}\n",
     );
     let service = single_service(&composed);
-    let entries: Vec<(&str, &str)> = service
+    let entries: Vec<(String, String)> = service
         .fields
         .labels
         .entries
         .iter()
-        .map(|e| (e.key.text(), e.value.text()))
+        .map(|e| (e.key.text().to_string(), e.value.text()))
         .collect();
     // Tier order — each `with` target left to right, then the body's
     // own — with a key an earlier tier already claimed replaced in
@@ -139,11 +139,101 @@ fn labels_merge_across_tiers_like_env() {
     assert_eq!(
         entries,
         vec![
-            ("stack", "homelab"),
-            ("owner", "platform-team"),
-            ("tier", "own"),
+            ("stack".to_string(), "homelab".to_string()),
+            ("owner".to_string(), "platform-team".to_string()),
+            ("tier".to_string(), "own".to_string()),
         ]
     );
+}
+
+/// The pattern #288 exists for: two independent templates each
+/// contributing to one key, which is what `router.middleware` did before
+/// routing left the compiler and what a list-valued label restores.
+#[test]
+fn list_valued_labels_concatenate_across_templates() {
+    let composed = compose_ok(
+        "template a {\n  labels { \"k\": [\"one\"] }\n}\n\
+         template b {\n  labels { \"k\": [\"two\"] }\n}\n\
+         service s {\n  image \"x\"\n  with a, b\n}\n",
+    );
+    assert_eq!(label_value(single_service(&composed), "k"), "one,two");
+}
+
+/// Tier order, and the service body *adding* rather than overriding —
+/// the half that makes a template able to supply a base list.
+#[test]
+fn a_service_body_adds_to_a_list_its_templates_supplied() {
+    let composed = compose_ok(
+        "template a {\n  labels { \"k\": [\"one\"] }\n}\n\
+         service s {\n  image \"x\"\n  with a\n  labels { \"k\": [\"two\"] }\n}\n",
+    );
+    assert_eq!(label_value(single_service(&composed), "k"), "one,two");
+}
+
+/// Naming one entry twice across tiers is one answer given twice, not
+/// two — the same dedupe `router.middleware` and `entrypoints` did.
+#[test]
+fn repeated_list_entries_dedupe_across_tiers() {
+    let composed = compose_ok(
+        "template a {\n  labels { \"k\": [\"one\", \"two\"] }\n}\n\
+         template b {\n  labels { \"k\": [\"two\", \"three\"] }\n}\n\
+         service s {\n  image \"x\"\n  with a, b\n}\n",
+    );
+    assert_eq!(label_value(single_service(&composed), "k"), "one,two,three");
+}
+
+/// A scalar keeps colliding, which is the half that makes the list
+/// meaningful: two answers to a one-answer question is still #243's
+/// error, and a list is how you say the question takes several.
+#[test]
+fn scalar_labels_still_collide_across_templates() {
+    let err = compose_err(
+        "template a {\n  labels { \"k\": \"one\" }\n}\n\
+         template b {\n  labels { \"k\": \"two\" }\n}\n\
+         service s {\n  image \"x\"\n  with a, b\n}\n",
+    );
+    match err {
+        ComposeError::MapKeyCollision(c) => {
+            assert_eq!(c.field, "labels");
+            assert_eq!(c.key, "k");
+        }
+        other => panic!("expected MapKeyCollision, got {other:?}"),
+    }
+}
+
+/// A scalar in the service body still overrides a template's, unchanged
+/// from before #288.
+#[test]
+fn a_service_body_still_overrides_a_scalar_label() {
+    let composed = compose_ok(
+        "template a {\n  labels { \"k\": \"from-template\" }\n}\n\
+         service s {\n  image \"x\"\n  with a\n  labels { \"k\": \"own\" }\n}\n",
+    );
+    assert_eq!(label_value(single_service(&composed), "k"), "own");
+}
+
+/// The two shapes disagree about what the key holds, so neither
+/// resolution is honest and the mismatch is reported instead.
+#[test]
+fn a_list_and_a_scalar_under_one_key_is_a_shape_mismatch() {
+    let err = compose_err(
+        "template a {\n  labels { \"k\": [\"one\"] }\n}\n\
+         template b {\n  labels { \"k\": \"two\" }\n}\n\
+         service s {\n  image \"x\"\n  with a, b\n}\n",
+    );
+    match err {
+        ComposeError::LabelShapeMismatch {
+            key,
+            first_shape,
+            second_shape,
+            ..
+        } => {
+            assert_eq!(key, "k");
+            assert_eq!(first_shape, "a list");
+            assert_eq!(second_shape, "a single value");
+        }
+        other => panic!("expected LabelShapeMismatch, got {other:?}"),
+    }
 }
 
 /// A template's `labels` reaching a service that writes none of its own
@@ -3032,7 +3122,7 @@ fn a_qualified_matcher_argument_is_rejected() {
 // resolved; `{{name}}` is left for codegen, which is the only stage that
 // knows which service a template's contribution landed on.
 
-fn label_value<'a>(service: &'a Service, key: &str) -> &'a str {
+fn label_value(service: &Service, key: &str) -> String {
     service
         .fields
         .labels
@@ -3641,7 +3731,7 @@ fn a_program_without_templates_raises_no_warnings() {
 /// The value a service's first `labels` entry ended up with — every
 /// case here reads through a label, since that's the position the
 /// feature exists for.
-fn first_label(program: &ComposedProgram) -> &str {
+fn first_label(program: &ComposedProgram) -> String {
     single_service(program).fields.labels.entries[0]
         .value
         .text()

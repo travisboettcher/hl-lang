@@ -1,0 +1,16 @@
+# #288: one key written as a list in one template and a single value in
+# another. Neither resolution is honest — concatenating the scalar
+# invents a list nobody wrote, and letting either win discards what the
+# other said — so the disagreement is reported rather than resolved.
+template a {
+  labels { "com.example.tags": ["one"] }
+}
+
+template b {
+  labels { "com.example.tags": "two" }
+}
+
+service web {
+  image "nginx"
+  with a, b
+}

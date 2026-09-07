@@ -1,0 +1,8 @@
+--- compose ---
+services:
+  syncthing:
+    image: lscr.io/linuxserver/syncthing
+    expose:
+    - 8384
+    labels:
+    - traefik.http.routers.syncthing.middlewares=local-ipwhitelist@file,forwardAuth-authentik@file

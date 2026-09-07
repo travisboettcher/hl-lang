@@ -5,9 +5,9 @@ use hl_lexer::{FileId, Lexer, Span, Token, TokenKind};
 use crate::ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnCondition, DependsOnEntry,
     Entrypoint, EnvEntry, EnvMap, Expose, FieldAccess, Healthcheck, HealthcheckTest, Ident, Image,
-    LabelEntry, LabelMap, Literal, MatchExpr, Network, Param, Program, QualifiedRef, RawEntry,
-    RawMap, RawValue, Restart, Router, Service, ServiceFields, TemplateDecl, TemplateInvocation,
-    TopDecl, Traefik, UseDecl, Volume, VolumeDriverOpt,
+    LabelEntry, LabelMap, LabelValue, Literal, MatchExpr, Network, Param, Program, QualifiedRef,
+    RawEntry, RawMap, RawValue, Restart, Router, Service, ServiceFields, TemplateDecl,
+    TemplateInvocation, TopDecl, Traefik, UseDecl, Volume, VolumeDriverOpt,
 };
 use crate::error::{Expected, ParseError};
 use crate::schema::{
@@ -123,6 +123,11 @@ enum FieldValue {
     /// An accumulating nested map-kind field (env/publish/driver_opts):
     /// (key, value, entry span).
     LiteralMap(Vec<(Literal, Literal, Span)>),
+    /// `labels`' own accumulating map (#288), separate from
+    /// [`Self::LiteralMap`] because a label value may be a list where
+    /// `env`/`publish`/`devices` values may not — see
+    /// [`crate::ast::LabelValue`] for why that distinction exists at all.
+    LabelMapEntries(Vec<(Literal, LabelValue, Span)>),
     /// An accumulating `volume` field: same shape as [`Self::LiteralMap`]
     /// except the key side is an [`ArrowMapHost`], which the parser has
     /// already split into a bind-mount literal or a named-volume
@@ -193,6 +198,7 @@ impl FieldValue {
             FieldValue::Struct(_, span) => *span,
             FieldValue::ScalarOrList(v) => v.span(),
             FieldValue::LiteralMap(_)
+            | FieldValue::LabelMapEntries(_)
             | FieldValue::MountMap(_)
             | FieldValue::Raw(_)
             | FieldValue::RefList(_)
@@ -1443,6 +1449,34 @@ impl<'src> Parser<'src> {
                 };
                 merge_mount_map_entries(nested, bucket, entries)
             }
+            // `labels` is the one map-kind field whose values may be
+            // lists (#288), so it parses through its own entry
+            // production and accumulates into its own bucket. Told apart
+            // by identity rather than by a new `TypeSchema` row, matching
+            // how `expose`'s own bespoke sugar is recognized — one flag
+            // with one inhabitant is the generic-schema-data mistake #198
+            // already backed out of once.
+            SchemaKind::Map if std::ptr::eq(nested, &schema::LABELS) => {
+                let entries = if self.peek().kind == TokenKind::LBrace {
+                    self.parse_map_body(|p| p.parse_label_map_entry(nested))?
+                } else if self.at_value_start() {
+                    vec![self.parse_label_map_entry(nested)?]
+                } else {
+                    return Err(self.unexpected(Expected::Description("a value or `{`")));
+                };
+                let bucket = match fields
+                    .entry(field.name)
+                    .or_insert_with(|| FieldValue::LabelMapEntries(Vec::new()))
+                {
+                    FieldValue::LabelMapEntries(v) => v,
+                    _ => unreachable!("field kind is stable for a given field name"),
+                };
+                // Keys on [`MapSide::Key`], the only side a `labels`
+                // value could answer for: a list has no single text.
+                merge_map_entries(nested, bucket, entries, |k: &Literal, _: &LabelValue| {
+                    k.text().to_string()
+                })
+            }
             SchemaKind::Map => {
                 let entries = if self.peek().kind == TokenKind::LBrace {
                     self.parse_literal_map_body(nested)?
@@ -1458,7 +1492,13 @@ impl<'src> Parser<'src> {
                     FieldValue::LiteralMap(v) => v,
                     _ => unreachable!("field kind is stable for a given field name"),
                 };
-                merge_map_entries(nested, bucket, entries, Literal::text)
+                merge_map_entries(nested, bucket, entries, |k: &Literal, v: &Literal| {
+                    match nested.uniqueness {
+                        Some(MapSide::Value) => v.text(),
+                        _ => k.text(),
+                    }
+                    .to_string()
+                })
             }
         }
     }
@@ -1516,6 +1556,32 @@ impl<'src> Parser<'src> {
         let second = self.parse_literal()?;
         let entry_span = join_spans(span, second.span());
         Ok((first, second, entry_span))
+    }
+
+    /// One `labels` entry: a key, the separator, then either a single
+    /// literal or a bracketed list (#288).
+    ///
+    /// The bracket is the only thing that distinguishes the two, and it
+    /// is deliberately the *only* thing — there is no bare comma-list
+    /// sugar here, for [`schema::FieldKind::ScalarOrList`]'s reason:
+    /// `"k": "a", "b"` would be ambiguous between one value followed by
+    /// a second entry and a two-item list, and the rest of the language
+    /// already settles that ambiguity with brackets.
+    fn parse_label_map_entry(
+        &mut self,
+        schema: &'static TypeSchema,
+    ) -> Result<(Literal, LabelValue, Span), ParseError> {
+        let key = self.parse_literal()?;
+        let span = key.span();
+        self.expect_map_separator(schema, span)?;
+        let value = if self.peek().kind == TokenKind::LBracket {
+            let (items, list_span) = self.parse_bracket_literal_list()?;
+            LabelValue::List(items, list_span)
+        } else {
+            LabelValue::Scalar(self.parse_literal()?)
+        };
+        let entry_span = join_spans(span, value.span());
+        Ok((key, value, entry_span))
     }
 
     /// One `volume` entry — the same two forms as
@@ -1914,33 +1980,29 @@ fn join_spans(start: Span, end: Span) -> Span {
 /// earlier writes of the same field already contributed, rejecting a
 /// duplicate on whichever side [`TypeSchema::uniqueness`] names.
 ///
-/// Generic over the key side's own type so one routine serves every
+/// Generic over both sides' own types so one routine serves every
 /// map-kind field: `env`/`publish`/`driver_opts`/`devices` key on a
-/// [`Literal`], `volume` on an [`ArrowMapHost`]. `key_text` reads that
-/// side's text — `Literal::text` or `ArrowMapHost::text`, passed by the
-/// caller, since there is no one trait both already implement.
-fn merge_map_entries<K>(
+/// [`Literal`], `volume` on an [`ArrowMapHost`], and `labels` values are
+/// [`LabelValue`]s rather than [`Literal`]s since #288. `uniqueness_text`
+/// reads whichever side [`TypeSchema::uniqueness`] names, passed by the
+/// caller because there is no one trait every side already implements —
+/// and because only the caller knows whether its value type has a text
+/// form at all. A `labels` value doesn't, which is exactly why it keys on
+/// [`MapSide::Key`].
+fn merge_map_entries<K, V>(
     nested: &'static TypeSchema,
-    bucket: &mut Vec<(K, Literal, Span)>,
-    new_entries: Vec<(K, Literal, Span)>,
-    key_text: fn(&K) -> &str,
+    bucket: &mut Vec<(K, V, Span)>,
+    new_entries: Vec<(K, V, Span)>,
+    uniqueness_text: impl Fn(&K, &V) -> String,
 ) -> Result<(), ParseError> {
     let side = nested
         .uniqueness
         .expect("volume/env schemas must define a uniqueness side");
     for (key, value, span) in new_entries {
-        let check = match side {
-            MapSide::Key => key_text(&key),
-            MapSide::Value => value.text(),
-        }
-        .to_string();
-        let dup = bucket.iter().find(|(k, v, _)| {
-            let existing = match side {
-                MapSide::Key => key_text(k),
-                MapSide::Value => v.text(),
-            };
-            existing == check
-        });
+        let check = uniqueness_text(&key, &value);
+        let dup = bucket
+            .iter()
+            .find(|(k, v, _)| uniqueness_text(k, v) == check);
         if let Some((_, _, first_span)) = dup {
             return Err(ParseError::DuplicateMapKey {
                 type_name: nested.type_name,
@@ -2237,7 +2299,7 @@ fn lower_service_fields(mut fields: StructFields) -> Result<ServiceFields, Parse
     // they're two different Compose keys, and one type for both would
     // make every diagnostic downstream read as if they were one field.
     let labels = match fields.remove("labels") {
-        Some(FieldValue::LiteralMap(entries)) => LabelMap {
+        Some(FieldValue::LabelMapEntries(entries)) => LabelMap {
             entries: entries
                 .into_iter()
                 .map(|(key, value, span)| LabelEntry { key, value, span })
