@@ -66,6 +66,21 @@ fn one_unnamed_http_router() {
     );
 }
 
+/// The named-router composite, which is the same shape one level along:
+/// the caller names the router and the module builds the `<service>-<name>`
+/// id the built-ins generate.
+#[test]
+fn one_named_http_router() {
+    assert_same(
+        "one_named_http_router",
+        "service web {\n  image \"nginx\"\n  expose 8123\n  \
+         router api {\n    host: \"api.example.com\"\n  }\n}\n",
+        "use \"std:traefik\" as traefik\n\
+         service web {\n  image \"nginx\"\n  \
+         with traefik.http_named { router: \"api\", host: \"api.example.com\", port: 8123 }\n}\n",
+    );
+}
+
 /// `expose <port> as \"<host>\"` desugars to an unnamed router during
 /// parsing, so it has to reach the same document as the long form — and
 /// as the template. This is the spelling #271 removes that a reader
@@ -121,6 +136,28 @@ fn the_whole_router_feature_set_across_both_namespaces() {
          traefik.tcp_rule { router: \"{{name}}-t\", rule: \"HostSNI(`t.example.com`)\" },\n    \
          traefik.tcp_service { router: \"{{name}}-t\", port: 7000 },\n    \
          traefik.port { port: 8123 }\n}\n",
+    );
+}
+
+/// The TCP set carrying every label it can, which is what keeps the five
+/// `tcp_*` templates honest: they're the HTTP five with one segment
+/// changed, and a typo in a label key there would otherwise ship
+/// silently, since nothing else in this file writes `tcp_entrypoints`,
+/// `tcp_middlewares` or `tcp_priority`.
+#[test]
+fn the_tcp_set_carrying_every_label() {
+    assert_same(
+        "the_tcp_set_carrying_every_label",
+        "service web {\n  image \"nginx\"\n  \
+         router t {\n    protocol: tcp\n    host: \"t.example.com\"\n    port: 7000\n    \
+         entrypoints: tcp-secure, tcp\n    middleware [ipallow]\n    priority: 7\n  }\n}\n",
+        "use \"std:traefik\" as traefik\n\
+         service web {\n  image \"nginx\"\n  with\n    \
+         traefik.tcp_rule { router: \"{{name}}-t\", rule: \"HostSNI(`t.example.com`)\" },\n    \
+         traefik.tcp_entrypoints { router: \"{{name}}-t\", entrypoints: [\"tcp-secure\", \"tcp\"] },\n    \
+         traefik.tcp_middlewares { router: \"{{name}}-t\", middlewares: [\"ipallow@file\"] },\n    \
+         traefik.tcp_priority { router: \"{{name}}-t\", priority: 7 },\n    \
+         traefik.tcp_service { router: \"{{name}}-t\", port: 7000 }\n}\n",
     );
 }
 
