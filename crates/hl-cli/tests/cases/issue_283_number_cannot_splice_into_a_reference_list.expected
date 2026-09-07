@@ -1,0 +1,2 @@
+--- error ---
+issue_283_number_cannot_splice_into_a_reference_list.hll:11:24: argument `nets` for template `attach` must be reference-shaped (a bare identifier, a quoted string, or `alias.name`) — found a number

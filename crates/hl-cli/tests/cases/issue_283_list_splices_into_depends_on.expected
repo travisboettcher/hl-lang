@@ -1,0 +1,19 @@
+--- compose ---
+services:
+  db:
+    image: postgres
+    networks:
+    - default
+  cache:
+    image: redis
+    networks:
+    - default
+  web:
+    image: nginx
+    networks:
+    - default
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy

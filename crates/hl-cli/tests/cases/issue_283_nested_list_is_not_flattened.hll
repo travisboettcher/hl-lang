@@ -1,0 +1,14 @@
+# #283: the join takes one level and refuses to go further. `[a, [b]]`
+# and `[a, b]` are different values, so rendering both `a,b` would be
+# the silent coercion this language keeps out — the same reason
+# `TemplateArgumentNotScalar` exists. The diagnostic points at the
+# nested item rather than the argument, since that item is what has to
+# change.
+template t(xs) {
+  container_name "{{xs}}"
+}
+
+service web {
+  image "nginx"
+  with t { xs: ["ok", ["nested"]] }
+}

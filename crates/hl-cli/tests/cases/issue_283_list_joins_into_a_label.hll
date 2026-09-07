@@ -1,0 +1,17 @@
+# #283: a list argument interpolates as its items, comma-joined. This is
+# the shape the built-in `middleware [auth, compress]` field generates —
+# one label, entries separated by commas — written as a template
+# instead, which is what #269 needs to reproduce `labels.rs` without the
+# caller spelling the separator by hand. The `@file` suffix is still the
+# caller's to write; a bare identifier here has no type to attach one
+# from yet.
+template middlewares(router, chain) {
+  labels {
+    "traefik.http.routers.{{router}}.middlewares": "{{chain}}"
+  }
+}
+
+service web {
+  image "nginx"
+  with middlewares { router: "{{name}}", chain: ["auth@file", "compress@file"] }
+}

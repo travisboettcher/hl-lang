@@ -203,6 +203,111 @@ ordinary content: `command` and `env` values carry `$HOME` through to a
 shell, and Compose reads its own `${VAR}` interpolation out of the
 generated file once `hllc` has written it. The warning skips both.
 
+### Passing a list
+
+A list argument does one of two things, depending on where the parameter
+sits.
+
+**Interpolated into a string, it joins with commas.** That's the shape
+of a Docker label holding several entries:
+
+```hll,build
+template middlewares(router, chain) {
+  labels {
+    "traefik.http.routers.{{router}}.middlewares": "{{chain}}"
+  }
+}
+
+service web {
+  image "nginx"
+  with middlewares {
+    router: "{{name}}",
+    chain: ["auth@file", "compress@file"]
+  }
+}
+```
+
+```yaml
+labels:
+- traefik.http.routers.web.middlewares=auth@file,compress@file
+```
+
+Any item with a text form counts—a quoted string, a number, a bare
+identifier, a forwarded parameter, a `decl.name` field access—so
+`[1, "two", three]` renders `1,two,three`. The comma is the only
+separator there is. A template that needs a different one takes the
+joined string as an ordinary parameter instead.
+
+**In a list-shaped field, it splices.** The items land where the
+parameter stood:
+
+```hll,build
+network a { }
+network b { }
+network c { }
+
+template attach(nets) {
+  networks [a, $nets, c]
+}
+
+service web {
+  image "nginx"
+  with attach { nets: [b] }
+}
+```
+
+```yaml
+networks:
+- a
+- b
+- c
+```
+
+`networks $nets` and `networks [$nets]` mean the same thing as each
+other, since a bare list field and a one-element bracket list parse
+alike. The same goes for the other list fields alongside it—`dns`,
+`env_file` and `depends_on`. A `depends_on` entry carries a condition as
+well as a name, and every item spliced through that entry takes it:
+
+```hll,build
+service db { image "postgres" }
+service cache { image "redis" }
+
+template waits_for(deps) {
+  depends_on [$deps { condition: service_healthy }]
+}
+
+service web {
+  image "nginx"
+  with waits_for { deps: [db, cache] }
+}
+```
+
+```yaml
+depends_on:
+  db:
+    condition: service_healthy
+  cache:
+    condition: service_healthy
+```
+
+An empty list means what it says in both places: no characters when
+joined, no elements when spliced.
+
+Two things a list can't do. It can't nest—`[a, [b]]` is an error rather
+than a flattening, because `[a, b]` already spells the flat list and one
+source shouldn't have two spellings. And it can't fill a slot that holds
+a single value, so `container_name $xs` is an error however many items
+`xs` holds:
+
+```hll,ignore
+container_name $xs
+```
+
+```text
+2:18: argument `xs` for template `t` must be a scalar value (a list/map can't fill a single-value field)
+```
+
 ### An interpolated value lands as written
 
 `{{host}}` puts the argument into the string as it stands. Nothing

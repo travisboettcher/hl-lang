@@ -19,6 +19,12 @@ fn compose_err(source: &str) -> ComposeError {
     compose(program).expect_err("expected a compose error")
 }
 
+/// The names a service's `networks` list holds, in order — what a
+/// splice has to get right (#283).
+fn network_names(service: &Service) -> Vec<&str> {
+    service.fields.networks.iter().map(|r| r.text()).collect()
+}
+
 fn single_service(program: &ComposedProgram) -> &Service {
     assert_eq!(program.services.len(), 1, "expected exactly one service");
     &program.services[0]
@@ -3174,21 +3180,215 @@ fn an_argument_may_carry_the_name_binding_through() {
     assert_eq!(label_value(service, "rule"), "Host(`{{name}}.example.com`)");
 }
 
-/// A list has no text form to splice into the middle of a string. Named
-/// at the argument, matching `ArgumentNotReferenceShaped`/
-/// `ArgumentNotNumeric`: the argument is what has to change, and one
-/// template body can be reached from many call sites.
+/// A list interpolates as its items, comma-joined (#283). Through #282
+/// this was `ArgumentNotInterpolable`; the join is what lets a template
+/// take `middlewares: ["auth@file", "compress@file"]` and render the one
+/// comma-joined label the built-in `middleware [...]` field generates.
 #[test]
-fn a_list_argument_cannot_be_interpolated() {
-    let err = compose_err(
+fn a_list_argument_interpolates_comma_joined() {
+    let composed = compose_ok(
         "template t(xs) {\n  container_name \"{{xs}}\"\n}\n\
          service s {\n  with t { xs: [a, b] }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        service.fields.container_name.as_ref().unwrap().text(),
+        "a,b"
+    );
+}
+
+/// Every item kind with a text form contributes it, so the join isn't
+/// quietly string-only: a number renders as written and a quoted string
+/// drops its quotes, exactly as each does when interpolated alone.
+#[test]
+fn a_joined_list_takes_numbers_and_strings() {
+    let composed = compose_ok(
+        "template t(xs) {\n  container_name \"{{xs}}\"\n}\n\
+         service s {\n  with t { xs: [1, \"two\", three] }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(
+        service.fields.container_name.as_ref().unwrap().text(),
+        "1,two,three"
+    );
+}
+
+/// An empty list joins to empty text rather than drawing an error: the
+/// join of nothing is nothing. Refusing it would be composition ruling on
+/// what an empty value means somewhere downstream, which #270 settled the
+/// other way.
+#[test]
+fn an_empty_list_joins_to_nothing() {
+    let composed = compose_ok(
+        "template t(xs) {\n  container_name \"[{{xs}}]\"\n}\n\
+         service s {\n  with t { xs: [] }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(service.fields.container_name.as_ref().unwrap().text(), "[]");
+}
+
+/// A nested list is refused rather than flattened, and refused *as the
+/// item* — `[a, [b]]` and `[a, b]` are different values, and rendering
+/// them alike is the silent coercion `TemplateArgumentNotScalar`'s own
+/// doc rules out.
+#[test]
+fn a_nested_list_item_is_refused_rather_than_flattened() {
+    let err = compose_err(
+        "template t(xs) {\n  container_name \"{{xs}}\"\n}\n\
+         service s {\n  with t { xs: [a, [b]] }\n  image \"x\"\n}\n",
     );
     match err {
         ComposeError::ArgumentNotInterpolable { param, found, .. } => {
             assert_eq!(param, "xs");
             assert_eq!(found, "a list");
         }
+        other => panic!("expected ArgumentNotInterpolable, got {other:?}"),
+    }
+}
+
+/// A list argument fills a list-shaped field, putting its items where
+/// the parameter stood (#283). `networks $nets` and `networks [$nets]`
+/// parse to the same one-element vector, so both spellings splice.
+#[test]
+fn a_list_argument_fills_a_reference_list() {
+    for body in ["networks $nets", "networks [$nets]"] {
+        let composed = compose_ok(&format!(
+            "network a {{}}\nnetwork b {{}}\ntemplate t(nets) {{\n  {body}\n}}\n\
+             service s {{\n  with t {{ nets: [a, b] }}\n  image \"x\"\n}}\n"
+        ));
+        let service = single_service(&composed);
+        assert_eq!(network_names(service), vec!["a", "b"], "{body}");
+    }
+}
+
+/// The items land where the parameter stood rather than at either end,
+/// which is what makes this a splice and not an append.
+#[test]
+fn a_spliced_list_keeps_its_position_among_written_elements() {
+    let composed = compose_ok(
+        "network a {}\nnetwork b {}\nnetwork c {}\n\
+         template t(nets) {\n  networks [a, $nets, c]\n}\n\
+         service s {\n  with t { nets: [b] }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(network_names(service), vec!["a", "b", "c"]);
+}
+
+/// An empty list contributes no elements here — unlike an interpolation,
+/// where it contributes empty text. Both are what an empty list means in
+/// the position it's used.
+#[test]
+fn an_empty_list_splices_to_no_elements() {
+    let composed = compose_ok(
+        "network a {}\ntemplate t(nets) {\n  networks [a, $nets]\n}\n\
+         service s {\n  with t { nets: [] }\n  image \"x\"\n}\n",
+    );
+    let service = single_service(&composed);
+    assert_eq!(network_names(service), vec!["a"]);
+}
+
+/// A spliced item faces the reference-shape check a written one does: a
+/// reference position's grammar could never hold a bare number, so
+/// arriving inside a list doesn't make it legal.
+#[test]
+fn a_number_inside_a_spliced_list_is_not_reference_shaped() {
+    let err = compose_err(
+        "template t(nets) {\n  networks $nets\n}\n\
+         service s {\n  with t { nets: [8080] }\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentNotReferenceShaped { param, .. } => assert_eq!(param, "nets"),
+        other => panic!("expected ArgumentNotReferenceShaped, got {other:?}"),
+    }
+}
+
+/// A nested list can't be one element, so it's refused rather than
+/// flattened — the splice's own half of the rule the join keeps.
+#[test]
+fn a_nested_list_cannot_be_a_spliced_element() {
+    let err = compose_err(
+        "template t(nets) {\n  networks $nets\n}\n\
+         service s {\n  with t { nets: [a, [b]] }\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::TemplateArgumentNotScalar { param, .. } => assert_eq!(param, "nets"),
+        other => panic!("expected TemplateArgumentNotScalar, got {other:?}"),
+    }
+}
+
+/// `depends_on` splices like the other three list fields the book groups
+/// it with, so the family behaves alike (#283).
+#[test]
+fn a_list_argument_splices_into_depends_on() {
+    let composed = compose_ok(
+        "service db {\n  image \"postgres\"\n}\nservice cache {\n  image \"redis\"\n}\n\
+         template t(deps) {\n  depends_on $deps\n}\n\
+         service s {\n  with t { deps: [db, cache] }\n  image \"x\"\n}\n",
+    );
+    let service = composed
+        .services
+        .iter()
+        .find(|s| s.name.name == "s")
+        .expect("service `s`");
+    let names: Vec<&str> = service
+        .fields
+        .depends_on
+        .iter()
+        .map(|e| e.reference.text())
+        .collect();
+    assert_eq!(names, vec!["db", "cache"]);
+}
+
+/// An entry's condition reaches every item spliced through it. Dropping
+/// it would silently discard what the author wrote on that entry, and
+/// there is no other entry to carry it.
+#[test]
+fn a_spliced_depends_on_entry_carries_its_condition_to_each_item() {
+    let composed = compose_ok(
+        "service db {\n  image \"postgres\"\n}\nservice cache {\n  image \"redis\"\n}\n\
+         template t(deps) {\n  depends_on [$deps { condition: service_healthy }]\n}\n\
+         service s {\n  with t { deps: [db, cache] }\n  image \"x\"\n}\n",
+    );
+    let service = composed
+        .services
+        .iter()
+        .find(|s| s.name.name == "s")
+        .expect("service `s`");
+    assert_eq!(service.fields.depends_on.len(), 2);
+    for entry in &service.fields.depends_on {
+        assert!(
+            entry.condition.is_some(),
+            "`{}` lost its condition",
+            entry.reference.text()
+        );
+    }
+}
+
+/// A single-value slot keeps refusing a list. Splicing answers "where a
+/// list is expected"; `container_name` expects one value, and there is
+/// no honest way to put several there.
+#[test]
+fn a_list_still_cannot_fill_a_single_value_slot() {
+    let err = compose_err(
+        "template t(xs) {\n  container_name $xs\n}\n\
+         service s {\n  with t { xs: [a, b] }\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::TemplateArgumentNotScalar { param, .. } => assert_eq!(param, "xs"),
+        other => panic!("expected TemplateArgumentNotScalar, got {other:?}"),
+    }
+}
+
+/// A map item is the same refusal one shape along, so the item check
+/// isn't list-specific.
+#[test]
+fn a_map_item_in_a_joined_list_is_refused() {
+    let err = compose_err(
+        "template t(xs) {\n  container_name \"{{xs}}\"\n}\n\
+         service s {\n  with t { xs: [a, { k: v }] }\n  image \"x\"\n}\n",
+    );
+    match err {
+        ComposeError::ArgumentNotInterpolable { found, .. } => assert_eq!(found, "a nested map"),
         other => panic!("expected ArgumentNotInterpolable, got {other:?}"),
     }
 }
