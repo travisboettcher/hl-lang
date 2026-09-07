@@ -1,0 +1,18 @@
+# #269: the common case through `std:traefik`, and the whole point of
+# this stage — the generated document is byte-for-byte what the
+# built-in `router` block produces for the same service. Compare with
+# issue_269_builtin_router_http.hll, which is that service written the
+# old way: the two `.expected` files are identical apart from nothing at
+# all. When #271 removes the built-ins, this file keeps compiling.
+use "std:traefik" as traefik
+
+network proxy {
+  external
+  name: "docker_default"
+}
+
+service web {
+  image "nginx"
+  networks [proxy]
+  with traefik.http { host: "web.example.com", port: 8123 }
+}

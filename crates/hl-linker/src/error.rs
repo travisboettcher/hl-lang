@@ -107,9 +107,10 @@ impl fmt::Display for LinkError {
                     span.line,
                     span.col,
                 )?;
-                // The empty case is the shipped one until #269 lands a
-                // module, and "available: (none)" would read as a list
-                // that failed to print rather than as an answer.
+                // A backstop since #269 filled the registry, kept
+                // because an empty one is a state this code can still be
+                // asked about and "available: (none)" would read as a
+                // list that failed to print rather than as an answer.
                 if available.is_empty() {
                     f.write_str("this compiler bundles no standard library modules")
                 } else {

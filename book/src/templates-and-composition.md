@@ -420,6 +420,117 @@ hit them:
   name an alias, a declaration and a field, and `$param` takes exactly
   one field. A fourth part has no reading left.
 
+## Routing with `std:traefik`
+
+`hllc` bundles one module, and its templates write Traefik's router and
+service labels. Import it like any other file:
+
+```hll,build
+use "std:traefik" as traefik
+
+service web {
+  image "nginx"
+  with traefik.http { host: "web.example.com", port: 8123 }
+}
+```
+
+```yaml
+services:
+  web:
+    image: nginx
+    expose:
+    - 8123
+    labels:
+    - traefik.http.routers.web.rule=Host(`web.example.com`)
+    - traefik.http.services.web.loadbalancer.server.port=8123
+```
+
+That's the same document a [`router`](./built-in-fields.md#router) block
+produces for the same service—byte for byte, which the compiler's own
+test suite checks for every shape a router can take. Both spellings work
+today.
+
+### One template per label
+
+The set is deliberately small-grained. A `labels` block writes every key
+it lists, and nothing omits one, so a single template taking every
+optional field would write `entrypoints=` for a router that has no
+entrypoints. Each label a router may or may not carry gets its own
+template instead, and you list the ones you want:
+
+| template | writes |
+| --- | --- |
+| `http_rule(router, rule)` | `…routers.<router>.rule` |
+| `http_entrypoints(router, entrypoints)` | `…routers.<router>.entrypoints` |
+| `http_middlewares(router, middlewares)` | `…routers.<router>.middlewares` |
+| `http_priority(router, priority)` | `…routers.<router>.priority` |
+| `http_service(router, port)` | `…routers.<router>.service` and that service's port |
+| `port(port)` | the service-wide load-balancer port |
+| `disable()` | `traefik.enable=false` |
+
+`tcp_rule`, `tcp_entrypoints`, `tcp_middlewares`, `tcp_priority` and
+`tcp_service` mirror the five HTTP ones in Traefik's TCP namespace. A
+separate set rather than a `protocol` parameter, because the namespace
+is part of the label *key* and no template chooses a key by condition.
+
+`router` takes the full router id rather than a name the module builds:
+`"{{name}}"` for the one unnamed router a service may have,
+`"{{name}}-api"` for a named one. `{{name}}` resolves inside an
+argument, so you write it at the call site and the module stays out of
+the business of deriving ids.
+
+`entrypoints` and `middlewares` take lists, joined into one label:
+
+```hll,build
+use "std:traefik" as traefik
+
+service web {
+  image "nginx"
+  expose 8123
+  with
+    traefik.http_rule { router: "{{name}}-api", rule: "Host(`api.example.com`)" },
+    traefik.http_entrypoints { router: "{{name}}-api", entrypoints: ["web-secure", "web"] },
+    traefik.http_middlewares { router: "{{name}}-api", middlewares: ["auth@file", "compress@file"] },
+    traefik.port { port: 8123 }
+}
+```
+
+```yaml
+labels:
+- traefik.http.routers.web-api.rule=Host(`api.example.com`)
+- traefik.http.routers.web-api.entrypoints=web-secure,web
+- traefik.http.routers.web-api.middlewares=auth@file,compress@file
+- traefik.http.services.web.loadbalancer.server.port=8123
+```
+
+Each middleware carries its own `@file` suffix. The `middleware` field
+adds that for you, and a list of strings can't, since a string is all
+the module holds.
+
+### The order you list them is the order they land
+
+Labels come out in `with`-list order, so listing the templates in the
+order the preceding table gives matches what a `router` block emits. Nothing depends on
+that—Docker reads labels as a map—but a diff against a file that used
+the built-in stays readable.
+
+### What the module can't do for you
+
+Two things the `router` block does that a template can't.
+
+It **doesn't write `traefik.docker.network`**. `hllc` still derives that
+one from whichever of your service's networks is `external`, so the
+label appears whether or not you route through this module, and writing
+it yourself is an error saying it's already generated.
+
+It **doesn't check your rule**. `router { rule: … }` parses the
+expression and rejects an unknown matcher or a wrong argument count
+against a table of Traefik's own. A rule you hand `http_rule` is a
+string, so `PathPrefx(\`/api\`)` compiles here and fails at Traefik
+instead—a router that silently never matches. Read
+[a value goes through as written](./built-in-fields.md#a-value-goes-through-as-written)
+before you build one from a parameter.
+
 ## Every template needs a `with`
 
 A template reaches a service only through that service's own `with`.

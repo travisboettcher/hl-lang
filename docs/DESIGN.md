@@ -1489,13 +1489,41 @@ prefixed `std:` names one of them:
 use "std:traefik" as traefik
 ```
 
-The namespace ships empty. #267 landed the mechanism ahead of its first
-module because that module—#259's Traefik template—has to reproduce the
-labels this compiler generates, byte for byte, which makes shipping
-alongside the compiler the whole point of it. A copy in the user's own tree
-drifts from the compiler that generated it the moment either one moves,
-and drift in a template whose job is byte-for-byte agreement means
-silently wrong output rather than a diagnostic.
+The namespace carries one module, `std:traefik`, added at #269. #267
+landed the mechanism a release ahead of it because that module has to
+reproduce the labels this compiler generates, byte for byte, which makes
+shipping alongside the compiler the whole point of it. A copy in the
+user's own tree drifts from the compiler that generated it the moment
+either one moves, and drift in a template whose job is byte-for-byte
+agreement means silently wrong output rather than a diagnostic.
+
+**`std:traefik` is one template per label**, rather than one `router`
+template taking every optional field, and the reason is a property of
+the language rather than a preference. A `labels` block writes every key
+it lists, and nothing omits one, so a single template would emit
+`entrypoints=` for a router that has no entrypoints. Each label a router
+may or may not carry gets its own template, a caller lists the ones it
+wants, and the `with`-list order is the label order. A composite covers
+the common shape over those primitives. The HTTP and TCP sets are
+separate for the same kind of reason: the namespace is part of the label
+*key*, and no template picks a key by condition.
+
+Two things the built-ins do that the module deliberately doesn't, both
+recorded at #269 rather than worked around:
+
+- **`traefik.docker.network` stays the compiler's.** It's derived from
+  whichever of a service's networks is `external`, several stages from
+  the label writer, and a template writing it collides with the derived
+  one (`LabelCollidesWithGenerated`). So the module writes every other
+  label and leaves that one alone, which is why a routed service still
+  matches byte for byte. It moves when the built-ins do, at #271.
+- **A rule handed to a template is a string.** `router { rule: ... }`
+  parses the expression against the matcher table and rejects an unknown
+  name or a wrong arity. `http_rule` takes text and passes it through,
+  so a misspelled matcher compiles and fails at Traefik as a router that
+  never matches. That validation is Traefik-shaped knowledge, and losing
+  it costs exactly what the compiler saves by carrying none—the same
+  trade #270 settled for label values.
 
 **Why a prefix rather than new syntax.** The obvious alternative,
 `use <std/traefik>`, costs two tokens the lexer has never carried—`<`
