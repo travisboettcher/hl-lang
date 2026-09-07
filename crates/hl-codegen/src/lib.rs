@@ -122,14 +122,6 @@ pub enum CodegenError {
         volume: String,
         span: Span,
     },
-    /// A service declares more than one `external` network, so which
-    /// one's real name belongs in `traefik.docker.network=` is
-    /// undecided.
-    AmbiguousExternalNetwork {
-        service: String,
-        candidates: Vec<String>,
-        span: Span,
-    },
     /// A `{{binding}}` interpolation used a name codegen doesn't
     /// recognize (today, the only valid one is `name`).
     UnknownInterpolation { binding: String, span: Span },
@@ -152,10 +144,9 @@ pub enum CodegenError {
     /// in for a built-in field.
     MissingImageOrBuild { service: String, span: Span },
     /// A `build` block sets no `context` (#224). The context is the
-    /// whole of what there is to build, so the block says nothing —
-    /// exactly the shape [`Self::RouterWithoutHost`] refuses one level
-    /// over, and refused rather than defaulted to `.` because a silent
-    /// default here builds the wrong directory rather than none.
+    /// whole of what there is to build, so the block says nothing.
+    /// Refused rather than defaulted to `.` because a silent default
+    /// here builds the wrong directory rather than none.
     BuildWithoutContext { service: String, span: Span },
     /// A `$param` reference survived composition and reached codegen.
     /// Composition is supposed to substitute every one of them (see
@@ -176,230 +167,39 @@ pub enum CodegenError {
     /// it as a located diagnostic rather than emitting the field's name
     /// into the generated document.
     UnresolvedFieldAccess { access: String, span: Span },
-    /// A value destined for a Traefik label contains a character that
-    /// would change the meaning of the label it's spliced into — the
-    /// canonical case being a backtick in a router's `host`, which closes
-    /// the ``Host(`...`)`` rule early and lets everything after it be
-    /// read as more rule grammar. Rejected rather than escaped:
-    /// Traefik's rule grammar has no escape for that backtick, so there
-    /// is nothing to escape *to*.
-    UnsafeLabelValue {
-        field: &'static str,
-        character: char,
-        span: Span,
-    },
-    /// A `router` block sets no `host` (#144, #184, #198) — `router`
-    /// names which one (`None` for the unnamed form). The block that
-    /// exists only to *be* a router says nothing about which requests
-    /// reach it, so there is no rule to emit and nothing the block could
-    /// have meant. Until #80 the whole label list was simply dropped
-    /// here, which meant a service whose author forgot a host deployed
-    /// with its authentication middleware quietly absent: valid output,
-    /// wrong service, no diagnostic.
+    /// Two `labels` entries land on one key once `{{name}}` is
+    /// substituted (#243, narrowed at #271).
     ///
-    /// Through #220 this variant carried a `field` telling it apart from
-    /// a second shape of the same mistake — a service-level `middleware`
-    /// with no `router` anywhere to attach it to. #221 moved `middleware`
-    /// inside `router`, so that shape can no longer be written: the list
-    /// only exists within the block it attaches to. What's left is one
-    /// question with one answer, so the discriminant is gone with it.
+    /// Only reachable here. Two keys spelled alike in source are already
+    /// [`hl_parser::ParseError::DuplicateMapKey`]; what the parser can't
+    /// see is two different spellings resolving to one key, which is
+    /// knowable only once interpolation has run.
     ///
-    /// `span` points at the router block itself.
+    /// A hard error rather than a last-one-wins, and that was the whole
+    /// design decision behind the field. Either precedence rule leaves
+    /// one of two lines in one body doing nothing and saying nothing,
+    /// which is the failure #193, #206 and #232 exist to close.
     ///
-    /// Since #228 there are two ways to give a router a rule — `host`
-    /// (with its optional `path_prefix`) and the whole-rule `rule`
-    /// expression — so this fires only when the block wrote *neither*,
-    /// and the message names both. Writing both is
-    /// [`Self::RouterRuleAndHost`], the opposite mistake.
-    RouterWithoutHost {
-        service: String,
-        router: Option<String>,
-        span: Span,
-    },
-    /// A service has at least one `router` block but no `expose <port>`
-    /// (#198) — a router with nothing to load-balance onto, which used to
-    /// mean Traefik silently guessed a port rather than `hllc` refusing
-    /// to compile. `expose`'s only remaining field is `port` (#198 moved
-    /// every Traefik-routing field onto `router`), so "does this service
-    /// have a router" and "does this service have a port" are now two
-    /// independent, directly checkable questions — this is what makes
-    /// asking both of them at once possible.
-    ///
-    /// `span` points at the first `router` block, which is the one that
-    /// needs either a sibling `expose <port>` or removing.
-    RouterWithoutPort { service: String, span: Span },
-    /// A service sets `traefik { disable }` (#159) and also declares a
-    /// `router` block — the one construct that flag exists to turn off.
-    /// Plain `expose <port>` doesn't conflict — it's Compose's own
-    /// `expose:` key, container-network visibility with no Traefik
-    /// involvement at all, so a disabled service may still declare it.
-    /// Through #220 a service-level `middleware` was a second way to
-    /// reach this error; #221 moved that field inside `router`, so a
-    /// `router` block is now the only thing to check — see
-    /// `labels::traefik_conflict_router`.
-    ///
-    /// A hard error, the same treatment [`Self::RouterWithoutHost`]
-    /// (#144) gives the mirror-image mistake, and for the same reason:
-    /// both are a field whose only meaning depends on a router existing,
-    /// contradicted by something else the same service says about that
-    /// very router. There's no reading of "disabled, but route this
-    /// through Traefik anyway" a user could have meant — silently
-    /// honoring one side over the other would reproduce exactly the
-    /// "valid output, wrong service" failure #144 already closed off for
-    /// the router-less case, just from the opposite direction.
-    ///
-    /// `span` points at the offending `router` block; `disabled_span`
-    /// points at the `disable` flag it contradicts, so the rendered
-    /// message can name both lines.
-    TraefikDisabledWithRouter {
-        service: String,
-        disabled_span: Span,
-        span: Span,
-    },
-    /// A `router` block's `protocol` names something other than `http`
-    /// or `tcp` (#225) — Traefik's only two router label namespaces.
-    ///
-    /// Reported from codegen rather than the parser so a template can
-    /// write `protocol: $proto`: substitution runs after parsing, and
-    /// an unresolved `$proto` rejected here as an unknown protocol
-    /// would name the wrong problem.
-    UnknownRouterProtocol {
-        service: String,
-        protocol: String,
-        span: Span,
-    },
-    /// A TCP `router` sets a field only an HTTP router has (#225) —
-    /// today only `path_prefix`, since a TCP router matches on the TLS
-    /// handshake's server name and never sees a request URI to take a
-    /// path from. Refused rather than dropped: silently ignoring it
-    /// would route traffic the block plainly meant to narrow.
-    TcpRouterWithHttpOnlyField {
-        service: String,
-        router: Option<String>,
-        field: &'static str,
-        span: Span,
-    },
-    /// A TCP `router` names no `port` (#225). An HTTP router with no
-    /// port of its own falls back to the one service-wide target
-    /// `expose.port` supplies, but that target is an *HTTP* service —
-    /// `traefik.http.services.<service>` — so a TCP router has nothing
-    /// to fall back to and must name its own.
-    TcpRouterWithoutPort {
-        service: String,
-        router: Option<String>,
-        span: Span,
-    },
-    /// A `router`'s `rule` names a matcher that isn't legal in the label
-    /// namespace its `protocol` picked (#228).
-    ///
-    /// [`Self::TcpRouterWithHttpOnlyField`]'s counterpart for the
-    /// whole-rule spelling, and it runs both directions: `PathPrefix`
-    /// under `protocol: tcp` has no request URI to match against, and
-    /// `HostSNI` under the default `http` has no TLS handshake to read a
-    /// server name from. Checked here rather than at parse time because
-    /// the answer depends on `protocol`, which is itself only resolved
-    /// here — see [`Self::UnknownRouterProtocol`]. Which matchers exist
-    /// and how many arguments each takes doesn't depend on anything, and
-    /// is checked in the parser instead.
-    MatcherWrongProtocol {
-        service: String,
-        router: Option<String>,
-        matcher: String,
-        /// `"http"` or `"tcp"` — the namespace segment the router landed
-        /// in, so the message can name it as the user's `protocol` does.
-        protocol: &'static str,
-        span: Span,
-    },
-    /// A `router` writes both `rule` and the `host`/`path_prefix` sugar
-    /// it replaces (#228).
-    ///
-    /// The sugar lowers into a `rule` of its own (`labels::sugar_expr`),
-    /// so a block writing both has described one rule twice, and nothing
-    /// in the language says which description wins. Neither reading is
-    /// safe to guess: honoring `rule` silently drops a host the block
-    /// plainly meant to match on, and honoring the sugar silently drops
-    /// the whole expression. Refused for the reason
-    /// [`Self::TraefikDisabledWithRouter`] refuses its own contradiction
-    /// — a service saying two incompatible things about one router.
-    ///
-    /// `span` points at the `host` or `path_prefix` entry;
-    /// `rule_span` at the expression it contradicts, so the rendered
-    /// message can name both lines.
-    RouterRuleAndHost {
-        service: String,
-        router: Option<String>,
-        /// `"host"` or `"path_prefix"` — whichever of the two the block
-        /// wrote beside its `rule`.
-        field: &'static str,
-        span: Span,
-        rule_span: Span,
-    },
-    /// A `router` block's name contains a character that can't appear in
-    /// a Traefik label *key* (#184).
-    ///
-    /// [`Self::UnsafeLabelValue`]'s counterpart for the other side of
-    /// the `=`. A router name is spliced into the key
-    /// `traefik.http.routers.<name>.rule`, so a `.` or an `=` in it
-    /// doesn't corrupt one label's value — it forges a *different* label
-    /// entirely, which is why the value-side [`Self::UnsafeLabelValue`]
-    /// set (tuned for the rule grammar a value is spliced into) is the
-    /// wrong set here. The name is checked against what a Traefik router
-    /// name may hold instead: ASCII letters, digits, `-`, and `_`.
-    ///
-    /// The grammar already makes this unreachable from `.hll` source —
-    /// a router name is an `IDENT`, whose own lexical rule admits
-    /// exactly those characters — so this is the second of two locks on
-    /// the same door, kept because codegen must not depend on the
-    /// parser's grammar to stay safe.
-    UnsafeRouterName {
-        service: String,
-        name: String,
-        character: char,
-        span: Span,
-    },
-    /// A hand-written `labels` entry names a key one of the service's
-    /// other features already generates (#243) — its `router` blocks,
-    /// its `expose` port, `traefik { disable }`, or the
-    /// `traefik.docker.network` label its external network produces.
-    ///
-    /// A hard error rather than a precedence rule, which is the whole
-    /// design decision behind the field. "Explicit wins" silently drops
-    /// a computed label the author never asked to lose — #232's exact
-    /// complaint about `raw { labels: [...] }`, one field over.
-    /// "Generated wins" silently drops the line the author plainly
-    /// wrote. Either way one of two spellings in one body does nothing
-    /// and says nothing, which is the failure #193, #206 and #232 exist
-    /// to close. Refusing keeps the language's promise that a line
-    /// either takes effect or is diagnosed.
-    ///
-    /// `feature` says which producer claimed the key and
-    /// `generated_span` where it was written, so the message names both
-    /// sides. The span is `Option` for exactly one producer:
-    /// `traefik.docker.network` is derived from whichever declared
-    /// network is `external`, resolved far from the `networks [...]`
-    /// entry that named it, so there is a list to name but no single
-    /// line — see [`LabelFeature::DockerNetwork`].
-    ///
-    /// Also raised for two `labels` entries that collide with *each
-    /// other* after `{{name}}` interpolation, which the parser's own
-    /// [`hl_parser::ParseError::DuplicateMapKey`] can't see: two keys
-    /// spelled differently in source can resolve to one key here.
-    LabelCollidesWithGenerated {
+    /// Through #271 this variant also covered a hand-written key
+    /// colliding with a *computed* one — a `router` block's, an `expose`
+    /// port's, `traefik { disable }`'s, or the `traefik.docker.network`
+    /// an external network produced. Codegen computes no labels any
+    /// more, so the only producer left is the field itself, and the
+    /// `LabelFeature` that named which producer claimed a key went with
+    /// them.
+    DuplicateLabelKey {
         key: String,
-        feature: LabelFeature,
-        generated_span: Option<Span>,
+        first: Span,
         span: Span,
     },
     /// A hand-written `labels` key contains a character that makes it
     /// stand for a different key than the one written (#243).
     ///
-    /// [`Self::UnsafeRouterName`]'s counterpart for the key a user
-    /// writes directly, and the same mechanism: Docker splits a label
-    /// string at its first `=`, so a key holding one ends there and the
-    /// rest becomes part of the value. That forges a label rather than
-    /// corrupting one, and it forges one
-    /// [`Self::LabelCollidesWithGenerated`] cannot catch, since the key
-    /// that check compares still holds the `=`.
+    /// Docker splits a label string at its first `=`, so a key holding
+    /// one ends there and the rest becomes part of the value. That
+    /// forges a label rather than corrupting one, and it forges one
+    /// [`Self::DuplicateLabelKey`] cannot catch, since the key that
+    /// check compares still holds the `=`.
     UnsafeLabelKey {
         key: String,
         character: char,
@@ -407,91 +207,17 @@ pub enum CodegenError {
     },
 }
 
-/// Which computed-label producer claimed a label key, for
-/// [`CodegenError::LabelCollidesWithGenerated`] (#243).
-///
-/// An enum rather than a pair of `&'static str` fields on the variant
-/// because each producer needs two different phrasings — what to call it
-/// and what to do about it — and one type owning both keeps them from
-/// drifting apart the way two loose strings at each call site would.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LabelFeature {
-    /// A `router` block: its `rule`, `entrypoints=`, `middlewares=`,
-    /// `priority`, and — when the block names its own `port` — its
-    /// `.service=` and load-balancer target.
-    Router,
-    /// `expose`'s port, as the one service-wide load-balancer target
-    /// every router without a port of its own falls back to.
-    Expose,
-    /// `traefik { disable }`'s single `traefik.enable=false`.
-    Traefik,
-    /// `traefik.docker.network`, computed from whichever of the
-    /// service's declared networks is `external`. The one producer with
-    /// no single span to point at.
-    DockerNetwork,
-    /// An earlier `labels` entry of this same service — reachable only
-    /// when two source keys resolve to one key after `{{name}}`
-    /// interpolation, since two identical keys as written are already a
-    /// parse error.
-    Labels,
-}
-
-impl LabelFeature {
-    /// How the diagnostic names this producer.
-    fn describe(self) -> &'static str {
-        match self {
-            LabelFeature::Router => "`router` block",
-            LabelFeature::Expose => "`expose` port",
-            LabelFeature::Traefik => "`traefik { disable }`",
-            LabelFeature::DockerNetwork => "external network",
-            LabelFeature::Labels => "own `labels` entry",
-        }
-    }
-
-    /// `"generated by"` for a computed label, `"set by"` for one the
-    /// user wrote — "generated" would be plainly wrong for the one
-    /// producer that is itself a hand-written entry.
-    fn verb(self) -> &'static str {
-        match self {
-            LabelFeature::Labels => "set by",
-            _ => "generated by",
-        }
-    }
-
-    /// The other half of the fix, beside removing the colliding entry.
-    fn remedy(self) -> &'static str {
-        match self {
-            LabelFeature::Router => "change the router",
-            LabelFeature::Expose => "change the `expose` port",
-            LabelFeature::Traefik => "drop the `traefik { disable }`",
-            LabelFeature::DockerNetwork => "change the external network",
-            LabelFeature::Labels => "change one of the two keys",
-        }
-    }
-}
-
 impl CodegenError {
     pub fn span(&self) -> Span {
         match self {
             CodegenError::UnknownNetwork { span, .. }
             | CodegenError::UnknownVolume { span, .. }
-            | CodegenError::AmbiguousExternalNetwork { span, .. }
             | CodegenError::UnknownInterpolation { span, .. }
             | CodegenError::MissingImageOrBuild { span, .. }
             | CodegenError::BuildWithoutContext { span, .. }
             | CodegenError::UnsubstitutedParameter { span, .. }
             | CodegenError::UnresolvedFieldAccess { span, .. }
-            | CodegenError::UnsafeLabelValue { span, .. }
-            | CodegenError::UnknownRouterProtocol { span, .. }
-            | CodegenError::TcpRouterWithHttpOnlyField { span, .. }
-            | CodegenError::TcpRouterWithoutPort { span, .. }
-            | CodegenError::MatcherWrongProtocol { span, .. }
-            | CodegenError::RouterRuleAndHost { span, .. }
-            | CodegenError::RouterWithoutHost { span, .. }
-            | CodegenError::RouterWithoutPort { span, .. }
-            | CodegenError::TraefikDisabledWithRouter { span, .. }
-            | CodegenError::UnsafeRouterName { span, .. }
-            | CodegenError::LabelCollidesWithGenerated { span, .. }
+            | CodegenError::DuplicateLabelKey { span, .. }
             | CodegenError::UnsafeLabelKey { span, .. } => *span,
         }
     }
@@ -530,15 +256,6 @@ impl CodegenError {
                 f,
                 "{at}: service `{service}` references undeclared volume `{volume}`"
             ),
-            CodegenError::AmbiguousExternalNetwork {
-                service,
-                candidates,
-                ..
-            } => write!(
-                f,
-                "{at}: service `{service}` declares more than one external network ({}) — which real network name should `traefik.docker.network` use?",
-                candidates.join(", ")
-            ),
             CodegenError::UnknownInterpolation { binding, .. } => {
                 write!(f, "{at}: unknown interpolation `{{{{{binding}}}}}`")
             }
@@ -563,128 +280,13 @@ impl CodegenError {
             // here: a backtick is the single most likely value, and
             // backtick-quoting a backtick reads as an unbroken run of
             // three.
-            CodegenError::UnsafeLabelValue {
-                field, character, ..
-            } => {
-                // A comma in `router.entrypoints` gets an extra sentence.
-                // It's the one rejection here that used to be *accepted*
-                // — `entrypoint "web,websecure"` was how you attached a
-                // router to several entry points before `entrypoints`
-                // became a list — so it's the one a user is likely to
-                // hit by writing something that was correct yesterday,
-                // or by pasting a value straight out of Traefik's own
-                // docs. Pointing at the list form turns a dead end into
-                // a one-line fix. Note this is a diagnostic affordance,
-                // not a semantic carve-out: the value is still rejected,
-                // exactly like every other metacharacter.
-                let hint = if *field == "router.entrypoints" && *character == ',' {
-                    " — `entrypoints` is a list, so write the entry points as separate items (`entrypoints web, websecure`) and let `hllc` join them"
-                } else {
-                    ""
-                };
-                write!(
-                    f,
-                    "{at}: `{field}` must not contain {character:?} — it would change the meaning of the generated Traefik label{hint}"
-                )
-            }
-            CodegenError::RouterWithoutHost {
-                service, router, ..
-            } => write!(
+            CodegenError::DuplicateLabelKey { key, first, .. } => write!(
                 f,
-                "{at}: service `{service}` declares {} with no `host` and no `rule`, so there is no rule for Traefik to match — add a host (`host: \"{service}.example.com\"`), write a `rule`, or drop the `router`",
-                named_router(router)
+                "{at}: label {key:?} is already set by this service's own `labels` at {} — two \
+                 entries spelled differently can still resolve to one key once `{{{{name}}}}` is \
+                 substituted, so one of them would silently do nothing",
+                first.locate(files)
             ),
-            CodegenError::UnknownRouterProtocol {
-                service, protocol, ..
-            } => write!(
-                f,
-                "{at}: service `{service}` declares a `router` with `protocol: {protocol}` — the only Traefik router protocols are `http` (the default) and `tcp`"
-            ),
-            CodegenError::TcpRouterWithHttpOnlyField {
-                service,
-                router,
-                field,
-                ..
-            } => write!(
-                f,
-                "{at}: service `{service}` sets `{field}` on {}, but a TCP router matches on the TLS server name and never sees a request path — drop the `{field}` or the `protocol: tcp`",
-                named_router(router)
-            ),
-            CodegenError::MatcherWrongProtocol {
-                service,
-                router,
-                matcher,
-                protocol,
-                ..
-            } => write!(
-                f,
-                "{at}: service `{service}` uses the rule matcher `{matcher}` on {}, which routes `{protocol}`, and `{matcher}` is not a `{protocol}` matcher — {}",
-                named_router(router),
-                matcher_protocol_hint(matcher, protocol)
-            ),
-            CodegenError::RouterRuleAndHost {
-                service,
-                router,
-                field,
-                rule_span,
-                ..
-            } => write!(
-                f,
-                "{at}: service `{service}` sets `{field}` on {}, which already has a `rule` (at {}) — `{field}` is sugar for part of a rule, so writing both describes one rule twice; drop the `{field}` or fold it into the `rule`",
-                named_router(router),
-                rule_span.locate(files)
-            ),
-            CodegenError::TcpRouterWithoutPort {
-                service, router, ..
-            } => write!(
-                f,
-                "{at}: service `{service}` declares {} with `protocol: tcp` but no `port`, and a TCP router can't fall back to `expose <port>`, which serves an HTTP router — add a port (`port: 1111`)",
-                named_router(router)
-            ),
-            CodegenError::RouterWithoutPort { service, .. } => write!(
-                f,
-                "{at}: service `{service}` declares a `router` but sets no `expose <port>`, so Traefik has no port to load-balance onto — add `expose <port>` or drop the `router`"
-            ),
-            CodegenError::TraefikDisabledWithRouter {
-                service,
-                disabled_span,
-                ..
-            } => write!(
-                f,
-                "{at}: service `{service}` declares a `router`, but `traefik` is disabled (at {}), so there is nothing for it to route — drop the `router` or remove `disable`",
-                disabled_span.locate(files)
-            ),
-            CodegenError::UnsafeRouterName {
-                service,
-                name,
-                character,
-                ..
-            } => write!(
-                f,
-                "{at}: service `{service}` names a router `{name}`, which must not contain {character:?} — the name becomes part of the Traefik label key (`traefik.http.routers.{name}.rule`), so it would write a different label than the one intended"
-            ),
-            CodegenError::LabelCollidesWithGenerated {
-                key,
-                feature,
-                generated_span,
-                ..
-            } => {
-                // `at ...` only when there's a line to name — the
-                // `traefik.docker.network` label has a `networks` list
-                // behind it but no single entry, so its message names
-                // the producer and stops there.
-                let located = match generated_span {
-                    Some(span) => format!(" at {}", span.locate(files)),
-                    None => String::new(),
-                };
-                write!(
-                    f,
-                    "{at}: label {key:?} is already {} this service's {}{located} — remove it here, or {}",
-                    feature.verb(),
-                    feature.describe(),
-                    feature.remedy()
-                )
-            }
             CodegenError::UnsafeLabelKey { key, character, .. } => write!(
                 f,
                 "{at}: label key {key:?} must not contain {character:?} — Docker splits a label at its first `=`, so the key would end there and the rest would become part of the value"
@@ -698,39 +300,6 @@ impl CodegenError {
 struct DisplayCodegenError<'a> {
     error: &'a CodegenError,
     files: Option<&'a SourceMap>,
-}
-
-/// How a diagnostic names one `router` block: quoted by name, or
-/// described for what it is when the block is the unnamed form and has
-/// no name to quote.
-/// What to try instead of a matcher used in the wrong namespace.
-///
-/// The two namespaces have near-equivalents for the one thing both care
-/// about — a name to route by — so a `Host` written on a TCP router is
-/// almost always a `HostSNI` and vice versa, and saying so is more
-/// useful than restating the table. Everything else has no counterpart
-/// at all: a TCP router genuinely has no path or header to match on, so
-/// the honest advice there is that the matcher and the `protocol` can't
-/// both be right.
-fn matcher_protocol_hint(matcher: &str, protocol: &'static str) -> String {
-    let counterpart = match (matcher, protocol) {
-        ("Host", "tcp") => Some("HostSNI"),
-        ("HostRegexp", "tcp") => Some("HostSNIRegexp"),
-        ("HostSNI", "http") => Some("Host"),
-        ("HostSNIRegexp", "http") => Some("HostRegexp"),
-        _ => None,
-    };
-    match counterpart {
-        Some(other) => format!("use `{other}` instead"),
-        None => format!("drop the matcher or the `protocol: {protocol}`"),
-    }
-}
-
-fn named_router(router: &Option<String>) -> String {
-    match router {
-        Some(name) => format!("`router {name}`"),
-        None => "an unnamed `router`".to_string(),
-    }
 }
 
 impl fmt::Display for DisplayCodegenError<'_> {
@@ -908,11 +477,10 @@ fn generate_service(
         devices.push(format!("{host}:{container}"));
     }
 
-    let (compose_networks, network_docs, docker_network) = resolve_networks(
+    let (compose_networks, network_docs) = resolve_networks(
         &fields.networks,
         declared_networks,
         name,
-        service.span,
         auto_attach_default,
     )?;
 
@@ -924,7 +492,7 @@ fn generate_service(
         .into_iter()
         .collect();
 
-    let labels = labels::compute(name, fields, docker_network.as_deref(), &bindings)?;
+    let labels = labels::compute(fields, &bindings)?;
 
     let depends_on = generate_depends_on(&fields.depends_on);
     let dns = fields.dns.iter().map(|r| r.text().to_string()).collect();
@@ -957,19 +525,20 @@ fn generate_service(
     // `raw` replacing a built-in field it names is the documented rule,
     // and `apply_raw_overrides` below is what carries it out. `labels` is
     // the one key where that rule surprises people, because it is not one
-    // field from the language's own perspective: it is what `router`,
-    // `expose`, `traefik`, and the resolved Docker network add up to. A
-    // service with both loses the whole computed set — correct, and until
-    // #232 completely silent. Warned rather than rejected: hand-writing
-    // the full list is exactly what `raw` is for when `router` can't yet
-    // say something, so what was missing is visibility, not a
+    // field from an author's perspective: its entries arrive from every
+    // template tier applied to the service as well as from its own body,
+    // and since #271 that includes all of the service's routing. A
+    // service with both loses the whole set — correct, and until #232
+    // completely silent. Warned rather than rejected: hand-writing the
+    // full list is exactly what `raw` is for when a label needs a shape
+    // `labels` can't write, so what was missing is visibility, not a
     // prohibition.
     //
-    // Conditioned on the computed set being non-empty rather than on
-    // which fields the service declares, so the warning fires exactly
-    // when something is actually dropped — that covers `traefik {
-    // disable }`'s lone `traefik.enable=false` too, which no
-    // `router`/`expose` test would have caught.
+    // Conditioned on the set being non-empty rather than on which
+    // fields the service declares, so the warning fires exactly when
+    // something is actually dropped — a service whose only label comes
+    // from a template it applies is covered the same as one that wrote
+    // the label itself.
     if let Some(span) = raw_labels_span
         && !labels.is_empty()
     {
@@ -1033,8 +602,7 @@ fn generate_service(
 ///
 /// A `build` block with no `context` at all is
 /// [`CodegenError::BuildWithoutContext`]: the context is the whole of
-/// what there is to build, exactly as a `router`'s `host` is the whole
-/// of what creates a router.
+/// what there is to build, so a block without one says nothing.
 fn generate_build(
     service: &str,
     build: Option<&Build>,
@@ -1334,12 +902,6 @@ fn resolve_volumes(
 /// networks name exactly one distinct external real name — that name,
 /// for the `traefik.docker.network=` label.
 ///
-/// `service_span` is only used for [`CodegenError::AmbiguousExternalNetwork`],
-/// which is a property of the service's whole `networks` list rather
-/// than of any one entry in it — there is no single offending
-/// reference to point at. [`CodegenError::UnknownNetwork`] does have
-/// one, and points at it (#70).
-///
 /// `auto_attach_default` is the multi-service half of #152: when set,
 /// [`IMPLICIT_DEFAULT_NETWORK`] is appended to the returned list if it
 /// isn't there already, exactly as if the service had written `networks
@@ -1351,21 +913,14 @@ fn resolve_networks(
     refs: &[Literal],
     declared: &[Network],
     service_name: &str,
-    service_span: Span,
     auto_attach_default: bool,
-) -> Result<(Vec<String>, NetworkDocs, Option<String>), CodegenError> {
+) -> Result<(Vec<String>, NetworkDocs), CodegenError> {
     let mut compose_networks = Vec::with_capacity(refs.len() + 1);
     let mut docs = Vec::with_capacity(refs.len());
-    let mut external_candidates = Vec::new();
 
     for r in refs {
         match declared.iter().find(|n| n.name.name == r.text()) {
-            Some(decl) => push_declared_network(
-                decl,
-                &mut compose_networks,
-                &mut docs,
-                &mut external_candidates,
-            ),
+            Some(decl) => push_declared_network(decl, &mut compose_networks, &mut docs),
             // The one name every program has whether or not it's
             // declared (#152): Compose defines `default` itself, so an
             // otherwise-unknown reference to exactly that name resolves
@@ -1406,32 +961,13 @@ fn resolve_networks(
             // An explicit `network default { ... }` still wins: its
             // `external`/`name` settings are honored exactly as any
             // other declared network's would be, including
-            // participating in the `traefik.docker.network=` /
-            // `AmbiguousExternalNetwork` logic below when it's
-            // `external`.
-            Some(decl) => push_declared_network(
-                decl,
-                &mut compose_networks,
-                &mut docs,
-                &mut external_candidates,
-            ),
+            // including its `external` flag.
+            Some(decl) => push_declared_network(decl, &mut compose_networks, &mut docs),
             None => compose_networks.push(IMPLICIT_DEFAULT_NETWORK.to_string()),
         }
     }
 
-    let docker_network = match external_candidates.as_slice() {
-        [] => None,
-        [one] => Some(one.clone()),
-        many => {
-            return Err(CodegenError::AmbiguousExternalNetwork {
-                service: service_name.to_string(),
-                candidates: many.to_vec(),
-                span: service_span,
-            });
-        }
-    };
-
-    Ok((compose_networks, docs, docker_network))
+    Ok((compose_networks, docs))
 }
 
 /// The shared body of resolving one *declared* network reference,
@@ -1443,30 +979,13 @@ fn push_declared_network(
     decl: &Network,
     compose_networks: &mut Vec<String>,
     docs: &mut NetworkDocs,
-    external_candidates: &mut Vec<String>,
 ) {
     compose_networks.push(decl.name.name.clone());
-    let is_external = decl.external.is_some();
-    // The same derivation `.name` reads in a value position (#275), from
-    // the same method, so the label this feeds and the language can't
-    // answer "what is this network called to Docker" differently.
-    let real_name = decl.docker_name().to_string();
-    // By *distinct* real name (#69): naming one external network
-    // more than once is not an ambiguity between it and itself,
-    // it's one answer given twice. Composition already drops
-    // repeated `networks` entries, so a duplicate can only reach
-    // here from a caller that built a `ComposedProgram` some other
-    // way, or from two declarations that differ in `hll` name but
-    // resolve to the same real one — neither of which leaves
-    // `traefik.docker.network` with an actual choice to make.
-    if is_external && !external_candidates.contains(&real_name) {
-        external_candidates.push(real_name.clone());
-    }
     docs.push((
         decl.name.name.clone(),
         doc::NetworkDoc {
             name: decl.real_name.as_ref().map(|l| l.text().to_string()),
-            external: is_external,
+            external: decl.external.is_some(),
         },
     ));
 }
@@ -1582,19 +1101,6 @@ mod error_display_tests {
     }
 
     #[test]
-    fn ambiguous_external_network_display() {
-        let err = CodegenError::AmbiguousExternalNetwork {
-            service: "web".to_string(),
-            candidates: vec!["a".to_string(), "b".to_string()],
-            span: span(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "3:5: service `web` declares more than one external network (a, b) — which real network name should `traefik.docker.network` use?"
-        );
-    }
-
-    #[test]
     fn unknown_interpolation_display() {
         let err = CodegenError::UnknownInterpolation {
             binding: "port".to_string(),
@@ -1659,304 +1165,8 @@ mod error_display_tests {
         );
     }
 
-    #[test]
-    fn unsafe_label_value_display() {
-        let err = CodegenError::UnsafeLabelValue {
-            field: "router.host",
-            character: '`',
-            span: span(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "3:5: `router.host` must not contain '`' — it would change the meaning of the generated Traefik label"
-        );
-    }
-
-    /// A comma in `router.entrypoints` — and only that pairing — gets the
-    /// migration hint appended.
-    #[test]
-    fn comma_in_entrypoint_display_adds_a_list_hint() {
-        let err = CodegenError::UnsafeLabelValue {
-            field: "router.entrypoints",
-            character: ',',
-            span: span(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "3:5: `router.entrypoints` must not contain ',' — it would change the meaning of the generated Traefik label — `entrypoints` is a list, so write the entry points as separate items (`entrypoints web, websecure`) and let `hllc` join them"
-        );
-    }
-
-    /// The hint is specific to the comma: another metacharacter in the
-    /// same field has nothing to do with list syntax, so suggesting a
-    /// list there would just be wrong.
-    #[test]
-    fn non_comma_in_entrypoint_display_has_no_list_hint() {
-        let err = CodegenError::UnsafeLabelValue {
-            field: "router.entrypoints",
-            character: '`',
-            span: span(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "3:5: `router.entrypoints` must not contain '`' — it would change the meaning of the generated Traefik label"
-        );
-    }
-
-    /// And a comma in a *different* field doesn't get it either.
-    #[test]
-    fn comma_in_middleware_display_has_no_list_hint() {
-        let err = CodegenError::UnsafeLabelValue {
-            field: "router.middleware",
-            character: ',',
-            span: span(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "3:5: `router.middleware` must not contain ',' — it would change the meaning of the generated Traefik label"
-        );
-    }
-
-    // --- `router` diagnostics (#184, #198) ---
-
-    /// The named form quotes the router back, so a service with four of
-    /// them says which one is missing its host.
-    #[test]
-    fn router_block_without_host_display() {
-        let err = CodegenError::RouterWithoutHost {
-            service: "vikunja".to_string(),
-            router: Some("api".to_string()),
-            span: span(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "3:5: service `vikunja` declares `router api` with no `host` and no `rule`, so \
-             there is no rule for Traefik to match — add a host \
-             (`host: \"vikunja.example.com\"`), write a `rule`, or drop the `router`"
-        );
-    }
-
-    /// The unnamed form has no name to quote, so it's named for what it
-    /// is rather than as an empty string.
-    #[test]
-    fn unnamed_router_block_without_host_display() {
-        let err = CodegenError::RouterWithoutHost {
-            service: "web".to_string(),
-            router: None,
-            span: span(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "3:5: service `web` declares an unnamed `router` with no `host` and no `rule`, so \
-             there is no rule for Traefik to match — add a host \
-             (`host: \"web.example.com\"`), write a `rule`, or drop the `router`"
-        );
-    }
-
-    /// A matcher used in the wrong namespace names its counterpart
-    /// where one exists (#228). The four counterpart pairs are the whole
-    /// point of the hint — "not a `tcp` matcher" alone leaves a reader
-    /// to go find that `HostSNI` is the thing they wanted — so each is
-    /// pinned separately rather than as one representative case.
-    #[test]
-    fn matcher_wrong_protocol_display_names_the_counterpart() {
-        for (matcher, protocol, counterpart) in [
-            ("Host", "tcp", "HostSNI"),
-            ("HostRegexp", "tcp", "HostSNIRegexp"),
-            ("HostSNI", "http", "Host"),
-            ("HostSNIRegexp", "http", "HostRegexp"),
-        ] {
-            let err = CodegenError::MatcherWrongProtocol {
-                service: "sftpgo".to_string(),
-                router: Some("sftp".to_string()),
-                matcher: matcher.to_string(),
-                protocol,
-                span: span(),
-            };
-            assert_eq!(
-                err.to_string(),
-                format!(
-                    "3:5: service `sftpgo` uses the rule matcher `{matcher}` on `router sftp`, \
-                     which routes `{protocol}`, and `{matcher}` is not a `{protocol}` matcher — \
-                     use `{counterpart}` instead"
-                )
-            );
-        }
-    }
-
-    /// A matcher with no counterpart says so instead of inventing one:
-    /// a TCP router genuinely has no request path, so there is nothing
-    /// to suggest and the honest advice is that the matcher and the
-    /// `protocol` can't both be right.
-    #[test]
-    fn matcher_wrong_protocol_display_without_a_counterpart() {
-        let err = CodegenError::MatcherWrongProtocol {
-            service: "sftpgo".to_string(),
-            router: None,
-            matcher: "PathPrefix".to_string(),
-            protocol: "tcp",
-            span: span(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "3:5: service `sftpgo` uses the rule matcher `PathPrefix` on an unnamed `router`, \
-             which routes `tcp`, and `PathPrefix` is not a `tcp` matcher — drop the matcher or \
-             the `protocol: tcp`"
-        );
-    }
-
-    /// Both spellings of a rule on one router (#228), naming the line
-    /// each sits on — the reader has to see both to pick one.
-    #[test]
-    fn router_rule_and_host_display_names_both_locations() {
-        let err = CodegenError::RouterRuleAndHost {
-            service: "web".to_string(),
-            router: Some("api".to_string()),
-            field: "path_prefix",
-            span: span(),
-            rule_span: Span {
-                start: 0,
-                end: 0,
-                line: 2,
-                col: 7,
-                file: FileId::ANONYMOUS,
-            },
-        };
-        assert_eq!(
-            err.to_string(),
-            "3:5: service `web` sets `path_prefix` on `router api`, which already has a `rule` \
-             (at 2:7) — `path_prefix` is sugar for part of a rule, so writing both describes one \
-             rule twice; drop the `path_prefix` or fold it into the `rule`"
-        );
-    }
-
-    /// A router with no port to balance onto (#198): the follow-up
-    /// diagnostic that falls out once `router` is the only source of
-    /// Traefik routers and `expose` the only source of ports.
-    #[test]
-    fn router_without_port_display() {
-        let err = CodegenError::RouterWithoutPort {
-            service: "web".to_string(),
-            span: span(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "3:5: service `web` declares a `router` but sets no `expose <port>`, so Traefik has \
-             no port to load-balance onto — add `expose <port>` or drop the `router`"
-        );
-    }
-
-    /// The message says *key*, not value, because that's what makes this
-    /// a different rejection from [`CodegenError::UnsafeLabelValue`]: a
-    /// bad name doesn't corrupt one label, it writes a different one.
-    #[test]
-    fn unsafe_router_name_display() {
-        let err = CodegenError::UnsafeRouterName {
-            service: "web".to_string(),
-            name: "a.tls".to_string(),
-            character: '.',
-            span: span(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "3:5: service `web` names a router `a.tls`, which must not contain '.' — the name \
-             becomes part of the Traefik label key (`traefik.http.routers.a.tls.rule`), so it \
-             would write a different label than the one intended"
-        );
-    }
-
-    /// #243's collision message, one row per producer. Each is pinned
-    /// separately rather than through one representative case because
-    /// naming the *right* producer is the whole value of the
-    /// diagnostic — "this label already exists" without saying which
-    /// feature made it leaves the reader to guess which of `router`,
-    /// `expose`, `traefik` and the network is responsible.
-    #[test]
-    fn label_collides_with_generated_display_names_each_producer() {
-        let generated = Span {
-            start: 0,
-            end: 0,
-            line: 2,
-            col: 7,
-            file: FileId::ANONYMOUS,
-        };
-        for (feature, described, remedy) in [
-            (LabelFeature::Router, "`router` block", "change the router"),
-            (
-                LabelFeature::Expose,
-                "`expose` port",
-                "change the `expose` port",
-            ),
-            (
-                LabelFeature::Traefik,
-                "`traefik { disable }`",
-                "drop the `traefik { disable }`",
-            ),
-        ] {
-            let err = CodegenError::LabelCollidesWithGenerated {
-                key: "traefik.enable".to_string(),
-                feature,
-                generated_span: Some(generated),
-                span: span(),
-            };
-            assert_eq!(
-                err.to_string(),
-                format!(
-                    "3:5: label \"traefik.enable\" is already generated by this service's \
-                     {described} at 2:7 — remove it here, or {remedy}"
-                )
-            );
-        }
-    }
-
-    /// The one producer with no line to name: `traefik.docker.network`
-    /// is derived from whichever declared network is `external`,
-    /// resolved far from the `networks [...]` entry that named it, so
-    /// the message names the producer and stops rather than pointing at
-    /// a span that would mislead.
-    #[test]
-    fn label_collides_with_the_docker_network_label_omits_a_location() {
-        let err = CodegenError::LabelCollidesWithGenerated {
-            key: "traefik.docker.network".to_string(),
-            feature: LabelFeature::DockerNetwork,
-            generated_span: None,
-            span: span(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "3:5: label \"traefik.docker.network\" is already generated by this service's \
-             external network — remove it here, or change the external network"
-        );
-    }
-
-    /// Two `labels` entries colliding with each other say "set by", not
-    /// "generated by" — nothing generated either of them, and calling a
-    /// line the author typed "generated" would send them looking for a
-    /// feature that isn't there.
-    #[test]
-    fn two_explicit_labels_colliding_say_set_rather_than_generated() {
-        let err = CodegenError::LabelCollidesWithGenerated {
-            key: "a.web".to_string(),
-            feature: LabelFeature::Labels,
-            generated_span: Some(Span {
-                start: 0,
-                end: 0,
-                line: 2,
-                col: 7,
-                file: FileId::ANONYMOUS,
-            }),
-            span: span(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "3:5: label \"a.web\" is already set by this service's own `labels` entry at 2:7 — \
-             remove it here, or change one of the two keys"
-        );
-    }
-
-    /// [`CodegenError::UnsafeRouterName`]'s counterpart on the key the
-    /// user writes directly (#243), and worded to say why: an `=` ends
-    /// the key where Docker splits the label.
+    /// Worded to say why an `=` is refused: it ends the key where
+    /// Docker splits the label (#243).
     #[test]
     fn unsafe_label_key_display() {
         let err = CodegenError::UnsafeLabelKey {

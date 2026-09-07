@@ -40,10 +40,8 @@ pub struct UseDecl {
 /// "$" IDENT`, no qualifier) and a `Reference` struct (`IDENT ( "."
 /// IDENT )?`, no `$param`) — purely because neither could represent the
 /// other's extra bit. That split meant a `Reference`-typed position
-/// (`networks`, `dns`, `env_file`, `expose.entrypoint`,
-/// `router.entrypoints`, `router.middleware`, a `depends_on` entry, a
-/// named-volume mount's
-/// host side) could never accept a `$param`: `template web(net)
+/// (`networks`, `dns`, `env_file`, a `depends_on` entry, a
+/// named-volume mount's host side) could never accept a `$param`: `template web(net)
 /// { networks [$net] }` was a parse error with no way to fix it short of
 /// giving `networks` a second grammar. Folding the qualifier into this
 /// type is what closes that gap — a `Reference` is now just this type's
@@ -500,294 +498,14 @@ pub struct Build {
 ///
 /// Through #197, `expose` also modeled exactly one Traefik router of its
 /// own (`host`, `entrypoint`). #198 moved every Traefik-routing field
-/// onto [`Router`], leaving `port` — Compose's own `expose:` key plus the
-/// `loadbalancer.server.port` label, with nothing to do with Traefik —
-/// the only thing left here. `expose <port> as "<host>"` still parses,
-/// but as bespoke parser sugar that produces an unnamed [`Router`]
-/// alongside this `Expose`, not by setting a field of this struct — see
-/// `crate::parser::Parser::parse_expose_as_sugar`.
+/// onto a `router` field, and #271 moved routing out of the language
+/// entirely — so `port` is all that is left here, doing the one job
+/// Compose's own `expose:` key does. The `expose <port> as "<host>"`
+/// sugar went with it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Expose {
     pub port: Option<Literal>,
     pub span: Span,
-}
-
-/// A parsed `router` block (#184) — one Traefik router computed off this
-/// service.
-///
-/// Through #197, [`Expose`] modeled exactly one router of its own — one
-/// `host`, one `Host()` rule, one `entrypoints=` label — and a service
-/// needing a second router (a public host beside a LAN host, an API path
-/// split off from a frontend) had no way to say so short of abandoning
-/// `expose` and hand-writing the whole label list in `raw { labels: [...]
-/// }`, losing every check `expose` performed. `router` was the second way
-/// to say it; #198 then moved every Traefik-routing field off `expose`
-/// and onto `router` outright, so today `router` is the *only* way to
-/// say it — the unnamed `router { ... }` form (or its `expose <port> as
-/// "<host>"` sugar) is simply the common single-router case.
-///
-/// `name` keys the emitted label: `router api { ... }` on service
-/// `vikunja` emits `traefik.http.routers.vikunja-api.*`, while the
-/// unnamed `router { ... }` emits `traefik.http.routers.vikunja.*`.
-/// Writing the unnamed form twice in one body — by hand, or once by hand
-/// and once via `expose <port> as "<host>"`'s own sugar — is a hard
-/// error (`ParseError::DuplicateRouterName`): both would claim that same
-/// id.
-///
-/// The name is an [`Ident`], never a string, for the same reason a
-/// `service`/`network`/`volume` declaration's name is: it lands in a
-/// label *key*, not a value, and `IDENT`'s own grammar
-/// (`[A-Za-z_][A-Za-z0-9_-]*`) can't spell the `.`, `=`, backtick, or
-/// space a forged `traefik.*` key would need. Codegen re-checks it
-/// anyway — see `hl_codegen`'s own router-name guard — so the rule holds
-/// for an AST built by any other route too.
-///
-/// A `router` carries no port. Compose's `loadbalancer.server.port`
-/// label is per Compose *service*, not per router, so it stays derived
-/// from [`Expose::port`] exactly as before, and several routers off one
-/// container all balance onto that one port. `middleware`, unlike the
-/// port, genuinely *is* per router, and #221 moved it here off
-/// `ServiceFields` outright — see [`Self::middleware`].
-#[derive(Debug, Clone, PartialEq)]
-pub struct Router {
-    /// `None` for the unnamed `router { ... }` form.
-    pub name: Option<Ident>,
-    /// The hostname this router matches, spliced into the
-    /// ``Host(`...`)`` rule. `Option` for the same reason as
-    /// [`Image::reference`] — the parser enforces no required fields —
-    /// but a router reaching codegen with no host at all is an error
-    /// there, since the host is the whole of what creates a router.
-    pub host: Option<Literal>,
-    /// The Traefik entry points this router attaches to (e.g.
-    /// `entrypoints web, web-secure`). A list rather than a scalar because
-    /// Traefik's own `entrypoints=` label is itself comma-separated:
-    /// modelling that as a list keeps the comma codegen's to write rather
-    /// than the user's, so no label value ever has to tolerate one.
-    ///
-    /// Empty means this router gets no `entrypoints=` label at all —
-    /// Traefik's own default of attaching to every entry point — rather
-    /// than the parser guessing a homelab-specific value. That's why
-    /// this is a plain `Vec` and not an `Option<Vec<_>>`: "unset" and
-    /// "set to nothing" have to mean the same thing here, exactly as
-    /// they do for [`Self::middleware`] beside it.
-    pub entrypoints: Vec<Literal>,
-    /// Path prefixes to `&&` onto the `Host()` rule, `||`-joined inside
-    /// one parenthesized group: `path_prefix: ["/api/v1", "/dav/"]`
-    /// yields ``Host(`h`) && (PathPrefix(`/api/v1`) ||
-    /// PathPrefix(`/dav/`))``. `Vec<Literal>`, the same type
-    /// `entrypoints` above carries since #196 unified the two — a prefix
-    /// is free text a template legitimately parameterizes with `$param`,
-    /// which is exactly what that unification made reachable here too
-    /// (previously it wasn't, since the pre-#196 `FieldKind::LiteralList`
-    /// this field carried existed for that one reason — see
-    /// [`crate::schema::allows_qualified_reference`]'s doc for why the
-    /// qualified form stays rejected here all the same).
-    ///
-    /// Order is observable — it's the order the `||` alternatives are
-    /// written in — so this concatenates on merge without the
-    /// distinct-name dedupe `entrypoints` and `middleware` get, the same
-    /// split `dns`/`env_file` already draw against `networks`.
-    pub path_prefix: Vec<Literal>,
-    /// The Traefik middleware this router attaches (#221) — the whole
-    /// of the language's `middleware`, which through #220 was a
-    /// service-level field instead.
-    ///
-    /// Service-level was the wrong scope, not merely a coarser one. A
-    /// middleware only ever reaches Traefik as a label on one specific
-    /// router, so one list per service could not say what `gitea`
-    /// actually needs: a public router beside an internal one, where
-    /// only the internal one carries the IP allowlist. A service-wide
-    /// list forces the allowlist onto both routers or neither, and both
-    /// readings are wrong. Keeping the old field *beside* this one would
-    /// have left two spellings of one concept, with precedence rules to
-    /// learn and a silent wrong answer whenever someone reached for the
-    /// wrong one; #221 moved the field here instead. A body that still
-    /// writes the old spelling gets `ParseError::MovedField` rather than
-    /// a silently ignored line — see [`crate::schema::moved_field`].
-    ///
-    /// Empty means this router attaches no middleware, the same way an
-    /// empty [`Self::entrypoints`] means it names no entry point: a plain
-    /// `Vec`, with "unset" and "set to nothing" deliberately identical.
-    pub middleware: Vec<Literal>,
-    /// Traefik's own router `priority=` (#225). Higher wins, and it's
-    /// the only thing separating two routers that match the same
-    /// request — `sftpgo`'s `web` and `webdav` share one host and are
-    /// disambiguated purely by this.
-    ///
-    /// A number, checked as one by `compose::check_numeric_fields`
-    /// alongside `expose.port`. `None` leaves the label off entirely,
-    /// which is Traefik's own default of deriving a priority from the
-    /// rule's length rather than a value `hllc` would be guessing.
-    pub priority: Option<Literal>,
-    /// The port this router load-balances onto (#225), giving it a
-    /// Traefik *service* of its own named after the router's own id.
-    ///
-    /// `None` falls back to [`ServiceFields::expose`]'s single `port`
-    /// and the one service-wide `loadbalancer.server.port` label that
-    /// every router shared before #225 — which is what keeps a file
-    /// written against the older model emitting exactly what it always
-    /// did. `Some` is for the container listening on more than one
-    /// port, where "the" port doesn't exist: `sftpgo` serves its web UI
-    /// on 2222, WebDAV on 4444, and SFTP on 1111, and each router has
-    /// to name which one it means.
-    pub port: Option<Literal>,
-    /// `http` (the default) or `tcp` (#225) — which of Traefik's two
-    /// label namespaces this router lives in.
-    ///
-    /// A TCP router is not an HTTP router with a flag: it emits
-    /// `traefik.tcp.routers.*`/`traefik.tcp.services.*` instead of
-    /// `traefik.http.*`, and matches on `HostSNI()` rather than
-    /// `Host()`, since at that layer there is no request to read a Host
-    /// header from — only the TLS handshake's server name. Raw SFTP
-    /// isn't HTTP at all, which is why `sftpgo` needs one.
-    ///
-    /// Validated in codegen rather than at parse time, so a template can
-    /// still write `protocol: $proto`: parameter substitution runs after
-    /// parsing, and rejecting an unresolved `$proto` as an unknown
-    /// protocol would be a diagnostic about the wrong thing. See
-    /// `hl_codegen`'s `CodegenError::UnknownRouterProtocol`.
-    pub protocol: Option<Literal>,
-    /// The whole Traefik rule, written out (#228) — `rule: Host("a") &&
-    /// !PathPrefix("/b")` — instead of assembled from [`Self::host`] and
-    /// [`Self::path_prefix`].
-    ///
-    /// Those two fields could only ever produce one shape: a host match,
-    /// optionally `&&`-ed onto a `||`-joined group of path prefixes.
-    /// #228 wanted that shape's *inverse* — "this host except these
-    /// prefixes" — for a frontend/backend pair splitting one host by
-    /// path, and there was no way to say it, so half the pair kept its
-    /// whole label list in `raw`.
-    ///
-    /// The issue asked for a `negate` flag beside `path_prefix`. A flag
-    /// buys exactly one more rule: the next router wanting a header
-    /// split, a method match, or an `||` at the top level needs a second
-    /// flag, and the one after that a third. An expression buys all of
-    /// them at once, and buys them in the spelling a user already has in
-    /// front of them, since a rule is something copied out of a Traefik
-    /// label.
-    ///
-    /// `host`/`path_prefix` survive as sugar rather than being replaced
-    /// by it: the single-host router is the overwhelmingly common case
-    /// and deserves its one-liner. Codegen lowers them into this very
-    /// type before rendering (`labels::sugar_expr`), so there is one
-    /// rule-rendering path rather than two that could disagree. Writing
-    /// both spellings on one router is a codegen error — two descriptions
-    /// of one rule, with nothing to say which wins.
-    pub rule: Option<MatchExpr>,
-    pub span: Span,
-}
-
-/// One node of a [`Router::rule`] expression (#228) — a boolean
-/// expression over Traefik's own rule matchers.
-///
-/// Matcher arguments are [`Literal`]s, the same type [`Router::path_prefix`]
-/// carries, so `$param` substitution and `{{name}}` interpolation reach
-/// them through the machinery every other literal slot already goes
-/// through, rather than needing a second copy of it.
-///
-/// [`Self::Group`] is a node rather than something the renderer infers
-/// from precedence. Two things pay for it. A rendered rule is then
-/// exactly the expression that was written, parentheses included, so the
-/// emitted label can be read straight off the source. And it lets the
-/// `host`/`path_prefix` sugar lower to `And(Host, Group(prefixes))` and
-/// keep emitting the parentheses it always has around a *single*
-/// prefix — where they change nothing semantically, and exist so that a
-/// rule's shape doesn't depend on how many prefixes it happens to have.
-#[derive(Debug, Clone, PartialEq)]
-pub enum MatchExpr {
-    /// `Host("a")` — a matcher name and its arguments. The name is an
-    /// [`Ident`], never a [`Literal`], so it can't be a `$param`: which
-    /// matcher this is has to be knowable at parse time, since that's
-    /// where the name and its argument count are checked.
-    Matcher {
-        name: Ident,
-        args: Vec<Literal>,
-        span: Span,
-    },
-    /// `!expr`.
-    Not { operand: Box<MatchExpr>, span: Span },
-    /// `lhs && rhs`.
-    And {
-        lhs: Box<MatchExpr>,
-        rhs: Box<MatchExpr>,
-        span: Span,
-    },
-    /// `lhs || rhs`.
-    Or {
-        lhs: Box<MatchExpr>,
-        rhs: Box<MatchExpr>,
-        span: Span,
-    },
-    /// `( expr )` — parentheses the source actually wrote, kept so the
-    /// rendered rule keeps them too.
-    Group { inner: Box<MatchExpr>, span: Span },
-}
-
-impl MatchExpr {
-    /// Where this node was written.
-    pub fn span(&self) -> Span {
-        match self {
-            MatchExpr::Matcher { span, .. }
-            | MatchExpr::Not { span, .. }
-            | MatchExpr::And { span, .. }
-            | MatchExpr::Or { span, .. }
-            | MatchExpr::Group { span, .. } => *span,
-        }
-    }
-
-    /// Every matcher argument in this expression, in source order.
-    ///
-    /// The one walk composition's passes over a rule share — the
-    /// qualified-reference rejection reads them, `$param` substitution
-    /// rewrites them through [`Self::args_mut`] — so a node kind added
-    /// here can't be visited by one of them and missed by the other.
-    pub fn args(&self) -> Vec<&Literal> {
-        let mut out = Vec::new();
-        self.collect_args(&mut out);
-        out
-    }
-
-    fn collect_args<'a>(&'a self, out: &mut Vec<&'a Literal>) {
-        match self {
-            MatchExpr::Matcher { args, .. } => out.extend(args.iter()),
-            MatchExpr::Not { operand, .. } | MatchExpr::Group { inner: operand, .. } => {
-                operand.collect_args(out)
-            }
-            MatchExpr::And { lhs, rhs, .. } | MatchExpr::Or { lhs, rhs, .. } => {
-                lhs.collect_args(out);
-                rhs.collect_args(out);
-            }
-        }
-    }
-
-    /// [`Self::args`], for the passes that rewrite each argument in
-    /// place.
-    pub fn args_mut(&mut self) -> Vec<&mut Literal> {
-        let mut out = Vec::new();
-        self.collect_args_mut(&mut out);
-        out
-    }
-
-    fn collect_args_mut<'a>(&'a mut self, out: &mut Vec<&'a mut Literal>) {
-        match self {
-            MatchExpr::Matcher { args, .. } => out.extend(args.iter_mut()),
-            MatchExpr::Not { operand, .. } | MatchExpr::Group { inner: operand, .. } => {
-                operand.collect_args_mut(out)
-            }
-            MatchExpr::And { lhs, rhs, .. } | MatchExpr::Or { lhs, rhs, .. } => {
-                lhs.collect_args_mut(out);
-                rhs.collect_args_mut(out);
-            }
-        }
-    }
-}
-
-impl Router {
-    /// This router's own name, or `None` for the unnamed form — the key
-    /// composition merges on and codegen builds the label id from.
-    pub fn key(&self) -> Option<&str> {
-        self.name.as_ref().map(|n| n.name.as_str())
-    }
 }
 
 /// A parsed `restart` field. `policy` is `Option` for the same reason as
@@ -795,21 +513,6 @@ impl Router {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Restart {
     pub policy: Option<Literal>,
-    pub span: Span,
-}
-
-/// A parsed `traefik` field (#159) — the one way to opt a service out of
-/// every Traefik label `hl-codegen`'s `labels.rs` otherwise computes for
-/// it. See [`crate::schema::TRAEFIK`]'s doc for why this is a `Nested`
-/// struct field rather than the bare `traefik disable` spelling the
-/// motivating issue first floated.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Traefik {
-    /// `Some(span)` of the bare `disable` flag if it was set; `None`
-    /// otherwise — bare-presence only, modeled directly on
-    /// [`Network::external`] (see that doc). There is no `disable:
-    /// false` form this milestone.
-    pub disable: Option<Span>,
     pub span: Span,
 }
 
@@ -1259,20 +962,6 @@ pub struct ServiceFields {
     /// of them.
     pub build: Option<Build>,
     pub expose: Option<Expose>,
-    /// `router <name> { ... }` blocks (#184), in source order — every
-    /// Traefik router this service computes, `expose <port> as
-    /// "<host>"`'s own sugared unnamed router included. See [`Router`]'s
-    /// own doc.
-    ///
-    /// Merged by router name, and per sub-field within each name — the
-    /// same shape `expose` merges by, so a service body can override
-    /// just one sub-field of a template-supplied router of the same
-    /// name. See `compose.rs`'s `merge_routers`.
-    pub routers: Vec<Router>,
-    /// `traefik { disable }` (#159). See [`Traefik`]'s doc. Codegen's
-    /// `labels.rs` is the sole reader — a service that leaves this unset
-    /// gets exactly today's computed label list, byte for byte.
-    pub traefik: Option<Traefik>,
     pub restart: Option<Restart>,
     /// Compose's own `healthcheck:` key (#153). See [`Healthcheck`]'s
     /// doc.

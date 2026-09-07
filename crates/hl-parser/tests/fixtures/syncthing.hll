@@ -11,20 +11,24 @@ network traefik-net {
 # *reference* to this, not a declaration of its own.
 volume syncthing-config {}
 
+# Routing is `labels`, not a built-in field (#271). The middlewares
+# entry is written as a *list* so a second template can add to it
+# rather than collide with it (#288) — which is what makes
+# `authenticated` below a unit you can mix into anything.
 template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
   expose $port
-  router {
-    host: "{{name}}.internal.techdebtor.io"
-    entrypoints: web-secure
-    middleware: local-ipwhitelist
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`{{name}}.internal.techdebtor.io`)"
+    "traefik.http.routers.{{name}}.entrypoints": "web-secure"
+    "traefik.http.routers.{{name}}.middlewares": ["local-ipwhitelist@file"]
   }
 }
 
 template authenticated {
-  router {
-    middleware: forwardAuth-authentik
+  labels {
+    "traefik.http.routers.{{name}}.middlewares": ["forwardAuth-authentik@file"]
   }
 }
 

@@ -1,0 +1,10 @@
+--- compose ---
+services:
+  docs:
+    image: swaggerapi/swagger-ui
+    expose:
+    - 8080
+    labels:
+    - traefik.http.routers.docs.rule=Host(`docs.techdebtor.io`)
+    - traefik.http.routers.docs.middlewares=local-ipwhitelist@file
+    - com.example.docs.upstream=docs:8080

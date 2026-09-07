@@ -26,9 +26,10 @@ fn jellyfin_fixture_parses_to_expected_ast() {
 
     let expose = service.fields.expose.as_ref().expect("expose field set");
     assert_eq!(expose.port.as_ref().unwrap().text(), "8096");
-    let router = &service.fields.routers[0];
-    assert_eq!(router.key(), None);
-    assert_eq!(router.host.as_ref().unwrap().text(), "media.techdebtor.io");
+    let labels = &service.fields.labels.entries;
+    assert_eq!(labels.len(), 1);
+    assert_eq!(labels[0].key.text(), "traefik.http.routers.{{name}}.rule");
+    assert_eq!(labels[0].value.text(), "Host(`media.techdebtor.io`)");
 
     assert_eq!(service.fields.volumes.entries.len(), 1);
     assert_eq!(service.fields.volumes.entries[0].host.text(), "/mnt/media");
@@ -90,14 +91,25 @@ fn syncthing_fixture_composes_to_expected_service() {
         matches!(port, Literal::Number { .. }),
         "expose.port should be substituted with the invocation's Number argument, got {port:?}"
     );
-    let router = &service.fields.routers[0];
-    assert_eq!(router.key(), None);
+    let label = |key: &str| {
+        service
+            .fields
+            .labels
+            .entries
+            .iter()
+            .find(|e| e.key.text() == key)
+            .unwrap_or_else(|| panic!("no `{key}` label"))
+            .value
+            .text()
+    };
     assert_eq!(
-        router.host.as_ref().unwrap().text(),
-        "{{name}}.internal.techdebtor.io"
+        label("traefik.http.routers.{{name}}.rule"),
+        "Host(`{{name}}.internal.techdebtor.io`)"
     );
-    let entrypoints: Vec<&str> = router.entrypoints.iter().map(|r| r.text()).collect();
-    assert_eq!(entrypoints, vec!["web-secure"]);
+    assert_eq!(
+        label("traefik.http.routers.{{name}}.entrypoints"),
+        "web-secure"
+    );
     let restart = service.fields.restart.as_ref().expect("restart field set");
     assert_eq!(restart.policy.as_ref().unwrap().text(), "unless-stopped");
     assert_eq!(
@@ -110,22 +122,13 @@ fn syncthing_fixture_composes_to_expected_service() {
         vec!["traefik-net"]
     );
 
-    // `internal_web` then `authenticated`, left-to-right — both
-    // contribute to the same unnamed router, so their `middleware`
-    // lists concatenate in tier order under that one key (#221).
-    let unnamed = service
-        .fields
-        .routers
-        .iter()
-        .find(|r| r.key().is_none())
-        .expect("the unnamed router internal_web declares");
+    // `internal_web` then `authenticated`, left-to-right — both write
+    // the same `labels` key, and because each writes a *list* the two
+    // concatenate in tier order rather than colliding (#288). This is
+    // the composition the built-in `router.middleware` used to carry.
     assert_eq!(
-        unnamed
-            .middleware
-            .iter()
-            .map(|r| r.text())
-            .collect::<Vec<_>>(),
-        vec!["local-ipwhitelist", "forwardAuth-authentik"]
+        label("traefik.http.routers.{{name}}.middlewares"),
+        "local-ipwhitelist@file,forwardAuth-authentik@file"
     );
 
     // `linuxserver_app`'s contributions: PUID/PGID values were written

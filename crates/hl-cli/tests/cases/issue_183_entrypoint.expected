@@ -41,6 +41,4 @@ services:
     expose:
     - 8080
     labels:
-    - traefik.http.routers.router.rule=Host(`router.example.com`)
     - traefik.http.routers.router.entrypoints=web,web-secure
-    - traefik.http.services.router.loadbalancer.server.port=8080

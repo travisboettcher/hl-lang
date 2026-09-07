@@ -7,5 +7,5 @@ services:
     - 80
     labels:
     - traefik.http.routers.web.rule=Host(`web.example.com`)
-    - traefik.http.routers.web.entrypoints=web-secure
     - traefik.http.services.web.loadbalancer.server.port=80
+    - traefik.http.routers.web.entrypoints=web-secure

@@ -53,8 +53,6 @@ Program {
                     ),
                     build: None,
                     expose: None,
-                    routers: [],
-                    traefik: None,
                     restart: None,
                     healthcheck: None,
                     publish: ArrowMap {

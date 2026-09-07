@@ -1,8 +1,8 @@
+use "std:traefik" as traefik
+
 service web {
   image "nginx:alpine"
-  expose 80
-  router {
-    host: "web.example.com"
-    entrypoints: web-secure
-  }
+  with
+    traefik.http { host: "web.example.com", port: 80 },
+    traefik.http_entrypoints { router: "{{name}}", entrypoints: ["web-secure"] }
 }

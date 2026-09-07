@@ -126,9 +126,6 @@ rather than pulled from a registry:
 service vault-git-sync {
   build "./vault-git-sync"
   restart unless-stopped
-  traefik {
-    disable
-  }
 }
 ```
 
@@ -148,9 +145,6 @@ service app {
   build {
     context: "./{{name}}"
     dockerfile: "Dockerfile.prod"
-  }
-  traefik {
-    disable
   }
 }
 ```
@@ -184,567 +178,22 @@ expose 8096
 
 `expose` is Compose's own `expose:` key—container-network visibility,
 reachable from other containers on the same network but never published
-to the host (for that, see [`publish`](#publish))—plus the
-`traefik.http.services.<service>.loadbalancer.server.port` label,
-written whenever the service has at least one [`router`](#router). It has
-nothing to do with which hostname routes to a service or which Traefik
-entry points a router attaches to—that's `router`'s job entirely, one
-section down.
+to the host (for that, see [`publish`](#publish)). It has nothing to do
+with which hostname reaches the service.
 
-### The `as` sugar
+### Routing isn't a built-in field
 
-`expose <port> as "<host>"` desugars to `expose { port }` plus an
-unnamed `router { host }`—it's sugar for the single-router service,
-which is most of them:
+`expose` says the port is reachable inside the Compose network. It says
+nothing about which hostname reaches it, which is a reverse proxy's
+question rather than Compose's, and `hllc` no longer answers it: there
+is no `router` field, no `traefik` field, and no `expose <port> as
+"<host>"` sugar. Routing goes in [`labels`](#labels), and the templates
+in [`std:traefik`](./routing.md) write those labels for you.
 
-```hll,fragment
-expose 8096 as "media.example.com"
-# same as:
-# expose { port: 8096 }
-# router { host: "media.example.com" }
-```
+The load-balancer port label goes with it—a `port` template writes it
+when a router needs one. What survives here is `expose` itself, doing
+the one job Compose gives it.
 
-`as` is a one-shot fusion, not a list—you can't follow it with more
-fields. A service that also needs an entry point, a path prefix, or a
-second router writes `router` out explicitly instead:
-
-```hll,fragment
-expose 8096
-router {
-  host: "media.example.com"
-  entrypoints: web-secure
-}
-```
-
-## `router`
-
-No primary field: the router's name already occupies the position right
-after the keyword, so there's nowhere for a bare value to go.
-
-| Field | Accepts | Default |
-|---|---|---|
-| `host` | string | *Required, unless the router sets [`rule`](#rule)—a router with neither has no rule* |
-| `entrypoints` | reference list | empty—label omitted, so Traefik attaches the router to every entry point |
-| `path_prefix` | list of strings | empty—the rule matches the host alone |
-| `rule` | match expression | unset—the rule comes from `host` and `path_prefix` instead |
-| `middleware` | reference list | empty—no `middlewares=` label for this router |
-| `priority` | number | unset—label omitted, so Traefik derives a priority from the rule's length |
-| `port` | number | unset—this router shares the one service-wide target [`expose`](#expose) supplies |
-| `protocol` | `http` or `tcp` | `http` |
-
-A `router` block declares one Traefik router, and owns every field that
-only ever means anything attached to one. Write it as many times as you
-need, each block naming its own router:
-
-```hll,fragment
-router api {
-  host: "vikunja.example.com"
-  entrypoints: web-secure
-  path_prefix: ["/api/v1", "/dav/", "/.well-known/"]
-}
-router frontend {
-  host: "vikunja.example.com"
-  entrypoints: web-secure
-}
-```
-
-That produces four labels, two per router:
-
-```text
-traefik.http.routers.vikunja-api.rule=Host(`vikunja.example.com`) && (PathPrefix(`/api/v1`) || PathPrefix(`/dav/`) || PathPrefix(`/.well-known/`))
-traefik.http.routers.vikunja-api.entrypoints=web-secure
-traefik.http.routers.vikunja-frontend.rule=Host(`vikunja.example.com`)
-traefik.http.routers.vikunja-frontend.entrypoints=web-secure
-```
-
-The name after the keyword becomes part of the label key:
-`traefik.http.routers.<service>-<name>`. Leave it off (`router { ... }`,
-no name) and the router takes the service's own name,
-`traefik.http.routers.<service>`—the **unnamed** form, and the shape
-`expose <port> as "<host>"` desugars to. Writing the unnamed form twice
-in one body, by hand or once by hand and once through the `as` sugar,
-is a compile error: two blocks can't both claim one router id.
-
-A name is a bare identifier, so it holds letters, digits, `-`, and `_`
-and nothing else. That restriction is deliberate rather than incidental:
-the name lands in a label **key**, where a `.` would extend the key and
-an `=` would end it, so a name that could hold either would let a router
-write a `traefik.*` label other than the one you asked for.
-
-The comma form works here too, the same shorthand a nested struct field
-takes when it has more than one field:
-
-```hll,fragment
-router api, host: "vikunja.example.com", entrypoints: web-secure
-```
-
-`entrypoints` is a **reference list**, spelled exactly like `middleware`
-below—a bare name, several comma-separated names, or a bracketed list.
-However many you name, they produce **one** label:
-`traefik.http.routers.<id>.entrypoints=` with the names comma-joined
-(`entrypoints=web,web-secure`)—`hllc` writes the commas, you write the
-names. Leave `entrypoints` off entirely and `hllc` emits no
-`entrypoints=` label at all, which is Traefik's own way of saying
-"attach this router to every entry point."
-
-One caveat if you write a bare list in the preceding comma-shorthand
-form: the list ends at the next `field:`, so `router api, entrypoints: web,
-host: "vikunja.example.com"` sets one entry point and a host, not two
-entry points. Put `entrypoints` last, use brackets (`entrypoints: [web,
-web-secure]`), or use the braced `router { ... }` body if you want a
-bare list in the middle.
-
-`path_prefix` narrows the router to requests under one of the listed
-paths. `hllc` joins them with `||` inside one parenthesized group and
-`&&`s that onto the host match, which is what keeps `&&` from binding
-tighter than `||` and matching every host under the last prefix. A single
-prefix keeps its parentheses too, so the rule reads the same either way.
-
-Because `hllc` splices `host` directly into the router rule
-(``Host(`...`)``, which has no escape for its own backtick delimiter), it
-rejects a `host` containing any rule metacharacter, most notably a
-backtick, plus `` ( ) { } | & , " ' \ ``. `hllc` checks each `entrypoints`
-entry against that same set, comma included: it owns the comma that
-joins entry points, so a comma inside one name would splice an extra
-entry into the label. (`entrypoints "web,web-secure"` is therefore an
-error—write `entrypoints web, web-secure`.) `hllc` rejects a comma in a
-`middleware` name for the same reason, and resolves `{{name}}` in `host`
-too, so the `"{{name}}.internal.example.com"` template idiom works here.
-Every argument of a [`rule`](#rule) matcher gets both, for the reason
-`host` does: it lands in the same rule, inside the same backticks.
-
-All three reject a control character too, such as the newline a string
-literal writes as `\n` (see
-[Numbers and strings](./syntax-basics.md#numbers-and-strings)). A hostname,
-an entry point name, and a middleware name have no use for one, and a
-label carrying one no longer means what it reads as.
-
-`path_prefix` can only ever OR its entries together. For anything
-else—a negation, a header match, an `||` at the top level—write the
-whole rule out with [`rule`](#rule) instead.
-
-A `router` with no `host` and no `rule` is a compile error, not a router
-quietly missing from the output:
-
-```hll
-service web {
-  image "nginx"
-  router api {
-    entrypoints: web-secure
-  }
-}
-```
-
-```text
-web.hll:3:3: service `web` declares `router api` with no `host` and no `rule`, so there is no rule for Traefik to match — add a host (`host: "web.example.com"`), write a `rule`, or drop the `router`
-```
-
-Two `router` blocks with the same name are an error as well. That's not
-two routers, it's one router described twice, with the second silently
-winning—the same reason two `volume` entries can't share one container
-path.
-
-### `port`, and the shared load-balancer target
-
-A router with no `port` of its own load-balances onto the one
-service-wide target
-`traefik.http.services.<service>.loadbalancer.server.port`, which comes
-from [`expose`](#expose). That's the common case: a container listens on
-one port however many routers point at it. A service with such a router
-but no `expose <port>` is a compile error—rather than leave Traefik to
-guess a port, `hllc` refuses to compile:
-
-```hll,ignore
-service web {
-  image "nginx"
-  router api {
-    host: "web.example.com"
-  }
-}
-```
-
-```text
-web.hll:3:3: service `web` declares a `router` but sets no `expose <port>`, so Traefik has no port to load-balance onto — add `expose <port>` or drop the `router`
-```
-
-Name a `port` on the block and that router gets a Traefik **service** of
-its own instead, keyed by the router's own id:
-
-```hll,build
-service sftpgo {
-  image "drakkan/sftpgo:latest"
-  router web {
-    host: "sftp.example.com"
-    priority: 100
-    port: 2222
-  }
-  router webdav {
-    host: "sftp.example.com"
-    priority: 90
-    port: 4444
-  }
-}
-```
-
-```text
-traefik.http.routers.sftpgo-web.rule=Host(`sftp.example.com`)
-traefik.http.routers.sftpgo-web.priority=100
-traefik.http.routers.sftpgo-web.service=sftpgo-web
-traefik.http.services.sftpgo-web.loadbalancer.server.port=2222
-traefik.http.routers.sftpgo-webdav.rule=Host(`sftp.example.com`)
-traefik.http.routers.sftpgo-webdav.priority=90
-traefik.http.routers.sftpgo-webdav.service=sftpgo-webdav
-traefik.http.services.sftpgo-webdav.loadbalancer.server.port=4444
-```
-
-That's a container serving two things on two ports behind one host.
-Note there's no `expose` here and none needed: with every router naming
-its own port, no one port is "the" port to fall back to. Mix the two
-freely—a router without a `port` still falls back, and `expose` matters
-only while at least one does.
-
-`priority` is what separates those two routers. Both match the same
-host, so without it Traefik picks between them by rule length. Higher
-wins. Leave it off and `hllc` emits no `priority=` label at all, which
-is Traefik's own default rather than a number `hllc` invented.
-
-### `rule`
-
-`host` and `path_prefix` between them say one thing: a host match, with
-the prefixes joined by `||` and hung off the host with `&&`. That covers
-most routers and nothing else. `rule` is the whole Traefik rule written out, so a
-router can say anything Traefik can express:
-
-```hll,build
-service adventure-log-web {
-  image "adventure-log/web:latest"
-  expose 3000
-  router {
-    rule: Host("travel.example.com")
-       && !(PathPrefix("/media") || PathPrefix("/admin"))
-    entrypoints: web-secure
-  }
-}
-```
-
-```text
-traefik.http.routers.adventure-log-web.rule=Host(`travel.example.com`) && !(PathPrefix(`/media`) || PathPrefix(`/admin`))
-traefik.http.routers.adventure-log-web.entrypoints=web-secure
-```
-
-That's the frontend half of a host split across two containers by
-path—the backend catching those prefixes is the same list without the
-`!`, which is exactly what `path_prefix` already produces:
-
-```hll,fragment
-router {
-  host: "travel.example.com"
-  path_prefix: ["/media", "/admin"]
-  entrypoints: web-secure
-}
-```
-
-The matcher names are Traefik's own, so a rule copied out of a Traefik
-label or the Traefik documentation transfers as-is. The one difference
-is quoting: Traefik delimits a matcher argument with a backtick, which
-has no escape sequence, so `hllc` writes the backticks and you write
-`"..."`.
-
-The matchers, with the exact arguments each takes:
-
-| matcher | routes |
-|---|---|
-| `Host(domain)` | `http` |
-| `HostRegexp(regexp)` | `http` |
-| `Path(path)` | `http` |
-| `PathPrefix(prefix)` | `http` |
-| `PathRegexp(regexp)` | `http` |
-| `Method(method)` | `http` |
-| `Header(key, value)` | `http` |
-| `HeaderRegexp(key, regexp)` | `http` |
-| `Query(key, value)` | `http` |
-| `QueryRegexp(key, regexp)` | `http` |
-| `ClientIP(ip)` | `http` and `tcp` |
-| `HostSNI(domain)` | `tcp` |
-| `HostSNIRegexp(regexp)` | `tcp` |
-| `ALPN(protocol)` | `tcp` |
-
-Combine them with `&&`, `||`, and `!`, and group them with parentheses.
-Precedence is Traefik's: `!` binds tightest, then `&&`, then `||`. `hllc`
-writes the parentheses a rule needs and keeps the ones you wrote, so the
-emitted label reads the way the source does.
-
-A matcher `hllc` doesn't recognize is a compile error naming every one it
-does, and so is a matcher given the wrong number of arguments. A matcher
-belonging to the other namespace is one too—see
-[`protocol`](#protocol)—so `hllc` catches a `PathPrefix` on a TCP
-router, which has no request path to match, rather than emitting it.
-
-Each argument goes through the same checks a `host` does: `{{name}}`
-resolves inside one, and `hllc` refuses a rule metacharacter—most of
-all a backtick—since a rule that can close its own matcher can write a
-second one.
-
-`host` and `path_prefix` are sugar for part of a rule. `host: "a"` is
-`Host("a")`, and `path_prefix: ["/x", "/y"]` hangs `(PathPrefix("/x") ||
-PathPrefix("/y"))` off it with `&&`—the same expression `rule` would
-build, so both spellings run through one code path. Writing `rule` beside
-either is a compile error, since that describes one rule twice:
-
-```hll
-service web {
-  image "nginx"
-  expose 80
-  router web {
-    rule: Host("web.example.com") && !PathPrefix("/admin")
-    path_prefix: ["/api"]
-  }
-}
-```
-
-```text
-web.hll:6:19: service `web` sets `path_prefix` on `router web`, which already has a `rule` (at web.hll:5:11) — `path_prefix` is sugar for part of a rule, so writing both describes one rule twice; drop the `path_prefix` or fold it into the `rule`
-```
-
-Reach for `rule` when the sugar can't say what you mean, and leave the
-sugar alone when it can—`router { host: "media.example.com" }` is
-shorter and says the same thing as its `rule` spelling.
-
-### `protocol`
-
-Traefik has two router namespaces, and `protocol` picks between them.
-`http` is the default, and everything preceding this describes it.
-`tcp` moves the whole label group to
-`traefik.tcp.routers.*`/`traefik.tcp.services.*` and switches the rule
-from ``Host(`...`)`` to ``HostSNI(`...`)``:
-
-```hll,build
-service sftpgo {
-  image "drakkan/sftpgo:latest"
-  router sftp {
-    protocol: tcp
-    host: "*"
-    port: 1111
-  }
-}
-```
-
-```text
-traefik.tcp.routers.sftpgo-sftp.rule=HostSNI(`*`)
-traefik.tcp.routers.sftpgo-sftp.service=sftpgo-sftp
-traefik.tcp.services.sftpgo-sftp.loadbalancer.server.port=1111
-```
-
-A TCP router matches on the TLS handshake's server name, since at that
-layer there's no HTTP request to read a `Host` header from—which is
-also why `HostSNI` takes `*` as a wildcard and `Host` has no equivalent.
-Raw SFTP isn't HTTP at all, which is what this is for.
-
-Two rules follow from that, both compile errors rather than silent
-drops:
-
-- A TCP router can't take a `path_prefix`. There's no request URI at
-  that layer to match a path against.
-- A TCP router must name its own `port`. The shared fallback target is
-  an *HTTP* service, so there's nothing there for it to fall back to.
-
-### `middleware`
-
-`middleware` is a `router` field, and only a `router` field. Each block
-names the Traefik middleware that router attaches:
-
-```hll,build
-service gitea {
-  image "gitea/gitea:latest"
-  expose 3000
-  router public {
-    host: "git.example.com"
-    entrypoints: web-secure
-  }
-  router internal {
-    host: "git.internal.example.com"
-    entrypoints: web-secure
-    middleware: local-ipwhitelist
-  }
-}
-```
-
-```text
-traefik.http.routers.gitea-public.rule=Host(`git.example.com`)
-traefik.http.routers.gitea-public.entrypoints=web-secure
-traefik.http.routers.gitea-internal.rule=Host(`git.internal.example.com`)
-traefik.http.routers.gitea-internal.entrypoints=web-secure
-traefik.http.routers.gitea-internal.middlewares=local-ipwhitelist@file
-traefik.http.services.gitea.loadbalancer.server.port=3000
-```
-
-That's a public route beside an internal, IP-restricted one off the same
-container, and it's why `middleware` belongs to the router rather than
-the service: one service-wide list would reach every router at once, so
-the allowlist would land on the public route as well as the internal
-one.
-
-However many you name, they produce **one** label per router, not one
-per item: `traefik.http.routers.<id>.middlewares=` with the names
-comma-joined. Every name also gets an `@file` suffix appended
-(`middlewares=local-ipwhitelist@file,forwardAuth-authentik@file`)—that's
-Traefik's file-provider reference convention, applied unconditionally,
-so write the bare middleware name and let `hllc` add it. `entrypoints`
-joins its own list the same way, just without the `@file` suffix. Leave
-`middleware` off a block and that router simply gets no `middlewares=`
-label, exactly as an absent `entrypoints` produces no `entrypoints=`.
-
-Routers that *should* share a middleware each name it:
-
-```hll,build
-service app {
-  image "nginx"
-  expose 80
-  router public {
-    host: "app.example.com"
-    middleware: forwardAuth-authentik
-  }
-  router lan {
-    host: "app.internal.example.com"
-    middleware: [forwardAuth-authentik, local-ipwhitelist]
-  }
-}
-```
-
-```text
-traefik.http.routers.app-public.rule=Host(`app.example.com`)
-traefik.http.routers.app-public.middlewares=forwardAuth-authentik@file
-traefik.http.routers.app-lan.rule=Host(`app.internal.example.com`)
-traefik.http.routers.app-lan.middlewares=forwardAuth-authentik@file,local-ipwhitelist@file
-traefik.http.services.app.loadbalancer.server.port=80
-```
-
-That repeats the shared name, which one service-level line wouldn't—and
-that's the trade this field makes on purpose. The shared line couldn't
-say which routers differ, and differing is the case that matters: a
-middleware silently attached to a route meant to be public, or silently
-missing from one meant to keep traffic out, is a security bug that
-compiles clean. A template can still carry the shared part once—see
-[Templates & composition](./templates-and-composition.md).
-
-Writing `middleware` on a `service` or `template` body is a compile
-error naming where it belongs, rather than a line quietly ignored:
-
-```hll,ignore
-service web {
-  image "nginx"
-  expose 80
-  middleware forwardAuth-authentik
-}
-```
-
-```text
-web.hll:4:3: `middleware` isn't a `service` field — move it inside the `router` block it applies to (`router { host: "...", middleware: ... }`)
-```
-
-## `traefik`
-
-No primary field—like `healthcheck`, no one sub-field stands in for the
-whole struct, so `traefik { ... }` requires the braced body.
-
-`hllc` computes a Traefik label list for every service by default:
-`traefik.docker.network=`, each [`router`](#router) block's rule and its
-`entrypoints=`/`middlewares=` labels, and the load-balancer port.
-
-The `disable` flag switches all of that off for one service and emits
-`traefik.enable=false` in its place, nothing else, not even
-`traefik.docker.network=`, since Traefik's Docker provider never acts on
-a service that turns it off, so that label would have nothing to do.
-
-| Field | Accepts | Default |
-|---|---|---|
-| `disable` | bare flag, no value | unset, Traefik labels computed normally |
-
-```hll,build
-service db {
-  image "postgres:15"
-  traefik {
-    disable
-  }
-}
-```
-
-```yaml
-services:
-  db:
-    image: postgres:15
-    labels:
-      - "traefik.enable=false"
-```
-
-This is the dedicated answer to a shape several real homelab services
-share: a backing database with no `router`/`middleware` of its own,
-sitting next to a Traefik-facing sibling service in the same file.
-Reaching for `raw` to say the same thing:
-
-```hll,fragment
-raw {
-  labels: ["traefik.enable=false"]
-}
-```
-
-works, since `raw` overrides the computed list either way—but it's a
-blunt instrument for a one-label change, and it silently stops tracking
-whatever `traefik.docker.network=`/router labels a future edit to the
-service would otherwise have added.
-
-Only a `router` block and `middleware` conflict with `disable`. Plain
-`expose <port>` doesn't—it's Compose's own `expose:` key,
-container-network visibility with no Traefik involvement at all, so a
-service that turns Traefik off can still declare one:
-
-```hll,build
-service db {
-  image "postgres:15"
-  expose 5432
-  traefik {
-    disable
-  }
-}
-```
-
-```yaml
-services:
-  db:
-    image: postgres:15
-    expose:
-      - 5432
-    labels:
-      - "traefik.enable=false"
-```
-
-Setting a `router` block or `middleware` on a service that turns Traefik
-off is a **compile error**, the same treatment
-[`router`](#router)'s own router-less-middleware check gives the mirror
-mistake:
-
-```hll,ignore
-service db {
-  image "postgres:15"
-  expose 5432 as "db.example.com"
-  traefik {
-    disable
-  }
-}
-```
-
-```text
-db.hll:3:15: service `db` declares a `router`, but `traefik` is disabled (at db.hll:5:5), so there is nothing for it to route — drop the `router` or remove `disable`
-```
-
-Both sides of that contradiction mean something on their own—only the
-pair together doesn't—so `hllc` refuses to guess which one the service
-actually meant.
-
-No brace-free `traefik disable` spelling exists—`disable` needs the
-braced body, `traefik { disable }`, exactly like
-[`healthcheck`](#healthcheck)'s own `disable` flag, which it's named to
-match.
 
 ## `publish`
 
@@ -756,9 +205,9 @@ the value side, the same convention `volume` follows for its own
 `publish` is Compose's `ports:` key, which puts the port on the Docker
 host where the rest of the local network can reach it. That's the
 opposite of [`expose`](#expose), Compose's `expose:` key, which reaches
-only other containers on the same network. A service behind Traefik
-wants `expose` (plus a [`router`](#router) block, or its `as "<host>"`
-sugar, for the routing itself). A service that takes traffic directly,
+only other containers on the same network. A service behind a reverse
+proxy wants `expose`, plus the labels that route to it (see
+[Routing](./routing.md)). A service that takes traffic directly,
 such as Pi-hole on 53, Syncthing's sync port, or a game server, wants
 `publish`. Setting both is fine and means both things.
 
@@ -990,11 +439,15 @@ Map-kind. Bare-entry separator: `:`, so the short form and the canonical
 form are the same thing. `hllc` checks uniqueness on the **key**, like
 `env`.
 
-`labels` holds extra Docker labels, and `hllc` **adds** them to the
-labels it computes for the service from [`router`](#router),
-[`expose`](#expose), [`traefik`](#traefik) and the external network:
+`labels` holds the service's Docker labels. Entries arrive from every
+template the service applies as well as from its own body, and `hllc`
+**adds** them rather than letting one set replace another, which is what
+lets templates carry a service's routing and still leaves room for a
+label of your own:
 
 ```hll,build
+use "std:traefik" as traefik
+
 network traefik-net {
   external
   name: "docker_default"
@@ -1002,13 +455,11 @@ network traefik-net {
 
 service web {
   image "nginx"
-  expose 8123
   networks [traefik-net]
 
-  router {
-    host: "web.example.com"
-    entrypoints: web-secure
-  }
+  with
+    traefik.http { host: "web.example.com", port: 8123 },
+    traefik.http_entrypoints { router: "{{name}}", entrypoints: ["web-secure"] }
 
   labels {
     "traefik.http.routers.web.tls.domains[0].main": "internal.example.com"
@@ -1031,12 +482,13 @@ Explicit entries always come last, after every computed label. Nothing a
 service computed moves to make room, so a file that writes no `labels`
 block generates exactly what it would without one.
 
-This is the field to reach for when Traefik needs one label `router`
-can't yet spell—the standard example is a per-router list of TLS Subject
-Alternative Name (SAN) domains. It's also what
-[`raw { labels: ... }`](#raw) can't do: `raw` replaces the whole computed
-list, so one extra line costs you `rule`, `entrypoints`,
-`docker.network` and the load-balancer port unless you retype all four.
+This is where routing labels go, either written by hand or by the
+templates in [`std:traefik`](./routing.md), and where a label no
+template covers goes—the standard example is a per-router list of TLS
+Subject Alternative Name (SAN) domains. It's also what
+[`raw { labels: ... }`](#raw) can't do: `raw` replaces the whole list,
+so one extra line costs you every other label unless you retype them
+all.
 
 ### Quoting
 
@@ -1049,8 +501,7 @@ Traefik's own documentation, has no way to perform.
 
 Docker reads a label as `key=value`, splitting at the first `=`, so a key
 containing one would name a different label than the one written. `hllc`
-rejects that rather than emitting it, the same way it rejects an `=` in a
-[`router`](#router) name.
+rejects that rather than emitting it.
 
 ### A value goes through as written
 
@@ -1073,25 +524,19 @@ labels:
 - traefik.http.routers.web.rule=Host(`web.example.com`) || Host(`www.example.com`)
 ```
 
-The cost is that a value here carries none of the protection
-[`router`](#router) gives you. `router.host` refuses a backtick, because
-`hllc` knows the rule grammar the host lands in and can see that a
-backtick closes the `Host(` call early:
-
-```hll,ignore
-router {
-  host: "ok.example.com`) || HostRegexp(`{any:.+}"
-}
-```
+The cost is that nothing checks what the value *means*. `hllc` once
+parsed rule syntax and could see that a stray backtick closed a `Host(`
+call early, so it refused a host containing one:
 
 ```text
 4:11: `router.host` must not contain '`' — it would change the meaning of the generated Traefik label
 ```
 
-Write the rule yourself and `hllc` loses that knowledge. The same string
-reaches Traefik intact, as a rule matching every host rather than one:
+That check went with the grammar. Routing is a string now, so the same
+value compiles and reaches Traefik intact—as a rule matching every host
+rather than one:
 
-```hll,ignore
+```hll,fragment
 labels {
   "traefik.http.routers.web.rule": "Host(`ok.example.com`) || HostRegexp(`{any:.+}`)"
 }
@@ -1119,33 +564,31 @@ labels {
 5:3: duplicate `labels` entry: key "com.example.owner" already set at 4:3
 ```
 
-### A key the service already computes is an error
+### A key two entries resolve to is an error
 
-A `labels` entry naming a key one of the other features generates is a
-compile error too, and the message names both sides:
+The preceding check compares keys as written, which isn't the same as
+comparing the keys that reach Compose: `{{name}}` resolves later, so two
+entries spelled differently in source can still land on one key. `hllc`
+catches that too, and the message names both sides:
 
 ```hll,ignore
 service web {
   image "nginx"
   expose 8123
-  router {
-    host: "web.example.com"
-  }
   labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`web.example.com`)"
     "traefik.http.routers.web.rule": "Host(`elsewhere.example.com`)"
   }
 }
 ```
 
 ```text
-8:5: label "traefik.http.routers.web.rule" is already generated by this service's `router` block at 4:3 — remove it here, or change the router
+6:5: label "traefik.http.routers.web.rule" is already set by this service's own `labels` at 5:5 — two entries spelled differently can still resolve to one key once `{{name}}` is substituted, so one of them would silently do nothing
 ```
 
-Neither spelling wins, deliberately. If the explicit entry won, the
-`router` block would quietly stop deciding what it plainly says it
-decides. If the computed label won, the line you wrote would quietly do
-nothing. Refusing is the only outcome where every line either takes
-effect or gets a diagnostic.
+Neither spelling wins, deliberately. Whichever one lost would be a line
+you wrote that quietly does nothing. Refusing is the only outcome where
+every line either takes effect or gets a diagnostic.
 
 ### Merging across templates
 
@@ -1316,10 +759,9 @@ env_file "miniflux.env"
 env_file ["miniflux.env", "common.env"]
 ```
 
-`middleware` looks like it belongs to this group but doesn't: it's a
-[`router`](#middleware) field, since a middleware only ever reaches
-Traefik as a label on one specific router. Writing it here is a compile
-error that says so.
+A middleware list looks like it belongs to this group but isn't a field
+at all: a middleware reaches Traefik as a label on one specific router,
+so it's written in [`labels`](#labels)—see [Routing](./routing.md).
 
 - `depends_on` names a same-file sibling `service` this one depends
   on—it's not cross-file, and doesn't accept a qualified `alias.name`.
@@ -1673,65 +1115,56 @@ costs nothing later.
 Note that `raw`'s value **replaces** the built-in one. It never merges
 with it.
 
-### `labels` is a derived key, and replacing it costs more than it looks
+### `labels` is an aggregate, and replacing it costs more than it looks
 
 `labels` deserves its own warning label, because the key `hllc` emits
-isn't one field from the language's point of view. On top of whatever a
-service writes in its own [`labels`](#labels) block, `hllc` assembles
-that key out of four independent features, any of which a service can
-use without thinking about the others.
+isn't one field from an author's point of view. Its entries arrive from
+every template the service applies as well as from its own
+[`labels`](#labels) block, and since templates carry a service's routing
+([`std:traefik`](./routing.md)), that usually means all of the service's
+routing is in there.
 
-- [`router`](#router)—the routing rule, the entry points, the
-  middleware.
-- [`expose`](#expose)—the load-balancer target port.
-- [`traefik { disable }`](#traefik)—the `traefik.enable=false` line
-  that keeps Traefik off a service entirely.
-- The Docker network the service resolves to, as
-  `traefik.docker.network`.
-
-So `raw { labels: [...] }` doesn't replace one field. It replaces
-everything that whole group produced, all at once:
+So `raw { labels: [...] }` doesn't replace one block. It replaces
+everything every contributor produced, all at once:
 
 ```hll,fragment
-expose 8080 as "web.example.com"
 raw {
-  labels: ["only.this=1"]   # every computed Traefik label is dropped
+  labels: ["only.this=1"]   # every other label is dropped
 }
 ```
 
-The router's rule, its entry points, the `docker.network` line, and the
-load-balancer port all vanish from that service—`only.this=1` is
-the entire `labels:` list `hllc` emits. Overriding `labels` therefore
-means writing every line those features would have produced, by hand,
-and keeping them in step with the `.hll` file from then on.
+The routing rule, the entry points, the load-balancer port—every entry
+any template or block wrote—vanishes from that service, leaving
+`only.this=1` as the entire `labels:` list `hllc` emits. Overriding `labels`
+therefore means writing every one of those lines by hand, and keeping
+them in step with the `.hll` file from then on.
 
 `hllc` says so rather than letting it happen quietly. A service that
-generates labels *and* names `labels` in its `raw` block gets a warning:
+has labels *and* names `labels` in its `raw` block gets a warning:
 
 ```text
-8:5: warning: `raw { labels: ... }` replaces service `web`'s generated
-Traefik labels rather than adding to them, so every label `router`,
-`expose`, and `traefik` would have produced is dropped — use a
-`labels { ... }` block to add labels to the computed set instead, or
-reproduce the ones you still need in this list
+8:5: warning: `raw { labels: ... }` replaces service `web`'s computed
+labels rather than adding to them, so every entry its `labels` blocks
+and the templates it applies would have produced is dropped — write the
+extra labels in a `labels { ... }` block instead, or reproduce the ones
+you still need in this list
 ```
 
 It's a warning, not an error. Hand-writing the whole label list is a
-legitimate thing to do—it's exactly what `raw` is for when `router`
-can't yet express a label you need—so the build still succeeds and the
+legitimate thing to do—it's exactly what `raw` is for when a label needs
+a shape `labels` can't yet write—so the build still succeeds and the
 generated document stays exactly as it was.
 
 For adding a label rather than replacing every one, reach for the
-[`labels`](#labels) field instead. It adds to the computed set, checks
-for duplicate keys, and refuses a key the service already computes
-instead of quietly dropping it. `raw { labels: ... }` stays the escape
-hatch for the case where you really do want to write the entire list by
+[`labels`](#labels) field instead. It adds to the set, checks for
+duplicate keys, and refuses two entries that resolve to one key instead
+of quietly dropping one. `raw { labels: ... }` stays the escape hatch
+for the case where you really do want to write the entire list by
 hand—and it overrides a `labels` field too, since it replaces the
 emitted key rather than any one contributor to it.
 
-A service that generates no labels at all—no `router`, no `expose`, no
-`traefik` block—has nothing for the raw list to replace, and says
-nothing.
+A service with no labels at all—none of its own and none from a
+template—has nothing for the raw list to replace, and says nothing.
 
 Overriding a service's `volumes:` or `networks:` key doesn't retract
 the top-level `volumes:`/`networks:` declarations that `volume` and

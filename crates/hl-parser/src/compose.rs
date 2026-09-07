@@ -25,9 +25,8 @@ use hl_lexer::{SourceMap, Span};
 use crate::ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnEntry, Entrypoint, EnvEntry,
     EnvMap, Expose, FieldAccess, Healthcheck, HealthcheckTest, Ident, Image, LabelEntry, LabelMap,
-    LabelValue, Literal, MatchExpr, Network, Program, QualifiedRef, RawEntry, RawMap, RawValue,
-    Restart, Router, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Traefik,
-    Volume,
+    LabelValue, Literal, Network, Program, QualifiedRef, RawEntry, RawMap, RawValue, Restart,
+    Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl, Volume,
 };
 use crate::interp;
 use crate::schema::{self, MapSide};
@@ -194,10 +193,8 @@ pub enum ComposeError {
         span: Span,
     },
     /// A `$param` substituted into a reference-shaped position
-    /// (`networks`, `dns`, `env_file`, a `depends_on`
-    /// entry's own reference, `expose.entrypoint`, `router.entrypoints`,
-    /// `router.path_prefix`, `router.middleware`) resolved to a bare
-    /// number. #201 dropped
+    /// (`networks`, `dns`, `env_file`, a `depends_on` entry's own
+    /// reference) resolved to a bare number. #201 dropped
     /// `: Number`/`: String` parameter annotations in favor of checking a
     /// substituted argument against the field it actually lands in —
     /// see docs/DESIGN.md's Syntactic grammar section for the full
@@ -436,12 +433,10 @@ pub enum ComposeError {
     /// [`Program`] has no imports by definition.
     UnknownAlias { alias: String, span: Span },
     /// A qualified reference (`alias.name`) was used on a reference-list
-    /// field that has no cross-file meaning — `depends_on`, `dns`,
-    /// `env_file`, `router.entrypoints`, `router.path_prefix`, or
-    /// `router.middleware`. (`depends_on` names
+    /// field that has no cross-file meaning — `depends_on`, `dns`, or
+    /// `env_file`. (`depends_on` names
     /// a same-file sibling service; the others aren't resolved against
-    /// anything an `.hll` file declares at all — an entry point lives in
-    /// the deployment's own `traefik.yml`, and an `env_file` path lives
+    /// anything an `.hll` file declares at all — an `env_file` path lives
     /// on disk next to the compose file.) `devices` isn't among these:
     /// since #167 its entries are plain [`Literal`]s, like `publish`'s
     /// and `env`'s, which were never reference-shaped to begin with, so
@@ -1295,14 +1290,14 @@ mod error_display_tests {
     #[test]
     fn unsupported_qualified_reference_display() {
         let err = ComposeError::UnsupportedQualifiedReference {
-            field: "router.middleware",
+            field: "dns",
             alias: "traefik".to_string(),
             span: span(1, 3),
         }
         .to_string();
         assert_eq!(
             err,
-            "1:3: `router.middleware` doesn't support a qualified reference yet (`traefik.` ...)"
+            "1:3: `dns` doesn't support a qualified reference yet (`traefik.` ...)"
         );
     }
 
@@ -2040,33 +2035,8 @@ fn resolve_qualified_references<R: SymbolResolver>(
     reject_qualified(&fields.dns, "dns")?;
     // An `env_file` path lives on disk next to the compose file, which
     // no `.hll` file declares, so there's nothing for an alias to
-    // resolve against — same reasoning as `router.entrypoints` just
-    // below.
+    // resolve against.
     reject_qualified(&fields.env_file, "env_file")?;
-    // A `router`'s own `entrypoints` list (#184) names an entry point in
-    // the deployment's own `traefik.yml`, which no `.hll` file declares,
-    // so there is nothing for an alias to resolve against — and codegen
-    // reads only `Literal::text`, so an unchecked `traefik.web` would
-    // compile to `entrypoints=web` with the qualifier silently gone.
-    // `path_prefix` (#196) gets the same check for the first time here:
-    // before #196 it couldn't parse a qualifier at all (see
-    // [`crate::schema::allows_qualified_reference`]'s doc), so there was
-    // nothing yet to reject.
-    // `router.middleware` (#221) names a middleware in that same
-    // `traefik.yml`, so it rejects a qualifier for exactly the reason
-    // `entrypoints` beside it does.
-    // A `rule` matcher's arguments (#228) are the same kind of free
-    // text `path_prefix` holds — a hostname, a path, a header value —
-    // and land in a Traefik rule the same way, so a qualifier there has
-    // nothing to resolve against either.
-    for router in &fields.routers {
-        reject_qualified(&router.entrypoints, "router.entrypoints")?;
-        reject_qualified(&router.path_prefix, "router.path_prefix")?;
-        reject_qualified(&router.middleware, "router.middleware")?;
-        if let Some(rule) = &router.rule {
-            reject_qualified(rule.args(), "router.rule")?;
-        }
-    }
     Ok(())
 }
 
@@ -2463,32 +2433,6 @@ fn visit_literals_mut(
     {
         visit(p)?;
     }
-    for router in &mut fields.routers {
-        for lit in [
-            router.host.as_mut(),
-            router.priority.as_mut(),
-            router.port.as_mut(),
-            router.protocol.as_mut(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            visit(lit)?;
-        }
-        for lit in router
-            .entrypoints
-            .iter_mut()
-            .chain(&mut router.path_prefix)
-            .chain(&mut router.middleware)
-        {
-            visit(lit)?;
-        }
-        if let Some(rule) = &mut router.rule {
-            for arg in rule.args_mut() {
-                visit(arg)?;
-            }
-        }
-    }
     if let Some(r) = &mut fields.restart
         && let Some(p) = &mut r.policy
     {
@@ -2655,43 +2599,6 @@ fn substitute_params(
     {
         substitute_numeric_literal(p, args, template_name, warnings)?;
     }
-    // `router`'s own literal slots (#184, #221) — `host`, `entrypoints`,
-    // `path_prefix`, and `middleware` are all `Literal`-carrying (see
-    // `schema::FieldKind::ReferenceList`). Missing any of the four would
-    // reproduce #168's live bug class: the `Literal::Param` survives to
-    // codegen, which emits the parameter's own name into a Traefik rule
-    // and exits 0.
-    for router in &mut fields.routers {
-        if let Some(h) = &mut router.host {
-            substitute_literal(h, args, template_name, warnings)?;
-        }
-        substitute_reference_list(&mut router.entrypoints, args, template_name, warnings)?;
-        substitute_reference_list(&mut router.path_prefix, args, template_name, warnings)?;
-        substitute_reference_list(&mut router.middleware, args, template_name, warnings)?;
-        // #225: `priority`/`port` are numbers, so they take the same
-        // numeric-checked substitution `expose.port` does; `protocol`
-        // is a plain literal, validated in codegen rather than here so
-        // an unresolved `$proto` never reaches that check.
-        if let Some(p) = &mut router.priority {
-            substitute_numeric_literal(p, args, template_name, warnings)?;
-        }
-        if let Some(p) = &mut router.port {
-            substitute_numeric_literal(p, args, template_name, warnings)?;
-        }
-        if let Some(p) = &mut router.protocol {
-            substitute_literal(p, args, template_name, warnings)?;
-        }
-        // #228: every matcher argument in a `rule`, reached through the
-        // one walk `reject_qualified` above uses, so the two can't
-        // disagree about which slots a rule has. Reference-shaped for
-        // the reason `path_prefix` beside it is — a matcher argument is
-        // free text, never a number.
-        if let Some(rule) = &mut router.rule {
-            for arg in rule.args_mut() {
-                substitute_reference_literal(arg, args, template_name, warnings)?;
-            }
-        }
-    }
     if let Some(r) = &mut fields.restart
         && let Some(p) = &mut r.policy
     {
@@ -2826,9 +2733,7 @@ fn substitute_params(
     }
     // The reference-shaped list fields #196 newly opened to `$param` —
     // `networks`, `dns`, `env_file`, and a `depends_on`
-    // entry's own reference (`router.entrypoints`, `router.path_prefix`,
-    // and `router.middleware` are the same kind of field but already got
-    // substituted in the router loop above) — walk through
+    // entry's own reference — walk through
     // `substitute_reference_literal`
     // rather than plain `substitute_literal`: #201 dropped
     // `: Number`/`: String` parameter annotations, so this is the one
@@ -3261,8 +3166,8 @@ fn warn(warnings: &mut Vec<ComposeWarning>, warning: ComposeWarning) {
 /// [`substitute_literal`], plus a check that the substituted argument is
 /// actually reference-shaped — the substitution-time replacement #201
 /// gave `substitute_params`' reference-list rows (`networks`,
-/// `networks`, `dns`, `env_file`, a `depends_on` entry's own reference,
-/// `expose.entrypoint`, `router.entrypoints`, `router.path_prefix`) once
+/// `networks`, `dns`, `env_file`, a `depends_on` entry's own reference)
+/// once
 /// `: Number`/`: String` annotations stopped existing to check at the
 /// call site.
 ///
@@ -3490,26 +3395,6 @@ fn check_numeric_fields(fields: &ServiceFields) -> Result<(), ComposeError> {
             span: retries.span(),
         });
     }
-    // A router's own `priority`/`port` (#225) — both numbers, both
-    // checked here for the hand-written case exactly as `expose.port`
-    // is, since a mismatch written directly never passes through
-    // substitution for `substitute_numeric_literal` to catch.
-    for router in &fields.routers {
-        for (field, slot) in [
-            ("router.priority", router.priority.as_ref()),
-            ("router.port", router.port.as_ref()),
-        ] {
-            if let Some(lit) = slot
-                && let Some(found) = numeric_mismatch(lit)
-            {
-                return Err(ComposeError::FieldNotNumeric {
-                    field,
-                    found,
-                    span: lit.span(),
-                });
-            }
-        }
-    }
     Ok(())
 }
 
@@ -3661,11 +3546,7 @@ impl Spanned for RawEntry {
 /// on `ServiceFields`. They carry no `Tier`: list fields concatenate
 /// unconditionally, so there is no collision to attribute to a tier.
 /// See [`LIST_FIELDS`].
-/// `router.entrypoints`/`router.path_prefix`/`router.middleware` aren't
-/// among them, even though they're the same [`FieldKind::ReferenceList`]
-/// kind — they live one level deeper, under a router name, so they merge
-/// through [`Self::routers`] instead (see [`merge_routers`]'s own doc).
-/// `devices` isn't among them either — see [`Self::arrow_maps`]'s own doc
+/// `devices` isn't among them — see [`Self::arrow_maps`]'s own doc
 /// for why it moved onto the same `merge_map` path as
 /// `env`/`volume`/`publish` (#167).
 ///
@@ -3735,60 +3616,6 @@ struct MergeAcc {
     /// with [`ComposeError::MapKeyCollision`] instead of the second one
     /// silently overwriting the first.
     raw: Vec<(RawEntry, Tier)>,
-    /// `router`'s own merge point (#184), keyed by router name and
-    /// merged *per sub-field* within each key — see [`merge_routers`].
-    ///
-    /// Not [`merge_map`], despite being keyed: `merge_map` replaces a
-    /// colliding entry outright, which would mean a service body writing
-    /// `router api { host: "..." }` silently discarded the `entrypoints`
-    /// and `path_prefix` a template gave the same router. `expose`
-    /// already merges per sub-field for exactly this reason, and a
-    /// `router` is `expose`'s router half made repeatable, so it has to
-    /// keep that property — one level deeper, since the sub-fields sit
-    /// under a name rather than directly on the struct.
-    routers: Vec<RouterAcc>,
-}
-
-/// One router's own accumulator, keyed by [`Self::key`] — a [`Router`]
-/// mid-merge, with the tier that last set the scalar `host` tracked
-/// alongside it exactly as [`MergeAcc::scalars`] tracks its own.
-///
-/// `entrypoints`, `path_prefix`, and `middleware` carry no `Tier`: like
-/// every other list in the language they concatenate unconditionally, so
-/// there's no collision to attribute to a tier. The scalars all do, for
-/// the reason [`MergeAcc::scalars`] tracks its own.
-struct RouterAcc {
-    name: Option<Ident>,
-    host: Option<(Literal, Tier)>,
-    entrypoints: Vec<Literal>,
-    path_prefix: Vec<Literal>,
-    middleware: Vec<Literal>,
-    /// #225's three scalars, each tier-tracked exactly like `host` and
-    /// merged through the same [`merge_router_scalar`].
-    priority: Option<(Literal, Tier)>,
-    port: Option<(Literal, Tier)>,
-    protocol: Option<(Literal, Tier)>,
-    /// #228's whole-rule spelling. Tier-tracked like the scalars beside
-    /// it and merged through the same [`merge_router_scalar`]: a rule is
-    /// one whole record, so two of them are two answers to one question
-    /// rather than two halves of one, and concatenating them the way the
-    /// lists above concatenate would mean nothing.
-    rule: Option<(MatchExpr, Tier)>,
-    span: Span,
-}
-
-impl RouterAcc {
-    fn key(&self) -> Option<&str> {
-        self.name.as_ref().map(|n| n.name.as_str())
-    }
-}
-
-/// A router id as a diagnostic renders it. The unnamed `router { }` form
-/// has a real id — the service's own name — but nothing the *user* wrote
-/// to quote back, so it's named for what it is rather than as an empty
-/// string.
-fn router_key_display(key: Option<&str>) -> String {
-    key.unwrap_or("<unnamed>").to_string()
 }
 
 impl MergeAcc {
@@ -3843,27 +3670,6 @@ impl MergeAcc {
                 (field.set)(&mut fields, values);
             }
         }
-        // In accumulated order, which is tier order: each `with`
-        // target's left to right, then the body's own, with a name an
-        // earlier tier already contributed merged in place rather than
-        // appended. That's what makes label
-        // emission order a stable function of the source (#184).
-        fields.routers = self
-            .routers
-            .into_iter()
-            .map(|r| Router {
-                name: r.name,
-                host: r.host.map(|(lit, _)| lit),
-                entrypoints: r.entrypoints,
-                path_prefix: r.path_prefix,
-                middleware: r.middleware,
-                priority: r.priority.map(|(lit, _)| lit),
-                port: r.port.map(|(lit, _)| lit),
-                protocol: r.protocol.map(|(lit, _)| lit),
-                rule: r.rule.map(|(expr, _)| expr),
-                span: r.span,
-            })
-            .collect();
         fields
     }
 }
@@ -4170,28 +3976,6 @@ static SCALAR_FIELDS: &[ScalarField] = &[
             f.healthcheck.get_or_insert(empty_healthcheck(span)).disable = Some(span);
         },
     },
-    // `traefik.disable`'s own collision point (#159) — same
-    // `ScalarValue::Flag` shape as `healthcheck.disable` just above, and
-    // for the same reason. Nothing else lives in `Traefik` yet, so there's
-    // no sibling sub-field for a freshly materialized one's span to
-    // prefer over this one.
-    ScalarField {
-        key: "traefik.disable",
-        take: |f| {
-            f.traefik
-                .as_mut()
-                .and_then(|t| t.disable.take())
-                .map(ScalarValue::Flag)
-        },
-        set: |f, v| {
-            let ScalarValue::Flag(span) = v else {
-                unreachable!(
-                    "`traefik.disable`'s own `take` only ever produces `ScalarValue::Flag`"
-                )
-            };
-            f.traefik.get_or_insert(empty_traefik(span)).disable = Some(span);
-        },
-    },
     // `command`'s own collision point (#156) — the same
     // shell-string-or-exec-list shape `healthcheck.test` carries, so it
     // shares that row's `ScalarValue::List` conversion, just written into
@@ -4284,19 +4068,6 @@ fn empty_healthcheck(span: Span) -> Healthcheck {
     }
 }
 
-/// A freshly materialized [`Traefik`] with `disable` unset, mirroring
-/// [`empty_healthcheck`] for the same reason (#159): the one call site
-/// today (`"traefik.disable"`'s own `get_or_insert`, in [`SCALAR_FIELDS`])
-/// doesn't need the indirection yet, but a second `Traefik` sub-field
-/// would otherwise force every existing call site to be revisited
-/// instead of just gaining a new one.
-fn empty_traefik(span: Span) -> Traefik {
-    Traefik {
-        disable: None,
-        span,
-    }
-}
-
 /// [`ScalarField`]'s counterpart for reference-list fields — the same
 /// `key`/`take`/`set` triple, minus everything scalars need only
 /// because they can collide. A list never collides (tiers concatenate,
@@ -4311,9 +4082,8 @@ fn empty_traefik(span: Span) -> Traefik {
 /// `MergeAcc::into_service_fields` *rebuilds* — needing the same
 /// read-out/write-back indirection the scalars already had, rather than
 /// the plain "name each one" every other reference list got. #198 moved
-/// `entrypoint` off `expose` entirely (it lives under a router name now,
-/// merged through [`MergeAcc::routers`] instead — see [`merge_routers`]),
-/// so the three rows left here (`networks`/`dns`/`env_file`)
+/// `entrypoint` off `expose` entirely, and #271 removed the routing it
+/// moved to, so the three rows left here (`networks`/`dns`/`env_file`)
 /// no longer strictly need the indirection for that original reason —
 /// kept anyway since they still ride the same table [`SCALAR_FIELDS`]
 /// (see hl-lang#28) exists to generalize: both merge functions stay one
@@ -4326,9 +4096,7 @@ struct ListField {
     set: fn(&mut ServiceFields, Vec<Literal>),
     /// Whether repeats of an already-accumulated name are dropped
     /// rather than appended (hl-lang#69). True for the set-like fields
-    /// — `networks` alone, since #221 moved `middleware` onto `router`
-    /// (where [`merge_routers`] dedupes it by the same rule) — where
-    /// naming
+    /// — `networks` alone — where naming
     /// the same thing twice means exactly what naming it once means, so
     /// the repeat is pure noise: it duplicated `networks:` entries and
     /// `middlewares=` label values in the output, made a single
@@ -4522,10 +4290,6 @@ fn merge_tier(
     // see `merge_depends_on`'s own doc for the narrower collision rule
     // this field needs.
     merge_depends_on(&mut acc.depends_on, incoming.depends_on, tier)?;
-    // Keyed by router name, then merged sub-field by sub-field within
-    // each key — see `merge_routers`' own doc for why neither
-    // `merge_map` nor `LIST_FIELDS` fits (#184).
-    merge_routers(&mut acc.routers, incoming.routers, tier)?;
     // Keyed like `env` — same [`MapSide::Key`] uniqueness convention —
     // now that `raw` isn't the language's one unconditionally
     // concatenated map field any more (#193). See `MergeAcc::raw`'s doc.
@@ -4538,209 +4302,6 @@ fn merge_tier(
         |e| e.key.text().to_string(),
     )?;
     Ok(())
-}
-
-/// Merges `router` blocks into `acc`, keyed by router name (#184).
-///
-/// Two levels of merging, not one. Between routers, this is keyed like
-/// [`merge_map`]: a name no tier has contributed yet is appended, and a
-/// name an earlier tier already contributed is merged into rather than
-/// added twice. *Within* one name, each sub-field then merges by its own
-/// kind, exactly the way `expose`'s `port`/`host`/`entrypoint` do — the
-/// scalar `host` follows [`merge_scalar`]'s Own-always-wins /
-/// two-explicit-templates-collide rule, while
-/// `entrypoints`, `path_prefix`, and `middleware` concatenate.
-///
-/// That second level is the whole point. [`merge_map`]'s own
-/// full-entry replacement is right for `volume`/`publish`, where an
-/// entry is a single mapping with nothing inside it to keep, but a
-/// router is a record: a service body writing `router api { host: "..."
-/// }` over a template's `router api { entrypoints: web-secure }` means
-/// "same router, different host," not "throw the entry point away." So
-/// this reads as the keyed form of the per-sub-field merge
-/// docs/DESIGN.md already describes for `expose`.
-///
-/// `entrypoints` and `middleware` dedupe by name and `path_prefix`
-/// doesn't, matching what each list means: naming one entry point or one
-/// middleware twice attaches the router to it once, while path prefixes
-/// are `||` alternatives whose written order is observable in the
-/// emitted rule — the same split [`ListField::dedupe`] already draws
-/// between `networks` and `dns`/`env_file`. `middleware` dedupes on the
-/// side `networks` sits on, for the same reason: a repeated middleware
-/// name would be a repeated entry in the one comma-joined
-/// `middlewares=` label.
-///
-/// A router's `middleware` merging across tiers this way — rather than
-/// the innermost tier replacing what an outer one said — is what lets a
-/// template supply a base list a service body adds to (#221), the same
-/// as `entrypoints` beside it.
-fn merge_routers(
-    acc: &mut Vec<RouterAcc>,
-    incoming: Vec<Router>,
-    tier: &Tier,
-) -> Result<(), ComposeError> {
-    for router in incoming {
-        let key = router.key().map(str::to_string);
-        let Some(pos) = acc.iter().position(|held| held.key() == key.as_deref()) else {
-            acc.push(RouterAcc {
-                name: router.name,
-                host: router.host.map(|h| (h, tier.clone())),
-                entrypoints: router.entrypoints,
-                path_prefix: router.path_prefix,
-                middleware: router.middleware,
-                priority: router.priority.map(|p| (p, tier.clone())),
-                port: router.port.map(|p| (p, tier.clone())),
-                protocol: router.protocol.map(|p| (p, tier.clone())),
-                rule: router.rule.map(|r| (r, tier.clone())),
-                span: router.span,
-            });
-            continue;
-        };
-        if let Some(host) = router.host {
-            merge_router_scalar(
-                &mut acc[pos].host,
-                "router.host",
-                key.as_deref(),
-                host,
-                tier,
-            )?;
-        }
-        // #225's three scalars follow `host`'s rule exactly, keyed the
-        // same way so a collision still says *which* router.
-        if let Some(priority) = router.priority {
-            merge_router_scalar(
-                &mut acc[pos].priority,
-                "router.priority",
-                key.as_deref(),
-                priority,
-                tier,
-            )?;
-        }
-        if let Some(port) = router.port {
-            merge_router_scalar(
-                &mut acc[pos].port,
-                "router.port",
-                key.as_deref(),
-                port,
-                tier,
-            )?;
-        }
-        if let Some(protocol) = router.protocol {
-            merge_router_scalar(
-                &mut acc[pos].protocol,
-                "router.protocol",
-                key.as_deref(),
-                protocol,
-                tier,
-            )?;
-        }
-        // #228: a whole rule, merged by the same rule the scalars are.
-        if let Some(rule) = router.rule {
-            merge_router_scalar(
-                &mut acc[pos].rule,
-                "router.rule",
-                key.as_deref(),
-                rule,
-                tier,
-            )?;
-        }
-        // First occurrence wins, so accumulated order stays tier order
-        // with later repeats dropped — the same dedupe-by-name rule
-        // `LIST_FIELDS`'s set-like rows follow (see [`ListField::dedupe`]),
-        // reached through the same comparison on `Literal::text` (a
-        // qualified entry can never get this far: it's rejected outright
-        // by `resolve_qualified_references`).
-        for entry in router.entrypoints {
-            if !acc[pos]
-                .entrypoints
-                .iter()
-                .any(|held| held.text() == entry.text())
-            {
-                acc[pos].entrypoints.push(entry);
-            }
-        }
-        acc[pos].path_prefix.extend(router.path_prefix);
-        // Deduped by name like `entrypoints` just above, and for the same
-        // reason — see this function's own doc (#221).
-        for entry in router.middleware {
-            if !acc[pos]
-                .middleware
-                .iter()
-                .any(|held| held.text() == entry.text())
-            {
-                acc[pos].middleware.push(entry);
-            }
-        }
-        // The most recent contributor's span, so a diagnostic about the
-        // merged router points at the most specific place it was
-        // written — the service's own body when it wrote one, the
-        // template otherwise.
-        acc[pos].span = router.span;
-    }
-    Ok(())
-}
-
-/// [`merge_scalar`]'s rule applied to one of a router's own scalar
-/// sub-fields, reported as a [`ComposeError::MapKeyCollision`] rather
-/// than a [`ComposeError::FieldCollision`] because the field alone
-/// (`router.host`) doesn't say *which* router collided — the key does,
-/// and `MapKeyCollision` is the variant that already carries one.
-///
-/// Generic over the slot rather than written once per sub-field: `host`
-/// was the only one until #225 added `priority`/`port`/`protocol`, and
-/// all four want the identical Own-wins /
-/// two-explicit-templates-collide rule. `slot` is the [`RouterAcc`]
-/// field to merge into and `field` the dotted name a collision reports.
-fn merge_router_scalar<T: RouterScalar>(
-    slot: &mut Option<(T, Tier)>,
-    field: &'static str,
-    key: Option<&str>,
-    value: T,
-    tier: &Tier,
-) -> Result<(), ComposeError> {
-    match slot.take() {
-        None => *slot = Some((value, tier.clone())),
-        Some((existing, existing_tier)) => match (&existing_tier, tier) {
-            (_, Tier::Own) => *slot = Some((value, Tier::Own)),
-            (Tier::Explicit(first), Tier::Explicit(second)) => {
-                return Err(ComposeError::MapKeyCollision(Box::new(MapKeyCollision {
-                    field,
-                    side: MapSide::Key,
-                    key: router_key_display(key),
-                    first_template: first.clone(),
-                    second_template: second.clone(),
-                    first: existing.span(),
-                    second: value.span(),
-                })));
-            }
-            _ => unreachable!("Own is always merged last, so it is never the existing tier"),
-        },
-    }
-    Ok(())
-}
-
-/// A single-occurrence `router` field [`merge_router_scalar`] can merge.
-///
-/// The merge itself is the same for every one of them — Own always wins,
-/// two explicit templates collide — and the
-/// only thing it needs from the value is where it was written, for the
-/// collision diagnostic to name both sides. Six of the seven rows are
-/// [`Literal`]s; `rule` (#228) is a whole [`MatchExpr`], which is the
-/// only reason this is a trait rather than a concrete type.
-trait RouterScalar {
-    fn span(&self) -> Span;
-}
-
-impl RouterScalar for Literal {
-    fn span(&self) -> Span {
-        Literal::span(self)
-    }
-}
-
-impl RouterScalar for MatchExpr {
-    fn span(&self) -> Span {
-        MatchExpr::span(self)
-    }
 }
 
 /// Merges `depends_on` entries into `acc`, keyed on the referenced
@@ -4760,11 +4321,8 @@ impl RouterScalar for MatchExpr {
 /// giving the *same* answer twice. Erroring there would be a gratuitous
 /// break of every `.hll` file that already composed two templates each
 /// depending on the same service, for a "conflict" that was never one —
-/// the same reasoning `resolve_networks`'s `AmbiguousExternalNetwork`
-/// check already applies to a network named `external` by two
-/// declarations that resolve to the same real name: "naming one
-/// external network more than once is not an ambiguity between it and
-/// itself, it's one answer given twice."
+/// naming one thing more than once is not an ambiguity between it and
+/// itself, it's one answer given twice.
 ///
 /// So two entries naming the same service are compared by
 /// [`DependsOnEntry::effective_condition`] — which folds a bare entry

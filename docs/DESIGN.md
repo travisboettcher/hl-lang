@@ -149,8 +149,6 @@ key            ::= IDENT | STRING
 sugar          ::= body
                   | value ( "->" | "=" ) value
                   | value ( "," value )* statement*
-                  | IDENT? body
-                  | IDENT ( "," statement )*
 
 value          ::= literal | list | statement
 
@@ -162,64 +160,8 @@ literal        ::= STRING | NUMBER | IDENT | IDENT "." IDENT | "$" IDENT
 field_access   ::= IDENT "." IDENT              # local declaration, field
                   | IDENT "." IDENT "." IDENT   # alias, declaration, field
                   | "$" IDENT "." IDENT         # bound declaration, field
-
-rule_expr      ::= or_expr
-
-or_expr        ::= and_expr ( "||" and_expr )*
-
-and_expr       ::= unary ( "&&" unary )*
-
-unary          ::= "!" unary | primary
-
-primary        ::= "(" rule_expr ")" | matcher
-
-matcher        ::= IDENT "(" ( literal ( "," literal )* )? ")"
 ```
 
-- `rule_expr` is reachable from exactly one place: `router`'s own `rule`
-  field, whose schema row `schema::FieldKind::MatchExpr` is the switch
-  that routes the generic engine into this grammar rather than into
-  `value`. It's the only field kind whose value is neither a literal, a
-  list of them, nor a nested body, and the only one with an operator
-  grammar. Precedence is Traefik's own—`!` tightest, then `&&`, then
-  `||`—which is what lets codegen render a parsed tree back out without
-  parenthesizing defensively: an expression written without parentheses
-  reparses in Traefik as the tree it parsed as here.
-
-  It's also the language's **second** self-recursive production, after
-  `raw`'s schema-free value grammar, so it carries a depth ceiling for
-  that one's reason, per #72: unbounded, a few kilobytes of `((((...))))`
-  overflows the stack, and a stack overflow aborts the process rather
-  than returning an error a library embedder can catch. The two
-  constants sit beside each other, `MAX_MATCH_EXPR_DEPTH` and
-  `MAX_RAW_VALUE_DEPTH`, and the second's own rustdoc carries the
-  measurement behind both numbers. The depth
-  counted is the parsed *tree*'s rather than the parser's call chain, so
-  a long `a && b && c && ...` chain counts against it as well as a stack
-  of `(`: `&&` folds left, so each extra operand is one more `Box` level
-  for drop glue to walk.
-
-  One token of lookahead decides where a `rule` expression *ends*, since
-  the lexer emits no newline token. It stops the moment the next token
-  is neither `&&` nor `||`, and the parser takes a `,` only between a
-  matcher's own parentheses—never at the top level—so in the
-  comma-continued form `router api, rule: Host("x"), entrypoints: web`
-  the second comma starts a sibling field of `router`, exactly as it
-  would after any other field's value. The `(` of a `param_list` never
-  competes with the `(` of a `matcher` or a group: `param_list` is
-  reachable only after the `template` keyword at the top level.
-- The last two `sugar` alternatives belong to a **name-keyed** field, of
-  which `router` is the only one—see the schema table below. The
-  identifier between the field name and the body names *this* instance
-  of the field rather than setting a sub-field, so `router api { host:
-  "..." }` and `router api, host: "..."` both declare a router called
-  `api`. The name is an `IDENT`, never a `STRING`, matching the spelling
-  of a top-level declaration's own name: it ends up in a Traefik
-  label *key*, and `IDENT`'s grammar can't hold the `.`, `=`, backtick,
-  or space that would forge a different key. Leaving the name off
-  requires the braced form, since a comma-list needs a first token to
-  continue from and `router host: "x"` can't say whether `host` names the
-  router or its own field.
 - A parameter carries no type annotation at all, per #201: `param` is
   just `IDENT`. Earlier milestones let it optionally declare `Number` or
   `String`, checked strictly against the argument's own literal kind at
@@ -241,9 +183,7 @@ matcher        ::= IDENT "(" ( literal ( "," literal )* )? ")"
   Dropping the annotation and checking a substituted argument against
   the field it lands in instead needs no such vocabulary. A
   reference-shaped position (`networks`, `dns`,
-  `env_file`, a `depends_on` entry's own reference, `expose.entrypoint`,
-  `router.entrypoints`, `router.path_prefix`, `router.middleware`, a
-  `router.rule` matcher's own arguments) rejects
+  `env_file`, a `depends_on` entry's own reference) rejects
   a substituted `Literal::Number`—the one literal kind that position's own grammar
   (`parse_literal_reference`) can never produce directly. A
   `number`-typed position—`expose.port` and `healthcheck.retries`, the
@@ -343,7 +283,7 @@ matcher        ::= IDENT "(" ( literal ( "," literal )* )? ")"
   in, `networks`/`dns`/`env_file`/an `entrypoints` or `middleware`
   list/a
   `depends_on` entry included—a template can write `networks [$net]` or
-  `router { middleware: $mw }` exactly as freely as `restart $policy`, since there is
+  `labels { "k": $v }` exactly as freely as `restart $policy`, since there is
   only the one grammar production for a value everywhere it's expected.
 - The `IDENT "." IDENT` form of `literal`—`alias.name`, produced only
   from a bare `IDENT` token followed by `.` `IDENT`, never from a
@@ -466,17 +406,14 @@ same two entries—see #81.
    desugars to a one-entry map, where `<sep>` is a per-type schema choice
    (`env` uses `=`, `volume` uses `->`). Both desugar to the same canonical
    `:`-separated map form internally.
-3. **Secondary-field bare shorthand**—after a primary value (or a
-   repeatable struct field's own name, for `router`), a type's schema
-   drives one further generic continuation: additional explicit `key:
-   value`/`key` fields may follow, each preceded by a **mandatory
+3. **Secondary-field bare shorthand**—after a primary value, a type's
+   schema drives one further generic continuation: additional explicit
+   `key: value`/`key` fields may follow, each preceded by a **mandatory
    comma** (the same "trailing comma continues, its absence ends the
-   statement" rule as any other comma-list): `router api, host: "...",
-   entrypoints: web`. A field whose own value is an unbracketed
-   comma-list (`entrypoints`'s reference list) ends at the next `key:`
-   rather than swallowing it, by the same one-token lookahead: in
-   `router api, entrypoints: web, host: "..."`, the second comma starts a
-   sibling field of `router`, not a second entry point.
+   statement" rule as any other comma-list): `build "./app", dockerfile:
+   "Dockerfile.prod"`. A field whose own value is an unbracketed
+   comma-list ends at the next `key:` rather than swallowing it, by the
+   same one-token lookahead.
    Writing a boolean struct field bare, with no value, always implies
    `true` (for example, `external` on `network`). A bare zero-field
    template invocation (`authenticated` with no `{ }`) is the same
@@ -488,36 +425,21 @@ same two entries—see #81.
    a valid statement start and now correctly errors instead of silently
    reattaching elsewhere.
 
-   `expose <port> as "<host>"` looks like a special case of this same
-   rule—fusing directly onto the primary value with **no comma**—and
-   through #197 it was one: `TypeSchema::bare_keyword_alias`, generic
-   schema data pairing a bare keyword (`as`) with a target field
-   (`expose`'s own `host`). #198 moved every Traefik-routing field off
-   `expose` and onto `router`, leaving `expose` with only `port`—no
-   field left for a generic alias to target—so `as` survives as bespoke
-   parser sugar instead (`Parser::parse_expose_as_sugar`), outside this
-   generic engine entirely: it desugars `expose <port> as "<host>"` to
-   `expose { port }` plus an unnamed `router { host }`, the two parsed
-   nodes a hand-written pair would produce. It keeps the one property
-   that mattered about the old mechanism: a one-shot continuation, not a
-   list. No further field can follow it, comma-led or bare. `expose port
-   as "host", entrypoints: web` is a compile error, though
-   no longer a dedicated one: `ParseError::AliasSugarCannotContinue`
-   doesn't exist any more, so the trailing comma is simply left for the
-   enclosing
-   body, where a bare comma never starts a valid statement.
+   `expose <port> as "<host>"` was a second, bespoke fusion onto the
+   primary value with no comma, desugaring to `expose { port }` plus an
+   unnamed `router { host }`. It went with routing at #271: there is no
+   `router` node left to desugar into, and a port and a hostname were
+   only ever fused because one built-in owned both. `as` is an ordinary
+   identifier again.
+
 4. **Repeatable-field accumulation**—semantic, not part of the
    Context-Free Grammar (CFG)—writing `volume`, `publish`, `env`,
-   `depends_on`, or `router` more than once in
+   `depends_on`, or `labels` more than once in
    one body appends, since those fields are list/map-kinded—subject to
    the set-like lists' distinct-name rule under "Composition" below, which
    drops a repeat of a name already present (`depends_on` instead keeps
    only its own list's *last* entry for a repeated name, per the same
    keyed-merge rule its own paragraph under "Composition" describes—#155).
-   `router` appends only for *distinct* names: two blocks in one body
-   claiming the same router id is a compile error rather than an
-   append or an override, since that isn't two routers but one router
-   described twice—#184.
    Writing `image` or `restart` twice in the same body is a
    duplicate-scalar compile error.
 
@@ -530,7 +452,6 @@ same two entries—see #81.
 | `service` | struct |—|—|—| yes |
 | `image` | struct | `ref` |—|—| no |
 | `expose` | struct | `port` |—|—| no |
-| `router` | struct |—|—| the router name | optional |
 | `volume`—the `service`/`template` field | map |—| `->` | value—the container path | no |
 | `driver_opts`—inside a `volume` declaration | map |—| `:` | key | no |
 | `publish` | map |—| `->` | value—the container port | no |
@@ -539,7 +460,6 @@ same two entries—see #81.
 | `labels` | map |—| `:` | key | no |
 | `restart` | struct | `policy` |—|—| no |
 | `healthcheck` | struct |—|—|—| no |
-| `traefik` | struct |—|—|—| no |
 | `with` | struct | `templates`—list of nested instantiations |—|—| no |
 | `raw` | map |—| `:` | key | no |
 
@@ -654,38 +574,27 @@ of the book's Built-in Fields page).
 
 `labels` is the one key where that rule needs saying out loud, and #232
 is why. Every other overridable key is one built-in field, so replacing
-it means replacing the one thing the author wrote. `labels` is a
-*derived* key instead: no single field sets it, and what codegen emits is
-the sum of four independent features.
+it means replacing the one thing the author wrote. `labels` is an
+*aggregate* instead: its entries reach a service from every template
+tier applied to it as well as from its own body, and since #271 that
+includes all of the service's routing.
 
-- `router`, contributing the routing rule, the entry points, and the
-  middleware list.
-- `expose`, contributing the load-balancer target port.
-- `traefik { disable }`, which trades the whole set for a single
-  `traefik.enable=false`.
-- The Docker network the service resolves to, as
-  `traefik.docker.network`.
-
-A service can reach for any one of those without knowing the other three
-exist. #243 later added a fifth contributor, the explicit `labels` field
-documented below, whose entries codegen appends to that same computed
-set. So `raw { labels: [...] }` beside a `router` block doesn't override
-*a* field. It discards the output of all of them at once, and overriding
-it commits the author to reproducing every one of them by hand and
-keeping them in step from then on. That's still the correct
-behavior—a half-merged `raw` value would no longer be verbatim
-passthrough, and hand-writing the whole list is a legitimate use of the
-escape hatch—but losing the whole computed set in silence is a trap
-worth a diagnostic, so codegen raises a `RawLabelsReplaceGenerated`
-warning whenever a service generates labels and `raw` names the key too.
-A warning rather than an error: no file stops compiling, and no
-generated document changes.
+A service applies a template without knowing what else contributes to
+the key. So `raw { labels: [...] }` doesn't override *a* field. It
+discards every contributor's output at once, and overriding it commits
+the author to reproducing all of it by hand and keeping it in step from
+then on. That's still the correct behavior—a half-merged `raw` value
+would no longer be verbatim passthrough, and hand-writing the whole list
+is a legitimate use of the escape hatch—but losing the whole set in
+silence is a trap worth a diagnostic, so codegen raises a
+`RawLabelsReplaceGenerated` warning whenever a service has labels and
+`raw` names the key too. A warning rather than an error: no file stops
+compiling, and no generated document changes.
 
 Codegen raises that warning only where the computed label set comes out
-non-empty, rather than wherever the service declares `router` or
-`expose`, so it fires exactly when the override actually costs
-something. A service with no `router`, no `expose` and no `traefik`
-block generates no labels for `raw` to replace, and says nothing.
+non-empty, so it fires exactly when the override actually costs
+something. A service with no labels of its own and none from a template
+generates none for `raw` to replace, and says nothing.
 
 `raw`'s own job has narrowed as the preceding schema table has grown.
 Early on, before this table had more than a handful of rows, `raw` stood
@@ -736,8 +645,8 @@ bare context string unless a `dockerfile` forces the mapping. `args` is delibera
 being a map that would need the merge machinery `env` has rather than
 the two plain scalars here, with nothing yet needing one. A `build`
 block with no `context` is a hard error rather than a silent default to
-`.`, for `router`-without-`host`'s reason one level over: a wrong
-default here builds the wrong directory rather than nothing.
+`.`: a wrong default here builds the wrong directory rather than
+nothing.
 
 `publish` and `expose` are separate rows on purpose, not two spellings
 of one concept. `publish` is Compose's `ports:` key, which puts the port
@@ -753,14 +662,10 @@ port serving both protocols—exactly the configuration the field exists
 to express.
 
 Through #197, `expose` also modeled exactly one Traefik router of its
-own: `host` generated the router-rule label, and `entrypoint` (a list of
-references, `entrypoint web, web-secure`—`entrypoints` since #199, for
-the same reason
-`router`'s own `middleware` is—Traefik's `entrypoints=` label is comma-separated, and
-modelling that as a list keeps the separator codegen's to write rather
-than the user's) restricted it to named entry points. #198 moved both
-fields onto `router` outright, leaving `expose` with the one field it
-still has, `port`—see that field's own paragraph below.
+own: `host` generated the router-rule label and `entrypoint` restricted
+it to named entry points. #198 moved both onto `router`, and #271 moved
+routing out of the language entirely, leaving `expose` with the one
+field it still has, `port`, doing the one job Compose gives it.
 
 `devices` shares `publish`'s reasoning for keying uniqueness on the
 container side, right down to the optional suffix: Compose's own
@@ -780,308 +685,79 @@ fields' own tree types together into the shared `ArrowMap`/
 then all three were already identical `merge_map` calls differing only
 in which field name and which `ServiceFields` slot each read.
 
-`router` is the one row that's both repeatable *and* struct-kind, and
-the only one whose instances take a key from a name the user writes. It
-started as the second way to get a Traefik router—#184—for the
-service that needs more than one off one container: a public host beside
-a local-network host, an API path prefix split off from a catch-all
-frontend. Before #184 the only way to say that was to abandon `expose`
-and hand-write the whole label list in `raw { labels: [...] }`, which
-gives up `expose`'s validation, its `{{name}}` interpolation, and its
-metacharacter guard for a service that's otherwise an ordinary
-Traefik-fronted container. #198 then moved every Traefik-routing field
-off `expose` and onto `router` outright, so today `router` is the *only*
-way to get one—the unnamed `router { }` form (or its `expose <port> as
-"<host>"` sugar) is simply the common single-router case, not a
-different mechanism from the multi-router one.
+Routing was a built-in through #270, and its removal at #271 is the
+largest single subtraction this language has made. It's recorded here
+rather than deleted, because the reasoning generalizes.
 
-`port` stays on `expose` rather than moving alongside `host`/
-`entrypoints`: it's per Compose *service* rather than per router—several
-routers off one container all balance onto that one port—and `expose`
-would need it regardless of Traefik for its own `expose:` key, so giving
-`router` a repeatable field that's never actually per-router would have
-been the wrong shape. See #198's "port" paragraph below.
+`router` was the table's one row that was both repeatable *and*
+struct-kind, keyed by a name the user wrote. Around it sat `traefik {
+disable }`, a `rule` sub-grammar with a table of Traefik's own matchers,
+`middleware` and `path_prefix` and `entrypoints` lists, an `expose
+<port> as "<host>"` sugar, and ~2,570 lines of codegen assembling label
+strings. All of it modelled one reverse proxy.
 
-Each block emits `traefik.http.routers.<service>-<name>` for its labels,
-or `traefik.http.routers.<service>` for the unnamed `router { }` form.
-Two blocks in one body claiming the same id—whether both are hand-written,
-or one is hand-written and the other comes from `expose <port> as
-"<host>"`'s own sugar—is a compile error rather than one silently
-overwriting the other's labels, the same rule two `volume` entries at
-one container path already follow: that isn't two routers, it's one
-router described twice. The parser catches this directly—see
-Diagnostics, below—since both spans are still in hand there. #198
-folded what used to be a separate codegen-level check,
-`ExposeHostWithUnnamedRouter`, for the one case reachable when `host`
-still lived on `expose`, into this same parse-time duplicate check, now
-that both an explicit unnamed `router { }` and the `as` sugar's own
-unnamed router are ordinary entries in one list before composition ever
-runs.
+That fails this document's own opening principle: *would this make sense
+on a homelab with completely different infrastructure?* A `router` block
+means nothing without Traefik, and the compiler had no business knowing
+what a rule was. So `hllc` now generates no routing labels at all. A
+service's routing is `labels` entries, and templates write those
+entries—`std:traefik` for the common case, covered under "Modules
+bundled with the compiler," or your own for anything else.
 
-`host` is a plain scalar. `entrypoints` and, since #221, `middleware`
-are reference lists, spelled and merged the same way `networks` is—see
-`middleware`'s own paragraph further down. `path_prefix` uses that same
-reference-list grammar too: a prefix is free text a template
-legitimately fills in with a `$param`, which every reference-list field
-accepts—`entrypoints` included—since `literal` now carries `$param`
-itself rather than needing a separate grammar to hold it. The qualified
-`alias.name` form still doesn't reach `path_prefix`'s generated output,
-though: it parses there like anywhere else, but `path_prefix` rejects
-it, the same as `dns`/`env_file`/`entrypoints`/`middleware`/`depends_on`—see
-the following Imports section. With prefixes set, the rule
-becomes ``Host(`h`) && (PathPrefix(`a`) || PathPrefix(`b`))``. The
-parentheses are load-bearing, not cosmetic: `&&` binds tighter than `||`
-in Traefik's rule grammar, so without them the rule would match *any*
-host under the last prefix. They're emitted for a single prefix too,
-where they change nothing, so the rule's shape doesn't depend on how many
-prefixes it happens to have.
+What the removal cost, stated plainly: `hllc` used to parse rule syntax
+and reject an unknown matcher, a wrong argument count, or a backtick in
+a host that would close a `Host(` call early. It can't any more, because
+a label value is a string. The alternative was a validator tracking a
+third party's syntax across its releases, inside a compiler whose whole
+claim is that it doesn't know about that third party. The check moved to
+Traefik's own startup, which is where someone maintains it.
 
-`router` carried no `port` through #224, on the reasoning that
-Compose's `loadbalancer.server.port` label is per Compose service rather
-than per router: a container listens on one port however many routers
-point at it. That's true of nearly every service, and false of
-`sftpgo`, which serves a web UI on 2222, WebDAV on 4444, and raw SFTP on
-1111 off one container. #225 added the `port` sub-field for that case.
-A router naming one gets a Traefik *service* of its own, keyed by the
-router's own id, and says so with a `.service=` label. A router naming
-none still falls through to the single service-wide target `expose`
-supplies, which is what keeps every file written against the older model
-emitting exactly what it always did.
+What the removal required is the more interesting half, because none of
+it was foreseen from the outside. Six capabilities the generic core
+lacked had to be *added* before the specific feature could be *deleted*:
+#266 interpolated a parameter into string content. #267 gave the
+compiler a way to ship modules at all. #275 read a declaration's real
+Docker name from a value, which `traefik.docker.network` needed and no
+built-in had ever exposed. #283 passed a list to a template. #288 made a
+list-valued `labels` entry concatenate across tiers rather than collide.
+The vendor integration had been standing
+in for all of them, which is why the gaps were invisible while it
+existed. Every one is now available to any template, for infrastructure
+this compiler has never heard of.
 
-That splits the "a routed service needs a port" rule in two, and the
-split is the interesting part. `expose` is now required only while at
-least one router actually falls back to it. A service whose routers all
-name their own needs no `expose` at all, and demanding one would mean
-inventing a "the" port that `sftpgo` genuinely doesn't have, the very
-reason its `expose:` key stayed in `raw` alongside its labels. The
-diagnostic points at the falling-back router rather than the first one,
-since that's the block the fix belongs to.
+Two smaller things went with it. `AmbiguousExternalNetwork` refused a
+service with two external networks purely because the compiler had to
+pick one to name in `traefik.docker.network`. Once a template writes
+that label and takes the network as an argument, there is nothing left
+to disambiguate. And `CodegenError::LabelCollidesWithGenerated` reduced
+to `DuplicateLabelKey`: with no generated labels to collide with, the
+only remaining collision is between two entries the author wrote.
 
-`priority` is the smallest of #225's three additions and needs least
-justification: a plain generic Traefik router setting, emitted verbatim
-as a number, absent by default so Traefik keeps its own rule-length
-heuristic rather than one `hllc` invented. What makes it necessary
-rather than merely nice is that two routers sharing a host have nothing
-else to tell them apart, which is exactly `sftpgo`'s `web`/`webdav`
-pair.
+The old spellings don't vanish silently. `router`, `traefik`,
+`middleware` and `expose <port> as "<host>"` are all
+`ParseError::MovedField` (`schema::moved_field`), each naming the
+`std:traefik` template that replaces it, rather than the generic
+`UnknownField`—whose advice on these types is the `raw { ... }` escape
+hatch, which here would compile and emit a meaningless `router:` Compose
+key while the routing quietly went missing. That's the same "valid
+output, wrong service" failure #144 closed off, arrived at through a
+helpful hint.
 
-`protocol` is the largest, since a TCP router isn't an HTTP router with
-a flag on it. It emits `traefik.tcp.routers.*`/`traefik.tcp.services.*`,
-a separate namespace, and matches ``HostSNI(`...`)`` rather than
-``Host(`...`)``. At that layer there is no HTTP request to read a
-`Host` header from, only the TLS handshake's server name, which is also
-why `HostSNI` accepts a `*` wildcard that `Host` has no equivalent of.
-Every other label a router emits keeps its spelling either side, which
-is why one code path emits both, parameterized by the namespace segment
-and the host matcher.
 
-Two constraints follow, both hard errors rather than silent drops. A TCP
-router can't take a `path_prefix`, having no request URI to match a path
-against, and ignoring one would route traffic the block plainly meant to
-narrow. And a TCP router must name its own `port`: the shared fallback
-target is an *HTTP* service (`traefik.http.services.<service>`), so
-there is nothing there for it to fall back to.
-
-Codegen validates `protocol` rather than the parser, unlike
-`depends_on`'s condition. The reason is `$param`: substitution runs
-after parsing, so a parse-time check would see `$proto` unresolved and
-reject it as an unknown protocol, which names the wrong problem
-entirely. By the time codegen runs, composition has bound every
-parameter, so what reaches the check is what the user actually wrote. `priority` and `port`
-are numbers and ride the same `check_numeric_fields` backstop
-`expose.port` already had, catching a hand-written mismatch that never
-passes through substitution for the argument-side check to see.
-
-`middleware` sits on `router` since #221, and only there—it used to be
-a service-level field instead, one list attaching to every router the
-service had. That issue is what settled the scope: a real service
-(`gitea`) needs a public router on `git.techdebtor.io` with no
-middleware beside an internal one on `git.internal.techdebtor.io` behind
-`local-ipwhitelist`. With one service-wide list, either both routers get
-the allowlist—breaking the intentionally public route—or neither does,
-dropping IP restriction from the internal-only one. That isn't a style
-difference, so the whole `labels` list stayed hand-typed in `raw`,
-giving up every check `router` performs, for the one service that most
-needed them.
-
-The part worth justifying is moving the field, rather than adding a
-per-router one beside it and keeping both, which would have been the
-smaller change. Two spellings of one concept would need a precedence rule
-between
-them—override or extend, and either answer is wrong somewhere. Extend
-leaves the preceding public router unable to shed the allowlist, which
-leaves the reported gap unfixed. Override fixes that but makes the
-service-level line mean "unless a router disagrees," so one `router`
-block no longer states what that router attaches: you have to check the
-service body too, and a middleware silently added to a public route or
-silently dropped from a restricted one is a security bug that compiles
-clean. A middleware is per-router in Traefik's own model, so the field
-belongs on the router—one scope, read where it's written.
-
-The cost is real and accepted: routers that share a middleware each name
-it, where one service-level line used to do. Templates absorb most of
-that—a template's own `router` block carries the shared name once for
-every service that composes it—and what's left is repetition the
-compiler can see, rather than brevity that hides which routers differ.
-
-Across tiers—each `with` target, then the service body—one
-router's `middleware` concatenates and dedupes by name, exactly like its
-`entrypoints`, so a template supplies a base list a service body adds to.
-
-The old spelling doesn't silently vanish. `middleware` written in a
-`service`/`template` body is `ParseError::MovedField`, naming where the
-field went, rather than the generic `UnknownField`—which on these two
-types offers the `raw { ... }` escape hatch, advice that here compiles
-and then emits a meaningless `middleware:` Compose key while the Traefik
-label the author wanted goes missing. That's the same "valid output,
-wrong service" failure #144 closed off, arrived at through a helpful
-hint, so the removed name stays recognized purely to name where it went
-(`schema::moved_field`).
-
-`rule` is the field that stopped `router` being able to express
-only one shape of rule, per #228. `host` and `path_prefix` between them say
-exactly one thing—a host match, with the prefixes joined by `||` and
-hung off the host with `&&`—and #228 needed that shape's *inverse*: `adventure_log`
-splits one host across two containers by path, the backend catching
-four prefixes and the frontend catching everything else. The backend
-half is the `||` shape `path_prefix` already produces. The frontend half
-had no representation at all, so its whole `labels` list stayed in
-`raw`, which is the same failure `middleware` had one paragraph up: the
-one service that most needed `router`'s checks was the one that couldn't
-use it.
-
-The issue proposed a `negate` flag beside `path_prefix`. The reason that
-was the wrong shape rather than merely a small one is that it buys
-exactly one more rule. The next router wanting a header split, a method
-match, or an `||` at the top level needs a second flag, and the one
-after that a third, each with its own interaction with the others to
-specify. An expression buys all of them at once and specifies nothing
-extra, because Traefik has already specified it.
-
-A raw rule *string* would have been simpler still, and it loses too
-much. Splicing user text straight into the label loses the
-backtick guard #65 put on `host`—a backtick has no escape inside
-``Host(`...`)``, so one in a rule closes the matcher and writes a
-second—and loses `{{name}}` resolution, matcher and arity checking, and
-any span inside the rule to point a diagnostic at. Parsing the
-expression is what buys all four, and anyone who genuinely wants
-unchecked passthrough already has `raw`.
-
-The matcher names are Traefik's own, spelling, capitalization, and all,
-against the rest of the language's snake_case. A rule is a
-thing users copy out of a Traefik label or the Traefik documentation, so
-a renamed vocabulary would put a translation step in front of the one
-operation this field exists to make easy. `hll`'s contribution is the
-quoting: Traefik delimits an argument with a backtick, `hllc` writes
-those, and the user writes an ordinary `"..."` string.
-
-`host`/`path_prefix` survive rather than giving way to it, since the
-single-host router is the overwhelmingly common case and deserves its
-one-liner—but they survive as *sugar*, which `labels::sugar_expr` lowers
-into the same `MatchExpr` a written-out `rule` parses to. One rule-rendering
-path, not two that could disagree about escaping, interpolation, or
-parenthesization. Writing both on one router is a hard error rather than
-a precedence rule, for the reason the `middleware` move rejected one:
-either answer silently drops something the block plainly meant.
-
-`MatchExpr::Group` is a real node rather than something the renderer
-infers from precedence, which is what keeps the sugar's output
-byte-identical to what it always was. `path_prefix` deliberately
-parenthesizes even a single prefix—where the parentheses change
-nothing—so that a rule's shape doesn't depend on how many prefixes it
-happens to have, and a precedence-only renderer would drop exactly
-those. Keeping written parentheses also means a rule renders the way
-someone typed it, so the source spells out the emitted label.
-
-The parse-time/codegen-time split follows `protocol`'s own reasoning
-rather than contradicting it. Which matchers exist and how many
-arguments each takes can't depend on anything composition does—a
-matcher name is an `IDENT`, which no `$param` can be, and substitution
-replaces one literal with one literal rather than expanding a list—so
-the parser checks both, where the span covers the matcher itself. Which *namespace* a matcher is legal in does depend on
-`protocol`, so that check sits in codegen beside the rest of the
-protocol-dependent ones, and runs both ways: `PathPrefix` under
-`protocol: tcp` has no request URI, and `HostSNI` under `http` has no
-TLS handshake.
-
-Besides the three top-level types, `healthcheck`, `traefik`, and
-`router` are the table's struct-kind rows with no primary field.
-`router`'s reason is its own: the router's name already occupies the
-position right after the keyword, so there is nowhere for a bare
-primary value to go—write `router api { host: "..." }` or `router api,
-host: "..."` instead. For the other two, unlike `image`'s `ref`
-or `expose`'s `port`, no single sub-field of `healthcheck`'s
-`test`/`interval`/`timeout`/`retries`/`start_period`/`start_interval`/
-`disable`, nor of `traefik`'s own lone `disable`, obviously stands in
-for the whole struct, so both require the braced body—`healthcheck
-"..."` and `traefik disable` are parse errors rather than sugar for
-anything. `test` needs a field kind none of the other struct fields do:
-`FieldKind::ScalarOrList` accepts either a bare literal (Compose's shell
-form, `CMD-SHELL <string>`) or a bracketed list of literals (Compose's
-exec form, `["CMD", "pg_isready", "-U", "miniflux"]`), single-occurrence
-like a plain scalar but with no bare comma-list sugar—`test: "a", "b"`
-would be ambiguous between the shell string plus garbage and a two-item
-exec list, so only a bare literal or an explicit `[...]` parses.
-`disable` mirrors `NETWORK`'s `external` directly: a bare-presence
-`FieldKind::BoolFlag`, matching Compose's own `disable: true`, which
-turns the healthcheck off entirely, including one inherited from the
-image. Every field here is a plain, generic Compose key, not
-homelab-specific in any of its own fields—the same "generic core"
-reasoning that already justified `dns`/`env_file`/`container_name`, see
-#153.
-
-`traefik`'s own `disable` mirrors that same `disable`/`external`
-bare-presence shape directly, but for the opposite reason: it isn't a
-generic Compose key at all, it's the one label `hll`'s own Traefik
-support computes but a service can now switch off—see #159. #199
-renamed it from `disabled` to match Compose's own key and
-`healthcheck`'s existing flag, since two spellings of one idea on
-adjacent lines of one service body draw a difference that means
-nothing.
-
-Issue #159, which motivated the field, floats a brace-free `traefik
-disable` spelling first, but that doesn't fit the schema engine: a
-brace-free form exists only for a type with a `primary_field`, and
-`FieldKind::BoolFlag` can never be one—a primary field always supplies a
-*value* (`parse_struct_primary_shorthand`'s only bare-value path calls
-`parse_literal`), while a bare-presence flag carries no value beyond
-itself. #199 revisited that: letting a bare flag serve as a primary
-field would be a small parser change, but it would buy exactly one
-inhabitant. `healthcheck` can't take it (no single sub-field stands in
-for a whole health check, and making `disable` the primary would trade a
-clear "expected `{`" for a confusing one on the far commoner
-`healthcheck "curl -f ..."` mistake), and `network`/`router` have their
-own name in the position a primary value would occupy. A generic
-mechanism with one inhabitant is what #198's F6 deleted in
-`bare_keyword_alias`, so `traefik { disable }` keeps the braced form.
-It costs nothing beyond what `healthcheck { disable }` already pays for,
-reads as its exact mirror, and leaves `traefik` a home a later Traefik
-knob can join without inventing a second `traefik`-prefixed field
-name.
-
-`labels` is the last row in that same group, added by #243, and the only
-one that *adds* to the label list rather than computing part of it. Every
-preceding row—`router`, `expose`, `traefik`, and the
-`traefik.docker.network` label an external `networks` entry produces—
-derives labels from something it models. `labels` models nothing: it
-carries whatever Docker label the author wants, `hllc` has no opinion
-about it, and it lands after every computed label in the emitted list.
-Appending rather than interleaving is deliberate. It means a service
-that writes no `labels` emits the identical list it emitted before the
-row existed, so the row is purely additive for every file already
-written.
+#243 added `labels` as the *additive* label form, and since #271 it's
+the only one: every label a service carries is a `labels` entry,
+whether written in its own body or contributed by a template it applies.
+Entries land in tier order—each `with` target left to right, then the
+body—so a service that applies no template emits exactly what it writes.
 
 Before #243 there was no additive form at all. The only way to write one
 extra label line was `raw { labels: [...] }`, which replaces the whole
-computed set—so a service keeping its `router` blocks and wanting a
-single extra line silently lost `rule`, `entrypoints`,
-`docker.network` and the load-balancer port, and had to reproduce all
-four by hand and keep them in sync. That's #232, reported against a real
-conversion, and #231 is the concrete need behind it: per-router TLS
-Subject Alternative Name (SAN) domains, which `router` has no field for.
-A first-class additive `labels` covers #231 without a schema row of its
-own, so a Traefik label `router` can't yet spell costs one line rather
-than the whole list.
+set—so a service wanting one extra line silently lost every other label
+it had, and had to reproduce them by hand and keep them in sync. That's
+#232, reported against a real conversion, and #231 is the concrete need
+behind it: per-router TLS Subject Alternative Name (SAN) domains, which
+the `router` field of the day had no home for. A first-class additive
+`labels` covers it without a schema row of its own.
 
 The row is map-kind rather than a list of `"key=value"` strings, and the
 choice is the same one #193 and #206 settled elsewhere. A list would read
@@ -1096,19 +772,18 @@ The cost is real and worth naming: a key such as
 `"traefik.http.routers.web.tls.domains[0].main"` needs quotes around it,
 because dots and brackets can't appear in a bare word.
 
-A `labels` key that collides with a computed one is a hard error naming
-both sides, not a precedence rule. Neither precedence is available.
-"Explicit wins" means a `router` block quietly stops deciding what it
-plainly says it decides. "Generated wins" means the line the author wrote
-quietly does nothing. Both leave one of two spellings in one body inert
-and undiagnosed, which is the failure #144, #193, #206 and #232 all exist
-to close. Refusing is the only outcome that keeps the language's promise
-that a line either takes effect or draws a diagnostic. Because the check reads
-the *key*, a key holding an `=` would defeat it—Docker splits a label at
-its first `=`, so `"traefik.docker.network=x"` would emit a second
-`traefik.docker.network` label the check never saw. Codegen rejects an
-`=` in a hand-written key for that reason, the same second lock
-`UnsafeRouterName` puts on a router name.
+Two `labels` entries resolving to one key is a hard error naming both
+sides, not a precedence rule. The parser catches the ones spelled
+identically, and codegen catches the rest: `{{name}}` resolves by then,
+and two keys spelled differently in source can land on one.
+Neither precedence is available: whichever entry lost would be a line
+the author wrote that quietly does nothing, which is the failure #144,
+#193, #206 and #232 all exist to close. Refusing is the only outcome
+that keeps the language's promise that a line either takes effect or
+draws a diagnostic. Because the check reads the *key*, a key holding an
+`=` would defeat it—Docker splits a label at its first `=`, so
+`"a.b=x"` would emit a label the check never saw. Codegen rejects an `=`
+in a key for that reason.
 
 `raw { labels: ... }` keeps its documented full-override semantics
 unchanged, and overrides a `labels` field too: `raw` replaces the emitted
@@ -1191,16 +866,15 @@ other. Unset, `entrypoint` is simply omitted, leaving the image's own
 `ENTRYPOINT` in effect.
 
 Through #198, the identifier `entrypoint` named two unrelated things,
-the way `volume` still does: this service-level command override and
-`router`'s own list of Traefik entry-point names. The grammar was never
+the way `volume` still does: this service-level command override and a
+router's own list of Traefik entry-point names. The grammar was never
 ambiguous—the parser resolves a field name only through
 `schema::resolve_field` against the enclosing type's own field list, so
 the two tables were never consulted in each other's position—but a
 reader had only position to tell them apart, one line from the next in
 the same service body. #199 renamed the router's field to
-`entrypoints`, which is what Traefik's own `entrypoints=` label spells
-and what the field has actually been since it became a list, so the two
-now differ by name as well as by position. `volume`'s own pair stays
+`entrypoints`, and #271 removed it from the language altogether, so
+`entrypoint` names one thing again. `volume`'s own pair stays
 untouched: a `volume` declaration and a `volume` mount are two distinct
 Docker concepts that Docker itself spells the same way, so renaming
 either would move `hll` further from the thing it models rather than
@@ -1246,9 +920,7 @@ per the Diagnostics section, since the old behavior would otherwise stop
 applying in silence.
 
 List fields concatenate, so no collision is possible. The set-like ones
-(`networks` alone, since #221 moved `middleware` onto `router`, where
-`merge_routers` dedupes it by this same rule) concatenate by
-*distinct* name, keeping the first occurrence, while `dns` and
+(`networks` alone) concatenate by *distinct* name, keeping the first occurrence, while `dns` and
 `env_file` keep duplicates since their order is observable—resolver
 priority for `dns`, Compose's own last-file-wins precedence for
 `env_file`—see #154. Map fields merge key-by-key, or value-by-value for
@@ -1292,30 +964,8 @@ conditions genuinely differ raise the same `MapKeyCollision` two
 explicit templates setting the same `env` key to different values
 would. Treating mere agreement as an error would have been a gratuitous
 breaking change to every `.hll` file already composing two templates
-that each depend on the same service—the same reasoning
-`hl-codegen`'s `AmbiguousExternalNetwork` check already applies to a
-network named `external` twice: naming one thing more than once isn't
-an ambiguity between it and itself, it's one answer given twice.
-
-`router` merges by router name, and then *per sub-field* within
-each name—the keyed form of the per-sub-field merge the next paragraph
-describes for `healthcheck`, one level deeper because a router's
-sub-fields sit under a name rather than directly on the struct. Both
-levels are load-bearing. Keyed, so two tiers naming different routers
-give a
-service both rather than one. Per sub-field, so a service body writing
-`router api { host: "..." }` over a template's `router api { entrypoints:
-web-secure, path_prefix: [...] }` means "same router, different host"
-rather than "throw the rest away"—the full-entry replacement `merge_map`
-gives `volume`/`publish` would silently discard it, since a `volume`
-entry has nothing inside it to keep and a router does. Within one name,
-`host` is a scalar and collides between two explicit templates, while
-`entrypoints` and `path_prefix` concatenate—`entrypoints` by distinct name
-like `networks`, `path_prefix` keeping duplicates like `dns`, since
-prefixes are `||` alternatives whose written order is observable in the
-emitted rule. A collision names the router as well as the field, through
-the same `MapKeyCollision` a colliding `env` key raises, since a message
-about `router.host` alone doesn't say *which* router—#184.
+that each depend on the same service: naming one thing more than once
+isn't an ambiguity between it and itself, it's one answer given twice.
 
 `labels` merges by key like `env`, with one rule of its own, settled at
 #288: a **list-valued** entry concatenates across tiers instead of
@@ -1404,14 +1054,20 @@ collide.
 ```
 template internal_web(port) {
   expose $port
-  router { entrypoints: web-secure }}
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`{{name}}.internal.techdebtor.io`)"
+    "traefik.http.routers.{{name}}.entrypoints": "web-secure"
+  }
+}
 
 service it-tools {
   with internal_web { port: 8080 }
   image "corentinth/it-tools:latest"
-  # overrides just the unnamed router's host—port and entry points still
+  # overrides just the rule—the port and the entrypoints label still
   # come from internal_web above
-  router { host: "tools.internal.techdebtor.io" }
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`tools.internal.techdebtor.io`)"
+  }
 }
 ```
 
@@ -1438,9 +1094,8 @@ use "docker.hll" as traefik
   (`networks [traefik.traefik-net]`), a named-volume mount's host side
   (`volume storage.media -> "/data"`), a `with` invocation's target
   (`with common.internal_web { ... }`)—and, syntactically, every other
-  reference-shaped position too (`dns`, `env_file`, an
-  `entrypoints` list, `depends_on`, `router.path_prefix`,
-  `router.middleware`), since `alias.`
+  reference-shaped position too (`dns`, `env_file`, `depends_on`),
+  since `alias.`
   and `$param` are the same `literal` production wherever it's
   written—see the preceding Syntactic grammar section. Only `networks` and a
   named-volume host actually *resolve* one, though: they're the two
@@ -1448,8 +1103,7 @@ use "docker.hll" as traefik
   against. Every other reference-shaped position rejects one outright,
   with `UnsupportedQualifiedReference`, exactly as it always has—none of
   them has a coherent cross-file meaning: `depends_on` names a same-file
-  sibling service, and `dns`/`env_file`/an `entrypoints`
-  list/`path_prefix`/a router's own `middleware` aren't resolved against
+  sibling service, and `dns`/`env_file` aren't resolved against
   anything an `.hll` file declares at all—an `env_file` entry names a path on disk next to the
   generated Compose file. `devices` was never a candidate for a
   qualified form in the first place—#167 made its entries plain
@@ -1528,22 +1182,18 @@ the common shape over those primitives. The HTTP and TCP sets are
 separate for the same kind of reason: the namespace is part of the label
 *key*, and no template picks a key by condition.
 
-Two things the built-ins do that the module deliberately doesn't, both
-recorded at #269 rather than worked around:
+`traefik.docker.network` is a template here like everything else, taking
+the network as an argument and reading its real Docker name through
+`{{net.name}}`, per #275. The compiler derived it through #270, and #271
+moved it in the same change that removed the derivation, since a template
+writing the label while the compiler still derived it would collide with
+it—there was no intermediate state where both spellings worked.
 
-- **`traefik.docker.network` stays the compiler's.** It's derived from
-  whichever of a service's networks is `external`, several stages from
-  the label writer, and a template writing it collides with the derived
-  one (`LabelCollidesWithGenerated`). So the module writes every other
-  label and leaves that one alone, which is why a routed service still
-  matches byte for byte. It moves when the built-ins do, at #271.
-- **A rule handed to a template is a string.** `router { rule: ... }`
-  parses the expression against the matcher table and rejects an unknown
-  name or a wrong arity. `http_rule` takes text and passes it through,
-  so a misspelled matcher compiles and fails at Traefik as a router that
-  never matches. That validation is Traefik-shaped knowledge, and losing
-  it costs exactly what the compiler saves by carrying none—the same
-  trade #270 settled for label values.
+**A rule handed to a template is a string.** Nothing parses it. A
+misspelled matcher compiles and fails at Traefik as a router that never
+matches. That validation was Traefik-shaped knowledge, and losing it
+costs exactly what the compiler saves by carrying none—the same trade
+#270 settled for label values.
 
 **Why a prefix rather than new syntax.** The obvious alternative,
 `use <std/traefik>`, costs two tokens the lexer has never carried—`<`
@@ -1622,16 +1272,16 @@ template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
   expose $port
-  router {
-    host: "{{name}}.internal.techdebtor.io"
-    entrypoints: web-secure
-    middleware: local-ipwhitelist
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`{{name}}.internal.techdebtor.io`)"
+    "traefik.http.routers.{{name}}.entrypoints": "web-secure"
+    "traefik.http.routers.{{name}}.middlewares": ["local-ipwhitelist@file"]
   }
 }
 
 template authenticated {
-  router {
-    middleware: forwardAuth-authentik
+  labels {
+    "traefik.http.routers.{{name}}.middlewares": ["forwardAuth-authentik@file"]
   }
 }
 
@@ -1665,16 +1315,16 @@ template internal_web(port) {
   networks [net.traefik-net]
   restart unless-stopped
   expose $port
-  router {
-    host: "{{name}}.internal.techdebtor.io"
-    entrypoints: web-secure
-    middleware: local-ipwhitelist
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`{{name}}.internal.techdebtor.io`)"
+    "traefik.http.routers.{{name}}.entrypoints": "web-secure"
+    "traefik.http.routers.{{name}}.middlewares": ["local-ipwhitelist@file"]
   }
 }
 
 template authenticated {
-  router {
-    middleware: forwardAuth-authentik
+  labels {
+    "traefik.http.routers.{{name}}.middlewares": ["forwardAuth-authentik@file"]
   }
 }
 
@@ -1885,96 +1535,27 @@ error, and there's no `--quiet`, `-W`, or `-A` style suppression yet.
 Warnings are a named enum per stage precisely so a later suppression
 scheme has something to filter on.
 
-The fourth construct of this shape is *not* a warning: a `router` block
-that sets no `host` is a hard error—#144, redirected by #198 from "no
-`expose.host`" to "no `router`" once `router` became the only source of
-a Traefik router. The block that exists only to *be* a router says
-nothing about which requests reach it, so no reading of it means
-anything, while dropping it quietly shipped a service with its
-forward-auth missing and nothing to say so.
+A fourth construct of this shape used to be a hard error rather than a
+warning: a `router` block that set no `host` had no rule to emit, so no
+reading of it meant anything, per #144 and #198. #271 removed it with
+the field, along with `RouterWithoutPort`, `UnsafeRouterName`, and the
+`traefik { disable }` contradiction check. Every one of them asked a
+question about a Traefik router, and `hllc` no longer knows what one is:
+a set of `labels` entries that describes a router badly is a set of
+labels, and the compiler has no basis to say otherwise. That's the
+cost side of #271's trade, recorded in the preceding schema section.
 
-Through #220 this check had a second shape, told apart by a `field`
-discriminant on the same `CodegenError` variant: a service-level
-`middleware` with no `router` anywhere to attach it to. #221 moved
-`middleware` inside `router`, which makes that shape unwritable—the list
-only exists within the block it attaches to—so the variant collapsed to
-the one question it still answers and lost the discriminant with it
-(`RouterWithoutHost`). What used to be a router-less `middleware` is now
-either a host-less `router`, caught here, or the old spelling on a
-service body, caught one stage earlier by `ParseError::MovedField`.
+`labels` carries the checks that survive, both #243's in origin—a
+written string that would name a different label than the one written,
+or a second answer to a question the service already answered:
 
-`traefik`'s own `disable` flag raises the mirror-image error—see
-#159: declaring a `router` block on a service that also switches Traefik
-off. Through #197 this list also named `expose.host`/
-`expose.entrypoint`—#198 removed both once `expose` stopped carrying
-either field, and #221 removed the service-level `middleware` from it
-the same way, leaving a `router` block the only construct to check. Both
-diagnostics share one shape, something whose only
-meaning depends on a router existing, contradicted by something else
-the same service says about that very router, so this gets the same
-hard-error treatment rather than a fourth warning. The router-less case
-is a missing piece silently completing itself the wrong way. This one is
-a direct contradiction between two things the author wrote on purpose,
-which reads as even less likely to be an accident, not more. Letting the
-flag lose silently would keep a router alive against the service's own
-stated intent. Letting the router-attached field lose silently would
-build a compile-broken deploy that looks fine until Traefik never picks
-it up, and neither failure mode is one `hllc` should choose on the
-author's behalf. `expose`'s own `port` is exempt: it's Compose's own
-`expose:` key, plain container-network visibility with nothing to do
-with Traefik, so a service with Traefik off may still declare one.
-
-`router` adds hard errors of its own, all of the same
-shape—something that can only be a Traefik router, either contradicted,
-or left incomplete—#184, #198:
-
-- A `router` block with no `host` has no rule to emit, so there is
-  nothing it could have meant—this is `RouterWithoutHost`, described
-  in the preceding paragraph. Through #197 this was stricter than
-  `expose`, which tolerated a host-less block because its `port` still
-  did a second job, Compose's own `expose:` key, that had nothing to do
-  with Traefik. #198 removed the comparison entirely by removing
-  `expose`'s own host-carrying router—today `router` is the only thing
-  that can be host-less this way, and it always has no second job.
-- A service with at least one `router` block but no `expose`-set `port`
-  is `RouterWithoutPort`, new at #198: once `router` is the only source
-  of a Traefik router and `expose` the only source of a port, "does this
-  service have a router" and "does this service have a port" become two
-  independent, directly checkable questions, closing a live defect the
-  old coupled design carried—a service routed only by `router` blocks
-  that forgot `expose <port>` used to emit no
-  `loadbalancer.server.port` label at all, silently, leaving Traefik to
-  guess one. It's the router-side mirror of `RouterBlockWithoutHost`: one
-  variant catches a router with nothing to route *to*, the other a
-  router with nothing to *balance onto*.
-- A router name outside `[A-Za-z0-9_-]` draws a rejection—this is
-  `UnsafeRouterName`. This is a different check from the metacharacter
-  guard that covers label *values*, and deliberately a different
-  character set: the name goes into the label **key**,
-  `traefik.http.routers.<name>.rule`, where a `.` extends the dotted key
-  and an `=` ends it outright, since Docker splits a label string on its
-  first `=`. A bad name doesn't corrupt one label's meaning, it writes a
-  different label. The grammar already refuses such a name—a router
-  name is an `IDENT`—and codegen checks it again anyway, so its safety
-  doesn't rest on the grammar staying as it stands.
-
-`labels` adds two more, both #243's, and both the same shape as the
-preceding `UnsafeRouterName`—a hand-written string that would name a
-different label than the one written, or a second answer to a question
-the service already answered:
-
-- A `labels` key one of the service's other features already generates
-  is `LabelCollidesWithGenerated`, naming the explicit entry's own span
-  and the producer that claimed the key—the `router` block, the `expose`
-  port, `traefik { disable }`, or the external network behind
-  `traefik.docker.network`. That last producer is the one with no single
-  line to point at, since codegen derives the label from whichever
-  declared network is `external`, several stages away from the
-  `networks [...]` entry that named it, so its message names the producer
-  and stops there. The variant also covers two `labels` entries colliding with
-  each other after `{{name}}` interpolation, which the parser's own
-  duplicate-key check can't see: two keys spelled differently in source
-  can resolve to one key by the time codegen holds both as strings.
+- Two `labels` entries that resolve to one key after `{{name}}`
+  interpolation is `DuplicateLabelKey`, naming both spans. The parser's
+  own duplicate-key check can't see these: two keys spelled differently
+  in source can resolve to one by the time codegen holds both as
+  strings. Through #270 this variant was `LabelCollidesWithGenerated`
+  and also covered a key one of the compiler's own features generated.
+  #271 left it nothing to collide with but another written entry.
 - A hand-written key containing `=` is `UnsafeLabelKey`. Docker splits a
   label at its first `=`, so such a key ends there and the rest joins
   the value—a forged label, and one the preceding check can't see, since
@@ -1983,11 +1564,11 @@ the service already answered:
   #181's string escapes made a newline writable, and no label key holds
   one on purpose.
 
-- A hand-written label **value** draws no check at all, settled at #270
-  as a decision rather than a gap. The metacharacter guard on
-  `router.host` works because codegen knows the grammar that host lands
-  in: a backtick there closes the `Host(` call early and widens the rule
-  to match everything, which is #65. A `labels` value has no such
+- A label **value** draws no check at all, settled at #270 as a decision
+  rather than a gap. The old metacharacter guard on `router.host` worked
+  because codegen knew the grammar that host landed in: a backtick there
+  closes the `Host(` call early and widens the rule to match everything,
+  which is #65. A `labels` value has no such
   grammar to know. A legitimate Traefik rule is mostly backticks,
   parentheses and `||`, so any guard strict enough to stop the dangerous
   string also refuses the ordinary one, and a guard tuned to Traefik's
@@ -2006,21 +1587,10 @@ instead, as `ParseError::DuplicateMapKey`—the same error a repeated
 `env`, `volume`, `publish` or `raw` key raises, from the same
 schema-declared uniqueness side.
 
-The parser catches two `router` blocks in one body claiming the same
-router id instead—`ParseError::DuplicateRouterName`—alongside the
-other duplicate-key errors, since both spans are still in hand there.
-Through #197 this covered only the hand-written case, two explicit
-`router { }` blocks whether named or unnamed. A service that instead wrote both an
-unnamed `router { }` and `expose <port> as "<host>"` reached a
-separate, codegen-level check instead, `ExposeHostWithUnnamedRouter`,
-since only codegen could see both the field-shaped `expose.host` and the
-block-shaped `router` at once. #198 collapses that distinction: the `as`
-sugar now desugars to an ordinary unnamed `router { host }` entry
-*during parsing*, per the preceding "Secondary-field bare shorthand"
-rule, so it collides with a hand-written unnamed `router { }` the same
-way any other duplicate name would. #198 removes
-`ExposeHostWithUnnamedRouter` rather than porting it forward—there's
-nothing left for it to catch that `DuplicateRouterName` doesn't already.
+`ParseError::DuplicateRouterName` and the codegen-level
+`ExposeHostWithUnnamedRouter` that preceded it both went with #271,
+along with the name-keyed field shape they policed: no built-in field
+takes a user-written name any more, so no two blocks can claim one id.
 
 ## Future work
 

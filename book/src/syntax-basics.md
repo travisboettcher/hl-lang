@@ -26,7 +26,7 @@ A body is a `{ }`-delimited list of statements, one per line:
 ```hll,build
 service jellyfin {
   image "jellyfin/jellyfin:latest"
-  expose 8096 as "media.example.com"
+  expose 8096
   restart unless-stopped
 }
 ```
@@ -48,7 +48,7 @@ the exact same grammar as a service's own top-level body.
 
 `hll` has none. Every word that looks like a keyword—`template`,
 `service`, `network`, `image`, `build`, `volume`, `env`, `restart`,
-`expose`, `router`,
+`expose`, `labels`,
 `with`, `as`, `use`, `raw`, `defaults`, and so on—is an ordinary
 identifier that only *means* something because of where it appears and
 what field it's assigned to. This is deliberate: it keeps the door open
@@ -95,40 +95,25 @@ field is which.
 
 ## Secondary-field shorthand
 
-A type with several fields—`router`, most often, since a router usually
-needs a `host` and sometimes `entrypoints` or a `path_prefix` too—lets
-you skip the full `{ }` body (each field on its own line—see [Layout
-rules](#layout-rules) below) and instead fuse further fields onto the
-primary position with a leading comma:
+A type with several fields lets you skip the full `{ }` body (each field
+on its own line—see [Layout rules](#layout-rules) below) and instead
+fuse further fields onto the primary position with a leading comma:
 
 ```hll,fragment
-router api, host: "media.example.com", entrypoints: web-secure
+build "./app", dockerfile: "Dockerfile.prod"
 # same as:
-# router api {
-#   host: "media.example.com"
-#   entrypoints: web-secure
+# build {
+#   context: "./app"
+#   dockerfile: "Dockerfile.prod"
 # }
 ```
 
 From there, you can keep adding further `key: value` fields, each
 preceded by a comma.
 
-`expose <port> as "<host>"` looks similar but is a different mechanism—a
-bespoke, one-shot spelling that desugars to `expose { port }` plus an
-unnamed `router { host }` (see [Built-in
-Fields](./built-in-fields.md#expose)), not a comma-continued field list.
-`as` fuses onto the primary value and stops there: nothing else can
-follow it, comma or no comma—`expose 8096 as "media.example.com",
-entrypoints: web-secure` is a **compile error**. A service that needs
-more than a bare host writes `router` out explicitly instead:
-
-```hll,fragment
-expose 8096
-router {
-  host: "media.example.com"
-  entrypoints: web-secure
-}
-```
+The same shorthand is what makes a `with` invocation's arguments read
+the way they do—`with traefik.http { host: "...", port: ... }` is one
+body written on one line, not a special call syntax.
 
 ## Map-style shorthand
 
@@ -222,7 +207,10 @@ per-service hostname without knowing the service's name in advance:
 ```hll
 template internal_web(port) {
   expose $port
-  router { host: "{{name}}.internal.example.com" }}
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`{{name}}.internal.example.com`)"
+  }
+}
 ```
 
 Applied inside `service syncthing { with internal_web { port: 8384 } }`,
@@ -279,11 +267,10 @@ error. So is a string ending in a backslash, such as `"C:\"`—that
 backslash escapes the closing quote, which leaves the string unfinished.
 Write a trailing backslash as `\\`.
 
-A value that lands in a Traefik label—a [`router`](./built-in-fields.md#router)'s
-`host`, plus each `entrypoints` entry—rejects a newline or a tab, on top
-of the metacharacter set it already rejects. Neither one belongs in a
-hostname or an entry point name, and either one changes what the
-generated label means.
+A [`labels`](./built-in-fields.md#labels) *key* rejects a newline, a tab
+and an `=`, on top of the metacharacter set every string already
+rejects. None of them belongs in a label key, and each changes which
+label Docker reads.
 
 A `template`'s declared parameter carries no type annotation—just a bare
 name (`template linuxserver_app(puid, pgid) { ... }`). Instead,

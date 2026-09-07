@@ -4,15 +4,16 @@
 template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
-  expose $port as "{{name}}.internal.techdebtor.io"
-  router {
-    middleware: local-ipwhitelist
+  expose $port
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`{{name}}.internal.techdebtor.io`)"
+    "traefik.http.routers.{{name}}.middlewares": ["local-ipwhitelist@file"]
   }
 }
 
 template authenticated {
-  router {
-    middleware: forwardAuth-authentik
+  labels {
+    "traefik.http.routers.{{name}}.middlewares": ["forwardAuth-authentik@file"]
   }
 }
 

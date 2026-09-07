@@ -2,7 +2,7 @@ use hl_lexer::TokenKind;
 use hl_parser::schema::MapSide;
 use hl_parser::{
     ArrowMapHost, Command, DependsOnCondition, Entrypoint, Expected, HealthcheckTest, Literal,
-    MAX_MATCH_EXPR_DEPTH, MatchExpr, ParseError, TemplateDecl, TopDecl, UseDecl, parse,
+    ParseError, TemplateDecl, TopDecl, UseDecl, parse,
 };
 
 fn parse_ok(source: &str) -> hl_parser::Program {
@@ -258,28 +258,6 @@ fn expose_primary_only() {
     let service = as_service(&program.decls[0]);
     let expose = service.fields.expose.as_ref().unwrap();
     assert_eq!(expose.port.as_ref().unwrap().text(), "8096");
-    assert!(service.fields.routers.is_empty());
-}
-
-/// `expose <port> as "<host>"` desugars to `expose { port }` plus an
-/// unnamed `router { host }` (#198) — `host` no longer lives on `Expose`
-/// itself, so the spelling survives as bespoke parser sugar reaching for
-/// `router` instead. This is the hard constraint the whole issue rests
-/// on: the sugar must keep parsing to *something* that emits the exact
-/// labels it always did (see `hl-codegen`'s own
-/// `sugared_expose_as_router_emits_exactly_what_expose_host_always_did`).
-#[test]
-fn expose_as_sugar_desugars_to_port_plus_unnamed_router() {
-    let program = parse_ok("service s {\n  expose 8096 as \"host.example.com\"\n}\n");
-    let service = as_service(&program.decls[0]);
-    let expose = service.fields.expose.as_ref().unwrap();
-    assert_eq!(expose.port.as_ref().unwrap().text(), "8096");
-    assert_eq!(service.fields.routers.len(), 1);
-    let router = &service.fields.routers[0];
-    assert_eq!(router.key(), None);
-    assert_eq!(router.host.as_ref().unwrap().text(), "host.example.com");
-    assert!(router.entrypoints.is_empty());
-    assert!(router.path_prefix.is_empty());
 }
 
 /// `host` is no longer a field of `expose` at all (#198) — routing
@@ -291,30 +269,6 @@ fn expose_as_sugar_desugars_to_port_plus_unnamed_router() {
 #[test]
 fn expose_host_field_no_longer_parses() {
     let err = parse("service s {\n  expose 8096, host: \"host.example.com\"\n}\n").unwrap_err();
-    assert!(
-        matches!(err, ParseError::UnexpectedToken { .. }),
-        "got {err:?}"
-    );
-}
-
-/// `as` fuses onto the primary value as one self-contained unit (docs/
-/// DESIGN.md's desugaring rule 3) — it cannot be followed by further
-/// secondary fields, comma or no comma, exactly as the pre-#198 schema-
-/// driven alias sugar it replaced. A service that needs more than a bare
-/// host must write the router out explicitly (`expose <port>` plus
-/// `router { host: "...", entrypoints: ... }`).
-///
-/// Unlike before #198, there's no dedicated diagnostic for this dead end
-/// any more (`ParseError::AliasSugarCannotContinue` is gone — see F6 of
-/// #198): whatever follows is left for the enclosing body's own
-/// statement loop, which reports the generic "expected a field name"
-/// error a bare comma there always produces.
-#[test]
-fn alias_sugar_cannot_be_followed_by_further_secondary_fields() {
-    let err = parse(
-        "service s {\n  expose 8096 as \"host.example.com\", entrypoints: \"web-secure\"\n}\n",
-    )
-    .unwrap_err();
     assert!(
         matches!(err, ParseError::UnexpectedToken { .. }),
         "got {err:?}"
@@ -705,36 +659,6 @@ fn entrypoint_bare_comma_list_is_rejected() {
     assert!(parse("service s {\n  entrypoint \"a\", \"b\"\n}\n").is_err());
 }
 
-/// The service-level `entrypoint` and `router`'s own `entrypoints`
-/// coexist in one body as two independent fields: the bare `entrypoint`
-/// statement sets `ServiceFields`'s scalar-or-list field (Compose's
-/// `ENTRYPOINT` override), while `entrypoints` inside `router`'s body
-/// sets `Router::entrypoints` (the Traefik entry-point list). #199
-/// renamed the router's field so the two no longer share an identifier
-/// at all; this pins down that neither one reaches the other's slot.
-#[test]
-fn service_entrypoint_and_router_entrypoints_coexist() {
-    let program = parse_ok(
-        "service s {\n  \
-           image \"nginx\"\n  \
-           entrypoint [\"/bin/sh\", \"-c\", \"do-a-thing\"]\n  \
-           expose 8080\n  \
-           router {\n    host: \"s.example.com\"\n    entrypoints: web, web-secure\n  }\n\
-         }\n",
-    );
-    let service = as_service(&program.decls[0]);
-    match service.fields.entrypoint.as_ref().unwrap() {
-        Entrypoint::Exec(items, _) => {
-            let texts: Vec<&str> = items.iter().map(Literal::text).collect();
-            assert_eq!(texts, vec!["/bin/sh", "-c", "do-a-thing"]);
-        }
-        other => panic!("expected Entrypoint::Exec, got {other:?}"),
-    }
-    let router = &service.fields.routers[0];
-    let names: Vec<&str> = router.entrypoints.iter().map(|r| r.text()).collect();
-    assert_eq!(names, vec!["web", "web-secure"]);
-}
-
 // --- bool flag ---
 
 #[test]
@@ -965,97 +889,6 @@ fn map_entry_in_a_top_level_volume_body_is_error() {
     ));
 }
 
-fn router_entrypoints_of(router: &hl_parser::Router) -> Vec<&str> {
-    router.entrypoints.iter().map(|r| r.text()).collect()
-}
-
-/// `entrypoints` is a reference list, spelled exactly like `networks`:
-/// a bare comma-separated list, a bracketed list, a quoted name, or a
-/// repeat of the field, all of which accumulate.
-#[test]
-fn router_entrypoints_accept_a_bracketed_list_and_a_quoted_name() {
-    let program = parse_ok(
-        "service s {\n  router {\n    host: \"a.example.com\"\n    \
-         entrypoints: [web, web-secure]\n    entrypoints: \"metrics\"\n  }\n}\n",
-    );
-    let service = as_service(&program.decls[0]);
-    let router = &service.fields.routers[0];
-    assert_eq!(
-        router_entrypoints_of(router),
-        vec!["web", "web-secure", "metrics"]
-    );
-}
-
-#[test]
-fn router_entrypoints_accept_a_bare_comma_list() {
-    // The book documents this spelling for `router`'s reference list,
-    // the same one `networks` takes. #198 moved `entrypoint` off
-    // `expose`, and the deleted `expose_entrypoint_accepts_a_bare_list`
-    // was the only test covering it — the replacement covers the
-    // bracketed and quoted forms but not this one.
-    let program = parse_ok(
-        "service s {\n  router {\n    host: \"a.example.com\"\n    \
-         entrypoints: web, web-secure\n  }\n}\n",
-    );
-    let service = as_service(&program.decls[0]);
-    let router = &service.fields.routers[0];
-    assert_eq!(router_entrypoints_of(router), vec!["web", "web-secure"]);
-}
-
-#[test]
-fn expose_as_sugar_router_span_covers_through_the_host() {
-    // The desugared router's span runs from the `as` keyword through the
-    // closing quote of the host, so a diagnostic about it points at the
-    // whole sugar rather than at the keyword alone.
-    let source = "service s {\n  expose 80 as \"h.example.com\"\n}\n";
-    let program = parse_ok(source);
-    let service = as_service(&program.decls[0]);
-    let span = service.fields.routers[0].span;
-    assert_eq!(
-        &source[span.start as usize..span.end as usize],
-        "as \"h.example.com\""
-    );
-}
-
-/// `host`/`entrypoints` together on the unnamed router, via the braced
-/// body — the shape `docs/DESIGN.md`'s `internal_web` template uses (the
-/// unnamed form has no name to continue a comma-list from, so the
-/// braced body is its only multi-field spelling). Exercised inside a
-/// `template` body specifically, matching that real worked example.
-#[test]
-fn router_host_and_entrypoints_fields_in_template_body() {
-    let program = parse_ok(
-        "template internal_web(port) {\n  \
-           expose $port\n  \
-           router {\n    host: \"{{name}}.internal.techdebtor.io\"\n    entrypoints: \"web-secure\"\n  }\n  \
-           dns \"192.168.50.182\"\n\
-         }\n",
-    );
-    let template = as_template(&program.decls[0]);
-    let router = &template.fields.routers[0];
-    assert_eq!(
-        router.host.as_ref().unwrap().text(),
-        "{{name}}.internal.techdebtor.io"
-    );
-    assert_eq!(router_entrypoints_of(router), vec!["web-secure"]);
-    assert_eq!(template.fields.dns.len(), 1);
-}
-
-/// A bare `entrypoints` list stops at the next `key:` rather than
-/// swallowing it as another entry point — the one-token lookahead in
-/// `parse_bare_reference_list`. Without it, `host` would be read as a
-/// second entry point and the parse would then die on its `:` with an
-/// error pointing at the wrong place entirely.
-#[test]
-fn bare_entrypoints_list_stops_at_the_next_field_key() {
-    let program =
-        parse_ok("service s {\n  router api, entrypoints: web, host: \"x.example.com\"\n}\n");
-    let service = as_service(&program.decls[0]);
-    let router = &service.fields.routers[0];
-    assert_eq!(router_entrypoints_of(router), vec!["web"]);
-    assert_eq!(router.host.as_ref().unwrap().text(), "x.example.com");
-}
-
 /// The same lookahead must not over-trigger: a comma followed by a
 /// plain reference (no colon after it) still continues the list.
 #[test]
@@ -1145,63 +978,6 @@ fn bool_flag_duplicate_is_error() {
 }
 
 // --- traefik (#159) ---
-
-#[test]
-fn traefik_disable_bare_flag() {
-    let program = parse_ok("service s {\n  image \"x\"\n  traefik {\n    disable\n  }\n}\n");
-    let service = as_service(&program.decls[0]);
-    assert!(service.fields.traefik.as_ref().unwrap().disable.is_some());
-}
-
-#[test]
-fn service_without_traefik_field_defaults_to_none() {
-    let program = parse_ok("service s {\n  image \"x\"\n}\n");
-    let service = as_service(&program.decls[0]);
-    assert!(service.fields.traefik.is_none());
-}
-
-/// `disable` is bare-presence only, exactly like `network`'s `external`
-/// and `healthcheck`'s `disable` — a `:` after it is rejected rather than
-/// treated as an attempted value.
-#[test]
-fn traefik_disable_rejects_a_colon_value() {
-    let err = parse("service s {\n  traefik { disable: true }\n}\n").unwrap_err();
-    assert!(
-        matches!(err, ParseError::UnexpectedToken { .. }),
-        "got {err:?}"
-    );
-}
-
-/// `traefik` has no `primary_field` (see `schema::TRAEFIK`'s doc) — the
-/// bare, brace-free `traefik disable` spelling the motivating issue
-/// (#159) first floated is rejected rather than parsed as sugar for
-/// anything.
-#[test]
-fn traefik_bare_value_without_braces_is_rejected() {
-    let err = parse("service s {\n  traefik disable\n}\n").unwrap_err();
-    match err {
-        ParseError::UnexpectedToken {
-            expected: Expected::Token(TokenKind::LBrace),
-            ..
-        } => {}
-        other => panic!("expected UnexpectedToken expecting `{{`, got {other:?}"),
-    }
-}
-
-/// A second bare `disable` is `DuplicateField`, the same regression
-/// coverage `bool_flag_duplicate_is_error` gives `network`'s `external`.
-#[test]
-fn traefik_disable_duplicate_is_error() {
-    let err = parse("service s {\n  traefik {\n    disable\n    disable\n  }\n}\n").unwrap_err();
-    assert!(matches!(
-        err,
-        ParseError::DuplicateField {
-            type_name: "traefik",
-            field: "disable",
-            ..
-        }
-    ));
-}
 
 // --- maps: volume / env ---
 
@@ -3012,430 +2788,157 @@ fn qualified_depends_on_reference_parses() {
     assert_eq!(r.text(), "db");
 }
 
-// --- `router` blocks (#184) ---
+// --- routing's migration diagnostics (#271) ---
 
-fn routers(service: &hl_parser::Service) -> &[hl_parser::Router] {
-    &service.fields.routers
-}
-
-fn router_entrypoints(router: &hl_parser::Router) -> Vec<&str> {
-    router.entrypoints.iter().map(Literal::text).collect()
-}
-
-fn router_prefixes(router: &hl_parser::Router) -> Vec<&str> {
-    router.path_prefix.iter().map(Literal::text).collect()
-}
-
-fn router_middleware(router: &hl_parser::Router) -> Vec<&str> {
-    router.middleware.iter().map(Literal::text).collect()
-}
-
-/// The canonical form: a name after the keyword, then a braced body
-/// whose fields are newline-separated like any other struct body.
+/// The three names #271 removed each keep being *recognized*, purely so
+/// the message can say where routing went. `UnknownField` would answer
+/// them with its `raw { ... }` hint instead, which is actively wrong
+/// advice here: `raw` replaces the whole label list rather than adding
+/// to it, so following it would compile and then silently drop every
+/// other label the service has.
 #[test]
-fn router_named_braced_body_parses() {
+fn a_router_block_names_its_new_home() {
+    let err = parse("service s {\n  image \"x\"\n  router { host: \"a\" }\n}\n")
+        .expect_err("`router` should no longer resolve");
+    let ParseError::MovedField { field, .. } = &err else {
+        panic!("expected MovedField, got {err:?}");
+    };
+    assert_eq!(*field, "router");
+    let rendered = err.to_string();
+    assert!(rendered.contains("std:traefik"), "{rendered}");
+    assert!(rendered.contains("traefik.http"), "{rendered}");
+}
+
+/// The same on a `template` body, which is where a homelab's routing
+/// actually lives — a file that never writes `router` on a `service`
+/// still has it in every template it shares.
+#[test]
+fn a_router_block_in_a_template_names_its_new_home_too() {
+    let err = parse("template t {\n  router { host: \"a\" }\n}\n")
+        .expect_err("`router` should no longer resolve in a template");
+    assert!(
+        matches!(&err, ParseError::MovedField { field, .. } if *field == "router"),
+        "{err:?}"
+    );
+}
+
+/// `traefik { disable }` gets its own message rather than sharing
+/// `router`'s: the replacement is a different template, and pointing a
+/// reader at `traefik.http` when they wanted `traefik.disable` is a
+/// wrong turn a diagnostic shouldn't cause.
+#[test]
+fn a_traefik_block_names_its_new_home() {
+    let err = parse("service s {\n  image \"x\"\n  traefik {\n    disable\n  }\n}\n")
+        .expect_err("`traefik` should no longer resolve");
+    assert!(
+        matches!(&err, ParseError::MovedField { field, .. } if *field == "traefik"),
+        "{err:?}"
+    );
+    let rendered = err.to_string();
+    assert!(rendered.contains("traefik.disable"), "{rendered}");
+}
+
+/// The service-level `middleware` spelling #221 moved onto `router` is
+/// still recognized two moves later, and now names the label template
+/// rather than the field that also went away.
+#[test]
+fn a_service_level_middleware_names_its_new_home() {
+    let err = parse("service s {\n  image \"x\"\n  middleware auth\n}\n")
+        .expect_err("`middleware` should no longer resolve");
+    assert!(
+        matches!(&err, ParseError::MovedField { field, .. } if *field == "middleware"),
+        "{err:?}"
+    );
+    let rendered = err.to_string();
+    assert!(rendered.contains("http_middlewares"), "{rendered}");
+}
+
+/// `expose <port> as "<host>"` is the one removed spelling that isn't a
+/// field name, so it can't go through `moved_field` — the parser
+/// recognizes the `as` itself and says the same kind of thing.
+#[test]
+fn the_expose_as_sugar_names_its_replacement() {
+    let err = parse("service s {\n  expose 8096 as \"media.example.com\"\n}\n")
+        .expect_err("`expose ... as` should no longer parse");
+    let rendered = err.to_string();
+    assert!(rendered.contains("was removed with routing"), "{rendered}");
+    assert!(rendered.contains("expose <port>"), "{rendered}");
+    assert!(rendered.contains("std:traefik"), "{rendered}");
+}
+
+/// A name that never existed still gets the ordinary `UnknownField`,
+/// so the migration table stays a short list of real former spellings
+/// rather than a catch-all that swallows typos.
+#[test]
+fn an_unrelated_unknown_field_is_not_a_moved_field() {
+    let err = parse("service s {\n  image \"x\"\n  routerz { host: \"a\" }\n}\n")
+        .expect_err("`routerz` is not a field");
+    assert!(matches!(&err, ParseError::UnknownField { .. }), "{err:?}");
+}
+
+// --- comma-continued secondary fields ---
+
+/// The generic continuation every struct-kind field with more than one
+/// sub-field rides: after a primary value, `, key: value` keeps setting
+/// fields of the *same* type rather than starting a sibling statement.
+///
+/// `router api, host: "..."` used to be this rule's main exercise, and
+/// #271 removed it — so it is pinned here directly rather than through
+/// whichever field happens to use it, since the rule outlives any one
+/// of them.
+#[test]
+fn a_comma_continues_into_a_secondary_field() {
     let program = parse_ok(
-        "service s {\n  image \"x\"\n  router api {\n    host: \"a.example.com\"\n    \
-         entrypoints: web-secure\n    path_prefix: [\"/api/v1\", \"/dav/\"]\n  }\n}\n",
+        "service s {\n  image \"x\"\n  build \"./app\", dockerfile: \"Dockerfile.prod\"\n}\n",
     );
     let service = as_service(&program.decls[0]);
-    let routers = routers(service);
-    assert_eq!(routers.len(), 1);
-    assert_eq!(routers[0].key(), Some("api"));
-    assert_eq!(routers[0].host.as_ref().unwrap().text(), "a.example.com");
-    assert_eq!(router_entrypoints(&routers[0]), vec!["web-secure"]);
-    assert_eq!(router_prefixes(&routers[0]), vec!["/api/v1", "/dav/"]);
+    let build = service.fields.build.as_ref().expect("build set");
+    assert_eq!(build.context.as_ref().unwrap().text(), "./app");
+    assert_eq!(build.dockerfile.as_ref().unwrap().text(), "Dockerfile.prod");
 }
 
-/// Leaving the name off is legal and means the router id `expose.host`
-/// would have produced — codegen is what refuses writing both.
+/// The continuation is checked against the *enclosing type's* own field
+/// list, so a comma followed by something that isn't one of its fields
+/// ends the statement instead of being swallowed. Without that, the
+/// stray text would be consumed as part of this field and the
+/// diagnostic would land somewhere the author never wrote.
 #[test]
-fn router_unnamed_braced_body_parses() {
-    let program = parse_ok("service s {\n  router { host: \"a.example.com\" }\n}\n");
-    let service = as_service(&program.decls[0]);
-    assert_eq!(routers(service).len(), 1);
-    assert_eq!(routers(service)[0].key(), None);
+fn a_comma_before_an_unknown_key_ends_the_statement() {
+    let err = parse("service s {\n  image \"x\"\n  build \"./app\", nonsense: \"x\"\n}\n")
+        .expect_err("`nonsense` is not a `build` field");
+    let rendered = err.to_string();
+    assert!(rendered.contains("found `,`"), "{rendered}");
 }
 
-/// The comma-continued spelling: the same secondary-field production a
-/// primary-value shorthand continues from (see
-/// `Parser::parse_secondary_fields`), here continuing from the router's
-/// name instead of from a primary value.
+/// A bare reference list ends at a comma whose next tokens are `KEY :`,
+/// because that shape starts a field rather than another list item. The
+/// span is the assertion: the error lands on the *comma*, not on the
+/// `:` several tokens later, which is what tells a reader the list was
+/// the thing that ended. Swallowing the key first would report against
+/// text the list was never entitled to.
 #[test]
-fn router_comma_shorthand_parses() {
-    let program = parse_ok(
-        "service s {\n  router api, host: \"a.example.com\", entrypoints: web-secure, \
-         path_prefix: [\"/api\"]\n}\n",
-    );
-    let service = as_service(&program.decls[0]);
-    let routers = routers(service);
-    assert_eq!(routers[0].key(), Some("api"));
-    assert_eq!(routers[0].host.as_ref().unwrap().text(), "a.example.com");
-    assert_eq!(router_entrypoints(&routers[0]), vec!["web-secure"]);
-    assert_eq!(router_prefixes(&routers[0]), vec!["/api"]);
-}
-
-/// The shorthand form has no closing brace to end its span, so the
-/// parser stretches it to the last token the secondary-field loop
-/// consumed. Without that, the block's span would stop at the `router`
-/// keyword and every diagnostic about the router would underline the
-/// keyword alone rather than the fields that caused it.
-#[test]
-fn router_comma_shorthand_span_reaches_its_last_field() {
-    let program = parse_ok(
-        "service s {\n  router api, host: \"a.example.com\", entrypoints: web-secure\n}\n",
-    );
-    let service = as_service(&program.decls[0]);
-    let router = &routers(service)[0];
-    // The span starts at the `router` keyword, before the name...
-    assert!(router.span.start < router.name.as_ref().unwrap().span.start);
-    // ...and reaches past the host, out to the final `entrypoints` entry.
-    assert!(router.span.end > router.host.as_ref().unwrap().span().end);
+fn a_bare_reference_list_stops_at_a_following_key() {
+    let source = "service s {\n  networks a, b, image: \"x\"\n}\n";
+    let err = parse(source).expect_err("a `key:` cannot continue a reference list");
+    let rendered = err.to_string();
+    assert!(rendered.contains("found `,`"), "{rendered}");
+    let span = err.span();
     assert_eq!(
-        router.span.end,
-        router.entrypoints.last().unwrap().span().end
+        &source[span.start as usize..span.end as usize],
+        ",",
+        "the diagnostic should point at the comma that ended the list"
     );
 }
 
-/// The braced form ends at its own closing brace, so its span reaches
-/// past the last field for a different reason. Pinned alongside the
-/// shorthand so the two paths can't drift apart.
+/// The other half: a comma *not* followed by `KEY :` goes on continuing
+/// the list, so the lookahead is a real discriminator rather than a
+/// blanket stop.
 #[test]
-fn router_braced_body_span_reaches_past_its_last_field() {
-    let program = parse_ok("service s {\n  router api {\n    host: \"a.example.com\"\n  }\n}\n");
+fn a_bare_reference_list_continues_past_an_ordinary_comma() {
+    let program = parse_ok("service s {\n  image \"x\"\n  networks a, b, c\n}\n");
     let service = as_service(&program.decls[0]);
-    let router = &routers(service)[0];
-    assert!(router.span.start < router.name.as_ref().unwrap().span.start);
-    assert!(router.span.end > router.host.as_ref().unwrap().span().end);
-}
-
-/// Several blocks in one body accumulate in source order, which is what
-/// makes the emitted label order a function of the source.
-#[test]
-fn several_routers_accumulate_in_source_order() {
-    let program = parse_ok(
-        "service s {\n  router api, host: \"a.example.com\"\n  \
-         router web, host: \"b.example.com\"\n  router lan, host: \"c.example.com\"\n}\n",
-    );
-    let service = as_service(&program.decls[0]);
-    let names: Vec<Option<&str>> = routers(service).iter().map(|r| r.key()).collect();
-    assert_eq!(names, vec![Some("api"), Some("web"), Some("lan")]);
-}
-
-/// `path_prefix` takes the bare comma-list sugar every list field takes,
-/// and accumulates across repeats of the field.
-#[test]
-fn router_path_prefix_accepts_a_bare_list_and_accumulates() {
-    let program = parse_ok(
-        "service s {\n  router api {\n    host: \"a.example.com\"\n    \
-         path_prefix: \"/api\", \"/dav\"\n    path_prefix: \"/.well-known\"\n  }\n}\n",
-    );
-    let service = as_service(&program.decls[0]);
-    assert_eq!(
-        router_prefixes(&routers(service)[0]),
-        vec!["/api", "/dav", "/.well-known"]
-    );
-}
-
-/// The same `KEY :` one-token lookahead that keeps `expose`'s own bare
-/// lists from swallowing a sibling field: the second comma here starts
-/// `entrypoints`, not a third prefix.
-#[test]
-fn router_bare_path_prefix_list_ends_at_the_next_field() {
-    let program = parse_ok(
-        "service s {\n  router api, host: \"a.example.com\", path_prefix: \"/api\", \
-         entrypoints: web-secure\n}\n",
-    );
-    let service = as_service(&program.decls[0]);
-    assert_eq!(router_prefixes(&routers(service)[0]), vec!["/api"]);
-    assert_eq!(router_entrypoints(&routers(service)[0]), vec!["web-secure"]);
-}
-
-/// Two blocks claiming one router id are one router described twice,
-/// with the later silently winning — refused, exactly as two `volume`
-/// entries at one container path are.
-#[test]
-fn duplicate_router_name_is_rejected() {
-    let err = parse(
-        "service s {\n  router api, host: \"a.example.com\"\n  router api, host: \"b.example.com\"\n}\n",
-    )
-    .expect_err("expected a parse error");
-    assert!(
-        matches!(
-            err,
-            ParseError::DuplicateRouterName { ref name, .. } if name.as_deref() == Some("api")
-        ),
-        "got {err:?}"
-    );
-}
-
-/// Including two unnamed blocks, which share the service's own id.
-#[test]
-fn duplicate_unnamed_router_is_rejected() {
-    let err = parse(
-        "service s {\n  router { host: \"a.example.com\" }\n  router { host: \"b.example.com\" }\n}\n",
-    )
-    .expect_err("expected a parse error");
-    assert!(
-        matches!(err, ParseError::DuplicateRouterName { name: None, .. }),
-        "got {err:?}"
-    );
-}
-
-/// Two routers with *different* names are the whole point of the field
-/// and stay accepted.
-#[test]
-fn two_differently_named_routers_are_accepted() {
-    let program = parse_ok(
-        "service s {\n  router api, host: \"a.example.com\"\n  router web, host: \"b.example.com\"\n}\n",
-    );
-    assert_eq!(routers(as_service(&program.decls[0])).len(), 2);
-}
-
-/// A template body accepts `router` exactly as a service body does —
-/// the two share one field list.
-#[test]
-fn router_parses_in_a_template_body() {
-    let program = parse_ok("template t {\n  router api, host: \"a.example.com\"\n}\n");
-    let template = as_template(&program.decls[0]);
-    assert_eq!(template.fields.routers.len(), 1);
-}
-
-/// A `$param` is legal in a `router`'s `host` and in each
-/// `path_prefix` — which is why `path_prefix` holds literals rather than
-/// references, since a reference has no `$param` form at all.
-#[test]
-fn router_host_and_path_prefix_accept_a_param() {
-    let program =
-        parse_ok("template t(h, p) {\n  router api { host: $h\n    path_prefix: [$p] }\n}\n");
-    let template = as_template(&program.decls[0]);
-    let router = &template.fields.routers[0];
-    assert!(matches!(
-        router.host.as_ref().unwrap(),
-        Literal::Param(name, _) if name == "h"
-    ));
-    assert!(matches!(&router.path_prefix[0], Literal::Param(name, _) if name == "p"));
-}
-
-/// An unknown sub-field is refused against `router`'s own field list,
-/// which is what keeps a typo from being silently dropped.
-#[test]
-fn unknown_router_field_is_rejected() {
-    let err = parse("service s {\n  router api { bogus: 1 }\n}\n").expect_err("expected an error");
-    assert!(
-        matches!(
-            err,
-            ParseError::UnknownField {
-                type_name: "router",
-                ref field,
-                ..
-            } if field == "bogus"
-        ),
-        "got {err:?}"
-    );
-}
-
-/// The unnamed form needs its braces: with no name and no `{`, there is
-/// no first token to continue a comma-list from, and `router host: "x"`
-/// would have to guess whether `host` names the router or its own field.
-#[test]
-fn unnamed_router_without_a_body_is_rejected() {
-    let err = parse("service s {\n  router\n}\n").expect_err("expected a parse error");
-    assert!(
-        matches!(err, ParseError::UnexpectedToken { .. }),
-        "got {err:?}"
-    );
-}
-
-/// Writing `host` twice in one router body is the ordinary duplicate
-/// scalar error, reported against `router` rather than the enclosing
-/// service.
-#[test]
-fn duplicate_router_host_is_rejected() {
-    let err = parse(
-        "service s {\n  router api {\n    host: \"a.example.com\"\n    host: \"b.example.com\"\n  }\n}\n",
-    )
-    .expect_err("expected a parse error");
-    assert!(
-        matches!(
-            err,
-            ParseError::DuplicateField {
-                type_name: "router",
-                field: "host",
-                ..
-            }
-        ),
-        "got {err:?}"
-    );
-}
-
-// --- per-router `middleware` (#221) ---
-
-/// The field this issue asked for: a `router` block carrying its own
-/// middleware list, resolved against `router`'s own field table — the
-/// only place `middleware` is a field at all since #221.
-#[test]
-fn router_middleware_parses_in_a_braced_body() {
-    let program = parse_ok(
-        "service s {\n  router internal {\n    host: \"a.example.com\"\n    \
-         middleware: local-ipwhitelist\n  }\n}\n",
-    );
-    let service = as_service(&program.decls[0]);
-    assert_eq!(
-        router_middleware(&routers(service)[0]),
-        vec!["local-ipwhitelist"]
-    );
-}
-
-/// It takes the bare comma-list sugar and the bracketed form every
-/// reference list takes, and accumulates across repeats of the field.
-#[test]
-fn router_middleware_accepts_a_bare_list_and_accumulates() {
-    let program = parse_ok(
-        "service s {\n  router internal {\n    host: \"a.example.com\"\n    \
-         middleware: local-ipwhitelist, forwardAuth-authentik\n    \
-         middleware: [rate-limit]\n  }\n}\n",
-    );
-    let service = as_service(&program.decls[0]);
-    assert_eq!(
-        router_middleware(&routers(service)[0]),
-        vec!["local-ipwhitelist", "forwardAuth-authentik", "rate-limit"]
-    );
-}
-
-/// And the comma-continued spelling, where the same `KEY :` one-token
-/// lookahead that bounds `path_prefix`'s bare list bounds this one.
-#[test]
-fn router_middleware_in_comma_shorthand_ends_at_the_next_field() {
-    let program = parse_ok(
-        "service s {\n  router internal, middleware: local-ipwhitelist, \
-         host: \"a.example.com\"\n}\n",
-    );
-    let service = as_service(&program.decls[0]);
-    assert_eq!(
-        router_middleware(&routers(service)[0]),
-        vec!["local-ipwhitelist"]
-    );
-    assert_eq!(
-        routers(service)[0].host.as_ref().unwrap().text(),
-        "a.example.com"
-    );
-}
-
-/// A `$param` reaches it like every other reference-shaped position
-/// (#196), so a template can parameterize which middleware one of its
-/// routers attaches.
-#[test]
-fn router_middleware_accepts_a_param() {
-    let program = parse_ok("template t(mw) {\n  router api { middleware: [$mw] }\n}\n");
-    let template = as_template(&program.decls[0]);
-    let router = &template.fields.routers[0];
-    assert!(matches!(&router.middleware[0], Literal::Param(name, _) if name == "mw"));
-}
-
-/// The qualified form parses here, exactly as it does in every other
-/// reference-shaped position — `compose()` is what rejects it, since a
-/// middleware has no `.hll` declaration for an alias to resolve against.
-#[test]
-fn qualified_router_middleware_reference_parses() {
-    let program = parse_ok("service s {\n  router api { middleware: common.forwardAuth }\n}\n");
-    let service = as_service(&program.decls[0]);
-    let r = &routers(service)[0].middleware[0];
-    assert_eq!(r.qualifier().unwrap().name, "common");
-    assert_eq!(r.text(), "forwardAuth");
-}
-
-/// The old service-level spelling is refused outright rather than
-/// silently ignored, and the diagnostic says where the field went — a
-/// bare `UnknownField` here would offer `raw { middleware: ... }`,
-/// which compiles and emits a meaningless Compose key while the Traefik
-/// label the author wanted goes missing.
-#[test]
-fn service_level_middleware_names_its_new_home() {
-    let err = parse("service s {\n  image \"x\"\n  middleware forwardAuth-authentik\n}\n")
-        .expect_err("expected a parse error");
-    assert!(
-        matches!(
-            err,
-            ParseError::MovedField {
-                type_name: "service",
-                ref field,
-                ..
-            } if field == "middleware"
-        ),
-        "got {err:?}"
-    );
-    assert_eq!(
-        err.to_string(),
-        "3:3: `middleware` isn't a `service` field — move it inside the `router` block \
-         it applies to (`router { host: \"...\", middleware: ... }`)"
-    );
-}
-
-/// A `template` body shares `service`'s field list, so it reports the
-/// move the same way — named for `template`, since that's the body the
-/// line was written in.
-#[test]
-fn template_level_middleware_names_its_new_home_too() {
-    let err = parse("template t {\n  middleware auth\n}\n").expect_err("expected a parse error");
-    assert!(
-        matches!(
-            err,
-            ParseError::MovedField {
-                type_name: "template",
-                ..
-            }
-        ),
-        "got {err:?}"
-    );
-}
-
-/// The move is reported even in the comma-continued position, where the
-/// lookahead has to decide whether `middleware` continues the preceding
-/// field's list. It doesn't: a moved name is no more a continuation
-/// than an unknown one, so the error names the enclosing body rather
-/// than the `router` the comma came from.
-#[test]
-fn service_level_middleware_after_a_comma_is_still_reported() {
-    let err = parse("service s {\n  router api, host: \"a.example.com\"\n  middleware auth\n}\n")
-        .expect_err("expected a parse error");
-    assert!(
-        matches!(
-            err,
-            ParseError::MovedField {
-                type_name: "service",
-                ..
-            }
-        ),
-        "got {err:?}"
-    );
-}
-
-/// #199 renamed `router`'s entry-point list to the plural, a pre-1.0
-/// breaking change, so the old singular gets the migration note rather
-/// than a bare "unknown field" — the same treatment `middleware`'s move
-/// gets just above, and for the same reason: an author with a working
-/// `.hll` file needs the new spelling, not a typo report.
-#[test]
-fn routers_old_entrypoint_spelling_names_its_new_one() {
-    let err = parse("service s {\n  router api {\n    entrypoint: web-secure\n  }\n}\n")
-        .expect_err("expected a parse error");
-    assert!(
-        matches!(
-            err,
-            ParseError::MovedField {
-                type_name: "router",
-                ref field,
-                ..
-            } if field == "entrypoint"
-        ),
-        "got {err:?}"
-    );
-    assert_eq!(
-        err.to_string(),
-        "3:5: `entrypoint` isn't a `router` field — it's spelled `entrypoints`, a \
-         list matching Traefik's own `entrypoints=` label"
-    );
+    let nets: Vec<&str> = service.fields.networks.iter().map(|r| r.text()).collect();
+    assert_eq!(nets, vec!["a", "b", "c"]);
 }
 
 /// The service-level `entrypoint` is untouched by that rename — it's
@@ -3447,30 +2950,6 @@ fn service_level_entrypoint_still_parses_after_the_router_rename() {
     let program = parse_ok("service s {\n  entrypoint \"/bin/sh\"\n}\n");
     let service = as_service(&program.decls[0]);
     assert!(service.fields.entrypoint.is_some());
-}
-
-/// `traefik { disabled }`'s own half of #199's rename, reported the same
-/// way.
-#[test]
-fn traefiks_old_disabled_spelling_names_its_new_one() {
-    let err = parse("service s {\n  traefik {\n    disabled\n  }\n}\n")
-        .expect_err("expected a parse error");
-    assert!(
-        matches!(
-            err,
-            ParseError::MovedField {
-                type_name: "traefik",
-                ref field,
-                ..
-            } if field == "disabled"
-        ),
-        "got {err:?}"
-    );
-    assert_eq!(
-        err.to_string(),
-        "3:5: `disabled` isn't a `traefik` field — it's spelled `disable`, matching \
-         `healthcheck { disable }`"
-    );
 }
 
 // --- `build` (#224) ---
@@ -3558,276 +3037,3 @@ fn duplicate_build_is_rejected() {
 }
 
 // --- `priority`, `port`, `protocol` on a router (#225) ---
-
-/// All three parse as plain scalars in the braced body, beside the
-/// fields `router` already had.
-#[test]
-fn router_priority_port_and_protocol_parse() {
-    let program = parse_ok(
-        "service s {\n  router web {\n    host: \"a.example.com\"\n    \
-         priority: 100\n    port: 2222\n    protocol: http\n  }\n}\n",
-    );
-    let service = as_service(&program.decls[0]);
-    let router = &routers(service)[0];
-    assert_eq!(router.priority.as_ref().unwrap().text(), "100");
-    assert_eq!(router.port.as_ref().unwrap().text(), "2222");
-    assert_eq!(router.protocol.as_ref().unwrap().text(), "http");
-}
-
-/// And in the comma-continued form, like every other `router`
-/// sub-field.
-#[test]
-fn router_new_fields_parse_in_comma_shorthand() {
-    let program =
-        parse_ok("service s {\n  router sftp, protocol: tcp, host: \"*\", port: 1111\n}\n");
-    let service = as_service(&program.decls[0]);
-    let router = &routers(service)[0];
-    assert_eq!(router.protocol.as_ref().unwrap().text(), "tcp");
-    assert_eq!(router.port.as_ref().unwrap().text(), "1111");
-}
-
-/// A router that names none of the three leaves all three `None`, so a
-/// file written before #225 parses to exactly the AST it always did.
-#[test]
-fn router_without_the_new_fields_leaves_them_unset() {
-    let program = parse_ok("service s {\n  router { host: \"a.example.com\" }\n}\n");
-    let router = &routers(as_service(&program.decls[0]))[0];
-    assert!(router.priority.is_none());
-    assert!(router.port.is_none());
-    assert!(router.protocol.is_none());
-}
-
-/// `protocol` accepts a `$param` — it's validated in codegen, not here,
-/// precisely so a template can parameterize it.
-#[test]
-fn router_protocol_accepts_a_param() {
-    let program = parse_ok("template t(p) {\n  router r { protocol: $p }\n}\n");
-    let template = as_template(&program.decls[0]);
-    let router = &template.fields.routers[0];
-    assert!(matches!(router.protocol.as_ref().unwrap(), Literal::Param(n, _) if n == "p"));
-}
-
-// --- `router { rule: ... }` (#228) ---
-
-/// The whole expression grammar in one shape, checked as a tree rather
-/// than as text: `&&` binds tighter than `||`, `!` tighter than either,
-/// and the parentheses the source wrote survive as their own node.
-#[test]
-fn router_rule_parses_with_traefik_precedence() {
-    let program = parse_ok(
-        "service s {\n  router {\n    rule: Host(\"a\") && !(PathPrefix(\"/b\") || PathPrefix(\"/c\"))\n  }\n}\n",
-    );
-    let rule = routers(as_service(&program.decls[0]))[0]
-        .rule
-        .as_ref()
-        .expect("the router set a rule");
-    let MatchExpr::And { lhs, rhs, .. } = rule else {
-        panic!("`&&` is the root, not {rule:?}");
-    };
-    assert!(matches!(**lhs, MatchExpr::Matcher { .. }));
-    let MatchExpr::Not { operand, .. } = &**rhs else {
-        panic!("`!` sits under the `&&`, not {rhs:?}");
-    };
-    let MatchExpr::Group { inner, .. } = &**operand else {
-        panic!("the written parentheses survive as a Group, not {operand:?}");
-    };
-    assert!(matches!(**inner, MatchExpr::Or { .. }));
-}
-
-/// Without parentheses, `&&` still binds tighter — so `a || b && c` is
-/// an `||` of `a` and `(b && c)`, exactly as Traefik reads it.
-#[test]
-fn and_binds_tighter_than_or() {
-    let program = parse_ok(
-        "service s {\n  router {\n    rule: Host(\"a\") || Host(\"b\") && Host(\"c\")\n  }\n}\n",
-    );
-    let rule = routers(as_service(&program.decls[0]))[0]
-        .rule
-        .as_ref()
-        .unwrap();
-    let MatchExpr::Or { lhs, rhs, .. } = rule else {
-        panic!("`||` is the root, not {rule:?}");
-    };
-    assert!(matches!(**lhs, MatchExpr::Matcher { .. }));
-    assert!(matches!(**rhs, MatchExpr::And { .. }));
-}
-
-/// The property the comma-continued form rests on: a `rule` expression
-/// consumes a `,` only inside a matcher's own parentheses, never at the
-/// top level, so the comma after it starts a sibling `router` field
-/// rather than being swallowed as more rule.
-#[test]
-fn a_rule_in_comma_shorthand_ends_at_the_next_field() {
-    let program = parse_ok(
-        "service s {\n  router api, rule: Header(\"X-Env\", \"prod\"), entrypoints: web-secure\n}\n",
-    );
-    let router = &routers(as_service(&program.decls[0]))[0];
-    assert_eq!(router.key(), Some("api"));
-    assert_eq!(router.entrypoints.len(), 1);
-    assert_eq!(router.entrypoints[0].text(), "web-secure");
-    let MatchExpr::Matcher { args, .. } = router.rule.as_ref().unwrap() else {
-        panic!("expected one matcher");
-    };
-    assert_eq!(args.len(), 2);
-}
-
-/// A matcher argument is an ordinary literal slot, so a template can
-/// parameterize one the way it can parameterize a `path_prefix`.
-#[test]
-fn a_matcher_argument_accepts_a_param() {
-    let program = parse_ok("template t(h) {\n  router r { rule: Host($h) }\n}\n");
-    let rule = as_template(&program.decls[0]).fields.routers[0]
-        .rule
-        .as_ref()
-        .unwrap();
-    let MatchExpr::Matcher { args, .. } = rule else {
-        panic!("expected one matcher");
-    };
-    assert!(matches!(&args[0], Literal::Param(n, _) if n == "h"));
-}
-
-#[test]
-fn an_unknown_matcher_is_rejected_with_the_legal_set() {
-    let err = parse("service s {\n  router { rule: PathPrefx(\"/a\") }\n}\n").unwrap_err();
-    assert!(
-        matches!(&err, ParseError::UnknownMatcher { name, .. } if name == "PathPrefx"),
-        "{err:?}"
-    );
-    let rendered = err.to_string();
-    assert!(rendered.contains("`PathPrefix`"), "{rendered}");
-}
-
-#[test]
-fn a_matcher_with_the_wrong_argument_count_is_rejected() {
-    let err = parse("service s {\n  router { rule: Header(\"X-Env\") }\n}\n").unwrap_err();
-    assert!(
-        matches!(
-            err,
-            ParseError::MatcherArity {
-                name: "Header",
-                expected: 2,
-                found: 1,
-                ..
-            }
-        ),
-        "{err:?}"
-    );
-}
-
-/// A bare identifier where a matcher belongs is an error rather than a
-/// literal, and it's reported at the name — not at whatever token
-/// happens to follow it, which is usually on a later line.
-#[test]
-fn a_matcher_name_without_an_argument_list_is_rejected_at_the_name() {
-    let source = "service s {\n  router {\n    rule: web-secure\n  }\n}\n";
-    let err = parse(source).unwrap_err();
-    assert_eq!(err.span().line, 3);
-    assert!(
-        matches!(&err, ParseError::UnexpectedToken { found_lexeme, .. } if found_lexeme == "web-secure"),
-        "{err:?}"
-    );
-}
-
-/// Two `rule`s in one body is the ordinary duplicate-scalar error: a
-/// router has one rule, and two say nothing about which wins.
-#[test]
-fn two_rules_in_one_router_is_a_duplicate_field() {
-    let err =
-        parse("service s {\n  router {\n    rule: Host(\"a\")\n    rule: Host(\"b\")\n  }\n}\n")
-            .unwrap_err();
-    assert!(
-        matches!(
-            err,
-            ParseError::DuplicateField {
-                type_name: "router",
-                field: "rule",
-                ..
-            }
-        ),
-        "{err:?}"
-    );
-}
-
-/// A composite node's span covers the whole expression — from the first
-/// matcher's own start to the closing `)` of the last — rather than just
-/// the operator or the left operand. That's the property the parser's
-/// span-joining exists to provide, and the reason a diagnostic about a
-/// rule can underline the rule.
-#[test]
-fn a_composite_node_spans_the_whole_expression() {
-    let rule_text = "Host(\"a\") && PathPrefix(\"/b\")";
-    let source = format!("service s {{\n  router {{ rule: {rule_text} }}\n}}\n");
-    let program = parse_ok(&source);
-    let span = routers(as_service(&program.decls[0]))[0]
-        .rule
-        .as_ref()
-        .unwrap()
-        .span();
-    let start = source.find("Host(").expect("the rule is in the source");
-    assert_eq!(span.start as usize, start);
-    assert_eq!(span.end as usize, start + rule_text.len());
-}
-
-/// Builds a `service` whose one router carries `rule`.
-fn rule_source(rule: &str) -> String {
-    format!("service s {{\n  router {{ rule: {rule} }}\n}}\n")
-}
-
-fn parses(rule: &str) -> bool {
-    parse(&rule_source(rule)).is_ok()
-}
-
-fn too_deep(rule: &str) -> bool {
-    matches!(
-        parse(&rule_source(rule)),
-        Err(ParseError::MatchExprTooDeep { .. })
-    )
-}
-
-/// The self-recursive half of the grammar is depth-capped for
-/// `MAX_RAW_VALUE_DEPTH`'s reason: unbounded, it overflows the stack,
-/// and a stack overflow aborts the process rather than returning an
-/// error a caller can catch.
-///
-/// Each of the four nesting constructs gets its limit pinned from *both*
-/// sides. A one-sided "far past the limit is rejected" test can't tell a
-/// correct cap from one that's off by one, and off-by-one is exactly
-/// what an accounting mistake here looks like. The two constructs that
-/// recurse (`(`, `!`) reach one level per token, so `MAX` of them is the
-/// last that fits; the two that fold left (`&&`, `||`) reach one level
-/// per *operator*, so `MAX + 1` operands are.
-#[test]
-fn nested_parentheses_are_capped_at_exactly_the_limit() {
-    let nest = |n: usize| format!("{}Host(\"a\"){}", "(".repeat(n), ")".repeat(n));
-    assert!(parses(&nest(MAX_MATCH_EXPR_DEPTH)));
-    assert!(too_deep(&nest(MAX_MATCH_EXPR_DEPTH + 1)));
-}
-
-#[test]
-fn nested_negations_are_capped_at_exactly_the_limit() {
-    let nest = |n: usize| format!("{}Host(\"a\")", "!".repeat(n));
-    assert!(parses(&nest(MAX_MATCH_EXPR_DEPTH)));
-    assert!(too_deep(&nest(MAX_MATCH_EXPR_DEPTH + 1)));
-}
-
-/// A long `&&` chain counts against the same cap: `&&` folds left, so
-/// each extra operand is one more level of `Box` for drop glue to walk,
-/// exactly as an extra `(` would be. `n` operands nest `n - 1` deep,
-/// which is why the limit lands one operand later than it does for a
-/// construct that recurses.
-#[test]
-fn a_long_and_chain_is_capped_at_exactly_the_limit() {
-    let chain = |n: usize| vec!["Host(\"a\")"; n].join(" && ");
-    assert!(parses(&chain(MAX_MATCH_EXPR_DEPTH + 1)));
-    assert!(too_deep(&chain(MAX_MATCH_EXPR_DEPTH + 2)));
-}
-
-/// And an `||` chain the same way — the two fold identically, so a cap
-/// that holds for one and not the other is an accounting bug rather than
-/// a design decision.
-#[test]
-fn a_long_or_chain_is_capped_at_exactly_the_limit() {
-    let chain = |n: usize| vec!["Host(\"a\")"; n].join(" || ");
-    assert!(parses(&chain(MAX_MATCH_EXPR_DEPTH + 1)));
-    assert!(too_deep(&chain(MAX_MATCH_EXPR_DEPTH + 2)));
-}

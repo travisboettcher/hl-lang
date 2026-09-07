@@ -39,7 +39,7 @@ Backus-Naur Form (BNF).
 ```hll,build
 service jellyfin {
   image "jellyfin/jellyfin:latest"
-  expose 8096 as "media.example.com"
+  expose 8096
   volume "/mnt/media" -> "/data"
   env PUID = "1000"
   restart unless-stopped
@@ -48,6 +48,10 @@ service jellyfin {
 
 `hllc build` turns that into a ready-to-run `docker-compose.yml` with a
 `jellyfin` service, its image, a bind mount, an environment variable, a
-restart policy, and Traefik labels routing `media.example.com` to port
-8096—all inferred from those five lines. The rest of this book walks
-through how that works, starting with [Getting Started](./getting-started.md).
+restart policy, and the network wiring—all from those six lines.
+
+A reverse proxy handles the hostname that reaches it, rather than
+Compose, so that isn't part of the language: it's labels, and templates
+write them. [Routing](./routing.md) covers the set `hllc` ships for
+Traefik. The rest of this book walks through how all of that works,
+starting with [Getting Started](./getting-started.md).

@@ -100,6 +100,24 @@ template tcp_service(router, port) {
 
 ## Service-wide
 
+# The Docker network Traefik should reach this container on, which
+# matters when a container sits on more than one and Traefik would
+# otherwise have to guess. Takes the declaration rather than a string,
+# so `$net.name` reads the real Docker name — the `name:` override when
+# the declaration sets one, the identifier otherwise — and a caller
+# can't accidentally pass the identifier where Docker needs the other.
+#
+# The compiler used to derive this label on its own, from whichever of a
+# service's networks was `external`. That was the last Traefik-shaped
+# thing left in codegen after #269, and it moved here at #271, in the
+# same change that removed the derivation: a template writing the label
+# while the compiler still derived it would collide with it.
+template docker_network(net) {
+  labels {
+    "traefik.docker.network": "{{net.name}}"
+  }
+}
+
 # The one load-balancer target a service's routers fall back to when
 # none names a port of its own.
 template port(port) {

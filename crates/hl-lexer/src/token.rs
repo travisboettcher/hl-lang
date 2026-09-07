@@ -49,16 +49,6 @@ pub enum TokenKind {
     /// grammar; the parser (not the lexer) enforces that it's only legal
     /// in that one context.
     Dollar,
-    /// `&&`, always a single token — never two separate `&` tokens, which
-    /// the lexer has no variant for at all. Joins two matchers in a
-    /// `router`'s `rule` expression (#228).
-    AmpAmp,
-    /// `||`, always a single token, on [`Self::AmpAmp`]'s reasoning.
-    PipePipe,
-    /// `!` — negates a matcher, or a parenthesized group of them, in a
-    /// `router`'s `rule` expression (#228). Never appears anywhere else
-    /// in the grammar.
-    Bang,
     /// Emitted exactly once, at the end of input.
     Eof,
 }
@@ -84,9 +74,6 @@ impl fmt::Display for TokenKind {
             TokenKind::Comma => "`,`",
             TokenKind::Dot => "`.`",
             TokenKind::Dollar => "`$`",
-            TokenKind::AmpAmp => "`&&`",
-            TokenKind::PipePipe => "`||`",
-            TokenKind::Bang => "`!`",
             TokenKind::Eof => "end of file",
         };
         write!(f, "{text}")
@@ -117,9 +104,6 @@ mod display_tests {
         assert_eq!(TokenKind::Colon.to_string(), "`:`");
         assert_eq!(TokenKind::Arrow.to_string(), "`->`");
         assert_eq!(TokenKind::LBrace.to_string(), "`{`");
-        assert_eq!(TokenKind::AmpAmp.to_string(), "`&&`");
-        assert_eq!(TokenKind::PipePipe.to_string(), "`||`");
-        assert_eq!(TokenKind::Bang.to_string(), "`!`");
     }
 
     #[test]

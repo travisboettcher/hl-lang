@@ -18,11 +18,10 @@ services:
     expose:
     - 8096
     labels:
-    - traefik.docker.network=docker_default
     - traefik.http.routers.jellyfin.rule=Host(`jellyfin.example.com`)
+    - traefik.http.services.jellyfin.loadbalancer.server.port=8096
     - traefik.http.routers.jellyfin.entrypoints=web-secure
     - traefik.http.routers.jellyfin.middlewares=local-ipwhitelist@file
-    - traefik.http.services.jellyfin.loadbalancer.server.port=8096
 networks:
   traefik-net:
     name: docker_default

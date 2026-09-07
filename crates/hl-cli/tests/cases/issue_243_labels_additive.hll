@@ -1,16 +1,18 @@
-# #243: `labels` is a first-class `service` field, *added* to the label
-# set `router`/`expose`/`traefik`/the docker-network label already
-# compute rather than replacing it. Before this field the only way to
-# write one extra label line was `raw { labels: [...] }`, which replaces
-# the whole computed set and silently drops `rule`, `entrypoints`,
-# `docker.network` and the load-balancer port — #232's report.
+# #243: `labels` is a first-class `service` field whose entries are
+# *added* to the set the rest of the service contributes rather than
+# replacing it. Before this field the only way to write one extra label
+# line was `raw { labels: [...] }`, which replaces the whole computed
+# set and silently drops everything else — #232's report.
 #
-# This is the issue's own worked example, and what it pins down is that
-# both halves reach the output: every computed Traefik label, in the
-# order it always had, then the two hand-written entries after them. The
-# ordering is the load-bearing half — appending rather than interleaving
-# is what keeps a file that writes no `labels` emitting byte-identical
-# output to before the field existed.
+# Since #271 routing is itself written as `labels`, through `std:traefik`
+# templates, so "the computed set" and "the hand-written set" are the
+# same field arriving from different tiers. That makes the ordering the
+# load-bearing half of this case: template tiers first, in `with`-list
+# order, then the service's own body — which is what keeps a file that
+# writes no `labels` of its own emitting byte-identical output to one
+# written before the field existed.
+use "std:traefik" as traefik
+
 network traefik-net {
   external
   name: "docker_default"
@@ -18,13 +20,12 @@ network traefik-net {
 
 service web {
   image "nginx"
-  expose 8123
   networks [traefik-net]
 
-  router {
-    host: "web.example.com"
-    entrypoints: web-secure
-  }
+  with
+    traefik.http { host: "web.example.com", port: 8123 },
+    traefik.http_entrypoints { router: "{{name}}", entrypoints: ["web-secure"] },
+    traefik.docker_network { net: traefik-net }
 
   labels {
     "traefik.http.routers.web.tls.domains[0].main": "internal.example.com"

@@ -22,7 +22,8 @@ fn jellyfin_example_lexes_to_expected_token_sequence() {
     let expected = vec![
         Ident, Ident, LBrace, // service jellyfin {
         Ident, Str, // image "..."
-        Ident, Number, Ident, Str, // expose 8096 as "..."
+        Ident, Number, // expose 8096
+        Ident, LBrace, Str, Colon, Str, RBrace, // labels { "...rule": "Host(`...`)" }
         Ident, Str, Arrow, Str, // volume "..." -> "..."
         Ident, Ident, Equals, Str, // env PUID = "..."
         Ident, Ident, // restart unless-stopped
@@ -38,11 +39,12 @@ fn syncthing_example_lexes_to_expected_token_sequence() {
         // template internal_web(port) {
         Ident, Ident, LParen, Ident, RParen, LBrace, // networks [traefik-net]
         Ident, LBracket, Ident, RBracket, // restart unless-stopped
-        Ident, Ident, // expose $port as "{{name}}.internal.techdebtor.io"
-        Ident, Dollar, Ident, Ident, Str, // router { middleware: local-ipwhitelist }
-        Ident, LBrace, Ident, Colon, Ident, RBrace, RBrace,
-        // template authenticated { router { middleware: forwardAuth-authentik } }
-        Ident, Ident, LBrace, Ident, LBrace, Ident, Colon, Ident, RBrace, RBrace,
+        Ident, Ident, // expose $port
+        Ident, Dollar, Ident, // labels { "...rule": "Host(`...`)"
+        Ident, LBrace, Str, Colon, Str, // "...middlewares": ["local-ipwhitelist@file"] } }
+        Str, Colon, LBracket, Str, RBracket, RBrace, RBrace,
+        // template authenticated { labels { "...middlewares": ["forwardAuth-authentik@file"] } }
+        Ident, Ident, LBrace, Ident, LBrace, Str, Colon, LBracket, Str, RBracket, RBrace, RBrace,
         // template linuxserver_app(puid, pgid) {
         Ident, Ident, LParen, Ident, Comma, Ident, RParen, LBrace, // env PUID = $puid
         Ident, Ident, Equals, Dollar, Ident, // env PGID = $pgid
