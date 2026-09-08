@@ -64,3 +64,8 @@ snake_case
 YAML's
 overridable
 [Vv]endor(s|ed|ing)?
+[Cc]addy
+nginx
+middlewares
+unsubstituted
+validator

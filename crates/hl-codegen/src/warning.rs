@@ -26,23 +26,23 @@ pub enum CodegenWarning {
     /// list, since that misspelling is an error only when the *name*
     /// doesn't resolve, not when the wrong network resolves.
     UnusedNetwork { network: String, span: Span },
-    /// A service that sets `raw { labels: ... }` while also generating
-    /// Traefik labels of its own.
+    /// A service that sets `raw { labels: ... }` while also carrying
+    /// `labels` entries of its own.
     ///
     /// `raw` replaces a built-in field it names rather than merging with
     /// it, which is deliberate and documented — a half-merged `raw` value
     /// isn't verbatim passthrough anymore. `labels` is the one key where
     /// that rule is a footgun, because it isn't one field from the
-    /// language's own perspective: it's the aggregate output of `router`,
-    /// `expose`, `traefik { disable }`, and the resolved Docker network,
-    /// each an independent feature. Overriding it means reproducing all
-    /// of them by hand, and until #232 nothing said so — the whole
-    /// computed set vanished with no diagnostic (#232).
+    /// author's perspective: its entries arrive from every template tier
+    /// applied to the service as well as from the body, and since #271
+    /// that includes all of the service's routing. Overriding it means
+    /// reproducing every one of them by hand, and until #232 nothing said
+    /// so — the whole set vanished with no diagnostic (#232).
     ///
     /// A warning rather than an error on purpose: hand-writing the whole
     /// label list is a legitimate thing to do, and is what `raw` is for
-    /// when `router` can't yet express a label. What was missing was
-    /// visibility, not a prohibition.
+    /// when a label needs a shape `labels` can't yet write. What was
+    /// missing was visibility, not a prohibition.
     ///
     /// Raised only when there is something to lose — a service whose
     /// generated label set is empty gives `raw { labels: ... }` nothing
@@ -94,11 +94,11 @@ impl CodegenWarning {
             ),
             CodegenWarning::RawLabelsReplaceGenerated { service, .. } => write!(
                 f,
-                "{at}: warning: `raw {{ labels: ... }}` replaces service `{service}`'s generated \
-                 Traefik labels rather than adding to them, so every label `router`, `expose`, \
-                 and `traefik` would have produced is dropped — use a `labels {{ ... }}` block to \
-                 add labels to the computed set instead, or reproduce the ones you still need in \
-                 this list"
+                "{at}: warning: `raw {{ labels: ... }}` replaces service `{service}`'s computed \
+                 labels rather than adding to them, so every entry its `labels` blocks and the \
+                 templates it applies would have produced is dropped — write the extra labels in \
+                 a `labels {{ ... }}` block instead, or reproduce the ones you still need in this \
+                 list"
             ),
         }
     }
@@ -184,10 +184,9 @@ mod tests {
         assert_eq!(
             warning.display(&files).to_string(),
             "shared/routed.hll:4:5: warning: `raw { labels: ... }` replaces service `web`'s \
-             generated Traefik labels rather than adding to them, so every label `router`, \
-             `expose`, and `traefik` would have produced is dropped — use a `labels { ... }` \
-             block to add labels to the computed set instead, or reproduce the ones you still \
-             need in this list"
+             computed labels rather than adding to them, so every entry its `labels` blocks and \
+             the templates it applies would have produced is dropped — write the extra labels in \
+             a `labels { ... }` block instead, or reproduce the ones you still need in this list"
         );
         assert_eq!(warning.span().line, 4);
     }

@@ -15,16 +15,6 @@ pub enum LexError {
     /// a valid token on its own (it only appears inside an `IDENT`'s tail,
     /// or as the lead character of `->`).
     DanglingDash { span: Span },
-    /// A lone `&` or `|` — each is only a token as half of the `&&`/`||`
-    /// a `router`'s `rule` expression joins matchers with (#228).
-    ///
-    /// One variant parameterized by the character rather than two
-    /// near-identical ones, since both render the same sentence and
-    /// neither has anything to say the other doesn't. [`Self::DanglingDash`]
-    /// stays separate because `-` genuinely has a second legal home —
-    /// inside an `IDENT`'s tail — so its message names a different set of
-    /// alternatives.
-    DanglingHalfOperator { ch: char, span: Span },
     /// A `\` inside a string literal was followed by a character that
     /// forms no escape sequence (#181).
     ///
@@ -48,7 +38,6 @@ impl LexError {
             LexError::UnterminatedString { span }
             | LexError::UnexpectedChar { span, .. }
             | LexError::DanglingDash { span }
-            | LexError::DanglingHalfOperator { span, .. }
             | LexError::UnknownEscape { span, .. }
             | LexError::DanglingEscape { span } => *span,
         }
@@ -80,13 +69,6 @@ impl fmt::Display for LexError {
                 write!(
                     f,
                     "{}:{}: unexpected '-' (expected '->' or an identifier)",
-                    span.line, span.col
-                )
-            }
-            LexError::DanglingHalfOperator { ch, .. } => {
-                write!(
-                    f,
-                    "{}:{}: unexpected {ch:?} — write it doubled ({ch}{ch}) to join two rule matchers",
                     span.line, span.col
                 )
             }
@@ -182,26 +164,6 @@ mod display_tests {
         assert_eq!(
             err.to_string(),
             r"2:4: a string literal can't end with a lone `\` — write a backslash as `\\`"
-        );
-    }
-
-    #[test]
-    fn dangling_half_operator_display_names_the_doubled_spelling() {
-        let err = LexError::DanglingHalfOperator {
-            ch: '&',
-            span: span(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "2:4: unexpected '&' — write it doubled (&&) to join two rule matchers"
-        );
-        let err = LexError::DanglingHalfOperator {
-            ch: '|',
-            span: span(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "2:4: unexpected '|' — write it doubled (||) to join two rule matchers"
         );
     }
 

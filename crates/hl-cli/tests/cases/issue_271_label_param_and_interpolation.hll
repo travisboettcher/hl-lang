@@ -1,0 +1,31 @@
+# #271: routing moved out of the grammar and into `labels`, which means
+# the two substitution paths that `router`'s sub-fields used to exercise
+# now run through label values instead. Both have bitten this project
+# before, so both are pinned here rather than left to the templates that
+# happen to use them:
+#
+#   - `$param`, substituted during composition. A field reachable from a
+#     template body but missing from `substitute_params`' walk emits the
+#     parameter's own name into the generated document and exits 0 —
+#     that was #168, in `healthcheck`, and `router.host` was covered for
+#     the same reason.
+#   - `{{name}}`, and `{{param}}` since #266, resolved at codegen inside
+#     string content. A router id is built this way in every `std:traefik`
+#     call site, so an interpolation that stopped working in a label
+#     value would break routing wholesale.
+#
+# Both halves of an entry are covered: the key is where a router id
+# lands, the value is where a host does.
+template routed(host, mw) {
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`{{host}}`)"
+    "traefik.http.routers.{{name}}.middlewares": [$mw]
+    "com.example.{{name}}.upstream": "{{name}}:8080"
+  }
+}
+
+service docs {
+  image "swaggerapi/swagger-ui"
+  expose 8080
+  with routed { host: "docs.techdebtor.io", mw: "local-ipwhitelist@file" }
+}

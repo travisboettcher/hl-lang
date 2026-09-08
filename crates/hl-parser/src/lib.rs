@@ -24,7 +24,7 @@
 //! let source = r#"
 //! service jellyfin {
 //!   image "jellyfin/jellyfin:latest"
-//!   expose 8096 as "media.techdebtor.io"
+//!   expose 8096
 //!   restart unless-stopped
 //! }
 //! "#;
@@ -57,8 +57,6 @@ mod ast;
 pub mod compose;
 mod error;
 pub mod interp;
-mod match_expr;
-pub mod matchers;
 mod parser;
 pub mod schema;
 mod warning;
@@ -66,9 +64,9 @@ mod warning;
 pub use ast::{
     ArrowMap, ArrowMapEntry, ArrowMapHost, Build, Command, DependsOnCondition, DependsOnEntry,
     Entrypoint, EnvEntry, EnvMap, Expose, FieldAccess, Healthcheck, HealthcheckTest, Ident, Image,
-    LabelEntry, LabelMap, LabelValue, Literal, MatchExpr, Network, Param, Program, QualifiedRef,
-    RawEntry, RawMap, RawValue, Restart, Router, Service, ServiceFields, TemplateDecl,
-    TemplateInvocation, TopDecl, Traefik, UseDecl, Volume, VolumeDriverOpt,
+    LabelEntry, LabelMap, LabelValue, Literal, Network, Param, Program, QualifiedRef, RawEntry,
+    RawMap, RawValue, Restart, Service, ServiceFields, TemplateDecl, TemplateInvocation, TopDecl,
+    UseDecl, Volume, VolumeDriverOpt,
 };
 pub use compose::{
     ComposeError, ComposedProgram, MAX_TEMPLATE_DEPTH, MapKeyCollision, SymbolResolver, compose,
@@ -76,6 +74,5 @@ pub use compose::{
 };
 pub use error::{Expected, ParseError};
 pub use hl_lexer::{FileId, Location, SourceMap, Span};
-pub use match_expr::MAX_MATCH_EXPR_DEPTH;
 pub use parser::{MAX_RAW_VALUE_DEPTH, parse, parse_in_file};
 pub use warning::ComposeWarning;

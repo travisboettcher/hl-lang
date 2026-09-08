@@ -1,5 +1,5 @@
 --- warnings ---
-issue_232_raw_labels_replace_router.hll:16:5: warning: `raw { labels: ... }` replaces service `web`'s generated Traefik labels rather than adding to them, so every label `router`, `expose`, and `traefik` would have produced is dropped — use a `labels { ... }` block to add labels to the computed set instead, or reproduce the ones you still need in this list
+issue_232_raw_labels_replace_router.hll:20:5: warning: `raw { labels: ... }` replaces service `web`'s computed labels rather than adding to them, so every entry its `labels` blocks and the templates it applies would have produced is dropped — write the extra labels in a `labels { ... }` block instead, or reproduce the ones you still need in this list
 --- compose ---
 services:
   web:

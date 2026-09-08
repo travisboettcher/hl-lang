@@ -1,3 +1,5 @@
+use "std:traefik" as traefik
+
 network traefik-net {
   external
   name: "docker_default"
@@ -8,10 +10,8 @@ service jellyfin {
   restart unless-stopped
   networks [traefik-net]
   env PUID = 1000
-  expose 8096
-  router {
-    host: "jellyfin.example.com"
-    entrypoints: web-secure
-    middleware: local-ipwhitelist
-  }
+  with
+    traefik.http { host: "jellyfin.example.com", port: 8096 },
+    traefik.http_entrypoints { router: "{{name}}", entrypoints: ["web-secure"] },
+    traefik.http_middlewares { router: "{{name}}", middlewares: ["local-ipwhitelist@file"] }
 }

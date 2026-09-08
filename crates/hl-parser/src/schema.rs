@@ -104,41 +104,6 @@ pub enum FieldKind {
     /// [`crate::ast::DependsOnEntry`]'s doc and
     /// [`crate::ParseError::InvalidDependsOnCondition`].
     DependsOnList,
-    /// A repeatable, *name-keyed* nested struct field — `router
-    /// <name> { ... }` (#184), the only one today.
-    ///
-    /// [`Self::Nested`]'s struct-kind arm is single-occurrence: a second
-    /// `expose` in one body is a [`crate::ParseError::DuplicateField`].
-    /// Its map-kind arm accumulates, but a map entry is a `key ->
-    /// value` pair, not a body of named sub-fields. A `router` needs
-    /// both halves at once — several of them per body, each with its own
-    /// `host`/`entrypoints`/`path_prefix` body — so it gets its own kind
-    /// rather than bending either of those.
-    ///
-    /// The name is optional (`router { ... }` is the unnamed form,
-    /// claiming the service's own router id) and is an `IDENT`, never a
-    /// `STRING`, matching how a top-level declaration's own name is
-    /// spelled — see
-    /// [`crate::ast::Router`]'s doc for why a label *key* can't take
-    /// arbitrary string content.
-    NamedNested(&'static TypeSchema),
-    /// `router`'s `rule` (#228) — a boolean expression over Traefik's
-    /// rule matchers, `Host("a") && !PathPrefix("/b")`, parsed by
-    /// this crate's own `match_expr` module rather than by any of the
-    /// generic value productions above.
-    ///
-    /// The only field kind whose value isn't a literal, a list of them,
-    /// or a nested body, and the only one with its own operator grammar.
-    /// It gets a kind rather than reusing [`Self::Scalar`] over a string
-    /// because a string would make the rule opaque: no spans inside it,
-    /// no matcher or arity checking, and no way to reject the backtick
-    /// that would let a rule forge a second matcher. Parsing it is what
-    /// buys all three.
-    ///
-    /// Single-occurrence like [`Self::Scalar`] — a second `rule` in one
-    /// body is a [`crate::ParseError::DuplicateField`], since a router
-    /// has one rule and two of them say nothing about which wins.
-    MatchExpr,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -238,23 +203,22 @@ pub static BUILD: TypeSchema = TypeSchema {
     schema_free: false,
 };
 
-/// `expose 8096` / `expose { port: 8096 }` — Compose's own `expose:` key
-/// (container-network visibility) plus the
-/// `traefik.http.services.<svc>.loadbalancer.server.port` label. Nothing
-/// else: `expose` used to also model exactly one Traefik router (`host`,
-/// `entrypoint`) before #198 moved all routing onto [`ROUTER`], leaving
-/// `port` the one field left here — a plain Compose concern with nothing
-/// to do with Traefik, so a `traefik { disable }` service may still set
-/// it (`hl_codegen`'s own `traefik_conflict_field` doesn't check it).
+/// `expose 8096` / `expose { port: 8096 }` — Compose's own `expose:`
+/// key, which declares a port visible to other containers on the network
+/// without publishing it to the host.
 ///
-/// `expose <port> as "<host>"` still parses — it's the shortest way to
-/// write the overwhelmingly common single-router service, and it's all
-/// over the book — but it's no longer schema-driven sugar onto a field of
-/// this type the way it was through #197 (`bare_keyword_alias`, see F6 of
-/// #198). `EXPOSE` has no `host` left for `as` to alias onto, so the
-/// parser recognizes the spelling directly and desugars it to `expose {
-/// port }` plus an unnamed `router { host }` — see
-/// `crate::parser::Parser::parse_expose_as_sugar`.
+/// Nothing else. Through #271 this field also fed
+/// `traefik.http.services.<svc>.loadbalancer.server.port`, and before
+/// #198 it modelled a whole Traefik router of its own (`host`,
+/// `entrypoint`). Both are gone — routing is `std:traefik`'s — and what
+/// is left is the plain Compose concern the keyword names.
+///
+/// `expose <port> as "<host>"` went with them. It was the shortest
+/// spelling of the common single-router service and desugared to an
+/// unnamed `router { host }`, a thing this language no longer has. The
+/// parser still recognizes the `as` to say so rather than failing on a
+/// stray token — see [`crate::ParseError::RemovedExposeAsSugar`], raised
+/// where the sugar used to be accepted.
 pub static EXPOSE: TypeSchema = TypeSchema {
     type_name: "expose",
     kind: SchemaKind::Struct,
@@ -270,102 +234,6 @@ pub static EXPOSE: TypeSchema = TypeSchema {
     schema_free: false,
 };
 
-/// `router api { host: "...", entrypoints: web-secure, path_prefix: [...] }`
-/// — one Traefik router computed off this service (#184), repeatable and
-/// keyed by the optional name written right after the keyword.
-///
-/// `router` owns every field that only ever means anything attached to a
-/// Traefik router (#198) — `expose` used to model exactly one router of
-/// its own (`host`, `entrypoint`) and no longer does; see [`EXPOSE`]'s
-/// doc. The unnamed `router { ... }` form is the common single-router
-/// case, and `expose <port> as "<host>"` still reaches it, just via
-/// bespoke parser sugar rather than a field of `expose` itself. A service
-/// that needs several routers — a public host beside a LAN host, an API
-/// path split off from a frontend — names each block instead.
-/// See [`crate::ast::Router`]'s doc for the whole rationale and for why
-/// the name is an `IDENT`.
-///
-/// No `primary_field`, for [`HEALTHCHECK`]'s reason rather than
-/// [`TRAEFIK`]'s: the position right after the keyword is already spoken
-/// for by the router's own name, so there is nowhere for a bare primary
-/// value to go. `host` would otherwise be the obvious candidate — write
-/// it as `router api { host: "..." }` or `router api, host: "..."`
-/// instead.
-///
-/// `entrypoints` is [`FieldKind::ReferenceList`], the same kind
-/// `middleware`/`networks` use. It was spelled `entrypoint` through
-/// #198; #199 renamed it, both because the field is a list and because
-/// the singular collided with `SERVICE_FIELDS`'s own `entrypoint`
-/// (Compose's `ENTRYPOINT` override) — an unrelated field one line away
-/// in the same service body, told apart only by position. `entrypoints`
-/// is also what Traefik's own emitted label spells. `path_prefix` is `FieldKind::ReferenceList`
-/// too (#196) — before #196 it needed its own `LiteralList` kind purely so
-/// a `$param` could reach it, back when a reference-list entry couldn't
-/// carry one; see [`FieldKind::ReferenceList`]'s own doc for why that's no
-/// longer a reason to keep the two kinds apart, and
-/// [`allows_qualified_reference`] for why `path_prefix` still rejects
-/// the qualified form the merge made syntactically reachable here.
-/// `middleware` (#221) is a third reference list on the same footing,
-/// sharing the name — and the grammar — of the service-level field it
-/// overrides for this one router; see [`crate::ast::Router::middleware`]
-/// for why it replaces that list rather than extending it, and
-/// [`resolve_field`]'s own doc for why one name meaning two related
-/// things in two bodies stays unambiguous.
-/// `router` carries no `port`: `loadbalancer.server.port` is per Compose
-/// service, not per router, so it stays [`EXPOSE`]'s.
-pub static ROUTER: TypeSchema = TypeSchema {
-    type_name: "router",
-    kind: SchemaKind::Struct,
-    fields: &[
-        FieldSchema {
-            name: "host",
-            kind: FieldKind::Scalar,
-        },
-        FieldSchema {
-            name: "entrypoints",
-            kind: FieldKind::ReferenceList,
-        },
-        FieldSchema {
-            name: "path_prefix",
-            kind: FieldKind::ReferenceList,
-        },
-        // #228's whole-rule spelling, which `host`/`path_prefix` above
-        // are the sugar for. Mutually exclusive with them, checked in
-        // codegen where the rule is actually assembled.
-        FieldSchema {
-            name: "rule",
-            kind: FieldKind::MatchExpr,
-        },
-        FieldSchema {
-            name: "middleware",
-            kind: FieldKind::ReferenceList,
-        },
-        // #225's three additions. `priority` and `port` are plain
-        // numbers; `protocol` names one of Traefik's two router
-        // namespaces and is checked in codegen, not here, so a template
-        // can still parameterize it — see [`crate::ast::Router`].
-        FieldSchema {
-            name: "priority",
-            kind: FieldKind::Scalar,
-        },
-        FieldSchema {
-            name: "port",
-            kind: FieldKind::Scalar,
-        },
-        FieldSchema {
-            name: "protocol",
-            kind: FieldKind::Scalar,
-        },
-    ],
-    primary_field: None,
-    map_separator: None,
-    uniqueness: None,
-    key_may_be_reference: false,
-    needs_name: false,
-    schema_free: false,
-};
-
-/// `restart unless-stopped` / `restart { policy: "unless-stopped" }`.
 pub static RESTART: TypeSchema = TypeSchema {
     type_name: "restart",
     kind: SchemaKind::Struct,
@@ -442,76 +310,6 @@ pub static HEALTHCHECK: TypeSchema = TypeSchema {
             kind: FieldKind::BoolFlag,
         },
     ],
-    primary_field: None,
-    map_separator: None,
-    uniqueness: None,
-    key_may_be_reference: false,
-    needs_name: false,
-    schema_free: false,
-};
-
-/// `traefik { disable }` — the one way to opt a service out of every
-/// Traefik label `hl-codegen`'s `labels.rs` otherwise computes for it
-/// (#159). `disable` mirrors [`HEALTHCHECK`]'s `disable` and
-/// [`NETWORK`]'s `external` exactly: a bare-presence
-/// [`FieldKind::BoolFlag`], with no `disable: false` form this
-/// milestone.
-///
-/// Spelled `disabled` through #198. #199 renamed it: `healthcheck {
-/// disable }` and `traefik { disabled }` could sit on adjacent lines of
-/// one service body, two spellings of one idea whose difference meant
-/// nothing, and `disable` is what Compose itself calls the key this
-/// mirrors.
-///
-/// **Rejected alternative: `traefik disable`, no braces.** The issue
-/// that motivated this field (#159) floats that spelling first, but it
-/// doesn't fit the schema engine without bending it. A bare, brace-free
-/// form only exists for a type with a `primary_field`
-/// (docs/DESIGN.md's desugaring rule 1), and
-/// `parse_struct_primary_shorthand`'s only bare-value path parses a
-/// *literal* (`self.parse_literal()`) — it has no notion of "the bare
-/// word names one of my own sub-fields," which is what `disable` would
-/// have to mean here. Making `disable` a primary field can't work
-/// either way that keeps faith with what a primary field means
-/// elsewhere: `FieldKind::BoolFlag` carries no value beyond its own bare
-/// presence, so there's no *value* for `traefik disable` to hand the
-/// primary-shorthand parser, only a second field name masquerading as
-/// one. Reaching `traefik disable` regardless would mean either
-/// treating the identifier `disable` as a magic scalar payload (special
-/// syntax for this one field, invisible to `resolve_field`) or teaching
-/// the primary-shorthand parser a "bare keyword names a sub-field"
-/// grammar no other type uses — both routes bend the generic engine
-/// around one field instead of reusing it, which is exactly what
-/// `schema.rs`'s table-driven design exists to avoid (see this module's
-/// own doc).
-///
-/// #199 asked again whether a bare [`FieldKind::BoolFlag`] should be
-/// allowed to serve as a `primary_field`, and the answer stayed no —
-/// not because the parser change would be large, but because it would
-/// have exactly one inhabitant. [`HEALTHCHECK`] can't take it (no one
-/// sub-field stands in for a whole health check, and making `disable`
-/// its primary would trade a clear "expected `{`" for a confusing one
-/// on the far commoner `healthcheck "curl -f ..."` mistake), and
-/// [`NETWORK`]/[`ROUTER`] both spend the position a primary value would
-/// occupy on their own name. #198's F6 deleted
-/// `TypeSchema::bare_keyword_alias` for being generic schema data with
-/// one inhabitant; adding another would undo that lesson to save two
-/// braces.
-///
-/// `traefik { disable }` costs nothing beyond what
-/// `healthcheck { disable }` and `network n { external }` already pay
-/// for, and — being `Nested` rather than a bare `BoolFlag` field
-/// directly on `SERVICE_FIELDS` — leaves a namespace open for a future
-/// Traefik knob (a router priority, a TLS resolver name, ...) to land in
-/// without inventing a second `traefik`-prefixed field name or promoting
-/// this to its own top-level type.
-pub static TRAEFIK: TypeSchema = TypeSchema {
-    type_name: "traefik",
-    kind: SchemaKind::Struct,
-    fields: &[FieldSchema {
-        name: "disable",
-        kind: FieldKind::BoolFlag,
-    }],
     primary_field: None,
     map_separator: None,
     uniqueness: None,
@@ -850,8 +648,8 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
     // same reason: Compose gives both keys the identical
     // shell-string-or-exec-list pair of forms.
     //
-    // Through #198 this name was shared with [`ROUTER`]'s own entry-point
-    // list, an unrelated reference list of Traefik entry-point names —
+    // Through #198 this name was shared with a `router`'s own
+    // entry-point list, an unrelated reference list of Traefik names —
     // the same two-roles-one-identifier situation `volume` is still in
     // (see [`top_level_type`]'s doc). It was never ambiguous to the
     // parser, since a field name is only ever resolved through
@@ -873,23 +671,6 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
     FieldSchema {
         name: "expose",
         kind: FieldKind::Nested(&EXPOSE),
-    },
-    // `router name { ... }` (#184) sits next to `expose` for the same
-    // reason `traefik` does: the three jointly decide which Traefik
-    // routers a service gets, so `hl-codegen`'s `labels.rs` reads them
-    // as one related group. Repeatable and name-keyed, unlike `expose`,
-    // which stays exactly the single-router field it has always been.
-    FieldSchema {
-        name: "router",
-        kind: FieldKind::NamedNested(&ROUTER),
-    },
-    // `traefik { disable }` (#159) sits next to `expose` on purpose:
-    // the two jointly decide whether — and how — a service gets a
-    // Traefik router, so `hl-codegen`'s `labels.rs` reads them as one
-    // related pair.
-    FieldSchema {
-        name: "traefik",
-        kind: FieldKind::Nested(&TRAEFIK),
     },
     // `labels { "key": "value" }` (#243) completes the group: `router`,
     // `expose` and `traefik` decide which labels are *computed*, and
@@ -925,10 +706,9 @@ static SERVICE_FIELDS: &[FieldSchema] = &[
         name: "raw",
         kind: FieldKind::Nested(&RAW),
     },
-    // No `middleware` row: #221 moved it onto [`ROUTER`] outright, since
-    // a middleware only ever reaches Traefik as a label on one specific
-    // router and a service-wide list couldn't say that two routers off
-    // one container need different ones. A body that still writes it
+    // No `middleware` row: #221 moved it onto `router`, and #271 moved
+    // routing itself out of the compiler, so a middleware is one more
+    // label `std:traefik` writes. A body that still writes the field
     // here resolves through [`moved_field`] instead of falling through
     // to `UnknownField`.
     FieldSchema {
@@ -1113,20 +893,24 @@ pub enum FieldResolution {
 /// to a better error.
 pub fn moved_field(schema: &'static TypeSchema, key_text: &str) -> Option<&'static str> {
     match (schema.type_name, key_text) {
-        // #221: `middleware` moved onto `router`. See [`ROUTER`].
-        ("service" | "template", "middleware") => Some(
-            "move it inside the `router` block it applies to (`router { host: \"...\", middleware: ... }`)",
+        // #271 took routing out of the compiler. These are the names a
+        // file written against any earlier release still carries, and
+        // `UnknownField` would answer them with its `raw { ... }` hint —
+        // actively wrong advice here, since `raw` replaces the whole
+        // computed label list rather than adding to it. So the names
+        // stay recognized purely to say where routing went.
+        ("service" | "template", "router") => Some(
+            "routing moved to `std:traefik`: `use \"std:traefik\" as traefik`, then \
+             `with traefik.http { host: \"...\", port: ... }`",
         ),
-        // #199: renamed to the plural, which is what the field has been
-        // since it became a list and what Traefik's own label spells.
-        ("router", "entrypoint") => {
-            Some("it's spelled `entrypoints`, a list matching Traefik's own `entrypoints=` label")
-        }
-        // #199: renamed to match `healthcheck { disable }` and Compose's
-        // own key. See [`TRAEFIK`].
-        ("traefik", "disabled") => {
-            Some("it's spelled `disable`, matching `healthcheck { disable }`")
-        }
+        ("service" | "template", "traefik") => Some(
+            "`traefik { disable }` moved to `std:traefik`: `use \"std:traefik\" as traefik`, \
+             then `with traefik.disable`",
+        ),
+        ("service" | "template", "middleware") => Some(
+            "a middleware is a label on one router now: `with traefik.http_middlewares \
+             { router: \"{{name}}\", middlewares: [\"auth@file\"] }` from `std:traefik`",
+        ),
         _ => None,
     }
 }

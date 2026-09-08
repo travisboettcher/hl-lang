@@ -13,13 +13,11 @@
 //! the pending diffs one at a time — reading each one is the point,
 //! because accepting a snapshot claims the new output is correct.
 
-use hl_codegen::{CodegenError, CodegenWarning, LabelFeature, generate};
+use hl_codegen::{CodegenError, CodegenWarning, generate};
 use hl_parser::{compose, parse};
 use insta::assert_yaml_snapshot;
 
-const SYNCTHING: &str = include_str!("../../hl-parser/tests/fixtures/syncthing.hll");
 const RAW_SERVICE: &str = include_str!("../../hl-parser/tests/fixtures/raw_service.hll");
-const JELLYFIN: &str = include_str!("../../hl-parser/tests/fixtures/jellyfin.hll");
 
 fn generate_from(source: &str) -> String {
     let program = parse(source).unwrap_or_else(|err| panic!("unexpected parse error: {err}"));
@@ -38,45 +36,6 @@ fn generate_err(source: &str) -> CodegenError {
 fn yaml_value(rendered: &str) -> serde_yaml_ng::Value {
     serde_yaml_ng::from_str(rendered)
         .unwrap_or_else(|err| panic!("output isn't valid YAML: {err}\n{rendered}"))
-}
-
-/// The design doc's own worked composition example, checked against the
-/// real, currently-deployed `syncthing/docker-compose.yml` this
-/// milestone was grounded in. Not byte-for-byte — the fixture doesn't
-/// express the real file's `TZ` env var or its extra bind mount, and per
-/// the confirmed decision this codegen always emits `expose:` even
-/// though the real file omits it — but everything the fixture *does*
-/// express should come out matching the real file's shape exactly.
-#[test]
-fn syncthing_matches_real_deployed_service() {
-    let yaml = generate_from(SYNCTHING);
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      syncthing:
-        image: "lscr.io/linuxserver/syncthing:latest"
-        restart: unless-stopped
-        environment:
-          - PUID=1000
-          - PGID=100
-        volumes:
-          - "syncthing-config:/config"
-        networks:
-          - traefik-net
-        expose:
-          - 8384
-        labels:
-          - traefik.docker.network=docker_default
-          - "traefik.http.routers.syncthing.rule=Host(`syncthing.internal.techdebtor.io`)"
-          - traefik.http.routers.syncthing.entrypoints=web-secure
-          - "traefik.http.routers.syncthing.middlewares=local-ipwhitelist@file,forwardAuth-authentik@file"
-          - traefik.http.services.syncthing.loadbalancer.server.port=8384
-    networks:
-      traefik-net:
-        name: docker_default
-        external: true
-    volumes:
-      syncthing-config: ~
-    "#);
 }
 
 /// `cadvisor`'s host-access knobs, matching the real
@@ -113,28 +72,6 @@ fn cadvisor_raw_passthrough_matches_real_service() {
           - "/dev/kmsg:/dev/kmsg"
         security_opt:
           - "seccomp:unconfined"
-    "#);
-}
-
-/// A plain service with no templates, no networks, no middleware — the
-/// minimal path should still produce a valid, complete Compose doc.
-#[test]
-fn jellyfin_plain_service_produces_minimal_doc() {
-    let yaml = generate_from(JELLYFIN);
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      jellyfin:
-        image: "jellyfin/jellyfin:latest"
-        restart: unless-stopped
-        environment:
-          - PUID=1000
-        volumes:
-          - "/mnt/media:/data"
-        expose:
-          - 8096
-        labels:
-          - "traefik.http.routers.jellyfin.rule=Host(`media.techdebtor.io`)"
-          - traefik.http.services.jellyfin.loadbalancer.server.port=8096
     "#);
 }
 
@@ -737,34 +674,6 @@ fn raw_entrypoint_overrides_the_built_in_entrypoint() {
     ");
 }
 
-/// The service-level `entrypoint` field and `router`'s own
-/// `entrypoints` sub-field are two unrelated things, and a service
-/// setting both emits both: a Compose `entrypoint:` key for the first
-/// and a Traefik `entrypoints=` label for the second.
-#[test]
-fn service_entrypoint_and_router_entrypoints_reach_different_output() {
-    let yaml = generate_from(
-        "service web {\n  \
-           image \"nginx\"\n  \
-           entrypoint \"/bin/sh -c 'do-a-thing'\"\n  \
-           expose 8080\n  \
-           router {\n    host: \"web.example.com\"\n    entrypoints: web-secure\n  }\n\
-         }\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      web:
-        image: nginx
-        entrypoint: "/bin/sh -c 'do-a-thing'"
-        expose:
-          - 8080
-        labels:
-          - "traefik.http.routers.web.rule=Host(`web.example.com`)"
-          - traefik.http.routers.web.entrypoints=web-secure
-          - traefik.http.services.web.loadbalancer.server.port=8080
-    "#);
-}
-
 // --- depends_on (#155) ---
 //
 // Every fixture below declares at least two services, since a
@@ -1085,72 +994,6 @@ fn parameterized_network_naming_something_undeclared_is_still_unknown_network() 
     ));
 }
 
-/// The same gap #196 closed for `networks`, checked for `middleware`
-/// (a `router` field since #221): before the unification a
-/// `Reference`-typed entry could never carry a `$param` either. The
-/// substituted argument must reach the generated `middlewares=` label as
-/// itself, not as the parameter's own name (#168's bug class, reproduced
-/// in a new position if this regressed).
-#[test]
-fn parameterized_middleware_reaches_the_middlewares_label() {
-    let yaml = generate_from(
-        "template protected(mw) {\n  expose 80\n  \
-           router { host: \"a.example.com\"\n    middleware: $mw }\n}\n\
-         service app {\n  image \"nginx\"\n  with protected { mw: \"forwardAuth-authentik\" }\n}\n",
-    );
-    let value = yaml_value(&yaml);
-    let labels = value["services"]["app"]["labels"]
-        .as_sequence()
-        .expect("labels should be a sequence");
-    let labels: Vec<&str> = labels.iter().map(|l| l.as_str().unwrap()).collect();
-    assert!(
-        labels.contains(&"traefik.http.routers.app.middlewares=forwardAuth-authentik@file"),
-        "expected the substituted middleware name in the label, got {labels:?}"
-    );
-}
-
-/// Hard constraint (#196): the Traefik metacharacter guard has to keep
-/// applying to exactly the values it applied to before — including a
-/// `$param` substituted into a router's `host` (`expose <port> as
-/// $host`'s own sugared unnamed router, since #198), which already went
-/// through the guard pre-#196 (a router's `host` was always
-/// `Literal`-typed), and a `$param` substituted into a router's
-/// `middleware`, which is new since #196 gave that position a `Literal`
-/// slot for the first time. Both must still be rejected.
-#[test]
-fn traefik_guard_still_applies_to_a_substituted_param() {
-    let host_err = generate_err(
-        "template site(host) {\n  expose 80 as $host\n}\n\
-         service app {\n  image \"nginx\"\n  with site { host: \"ok`) || HostRegexp(`{any:.+}\" }\n}\n",
-    );
-    assert!(
-        matches!(
-            host_err,
-            CodegenError::UnsafeLabelValue {
-                field: "router.host",
-                ..
-            }
-        ),
-        "expected UnsafeLabelValue for router.host, got {host_err:?}"
-    );
-
-    let middleware_err = generate_err(
-        "template protected(mw) {\n  expose 80\n  \
-           router { host: \"a.example.com\"\n    middleware: $mw }\n}\n\
-         service app {\n  image \"nginx\"\n  with protected { mw: \"a,b\" }\n}\n",
-    );
-    assert!(
-        matches!(
-            middleware_err,
-            CodegenError::UnsafeLabelValue {
-                field: "router.middleware",
-                ..
-            }
-        ),
-        "expected UnsafeLabelValue for router.middleware, got {middleware_err:?}"
-    );
-}
-
 /// #70: the error used to carry the enclosing service's span, so an
 /// undeclared network on line 4 was reported at `1:1`. It now points at
 /// the offending reference itself.
@@ -1167,71 +1010,6 @@ fn unknown_network_error_points_at_the_offending_reference() {
         "expected the span of `nope`, got {}:{}",
         span.line,
         span.col
-    );
-}
-
-/// The ambiguity is a property of the service's whole `networks` list —
-/// no one reference is at fault — so this one deliberately keeps
-/// pointing at the service.
-#[test]
-fn ambiguous_external_network_error_points_at_the_service() {
-    let err = generate_err(
-        "network a {\n  external\n}\n\
-         network b {\n  external\n}\n\
-         service s {\n  image \"x\"\n  networks [a, b]\n}\n",
-    );
-    assert!(matches!(
-        err,
-        CodegenError::AmbiguousExternalNetwork { ref service, .. } if service == "s"
-    ));
-    let span = err.span();
-    assert_eq!((span.line, span.col), (7, 1));
-}
-
-/// #69: one external network named by several tiers is one answer given
-/// repeatedly, not an ambiguity between it and itself. Composition drops
-/// the repeated `networks` entries, and the label resolves to the single
-/// real name rather than erroring out.
-#[test]
-fn external_network_named_by_several_tiers_is_not_ambiguous() {
-    let yaml = generate_from(
-        "network proxy {\n  external\n  name: \"docker_default\"\n}\n\
-         template a {\n  networks [proxy]\n}\n\
-         template b {\n  networks [proxy]\n}\n\
-         service web {\n  image \"nginx\"\n  with a, b\n  networks [proxy]\n}\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&yaml), @"
-    services:
-      web:
-        image: nginx
-        networks:
-          - proxy
-        labels:
-          - traefik.docker.network=docker_default
-    networks:
-      proxy:
-        name: docker_default
-        external: true
-    ");
-}
-
-/// Two distinct declarations that resolve to the *same* real name are
-/// not an ambiguity either: the check is on distinct real names, so
-/// there is still only one answer `traefik.docker.network` could take.
-/// (Two genuinely different external networks remain an error — see
-/// `ambiguous_external_network_error_points_at_the_service`.)
-#[test]
-fn two_declarations_sharing_one_real_name_are_not_ambiguous() {
-    let yaml = generate_from(
-        "network a {\n  external\n  name: \"shared_real\"\n}\n\
-         network b {\n  external\n  name: \"shared_real\"\n}\n\
-         service s {\n  image \"x\"\n  networks [a, b]\n}\n",
-    );
-    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-    let labels = &value["services"]["s"]["labels"];
-    assert_eq!(
-        labels,
-        &serde_yaml_ng::Value::from(vec!["traefik.docker.network=shared_real"])
     );
 }
 
@@ -1305,38 +1083,6 @@ fn explicit_default_reference_plus_auto_attach_is_not_duplicated() {
         value["services"]["app"]["networks"],
         serde_yaml_ng::Value::from(vec!["default"])
     );
-}
-
-/// An explicit `network default { ... }` declaration still wins over the
-/// implicit fallback: its `external`/`name` settings are honored exactly
-/// as any other declared network's, and it still emits its own top-level
-/// `networks:` entry — the implicit, doc-free `default` is only a
-/// fallback for when no declaration exists at all.
-#[test]
-fn explicit_default_declaration_is_honored_and_emitted() {
-    let yaml = generate_from(
-        "network default {\n  external\n  name: \"shared_net\"\n}\n\
-         service app {\n  image \"app\"\n}\nservice db {\n  image \"postgres:15\"\n}\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      app:
-        image: app
-        networks:
-          - default
-        labels:
-          - traefik.docker.network=shared_net
-      db:
-        image: "postgres:15"
-        networks:
-          - default
-        labels:
-          - traefik.docker.network=shared_net
-    networks:
-      default:
-        name: shared_net
-        external: true
-    "#);
 }
 
 /// #152's note on `UnusedNetwork`: auto-attach feeds `default` into the
@@ -1576,84 +1322,12 @@ fn missing_image_and_build_is_error() {
 
 #[test]
 fn unknown_interpolation_is_error() {
-    let err =
-        generate_err("service s {\n  image \"x\"\n  expose 80 as \"{{typo}}.example.com\"\n}\n");
+    let err = generate_err(
+        "service s {\n  image \"x\"\n  labels { \"k\": \"{{typo}}.example.com\" }\n}\n",
+    );
     assert!(matches!(
         err,
         CodegenError::UnknownInterpolation { binding, .. } if binding == "typo"
-    ));
-}
-
-/// #65: a backtick in a router's `host` used to compile to a valid
-/// Traefik rule matching every host, since `Host()`'s value has no
-/// escape for its own delimiter.
-#[test]
-fn backtick_in_expose_host_is_error() {
-    let err = generate_err(
-        "service s {\n  image \"x\"\n  expose 80 as \"ok.example.com`) || HostRegexp(`{any:.+}\"\n}\n",
-    );
-    assert!(matches!(
-        err,
-        CodegenError::UnsafeLabelValue {
-            field: "router.host",
-            character: '`',
-            ..
-        }
-    ));
-}
-
-/// hl-lang#73: several entry points are several list entries, joined by
-/// codegen into the one `entrypoints=` label Traefik expects — end to
-/// end, through the real parse/compose/generate pipeline.
-#[test]
-fn several_entrypoints_join_into_one_label() {
-    let yaml = generate_from(
-        "service s {\n  image \"x\"\n  expose 80\n  router {\n    host: \"ok.example.com\"\n    entrypoints: web, web-secure\n  }\n}\n",
-    );
-    assert!(
-        yaml.contains("traefik.http.routers.s.entrypoints=web,web-secure"),
-        "expected a joined entrypoints label, got:\n{yaml}"
-    );
-}
-
-/// hl-lang#73: the flip side — `entrypoints` used to be a scalar where
-/// `"web,web-secure"` was the *only* way to name two entry points, so
-/// this exact spelling used to compile. It's rejected now, and the
-/// message says to use the list instead.
-#[test]
-fn comma_inside_one_entrypoints_entry_is_error_with_a_list_hint() {
-    let err = generate_err(
-        "service s {\n  image \"x\"\n  expose 80\n  router {\n    host: \"ok.example.com\"\n    entrypoints: \"web,web-secure\"\n  }\n}\n",
-    );
-    assert!(matches!(
-        err,
-        CodegenError::UnsafeLabelValue {
-            field: "router.entrypoints",
-            character: ',',
-            ..
-        }
-    ));
-    assert!(
-        err.to_string().contains("`entrypoints` is a list"),
-        "expected a list hint, got: {err}"
-    );
-}
-
-/// #65: `middlewares=` is a single comma-joined label, so a comma
-/// inside one name silently became two references.
-#[test]
-fn comma_in_middleware_reference_is_error() {
-    let err = generate_err(
-        "service s {\n  image \"x\"\n  expose 80\n  \
-           router { host: \"ok.example.com\"\n    middleware: [\"a,b\"] }\n}\n",
-    );
-    assert!(matches!(
-        err,
-        CodegenError::UnsafeLabelValue {
-            field: "router.middleware",
-            character: ',',
-            ..
-        }
     ));
 }
 
@@ -1798,74 +1472,6 @@ fn raw_key_shadowing_a_built_in_field_overrides_it() {
     ");
 }
 
-/// The sharp edge of override semantics, asserted deliberately: `raw`'s
-/// `labels` replaces the computed Traefik labels wholesale rather than
-/// merging with them. Merging would make `raw` something other than
-/// verbatim passthrough.
-///
-/// The output is unchanged by #232 — what changed is that it no longer
-/// happens in silence; see
-/// `raw_labels_beside_a_router_warn_that_they_replace_it`.
-#[test]
-fn raw_labels_replace_the_computed_traefik_labels() {
-    let yaml = generate_from(
-        "service web {\n  \
-           image \"nginx\"\n  \
-           expose 8080 as \"web.example.com\"\n  \
-           raw {\n    labels: [\"only.this=1\"]\n  }\n\
-         }\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&yaml), @"
-    services:
-      web:
-        image: nginx
-        expose:
-          - 8080
-        labels:
-          - only.this=1
-    ");
-}
-
-/// #232: the replacement above is now *said*, not just done. `labels`
-/// isn't one field from the language's own perspective — it's what
-/// `router`, `expose`, `traefik`, and the resolved Docker network add up
-/// to — so a service with both a `router` and a `raw { labels: ... }`
-/// loses the whole computed set, which is the one override that reliably
-/// surprises people. A warning, deliberately: the build still succeeds
-/// and the document is unchanged.
-#[test]
-fn raw_labels_beside_a_router_warn_that_they_replace_it() {
-    let program = parse(
-        "service web {\n  \
-           image \"nginx\"\n  \
-           expose 8080\n  \
-           router {\n    host: \"web.example.com\"\n  }\n  \
-           raw {\n    labels: [\"only.this=1\"]\n  }\n\
-         }\n",
-    )
-    .unwrap();
-    let composed = compose(program).unwrap();
-    let generated = generate(composed).expect("replacing the labels is legal, not an error");
-
-    assert!(
-        matches!(
-            generated.warnings.as_slice(),
-            [CodegenWarning::RawLabelsReplaceGenerated { service, .. }] if service == "web"
-        ),
-        "expected one raw-labels warning, got: {:?}",
-        generated.warnings
-    );
-    // The span is the `labels` key inside the `raw` body — the line the
-    // author has to edit, not the `router` block it silently displaced.
-    assert_eq!(
-        generated.warnings[0].to_string(),
-        "8:5: warning: `raw { labels: ... }` replaces service `web`'s generated Traefik labels \
-         rather than adding to them, so every label `router`, `expose`, and `traefik` would \
-         have produced is dropped — use a `labels { ... }` block to add labels to the computed \
-         set instead, or reproduce the ones you still need in this list"
-    );
-}
-
 /// The warning is conditioned on there being something to lose, not on
 /// which fields the service happens to declare: a service that generates
 /// no labels at all has nothing for `raw { labels: ... }` to replace, so
@@ -1888,398 +1494,11 @@ fn raw_labels_on_a_service_with_no_computed_labels_say_nothing() {
     );
 }
 
-/// `traefik { disable }` generates exactly one label, and losing it
-/// re-enables Traefik for the service — the smallest computed set there
-/// is, and the one most worth hearing about. It warns like any other.
+/// A service that writes no labels emits no `labels:` key at all.
+/// `expose <port>` alone stays legal and says nothing about routing —
+/// it's Compose's own `expose:` key.
 #[test]
-fn raw_labels_over_a_disabled_services_label_warn_too() {
-    let program = parse(
-        "service db {\n  \
-           image \"postgres:15\"\n  \
-           traefik { disable }\n  \
-           raw {\n    labels: [\"only.this=1\"]\n  }\n\
-         }\n",
-    )
-    .unwrap();
-    let composed = compose(program).unwrap();
-    let generated = generate(composed).unwrap();
-    assert!(
-        matches!(
-            generated.warnings.as_slice(),
-            [CodegenWarning::RawLabelsReplaceGenerated { service, .. }] if service == "db"
-        ),
-        "expected one raw-labels warning, got: {:?}",
-        generated.warnings
-    );
-}
-
-/// A `raw` key that isn't `labels` never warns, however many labels the
-/// service computes — the override rule is only a footgun for the one
-/// key that is an aggregate of several features.
-#[test]
-fn a_raw_key_other_than_labels_beside_a_router_says_nothing() {
-    let program = parse(
-        "service web {\n  \
-           image \"nginx\"\n  \
-           expose 8080\n  \
-           router {\n    host: \"web.example.com\"\n  }\n  \
-           raw {\n    security_opt: [\"seccomp=unconfined\"]\n  }\n\
-         }\n",
-    )
-    .unwrap();
-    let composed = compose(program).unwrap();
-    let generated = generate(composed).unwrap();
-    assert!(
-        generated.warnings.is_empty(),
-        "unexpected warnings: {:?}",
-        generated.warnings
-    );
-}
-
-/// Every field `ComposeServiceDoc` serializes is overridable, checked in
-/// one shot — if a new built-in field is ever added without an override
-/// rule, this fails (with a duplicate-key parse error) alongside the
-/// exhaustive destructure in `doc.rs` that won't compile without one.
-#[test]
-fn every_built_in_field_is_overridable_by_raw() {
-    let yaml = generate_from(
-        "network traefik-net {\n  external\n  name: \"docker_default\"\n}\n\
-         volume web-data {}\n\
-         service database {\n  image \"postgres\"\n}\n\
-         service web {\n  \
-           image \"nginx\"\n  \
-           container_name \"web-ctr\"\n  \
-           command \"npm start\"\n  \
-           privileged\n  \
-           restart unless-stopped\n  \
-           healthcheck { test: \"curl -f http://localhost\" }\n  \
-           env PUID = \"1000\"\n  \
-           env_file \"web.env\"\n  \
-           volume web-data -> \"/data\"\n  \
-           networks [traefik-net]\n  \
-           dns [\"192.168.50.182\"]\n  \
-           devices \"/dev/original\" -> \"/dev/original\"\n  \
-           publish 8080 -> 8080\n  \
-           expose 8080 as \"web.example.com\"\n  \
-           depends_on database\n  \
-           raw {\n    \
-             image: \"raw-image\"\n    \
-             container_name: \"raw-name\"\n    \
-             command: [\"raw-command\"]\n    \
-             privileged: false\n    \
-             restart: \"always\"\n    \
-             healthcheck: { test: \"raw-test\" }\n    \
-             environment: [\"RAW=1\"]\n    \
-             env_file: [\"raw.env\"]\n    \
-             volumes: [\"raw-vol:/raw\"]\n    \
-             networks: [\"raw-net\"]\n    \
-             dns: [\"1.1.1.1\"]\n    \
-             devices: [\"/dev/raw:/dev/raw\"]\n    \
-             ports: [\"7777:7777\"]\n    \
-             expose: [9999]\n    \
-             depends_on: [\"raw-dep\"]\n    \
-             labels: [\"raw.label=1\"]\n  \
-           }\n\
-         }\n",
-    );
-    let parsed = yaml_value(&yaml);
-    let web = &parsed["services"]["web"];
-    assert_yaml_snapshot!(web, @r#"
-    image: raw-image
-    container_name: raw-name
-    command:
-      - raw-command
-    privileged: false
-    restart: always
-    healthcheck:
-      test: raw-test
-    environment:
-      - RAW=1
-    env_file:
-      - raw.env
-    volumes:
-      - "raw-vol:/raw"
-    networks:
-      - raw-net
-    dns:
-      - 1.1.1.1
-    devices:
-      - "/dev/raw:/dev/raw"
-    ports:
-      - "7777:7777"
-    expose:
-      - 9999
-    depends_on:
-      - raw-dep
-    labels:
-      - raw.label=1
-    "#);
-}
-
-/// Overriding the service's own `volumes:`/`networks:` keys doesn't
-/// retract the top-level `volumes:`/`networks:` declarations codegen
-/// derived from the built-in fields. `raw`'s values are unparsed, so
-/// there's no way to re-derive those declarations from the replacement
-/// — and keeping them is what lets a `raw` value that names the same
-/// named volume or network still resolve.
-#[test]
-fn raw_override_keeps_the_top_level_volume_and_network_declarations() {
-    let yaml = generate_from(
-        "network traefik-net {\n  external\n  name: \"docker_default\"\n}\n\
-         volume web-data {}\n\
-         service web {\n  \
-           image \"nginx\"\n  \
-           volume web-data -> \"/data\"\n  \
-           networks [traefik-net]\n  \
-           raw {\n    \
-             volumes: [\"web-data:/elsewhere\"]\n    \
-             networks: [\"traefik-net\"]\n  \
-           }\n\
-         }\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      web:
-        image: nginx
-        labels:
-          - traefik.docker.network=docker_default
-        volumes:
-          - "web-data:/elsewhere"
-        networks:
-          - traefik-net
-    networks:
-      traefik-net:
-        name: docker_default
-        external: true
-    volumes:
-      web-data: ~
-    "#);
-}
-
-/// The symmetric half of `every_built_in_field_is_overridable_by_raw`:
-/// a `raw` block that names *other* keys leaves every built-in field
-/// alone. Same service, same `raw` arity — only the keys differ — so
-/// the two together pin the override to key equality rather than to
-/// "there is a `raw` block".
-///
-/// `web`'s `networks:` list ends with `default` alongside its explicit
-/// `traefik-net` — this fixture declares two services, so #152's
-/// auto-attach reaches it too.
-#[test]
-fn raw_leaves_built_in_fields_it_does_not_name_alone() {
-    let yaml = generate_from(
-        "network traefik-net {\n  external\n  name: \"docker_default\"\n}\n\
-         volume web-data {}\n\
-         service database {\n  image \"postgres\"\n}\n\
-         service web {\n  \
-           image \"nginx\"\n  \
-           container_name \"web-ctr\"\n  \
-           command \"npm start\"\n  \
-           restart unless-stopped\n  \
-           healthcheck { test: \"curl -f http://localhost\" }\n  \
-           env PUID = \"1000\"\n  \
-           env_file \"web.env\"\n  \
-           volume web-data -> \"/data\"\n  \
-           networks [traefik-net]\n  \
-           dns [\"192.168.50.182\"]\n  \
-           publish 8080 -> 8080\n  \
-           expose 8080 as \"web.example.com\"\n  \
-           depends_on database\n  \
-           raw {\n    privileged: true\n    cap_add: [\"NET_ADMIN\"]\n  }\n\
-         }\n",
-    );
-    let parsed = yaml_value(&yaml);
-    let web = &parsed["services"]["web"];
-    assert_yaml_snapshot!(web, @r#"
-    image: nginx
-    container_name: web-ctr
-    command: npm start
-    restart: unless-stopped
-    healthcheck:
-      test: "curl -f http://localhost"
-    environment:
-      - PUID=1000
-    env_file:
-      - web.env
-    volumes:
-      - "web-data:/data"
-    networks:
-      - traefik-net
-      - default
-    dns:
-      - 192.168.50.182
-    ports:
-      - "8080:8080"
-    expose:
-      - 8080
-    depends_on:
-      - database
-    labels:
-      - traefik.docker.network=docker_default
-      - "traefik.http.routers.web.rule=Host(`web.example.com`)"
-      - traefik.http.services.web.loadbalancer.server.port=8080
-    privileged: true
-    cap_add:
-      - NET_ADMIN
-    "#);
-}
-
-/// Values that look like YAML structure — `: `, a leading/embedded `#`,
-/// a NUL byte, flow/indicator characters — have to survive the round
-/// trip *as data*, on every channel a user-supplied string can reach:
-/// `container_name`, `env` values, volume paths, an external network's
-/// or volume's real `name` (the network's also lands inside a Traefik
-/// label), and both keys and values inside `raw`. If the serializer ever emitted one of these
-/// unquoted, the reparse below wouldn't just differ — it would come back
-/// with a different *shape* (an extra nested mapping, a truncated value
-/// where a `#` started a comment), which is exactly the YAML-structure
-/// injection this pins shut.
-///
-/// This is the invariant #126 had to preserve when the workspace moved
-/// off the deprecated `serde_yaml` to `serde_yaml_ng`, so it's asserted
-/// here rather than left implicit in the fixture-shaped tests above —
-/// it's the property that has to hold across *any* future swap of the
-/// underlying YAML library, not just that one.
-///
-/// A literal newline is covered too, since #181 gave `STRING` the `\n`
-/// escape that expresses one. It's the most structural character YAML
-/// has — an unquoted one would end the scalar and start a new line of
-/// document — so it belongs on every channel above rather than only on
-/// the `raw` value that motivated the escape.
-#[test]
-fn yaml_hostile_values_round_trip_as_data_not_structure() {
-    let yaml = generate_from(
-        "network shared {\n  \
-           external\n  \
-           name: \"net: with # hash\"\n\
-         }\n\
-         volume hostile-vol {\n  \
-           name: \"vol: name # hash\"\n\
-         }\n\
-         service web {\n  \
-           image \"nginx\"\n  \
-           container_name \"ctr: name # here\"\n  \
-           env COLON = \"value: with colon\"\n  \
-           env HASH = \"value # with hash\"\n  \
-           env NUL = \"value\0with nul\"\n  \
-           env FLOW = \"[a, b]{c: d}\"\n  \
-           env ANCHOR = \"&anchor *alias\"\n  \
-           env NEWLINE = \"first\\nsecond: value\"\n  \
-           volume hostile-vol -> \"/mnt/# hash\"\n  \
-           networks [shared]\n  \
-           raw {\n    \
-             colon_val: \"raw: colon value\"\n    \
-             hash_val: \"raw # hash value\"\n    \
-             nul_val: \"raw\0nul\"\n    \
-             newline_val: \"raw\\nnewline: value\"\n    \
-             nested: {\n      \
-               \"key: with colon\": \"v1\"\n      \
-               \"key # with hash\": \"v2\"\n    \
-             }\n  \
-           }\n\
-         }\n",
-    );
-    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml)
-        .unwrap_or_else(|err| panic!("output isn't valid YAML: {err}\n{yaml}"));
-    let web = &parsed["services"]["web"];
-
-    /// Shorthand for the YAML string a value is expected to come back as.
-    fn s(text: &str) -> serde_yaml_ng::Value {
-        serde_yaml_ng::Value::String(text.to_string())
-    }
-
-    assert_eq!(web["container_name"], s("ctr: name # here"));
-
-    let env: Vec<&str> = web["environment"]
-        .as_sequence()
-        .expect("environment is a sequence")
-        .iter()
-        .map(|v| v.as_str().expect("env entry is a string"))
-        .collect();
-    assert_eq!(
-        env,
-        vec![
-            "COLON=value: with colon",
-            "HASH=value # with hash",
-            "NUL=value\0with nul",
-            "FLOW=[a, b]{c: d}",
-            "ANCHOR=&anchor *alias",
-            "NEWLINE=first\nsecond: value",
-        ],
-        "\n--- actual ---\n{yaml}"
-    );
-
-    assert_eq!(
-        web["volumes"],
-        serde_yaml_ng::Value::Sequence(vec![s("hostile-vol:/mnt/# hash")]),
-        "\n--- actual ---\n{yaml}"
-    );
-    assert_eq!(web["colon_val"], s("raw: colon value"));
-    assert_eq!(web["hash_val"], s("raw # hash value"));
-    assert_eq!(web["nul_val"], s("raw\0nul"));
-    assert_eq!(web["newline_val"], s("raw\nnewline: value"));
-    assert_eq!(web["nested"]["key: with colon"], s("v1"));
-    assert_eq!(web["nested"]["key # with hash"], s("v2"));
-
-    // The external network's real name reaches the output twice: once as
-    // `networks.shared.name`, once inside the computed Traefik label.
-    assert_eq!(parsed["networks"]["shared"]["name"], s("net: with # hash"));
-    assert!(
-        web["labels"]
-            .as_sequence()
-            .expect("labels is a sequence")
-            .contains(&s("traefik.docker.network=net: with # hash")),
-        "\n--- actual ---\n{yaml}"
-    );
-
-    // A named volume's own key is an `.hll` identifier since #60 made
-    // the top-level declaration mandatory, so the hostile characters now
-    // reach the output through its `name:` override instead — the exact
-    // same channel as the network's, and a `#` there would otherwise
-    // comment out the rest of the mapping.
-    assert_eq!(
-        parsed["volumes"]["hostile-vol"]["name"],
-        s("vol: name # hash"),
-        "\n--- actual ---\n{yaml}"
-    );
-}
-
-/// #80's router-less-`middleware` failure can no longer be written at
-/// all since #221 moved the field inside `router`: the old spelling is
-/// refused one stage earlier, by the parser, with a diagnostic that
-/// says where the field went rather than offering the `raw` escape
-/// hatch that the generic unknown-field message would.
-#[test]
-fn service_level_middleware_is_a_parse_error_naming_its_new_home() {
-    let err = hl_parser::parse("service w {\n  image \"n\"\n  expose 80\n  middleware auth\n}\n")
-        .expect_err("expected a parse error");
-    assert_eq!(
-        err.to_string(),
-        "4:3: `middleware` isn't a `service` field — move it inside the `router` block \
-         it applies to (`router { host: \"...\", middleware: ... }`)"
-    );
-}
-
-/// The mistake that survives: a `router` block that sets no `host` is
-/// refused before its own `middleware` is even looked at, since the
-/// block itself has nothing to attach that middleware to.
-#[test]
-fn router_entrypoints_without_a_host_is_an_error() {
-    let err = generate_err(
-        "service w {\n  image \"n\"\n  expose 80\n  \
-           router { entrypoints: web-secure\n    middleware: auth }\n}\n",
-    );
-    assert!(
-        matches!(err, CodegenError::RouterWithoutHost { router: None, .. }),
-        "expected the hostless router to be reported first, got: {err:?}"
-    );
-}
-
-/// A service that sets neither `router` nor `middleware` is unaffected —
-/// no router, no labels, and no diagnostic. `expose <port>` alone stays
-/// legal (constraint #3): it's Compose's own `expose:` key.
-#[test]
-fn a_routerless_service_without_middleware_still_builds() {
+fn a_service_with_no_labels_emits_no_labels_key() {
     let yaml = generate_from("service w {\n  image \"n\"\n  expose 80\n}\n");
     let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
     assert!(parsed["services"]["w"].get("labels").is_none());
@@ -2360,352 +1579,6 @@ fn named_volume_read_only_flag_emits_ro_suffix_alongside_an_unflagged_entry() {
     "#);
 }
 
-// --- `traefik { disable }` (#159) ---
-
-/// The issue's own worked example, end to end: `miniflux`'s `db` backing
-/// service opts out of every Traefik label with `traefik { disable }`
-/// instead of replacing the whole computed `labels:` list through `raw`.
-/// `miniflux` itself is an ordinary Traefik-facing service, unaffected —
-/// this is the "one backend-only service in an otherwise
-/// Traefik-facing stack" shape #159 names directly.
-#[test]
-fn miniflux_db_disables_traefik_end_to_end() {
-    let yaml = generate_from(
-        "service miniflux {\n  \
-           image \"miniflux/miniflux:latest\"\n  \
-           expose 8080 as \"miniflux.example.com\"\n  \
-           depends_on db\n\
-         }\n\
-         service db {\n  \
-           image \"postgres:15\"\n  \
-           traefik {\n    disable\n  }\n\
-         }\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      miniflux:
-        image: "miniflux/miniflux:latest"
-        networks:
-          - default
-        expose:
-          - 8080
-        depends_on:
-          - db
-        labels:
-          - "traefik.http.routers.miniflux.rule=Host(`miniflux.example.com`)"
-          - traefik.http.services.miniflux.loadbalancer.server.port=8080
-      db:
-        image: "postgres:15"
-        networks:
-          - default
-        labels:
-          - traefik.enable=false
-    "#);
-}
-
-/// Without `docker_network`/`expose.host`/`middleware` in the way, a
-/// disabled service's label list really is exactly the one line —
-/// checked directly against the raw string, not just parsed-YAML
-/// equality, since "exactly one label and nothing else" is precisely
-/// the guarantee at stake.
-#[test]
-fn disabled_service_emits_exactly_one_label() {
-    let yaml = generate_from("service db {\n  image \"postgres:15\"\n  traefik { disable }\n}\n");
-    let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
-    let labels = parsed["services"]["db"]["labels"]
-        .as_sequence()
-        .expect("labels is a sequence");
-    assert_eq!(labels.len(), 1);
-    assert_eq!(labels[0].as_str().unwrap(), "traefik.enable=false");
-}
-
-/// A service that never writes `traefik` at all is byte-for-byte
-/// unaffected by this field existing — the exact same assertion
-/// `syncthing_matches_real_deployed_service` already makes, re-run here
-/// to pin down that adding `traefik` to the schema changed nothing about
-/// a program that doesn't use it.
-#[test]
-fn a_service_without_traefik_field_is_unaffected() {
-    let yaml = generate_from(SYNCTHING);
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      syncthing:
-        image: "lscr.io/linuxserver/syncthing:latest"
-        restart: unless-stopped
-        environment:
-          - PUID=1000
-          - PGID=100
-        volumes:
-          - "syncthing-config:/config"
-        networks:
-          - traefik-net
-        expose:
-          - 8384
-        labels:
-          - traefik.docker.network=docker_default
-          - "traefik.http.routers.syncthing.rule=Host(`syncthing.internal.techdebtor.io`)"
-          - traefik.http.routers.syncthing.entrypoints=web-secure
-          - "traefik.http.routers.syncthing.middlewares=local-ipwhitelist@file,forwardAuth-authentik@file"
-          - traefik.http.services.syncthing.loadbalancer.server.port=8384
-    networks:
-      traefik-net:
-        name: docker_default
-        external: true
-    volumes:
-      syncthing-config: ~
-    "#);
-}
-
-/// `expose.port` alone doesn't conflict with `disable` — it's Compose's
-/// own `expose:` key, plain container-network visibility, nothing to do
-/// with Traefik. `db`'s own `expose 5432` from the issue's real shape.
-#[test]
-fn disabled_service_may_still_declare_expose_port() {
-    let yaml = generate_from(
-        "service db {\n  image \"postgres:15\"\n  expose 5432\n  traefik { disable }\n}\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      db:
-        image: "postgres:15"
-        expose:
-          - 5432
-        labels:
-          - traefik.enable=false
-    "#);
-}
-
-#[test]
-fn traefik_disabled_with_expose_host_is_an_error() {
-    let err = generate_err(
-        "service db {\n  image \"postgres:15\"\n  expose 5432 as \"db.example.com\"\n  traefik { disable }\n}\n",
-    );
-    assert!(
-        matches!(
-            &err,
-            CodegenError::TraefikDisabledWithRouter { service, .. } if service == "db"
-        ),
-        "got {err:?}"
-    );
-    assert_eq!(
-        err.to_string(),
-        "3:15: service `db` declares a `router`, but `traefik` is disabled (at 4:13), so there \
-         is nothing for it to route — drop the `router` or remove `disable`"
-    );
-}
-
-#[test]
-fn traefik_disabled_with_router_block_is_an_error() {
-    let err = generate_err(
-        "service db {\n  \
-           image \"postgres:15\"\n  \
-           expose 5432\n  \
-           router { entrypoints: web-secure }\n  \
-           traefik { disable }\n\
-         }\n",
-    );
-    assert!(
-        matches!(err, CodegenError::TraefikDisabledWithRouter { .. }),
-        "got {err:?}"
-    );
-}
-
-/// `raw { labels: [...] }` still overrides the computed list entirely —
-/// including a disabled service's single `traefik.enable=false` line —
-/// exactly as it overrides the ordinary computed router labels.
-#[test]
-fn raw_labels_override_a_disabled_services_label_too() {
-    let yaml = generate_from(
-        "service db {\n  \
-           image \"postgres:15\"\n  \
-           traefik { disable }\n  \
-           raw {\n    labels: [\"only.this=1\"]\n  }\n\
-         }\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      db:
-        image: "postgres:15"
-        labels:
-          - only.this=1
-    "#);
-}
-
-/// `traefik { disable }` composes through `with` just like any other
-/// nested field — a template can carry the "no Traefik" shape for every
-/// backend-only service that reuses it.
-#[test]
-fn traefik_disabled_composes_through_a_template() {
-    let yaml = generate_from(
-        "template backend_only {\n  traefik { disable }\n}\n\
-         service db {\n  with backend_only\n  image \"postgres:15\"\n}\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      db:
-        image: "postgres:15"
-        labels:
-          - traefik.enable=false
-    "#);
-}
-
-/// #221's motivating real service, end to end: `gitea` needs a public
-/// router with no middleware beside an internal one behind
-/// `local-ipwhitelist`. Before per-router `middleware`, the whole label
-/// list had to be hand-typed in `raw` — either both routers got the
-/// allowlist (breaking the intentionally public route) or neither did
-/// (dropping IP restriction on the internal-only one).
-#[test]
-fn gitea_public_and_internal_routers_carry_different_middleware() {
-    let yaml = generate_from(
-        "service gitea {\n  \
-           image \"gitea/gitea:latest\"\n  \
-           expose 3000\n  \
-           router public {\n    \
-             host: \"git.techdebtor.io\"\n    \
-             entrypoints: web-secure\n  \
-           }\n  \
-           router internal {\n    \
-             host: \"git.internal.techdebtor.io\"\n    \
-             entrypoints: web-secure\n    \
-             middleware: local-ipwhitelist\n  \
-           }\n\
-         }\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      gitea:
-        image: "gitea/gitea:latest"
-        expose:
-          - 3000
-        labels:
-          - "traefik.http.routers.gitea-public.rule=Host(`git.techdebtor.io`)"
-          - traefik.http.routers.gitea-public.entrypoints=web-secure
-          - "traefik.http.routers.gitea-internal.rule=Host(`git.internal.techdebtor.io`)"
-          - traefik.http.routers.gitea-internal.entrypoints=web-secure
-          - traefik.http.routers.gitea-internal.middlewares=local-ipwhitelist@file
-          - traefik.http.services.gitea.loadbalancer.server.port=3000
-    "#);
-}
-
-/// A router that names no `middleware` emits no `middlewares=` label,
-/// and nothing on a sibling router leaks onto it — the property that
-/// makes the public/internal split above mean what it reads as.
-#[test]
-fn a_router_naming_no_middleware_emits_no_middlewares_label() {
-    let yaml = generate_from(
-        "service app {\n  \
-           image \"nginx\"\n  \
-           expose 80\n  \
-           router public, host: \"app.techdebtor.io\"\n  \
-           router lan {\n    \
-             host: \"app.internal.techdebtor.io\"\n    \
-             middleware: local-ipwhitelist\n  \
-           }\n\
-         }\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      app:
-        image: nginx
-        expose:
-          - 80
-        labels:
-          - "traefik.http.routers.app-public.rule=Host(`app.techdebtor.io`)"
-          - "traefik.http.routers.app-lan.rule=Host(`app.internal.techdebtor.io`)"
-          - traefik.http.routers.app-lan.middlewares=local-ipwhitelist@file
-          - traefik.http.services.app.loadbalancer.server.port=80
-    "#);
-}
-
-/// A template can carry a router's middleware list, and the service
-/// body adds to it — the tier merge, deduped by name like `entrypoints`.
-/// The service-level field stays a separate slot, reaching only the
-/// routers that name none of their own.
-#[test]
-fn router_middleware_composes_through_a_template() {
-    let yaml = generate_from(
-        "template lan_only {\n  \
-           router lan, middleware: local-ipwhitelist\n\
-         }\n\
-         service app {\n  \
-           with lan_only\n  \
-           image \"nginx\"\n  \
-           expose 80\n  \
-           router lan {\n    \
-             host: \"app.internal.techdebtor.io\"\n    \
-             middleware: [local-ipwhitelist, forwardAuth-authentik]\n  \
-           }\n\
-         }\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      app:
-        image: nginx
-        expose:
-          - 80
-        labels:
-          - "traefik.http.routers.app-lan.rule=Host(`app.internal.techdebtor.io`)"
-          - "traefik.http.routers.app-lan.middlewares=local-ipwhitelist@file,forwardAuth-authentik@file"
-          - traefik.http.services.app.loadbalancer.server.port=80
-    "#);
-}
-
-/// A comma inside a router's own middleware name would splice an extra
-/// entry into the one comma-joined `middlewares=` label, exactly as it
-/// would in the service-level list — rejected, and named for the
-/// position the user actually wrote.
-#[test]
-fn comma_in_a_router_middleware_is_an_error() {
-    let err = generate_err(
-        "service s {\n  image \"x\"\n  expose 80\n  \
-           router api, host: \"ok.example.com\", middleware: \"a,b\"\n}\n",
-    );
-    assert!(
-        matches!(
-            err,
-            CodegenError::UnsafeLabelValue {
-                field: "router.middleware",
-                character: ',',
-                ..
-            }
-        ),
-        "got {err:?}"
-    );
-}
-
-/// #224's motivating real service: `node-red`'s `vault-git-sync`
-/// sidecar, built from a local Dockerfile rather than pulled. Before
-/// #224 this was not expressible at all — `raw` included — because the
-/// image requirement was checked against the structured `image` field,
-/// which a locally-built service has no reason to set.
-#[test]
-fn vault_git_sync_builds_from_a_local_context() {
-    let yaml = generate_from(
-        "service vault-git-sync {\n  \
-           build \"./vault-git-sync\"\n  \
-           restart unless-stopped\n  \
-           env_file \"vault-git-sync.env\"\n  \
-           volume \"/home/boettcherta/obsidian-vault\" -> \"/vault\"\n  \
-           traefik { disable }\n  \
-           raw {\n    user: \"1000:100\"\n  }\n\
-         }\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      vault-git-sync:
-        build: "./vault-git-sync"
-        restart: unless-stopped
-        env_file:
-          - vault-git-sync.env
-        volumes:
-          - "/home/boettcherta/obsidian-vault:/vault"
-        labels:
-          - traefik.enable=false
-        user: "1000:100"
-    "#);
-}
-
 /// A `dockerfile` switches `build:` from Compose's short form to its
 /// long one, and `{{name}}` resolves in both halves.
 #[test]
@@ -2774,113 +1647,53 @@ fn build_without_a_context_is_an_error() {
 
 // ---- #243: a first-class, additive `labels` field ----
 
-/// #243's own worked example: hand-written `labels` land *after* every
-/// computed Traefik label, and none of the computed ones move. The
-/// ordering is the load-bearing half — appending rather than
-/// interleaving is what keeps a file that writes no `labels` emitting
-/// byte-identical output to before the field existed.
+/// The other half of the preceding test: a service that *does* have
+/// labels gets the warning, so the "nothing to lose" condition is a
+/// real condition rather than the warning never firing.
 #[test]
-fn explicit_labels_are_appended_to_the_computed_ones() {
-    let yaml = generate_from(
-        "network traefik-net {\n  external\n  name: \"docker_default\"\n}\n\
-         service web {\n  \
-           image \"nginx\"\n  \
-           expose 8123\n  \
-           networks [traefik-net]\n  \
-           router {\n    host: \"web.example.com\"\n    entrypoints: web-secure\n  }\n  \
-           labels {\n    \
-             \"traefik.http.routers.web.tls.domains[0].main\": \"internal.example.com\"\n    \
-             \"com.example.owner\": \"platform-team\"\n  }\n\
-         }\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      web:
-        image: nginx
-        networks:
-          - traefik-net
-        expose:
-          - 8123
-        labels:
-          - traefik.docker.network=docker_default
-          - "traefik.http.routers.web.rule=Host(`web.example.com`)"
-          - traefik.http.routers.web.entrypoints=web-secure
-          - traefik.http.services.web.loadbalancer.server.port=8123
-          - "traefik.http.routers.web.tls.domains[0].main=internal.example.com"
-          - com.example.owner=platform-team
-    networks:
-      traefik-net:
-        name: docker_default
-        external: true
-    "#);
-}
-
-/// The mirror of #232's report, which is what this field exists to fix:
-/// the same service written with `raw { labels: [...] }` keeps only the
-/// one hand-written line, while `labels` keeps both halves. Held side by
-/// side in one test so the difference is the diff.
-#[test]
-fn labels_adds_where_raw_labels_replaces() {
-    let additive = generate_from(
+fn raw_labels_beside_real_labels_warn() {
+    let program = parse(
         "service web {\n  \
            image \"nginx\"\n  \
-           expose 8123\n  \
-           router {\n    host: \"web.example.com\"\n  }\n  \
-           labels {\n    \"com.example.owner\": \"platform-team\"\n  }\n\
+           labels {\n    \"com.example.owner\": \"platform-team\"\n  }\n  \
+           raw {\n    labels: [\"only.this=1\"]\n  }\n\
          }\n",
+    )
+    .unwrap();
+    let composed = compose(program).unwrap();
+    let generated = generate(composed).unwrap();
+    assert!(
+        matches!(
+            generated.warnings.as_slice(),
+            [CodegenWarning::RawLabelsReplaceGenerated { service, .. }] if service == "web"
+        ),
+        "expected one raw-labels warning, got: {:?}",
+        generated.warnings
     );
-    assert_yaml_snapshot!(yaml_value(&additive), @r#"
-    services:
-      web:
-        image: nginx
-        expose:
-          - 8123
-        labels:
-          - "traefik.http.routers.web.rule=Host(`web.example.com`)"
-          - traefik.http.services.web.loadbalancer.server.port=8123
-          - com.example.owner=platform-team
-    "#);
-
-    let replacing = generate_from(
-        "service web {\n  \
-           image \"nginx\"\n  \
-           expose 8123\n  \
-           router {\n    host: \"web.example.com\"\n  }\n  \
-           raw {\n    labels: [\"com.example.owner=platform-team\"]\n  }\n\
-         }\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&replacing), @"
-    services:
-      web:
-        image: nginx
-        expose:
-          - 8123
-        labels:
-          - com.example.owner=platform-team
-    ");
 }
 
-/// `traefik { disable }` silences the labels *this crate computes*, not
-/// a label the user wrote by hand: an explicit entry is an ordinary
-/// Docker label that may have nothing to do with Traefik, so it survives
-/// the short circuit that leaves the computed list at one line.
+/// The warning keys on the `raw` entry named `labels` specifically, not
+/// on there being any `raw` entry at all: a service with labels and a
+/// `raw` block that names some *other* key loses nothing, so it says
+/// nothing. Without this, a check that fired on every `raw` key would
+/// look identical to the correct one in every other test here.
 #[test]
-fn a_disabled_service_still_emits_its_explicit_labels() {
-    let yaml = generate_from(
-        "service db {\n  \
-           image \"postgres:15\"\n  \
-           traefik { disable }\n  \
-           labels {\n    \"com.example.owner\": \"platform-team\"\n  }\n\
+fn a_raw_key_other_than_labels_does_not_warn() {
+    let program = parse(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           labels {\n    \"com.example.owner\": \"platform-team\"\n  }\n  \
+           raw {\n    security_opt: [\"no-new-privileges:true\"]\n  }\n\
          }\n",
+    )
+    .unwrap();
+    let composed = compose(program).unwrap();
+    let generated = generate(composed).unwrap();
+    assert!(
+        generated.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        generated.warnings
     );
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      db:
-        image: "postgres:15"
-        labels:
-          - traefik.enable=false
-          - com.example.owner=platform-team
-    "#);
 }
 
 /// `raw`'s documented full-override semantics are unchanged (#243
@@ -2926,146 +1739,6 @@ fn explicit_labels_interpolate_the_service_name() {
     ");
 }
 
-/// A label key a `router` block already generates is a hard error naming
-/// both sides — not "explicit wins" and not "generated wins", either of
-/// which would make one of the two lines the author wrote silently do
-/// nothing.
-#[test]
-fn a_label_colliding_with_a_router_label_is_an_error() {
-    let err = generate_err(
-        "service web {\n  \
-           image \"nginx\"\n  \
-           expose 8123\n  \
-           router {\n    host: \"web.example.com\"\n  }\n  \
-           labels {\n    \"traefik.http.routers.web.rule\": \"Host(`x.example.com`)\"\n  }\n\
-         }\n",
-    );
-    assert!(
-        matches!(
-            &err,
-            CodegenError::LabelCollidesWithGenerated { key, feature, generated_span, .. }
-                if key == "traefik.http.routers.web.rule"
-                    && *feature == LabelFeature::Router
-                    && generated_span.is_some()
-        ),
-        "got {err:?}"
-    );
-}
-
-/// The `expose`-derived load-balancer target is its own producer, named
-/// as such rather than lumped in with the routers that fall back to it.
-#[test]
-fn a_label_colliding_with_the_expose_target_is_an_error() {
-    let err = generate_err(
-        "service web {\n  \
-           image \"nginx\"\n  \
-           expose 8123\n  \
-           router {\n    host: \"web.example.com\"\n  }\n  \
-           labels {\n    \
-             \"traefik.http.services.web.loadbalancer.server.port\": \"9999\"\n  }\n\
-         }\n",
-    );
-    assert!(
-        matches!(
-            &err,
-            CodegenError::LabelCollidesWithGenerated { feature, .. }
-                if *feature == LabelFeature::Expose
-        ),
-        "got {err:?}"
-    );
-}
-
-/// `traefik.enable=false` is generated too, so a `labels` entry trying
-/// to contradict it collides rather than quietly losing — or, worse,
-/// quietly winning and re-enabling a service the author disabled.
-#[test]
-fn a_label_colliding_with_traefik_disable_is_an_error() {
-    let err = generate_err(
-        "service db {\n  \
-           image \"postgres:15\"\n  \
-           traefik { disable }\n  \
-           labels {\n    \"traefik.enable\": \"true\"\n  }\n\
-         }\n",
-    );
-    assert!(
-        matches!(
-            &err,
-            CodegenError::LabelCollidesWithGenerated { feature, .. }
-                if *feature == LabelFeature::Traefik
-        ),
-        "got {err:?}"
-    );
-}
-
-/// The one producer with no span to name: `traefik.docker.network` comes
-/// from whichever declared network is `external`, resolved far from the
-/// `networks [...]` entry, so the diagnostic names the producer and
-/// stops there.
-#[test]
-fn a_label_colliding_with_the_docker_network_label_is_an_error() {
-    let err = generate_err(
-        "network traefik-net {\n  external\n  name: \"docker_default\"\n}\n\
-         service web {\n  \
-           image \"nginx\"\n  \
-           networks [traefik-net]\n  \
-           labels {\n    \"traefik.docker.network\": \"somewhere-else\"\n  }\n\
-         }\n",
-    );
-    assert!(
-        matches!(
-            &err,
-            CodegenError::LabelCollidesWithGenerated { feature, generated_span, .. }
-                if *feature == LabelFeature::DockerNetwork && generated_span.is_none()
-        ),
-        "got {err:?}"
-    );
-}
-
-/// Two keys spelled differently in source can resolve to one key after
-/// `{{name}}` interpolation, which the parser's own duplicate-key check
-/// cannot see. Codegen catches it, since by then both are strings.
-#[test]
-fn two_explicit_labels_colliding_after_interpolation_is_an_error() {
-    let err = generate_err(
-        "service web {\n  \
-           image \"nginx\"\n  \
-           labels {\n    \
-             \"a.{{name}}\": \"1\"\n    \
-             \"a.web\": \"2\"\n  }\n\
-         }\n",
-    );
-    assert!(
-        matches!(
-            &err,
-            CodegenError::LabelCollidesWithGenerated { key, feature, .. }
-                if key == "a.web" && *feature == LabelFeature::Labels
-        ),
-        "got {err:?}"
-    );
-}
-
-/// An `=` in a hand-written key would end the key where Docker splits
-/// the label, forging a different label than the one written — and one
-/// the collision check above cannot see, since the key it compares still
-/// holds the `=`. Refused, exactly as an `=` in a router name is.
-#[test]
-fn an_equals_sign_in_a_label_key_is_rejected() {
-    let err = generate_err(
-        "service web {\n  \
-           image \"nginx\"\n  \
-           labels {\n    \"traefik.docker.network=forged\": \"y\"\n  }\n\
-         }\n",
-    );
-    assert!(
-        matches!(
-            &err,
-            CodegenError::UnsafeLabelKey { key, character, .. }
-                if key == "traefik.docker.network=forged" && *character == '='
-        ),
-        "got {err:?}"
-    );
-}
-
 /// A newline in a key is writable since string escapes landed (#181),
 /// and no label key can hold one for any legitimate reason.
 #[test]
@@ -3086,6 +1759,121 @@ fn a_newline_in_a_label_key_is_rejected() {
 }
 
 // ---- #275: `.name` reads the real Docker name ----
+
+/// A volume's name reads the same way, and the interpolated spelling
+/// puts it mid-string — the two halves of #275 that aren't about
+/// networks at all.
+#[test]
+fn a_volume_name_reads_and_interpolates_the_same_way() {
+    let yaml = generate_from(
+        "volume media {\n  name: \"media_store\"\n}\n\
+         service jellyfin {\n  \
+           image \"jellyfin/jellyfin\"\n  \
+           volume media -> \"/data\"\n  \
+           labels {\n    \
+             \"backup.volume\": media.name\n    \
+             \"backup.path\": \"/mnt/{{media.name}}\"\n  }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      jellyfin:
+        image: jellyfin/jellyfin
+        volumes:
+          - "media:/data"
+        labels:
+          - backup.volume=media_store
+          - backup.path=/mnt/media_store
+    volumes:
+      media:
+        name: media_store
+    "#);
+}
+
+/// An explicit `network default { ... }` declaration still wins over the
+/// implicit fallback: its `external`/`name` settings are honored exactly
+/// as any other declared network's, and it still emits its own top-level
+/// `networks:` entry — the implicit, doc-free `default` is only a
+/// fallback for when no declaration exists at all.
+#[test]
+fn explicit_default_declaration_is_honored_and_emitted() {
+    let yaml = generate_from(
+        "network default {\n  external\n  name: \"shared_net\"\n}\n\
+         service app {\n  image \"app\"\n}\nservice db {\n  image \"postgres:15\"\n}\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      app:
+        image: app
+        networks:
+          - default
+      db:
+        image: "postgres:15"
+        networks:
+          - default
+    networks:
+      default:
+        name: shared_net
+        external: true
+    "#);
+}
+
+/// Overriding the service's own `volumes:`/`networks:` keys doesn't
+/// retract the top-level `volumes:`/`networks:` declarations codegen
+/// derived from the built-in fields. `raw`'s values are unparsed, so
+/// there's no way to re-derive those declarations from the replacement
+/// — and keeping them is what lets a `raw` value that names the same
+/// named volume or network still resolve.
+#[test]
+fn raw_override_keeps_the_top_level_volume_and_network_declarations() {
+    let yaml = generate_from(
+        "network proxy-net {\n  external\n  name: \"docker_default\"\n}\n\
+         volume web-data {}\n\
+         service web {\n  \
+           image \"nginx\"\n  \
+           volume web-data -> \"/data\"\n  \
+           networks [proxy-net]\n  \
+           raw {\n    \
+             volumes: [\"web-data:/elsewhere\"]\n    \
+             networks: [\"proxy-net\"]\n  \
+           }\n\
+         }\n",
+    );
+    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
+    services:
+      web:
+        image: nginx
+        volumes:
+          - "web-data:/elsewhere"
+        networks:
+          - proxy-net
+    networks:
+      proxy-net:
+        name: docker_default
+        external: true
+    volumes:
+      web-data: ~
+    "#);
+}
+
+/// Two keys spelled differently in source can resolve to one key after
+/// `{{name}}` interpolation, which the parser's own duplicate-key check
+/// cannot see. Codegen catches it, since by then both are strings.
+#[test]
+fn two_explicit_labels_colliding_after_interpolation_is_an_error() {
+    let err = generate_err(
+        "service web {\n  \
+           image \"nginx\"\n  \
+           labels {\n    \
+             \"a.{{name}}\": \"1\"\n    \
+             \"a.web\": \"2\"\n  }\n\
+         }\n",
+    );
+    assert!(
+        matches!(&err, CodegenError::DuplicateLabelKey { key, .. } if key == "a.web"),
+        "got {err:?}"
+    );
+}
 
 /// The shape #275 exists for, end to end: one parameter serves the
 /// `networks [$net]` entry, which wants the identifier, *and* the label
@@ -3118,42 +1906,11 @@ fn a_field_access_emits_the_real_docker_network_name() {
         expose:
           - 8096
         labels:
-          - traefik.docker.network=docker_default
           - caddy.network=docker_default
           - "caddy.upstream=jellyfin:8096"
     networks:
       proxy:
         name: docker_default
         external: true
-    "#);
-}
-
-/// A volume's name reads the same way, and the interpolated spelling
-/// puts it mid-string — the two halves of #275 that aren't about
-/// networks at all.
-#[test]
-fn a_volume_name_reads_and_interpolates_the_same_way() {
-    let yaml = generate_from(
-        "volume media {\n  name: \"media_store\"\n}\n\
-         service jellyfin {\n  \
-           image \"jellyfin/jellyfin\"\n  \
-           volume media -> \"/data\"\n  \
-           labels {\n    \
-             \"backup.volume\": media.name\n    \
-             \"backup.path\": \"/mnt/{{media.name}}\"\n  }\n\
-         }\n",
-    );
-    assert_yaml_snapshot!(yaml_value(&yaml), @r#"
-    services:
-      jellyfin:
-        image: jellyfin/jellyfin
-        volumes:
-          - "media:/data"
-        labels:
-          - backup.volume=media_store
-          - backup.path=/mnt/media_store
-    volumes:
-      media:
-        name: media_store
     "#);
 }

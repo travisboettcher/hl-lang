@@ -6,6 +6,7 @@
 - [Syntax Basics](./syntax-basics.md)
 - [Built-in Fields](./built-in-fields.md)
 - [Templates & Composition](./templates-and-composition.md)
+- [Routing](./routing.md)
 - [Imports](./imports.md)
 - [The `hllc` command-line tool](./cli.md)
 

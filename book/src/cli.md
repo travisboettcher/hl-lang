@@ -296,7 +296,7 @@ No flag silences them yet. When one is telling you about something you
 meant, the fix is to write it in a way that drops nothing, and the
 warning text names that fix in each case.
 
-A fourth construct once dropped this way—a `router` with no `host`—is a
-hard **error** instead, because a router with nothing to match is never
-something you could have meant. See
-[`router`](./built-in-fields.md#router).
+Routing used to add a fourth of these—a `router` with nothing to match
+was a hard error rather than a warning. Routing is templates now, so
+`hllc` has no view on whether a set of labels describes a working
+router. See [Routing](./routing.md).

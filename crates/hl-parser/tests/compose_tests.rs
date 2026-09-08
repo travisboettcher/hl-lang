@@ -6,7 +6,7 @@
 use hl_parser::schema::MapSide;
 use hl_parser::{
     ArrowMapHost, Command, ComposeError, ComposeWarning, ComposedProgram, Entrypoint, Healthcheck,
-    HealthcheckTest, Literal, MatchExpr, RawValue, Service, compose, parse,
+    HealthcheckTest, LabelValue, Literal, RawValue, Service, compose, parse,
 };
 
 fn compose_ok(source: &str) -> ComposedProgram {
@@ -797,79 +797,6 @@ fn no_healthcheck_anywhere_leaves_it_unset() {
 }
 // --- traefik (#159) ---
 
-/// A template carrying `traefik { disable }` composes onto a service
-/// through `with`, exactly like `healthcheck { disable }` does — the
-/// same `merge_scalar_like`-routed collision point, just for `traefik`'s
-/// own `MergeAcc` slot instead of `healthcheck`'s.
-#[test]
-fn traefik_disable_composes_through_with() {
-    let composed = compose_ok(
-        "template backend_only {\n  traefik { disable }\n}\n\
-         service db {\n  with backend_only\n  image \"postgres:15\"\n}\n",
-    );
-    let service = single_service(&composed);
-    let traefik = service.fields.traefik.as_ref().expect("traefik set");
-    assert!(traefik.disable.is_some());
-}
-
-/// Two explicit templates both writing `traefik { disable }` still
-/// collide — the `traefik` analogue of
-/// `explicit_templates_setting_same_healthcheck_disable_still_collide`:
-/// `merge_scalar_like`'s `Explicit`-vs-`Explicit` arm always errors, even
-/// though the two agree, because nothing about the merge engine can tell
-/// "genuinely agree" apart from "coincidentally wrote the same thing."
-#[test]
-fn explicit_templates_setting_same_traefik_disable_still_collide() {
-    let err = compose_err(
-        "template a {\n  traefik { disable }\n}\n\
-         template b {\n  traefik { disable }\n}\n\
-         service s {\n  with a, b\n  image \"x\"\n}\n",
-    );
-    assert!(
-        matches!(
-            err,
-            ComposeError::FieldCollision {
-                field: "traefik.disable",
-                ..
-            }
-        ),
-        "got {err:?}"
-    );
-}
-
-/// A template's `traefik { disable }` survives untouched when nothing
-/// else in the composition names `traefik` at all — the `traefik`
-/// analogue of
-/// `template_map_entries_survive_untouched_but_service_body_overrides_others`:
-/// a template's value only ever loses to a *competing* value for the
-/// same field, and an unset field from a later tier is never that.
-#[test]
-fn template_traefik_disable_survives_when_unchallenged() {
-    let composed = compose_ok(
-        "template base {\n  traefik { disable }\n}\n\
-         service s {\n  with base\n  image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    let traefik = service.fields.traefik.as_ref().expect("traefik set");
-    assert!(traefik.disable.is_some());
-}
-
-/// A service's own `traefik { disable }` beats an explicit `with`
-/// template that leaves `traefik` unset — `merge_scalar_like`'s `(_,
-/// Tier::Own)` arm, the same one
-/// `service_own_healthcheck_test_beats_an_explicit_templates_test`
-/// exercises for `healthcheck.test`.
-#[test]
-fn service_own_traefik_disable_survives_with_no_competing_template_value() {
-    let composed = compose_ok(
-        "template pg {\n  restart unless-stopped\n}\n\
-         service db {\n  with pg\n  image \"postgres:15\"\n  traefik { disable }\n}\n",
-    );
-    let service = single_service(&composed);
-    let traefik = service.fields.traefik.as_ref().expect("traefik set");
-    assert!(traefik.disable.is_some());
-}
-
 // --- command merge (#156) ---
 //
 // `command` merges through `merge_scalar_like` — the same
@@ -1202,8 +1129,9 @@ fn list_fields_concatenate_in_priority_order() {
 /// network a template already supplies is a natural thing to write, and
 /// means exactly what stating it once means — so the repeat is dropped
 /// rather than duplicated into the output. (`middleware` used to be the
-/// second row here; #221 moved it onto `router`, where `merge_routers`
-/// dedupes it by this same rule — see the `router_middleware_*` tests.)
+/// second row here; #221 moved it onto `router`, and #271 removed
+/// routing from the language — a list-valued `labels` entry dedupes by
+/// this same rule now.)
 ///
 /// `depends_on` used to be one of these set-like lists too, and this
 /// test used to cover it alongside `networks` — but #155
@@ -1658,8 +1586,7 @@ fn template_argument_not_scalar_is_error() {
 // #201 dropped `: Number`/`: String` annotations in favor of checking a
 // substituted argument against the *field's own* schema shape: a
 // reference-shaped position (`networks`, `dns`,
-// `env_file`, `depends_on`, `expose.entrypoint`, `router.entrypoints`,
-// `router.path_prefix`, `router.middleware`) rejects a substituted
+// `env_file`, `depends_on`) rejects a substituted
 // `Literal::Number` — the
 // one literal kind `parse_literal_reference` can never produce directly,
 // so a `Number` reaching one of these fields can only mean a template
@@ -2187,20 +2114,22 @@ fn assert_no_params(service: &Service) {
         assert_not_param(&entry.key);
         assert_raw_value_no_param(&entry.value);
     }
-    // `router`'s three literal-holding sub-fields (#184/#196). Adding a
-    // field without extending this walk is exactly what #168 was: the
-    // `Literal::Param` survives composition and codegen emits the
-    // parameter's own name into the generated document, silently and
-    // with exit 0.
-    for router in &fields.routers {
-        if let Some(host) = &router.host {
-            assert_not_param(host);
-        }
-        for entry in &router.entrypoints {
-            assert_not_param(entry);
-        }
-        for prefix in &router.path_prefix {
-            assert_not_param(prefix);
+    // Both halves of every `labels` entry, and every item of a
+    // list-valued one (#288). Adding a field without extending this
+    // walk is exactly what #168 was: the `Literal::Param` survives
+    // composition and codegen emits the parameter's own name into the
+    // generated document, silently and with exit 0. Routing is written
+    // here since #271, so this is the arm that now carries what
+    // `router`'s sub-fields used to.
+    for entry in &fields.labels.entries {
+        assert_not_param(&entry.key);
+        match &entry.value {
+            LabelValue::Scalar(lit) => assert_not_param(lit),
+            LabelValue::List(items, _) => {
+                for item in items {
+                    assert_not_param(item);
+                }
+            }
         }
     }
     // The reference-shaped list fields #196 opened to `$param` for the
@@ -2518,348 +2447,6 @@ fn unqualified_env_file_is_accepted() {
     assert_eq!(service.fields.env_file.len(), 1);
 }
 
-// --- `router` merge (#184) ---
-
-fn router_named<'a>(service: &'a Service, name: &str) -> &'a hl_parser::Router {
-    service
-        .fields
-        .routers
-        .iter()
-        .find(|r| r.key() == Some(name))
-        .unwrap_or_else(|| panic!("no router named {name:?}"))
-}
-
-fn router_entrypoints(router: &hl_parser::Router) -> Vec<&str> {
-    router.entrypoints.iter().map(|r| r.text()).collect()
-}
-
-fn router_prefixes(router: &hl_parser::Router) -> Vec<&str> {
-    router.path_prefix.iter().map(Literal::text).collect()
-}
-
-fn router_middleware(router: &hl_parser::Router) -> Vec<&str> {
-    router.middleware.iter().map(Literal::text).collect()
-}
-
-/// `router` merges keyed by name, then per sub-field within each name —
-/// `expose`'s own per-sub-field merge, one level deeper. This is
-/// `service_own_body_can_override_just_expose_host`'s exact scenario
-/// applied to a router: the service replaces just `host` and still
-/// inherits the template's `entrypoints` and `path_prefix` without
-/// repeating them.
-#[test]
-fn service_own_body_can_override_just_one_router_subfield() {
-    let composed = compose_ok(
-        "template api_router {\n  \
-           router api {\n    host: \"placeholder.example.com\"\n    \
-             entrypoints: web-secure\n    path_prefix: [\"/api/v1\"]\n  }\n\
-         }\n\
-         service vikunja {\n  \
-           with api_router\n  image \"vikunja/vikunja\"\n  \
-           router api { host: \"vikunja.techdebtor.io\" }\n\
-         }\n",
-    );
-    let service = single_service(&composed);
-    assert_eq!(service.fields.routers.len(), 1);
-    let api = router_named(service, "api");
-    assert_eq!(api.host.as_ref().unwrap().text(), "vikunja.techdebtor.io");
-    assert_eq!(router_entrypoints(api), vec!["web-secure"]);
-    assert_eq!(router_prefixes(api), vec!["/api/v1"]);
-}
-
-/// Two *different* router names from two tiers are two routers, not a
-/// collision — the keyed half of the merge.
-#[test]
-fn routers_with_different_names_accumulate_across_tiers() {
-    let composed = compose_ok(
-        "template lan_only {\n  router lan, host: \"a.example.local\"\n}\n\
-         template public {\n  router web, host: \"a.example.com\"\n}\n\
-         service s {\n  with lan_only, public\n  image \"x\"\n  router admin, host: \"admin.example.com\"\n}\n",
-    );
-    let service = single_service(&composed);
-    let names: Vec<Option<&str>> = service.fields.routers.iter().map(|r| r.key()).collect();
-    assert_eq!(names, vec![Some("lan"), Some("web"), Some("admin")]);
-}
-
-/// Two explicit templates disagreeing on one router's `host` is a
-/// collision, reported with the router's own name — the same rule two
-/// explicit templates setting `expose.host` already hit, keyed so the
-/// message says *which* router.
-#[test]
-fn explicit_templates_setting_the_same_router_host_collide() {
-    let err = compose_err(
-        "template a {\n  router api, host: \"a.example.com\"\n}\n\
-         template b {\n  router api, host: \"b.example.com\"\n}\n\
-         service s {\n  with a, b\n  image \"x\"\n}\n",
-    );
-    match err {
-        ComposeError::MapKeyCollision(details) => {
-            assert_eq!(details.field, "router.host");
-            assert_eq!(details.key, "api");
-            assert_eq!(details.first_template, "a");
-            assert_eq!(details.second_template, "b");
-        }
-        other => panic!("expected MapKeyCollision on router.host, got {other:?}"),
-    }
-}
-
-/// ...but two explicit templates setting *different* sub-fields of one
-/// router don't collide, exactly as they don't for `expose`.
-#[test]
-fn explicit_templates_setting_different_router_subfields_do_not_collide() {
-    let composed = compose_ok(
-        "template a {\n  router api, host: \"a.example.com\"\n}\n\
-         template b {\n  router api, entrypoints: web-secure\n}\n\
-         service s {\n  with a, b\n  image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    let api = router_named(service, "api");
-    assert_eq!(api.host.as_ref().unwrap().text(), "a.example.com");
-    assert_eq!(router_entrypoints(api), vec!["web-secure"]);
-}
-
-/// A router's `entrypoints` is set-like, so two tiers naming the same one
-/// yield a router attached to it once — `expose.entrypoint`'s own
-/// distinct-name rule.
-#[test]
-fn router_entrypoints_concatenate_and_dedupe() {
-    let composed = compose_ok(
-        "template a {\n  router api, entrypoints: web\n}\n\
-         template b {\n  router api, entrypoints: web-secure\n}\n\
-         service s {\n  with a, b\n  image \"x\"\n  \
-           router api {\n    host: \"a.example.com\"\n    entrypoints: web-secure\n  }\n}\n",
-    );
-    let service = single_service(&composed);
-    assert_eq!(
-        router_entrypoints(router_named(service, "api")),
-        vec!["web", "web-secure"]
-    );
-}
-
-/// `path_prefix` concatenates *without* deduping, unlike `entrypoints`:
-/// the entries are `||` alternatives whose written order is observable
-/// in the emitted rule, the same reasoning that keeps `dns` and
-/// `env_file` order-preserving.
-#[test]
-fn router_path_prefixes_concatenate_in_tier_order() {
-    let composed = compose_ok(
-        "template a {\n  router api, path_prefix: [\"/api/v1\"]\n}\n\
-         service s {\n  with a\n  image \"x\"\n  \
-           router api {\n    host: \"a.example.com\"\n    path_prefix: [\"/dav/\"]\n  }\n}\n",
-    );
-    let service = single_service(&composed);
-    assert_eq!(
-        router_prefixes(router_named(service, "api")),
-        vec!["/api/v1", "/dav/"]
-    );
-}
-
-/// A `$param` in a router's `host` is substituted like every other
-/// literal slot — #168's bug class, which is a field added without
-/// extending `substitute_params`' walk.
-#[test]
-fn router_host_param_is_substituted() {
-    let composed = compose_ok(
-        "template routed(h) {\n  router api { host: $h }\n}\n\
-         service s {\n  with routed { h: \"a.example.com\" }\n  image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    assert_eq!(
-        router_named(service, "api").host.as_ref().unwrap().text(),
-        "a.example.com"
-    );
-    assert_no_params(service);
-}
-
-/// And each `path_prefix` entry, which is why the field holds literals
-/// rather than references: a reference has no `$param` form to
-/// substitute at all.
-#[test]
-fn router_path_prefix_params_are_substituted() {
-    let composed = compose_ok(
-        "template routed(h, api, dav) {\n  \
-           router api { host: $h\n    path_prefix: [$api, $dav] }\n\
-         }\n\
-         service s {\n  \
-           with routed { h: \"a.example.com\", api: \"/api/v1\", dav: \"/dav/\" }\n  \
-           image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    let api = router_named(service, "api");
-    assert_eq!(api.host.as_ref().unwrap().text(), "a.example.com");
-    assert_eq!(router_prefixes(api), vec!["/api/v1", "/dav/"]);
-    assert_no_params(service);
-}
-
-/// A router's entry point names something in the deployment's own
-/// `traefik.yml`, not a declaration any `.hll` file exports, so a
-/// qualifier has nothing to resolve against — rejected exactly as
-/// `expose.entrypoint`'s is, rather than silently dropped on the way to
-/// the label.
-#[test]
-fn qualified_router_entrypoints_reference_is_rejected() {
-    let err = compose_err(
-        "service s {\n  image \"x\"\n  router api, host: \"a.example.com\", entrypoints: traefik.web\n}\n",
-    );
-    assert!(
-        matches!(
-            err,
-            ComposeError::UnsupportedQualifiedReference { field: "router.entrypoints", ref alias, .. } if alias == "traefik"
-        ),
-        "got {err:?}"
-    );
-}
-
-/// The unnamed `router { }` form merges under its own key, distinct from
-/// every named one — it isn't a wildcard that soaks up named blocks.
-#[test]
-fn unnamed_router_merges_under_its_own_key() {
-    let composed = compose_ok(
-        "template a {\n  router { entrypoints: web-secure }\n}\n\
-         service s {\n  with a\n  image \"x\"\n  \
-           router { host: \"a.example.com\" }\n  router api, host: \"b.example.com\"\n}\n",
-    );
-    let service = single_service(&composed);
-    assert_eq!(service.fields.routers.len(), 2);
-    let unnamed = service
-        .fields
-        .routers
-        .iter()
-        .find(|r| r.key().is_none())
-        .expect("unnamed router kept");
-    assert_eq!(unnamed.host.as_ref().unwrap().text(), "a.example.com");
-    assert_eq!(router_entrypoints(unnamed), vec!["web-secure"]);
-}
-
-/// A service that never mentions `router` composes to an empty list, so
-/// every file written before the field existed reaches codegen with
-/// exactly the fields it always had.
-#[test]
-fn a_service_without_routers_composes_to_an_empty_list() {
-    let composed = compose_ok(
-        "template internal_web(port) {\n  expose $port\n  dns resolver\n}\n\
-         service s {\n  with internal_web { port: 8080 }\n  image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    assert!(service.fields.routers.is_empty());
-}
-
-// --- per-router `middleware` (#221) ---
-
-/// A router's own `middleware` merges across tiers exactly like its
-/// `entrypoints`: concatenated in tier order and deduped by name, since a
-/// repeat would be a repeated entry in the one comma-joined
-/// `middlewares=` label. A template supplies a base list; the service
-/// body adds to it.
-#[test]
-fn router_middleware_concatenates_and_dedupes_across_tiers() {
-    let composed = compose_ok(
-        "template a {\n  router internal, middleware: local-ipwhitelist\n}\n\
-         service s {\n  with a\n  image \"x\"\n  \
-           router internal {\n    host: \"a.example.local\"\n    \
-             middleware: [local-ipwhitelist, rate-limit]\n  }\n}\n",
-    );
-    let service = single_service(&composed);
-    assert_eq!(
-        router_middleware(router_named(service, "internal")),
-        vec!["local-ipwhitelist", "rate-limit"]
-    );
-}
-
-/// The old service-level spelling is a hard error rather than a
-/// silently ignored line (#221) — and it's a *parse* error, so it never
-/// reaches composition at all.
-#[test]
-fn service_level_middleware_no_longer_parses() {
-    let err = hl_parser::parse("service s {\n  image \"x\"\n  middleware auth\n}\n")
-        .expect_err("expected a parse error");
-    assert!(
-        matches!(
-            err,
-            hl_parser::ParseError::MovedField {
-                type_name: "service",
-                ref field,
-                ..
-            } if field == "middleware"
-        ),
-        "got {err:?}"
-    );
-}
-
-/// Two routers off one service carry independent lists — the whole
-/// point of #221, and the shape `gitea.hll`'s public/internal pair needs.
-#[test]
-fn two_routers_keep_independent_middleware_lists() {
-    let composed = compose_ok(
-        "service gitea {\n  image \"x\"\n  \
-           router public, host: \"git.example.com\"\n  \
-           router internal {\n    host: \"git.internal.example.com\"\n    \
-             middleware: local-ipwhitelist\n  }\n}\n",
-    );
-    let service = single_service(&composed);
-    assert!(router_middleware(router_named(service, "public")).is_empty());
-    assert_eq!(
-        router_middleware(router_named(service, "internal")),
-        vec!["local-ipwhitelist"]
-    );
-}
-
-/// A `$param` in a router's `middleware` is substituted like every other
-/// literal slot — #168's bug class, which is a field added without
-/// extending `substitute_params`' walk.
-#[test]
-fn router_middleware_params_are_substituted() {
-    let composed = compose_ok(
-        "template routed(h, mw) {\n  router api { host: $h\n    middleware: [$mw] }\n}\n\
-         service s {\n  \
-           with routed { h: \"a.example.com\", mw: local-ipwhitelist }\n  image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    assert_eq!(
-        router_middleware(router_named(service, "api")),
-        vec!["local-ipwhitelist"]
-    );
-    assert_no_params(service);
-}
-
-/// And it's reference-shaped, so a bare number substituted into it is
-/// the same shape error every other reference position raises (#201).
-#[test]
-fn router_middleware_rejects_a_number_argument() {
-    let err = compose_err(
-        "template t(mw) {\n  router api { middleware: [$mw] }\n}\n\
-         service s {\n  with t { mw: 1000 }\n  image \"x\"\n}\n",
-    );
-    match err {
-        ComposeError::ArgumentNotReferenceShaped {
-            template, param, ..
-        } => {
-            assert_eq!(template, "t");
-            assert_eq!(param, "mw");
-        }
-        other => panic!("expected ArgumentNotReferenceShaped, got {other:?}"),
-    }
-}
-
-/// A middleware lives in the deployment's own `traefik.yml`, not in a
-/// declaration any `.hll` file exports, so a qualifier has nothing to
-/// resolve against here either — rejected under the router's own field
-/// path, so the diagnostic says which position was written.
-#[test]
-fn qualified_router_middleware_reference_is_rejected() {
-    let err = compose_err(
-        "service s {\n  image \"x\"\n  \
-           router api, host: \"a.example.com\", middleware: traefik.forwardAuth\n}\n",
-    );
-    assert!(
-        matches!(
-            err,
-            ComposeError::UnsupportedQualifiedReference { field: "router.middleware", ref alias, .. } if alias == "traefik"
-        ),
-        "got {err:?}"
-    );
-}
-
 // --- `build` (#224) ---
 
 /// `build`'s two sub-fields merge per sub-field like `healthcheck`'s,
@@ -2926,53 +2513,14 @@ fn a_service_without_build_composes_to_none() {
 
 // --- `priority`, `port`, `protocol` on a router (#225) ---
 
-/// The three new scalars merge on `host`'s rule: own wins, and a
-/// service body overriding one keeps the rest its template supplied.
 #[test]
-fn service_body_can_override_just_one_new_router_subfield() {
-    let composed = compose_ok(
-        "template api {\n  router web {\n    host: \"placeholder\"\n    \
-           priority: 10\n    port: 8080\n  }\n}\n\
-         service s {\n  with api\n  image \"x\"\n  \
-           router web { priority: 100 }\n}\n",
-    );
-    let service = single_service(&composed);
-    let web = router_named(service, "web");
-    assert_eq!(web.priority.as_ref().unwrap().text(), "100");
-    assert_eq!(web.port.as_ref().unwrap().text(), "8080");
-    assert_eq!(web.host.as_ref().unwrap().text(), "placeholder");
-}
-
-/// Two explicit templates disagreeing on one collide, keyed by router
-/// name so the message says which router — the same `MapKeyCollision`
-/// `router.host` already raises.
-#[test]
-fn explicit_templates_setting_the_same_router_priority_collide() {
-    let err = compose_err(
-        "template a {\n  router web, priority: 10\n}\n\
-         template b {\n  router web, priority: 20\n}\n\
-         service s {\n  with a, b\n  image \"x\"\n}\n",
-    );
-    match err {
-        ComposeError::MapKeyCollision(details) => {
-            assert_eq!(details.field, "router.priority");
-            assert_eq!(details.key, "web");
-        }
-        other => panic!("expected MapKeyCollision on router.priority, got {other:?}"),
-    }
-}
-
-/// `priority` and `port` are numbers, so a hand-written non-number is
-/// caught by the same backstop `expose.port` has.
-#[test]
-fn router_priority_must_be_a_number() {
-    let err =
-        compose_err("service s {\n  image \"x\"\n  router web, host: \"a\", priority: high\n}\n");
+fn expose_port_must_be_a_number() {
+    let err = compose_err("service s {\n  image \"x\"\n  expose eighty\n}\n");
     assert!(
         matches!(
             err,
             ComposeError::FieldNotNumeric {
-                field: "router.priority",
+                field: "expose.port",
                 ..
             }
         ),
@@ -2980,139 +2528,26 @@ fn router_priority_must_be_a_number() {
     );
 }
 
+/// The other field the check covers, so a mistake that drops one arm
+/// doesn't hide behind the other.
 #[test]
-fn router_port_must_be_a_number() {
-    let err =
-        compose_err("service s {\n  image \"x\"\n  router web, host: \"a\", port: eighty\n}\n");
+fn healthcheck_retries_must_be_a_number() {
+    let err = compose_err(
+        "service s {\n  image \"x\"\n  healthcheck {\n    test [\"CMD\", \"true\"]\n    retries: thrice\n  }\n}\n",
+    );
     assert!(
         matches!(
             err,
             ComposeError::FieldNotNumeric {
-                field: "router.port",
+                field: "healthcheck.retries",
                 ..
             }
         ),
         "got {err:?}"
     );
-}
-
-/// And a substituted one is caught on the way in, naming the argument
-/// rather than the `$param` use site.
-#[test]
-fn router_port_rejects_a_non_numeric_argument() {
-    let err = compose_err(
-        "template t(p) {\n  router web { host: \"a\"\n    port: $p }\n}\n\
-         service s {\n  with t { p: \"eighty\" }\n  image \"x\"\n}\n",
-    );
-    assert!(
-        matches!(err, ComposeError::ArgumentNotNumeric { .. }),
-        "got {err:?}"
-    );
-}
-
-/// All three take a `$param` and are substituted like every other
-/// literal slot — #168's bug class in three new positions.
-#[test]
-fn router_new_field_params_are_substituted() {
-    let composed = compose_ok(
-        "template t(pri, prt, proto) {\n  \
-           router web { host: \"a.example.com\"\n    priority: $pri\n    \
-             port: $prt\n    protocol: $proto }\n}\n\
-         service s {\n  with t { pri: 100, prt: 2222, proto: tcp }\n  image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    let web = router_named(service, "web");
-    assert_eq!(web.priority.as_ref().unwrap().text(), "100");
-    assert_eq!(web.port.as_ref().unwrap().text(), "2222");
-    assert_eq!(web.protocol.as_ref().unwrap().text(), "tcp");
-    assert_no_params(service);
 }
 
 // --- `router { rule: ... }` (#228) ---
-
-/// A rule merges on `host`'s rule — own wins over a template's — rather
-/// than concatenating. A rule is one whole record: two of them are two
-/// answers to one question, not two halves of one.
-#[test]
-fn a_service_body_rule_overrides_its_template_s() {
-    let composed = compose_ok(
-        "template api {\n  router web { rule: Host(\"placeholder\") }\n}\n\
-         service s {\n  with api\n  image \"x\"\n  \
-           router web { rule: Host(\"real.example.com\") }\n}\n",
-    );
-    let service = single_service(&composed);
-    let rule = router_named(service, "web").rule.as_ref().unwrap();
-    let MatchExpr::Matcher { args, .. } = rule else {
-        panic!("expected one matcher, got {rule:?}");
-    };
-    assert_eq!(args[0].text(), "real.example.com");
-}
-
-/// Two explicit templates disagreeing collide, keyed by router name so
-/// the message says which router — the same `MapKeyCollision` every
-/// other single-occurrence `router` field raises.
-#[test]
-fn explicit_templates_setting_the_same_router_rule_collide() {
-    let err = compose_err(
-        "template a {\n  router web { rule: Host(\"a\") }\n}\n\
-         template b {\n  router web { rule: Host(\"b\") }\n}\n\
-         service s {\n  with a, b\n  image \"x\"\n}\n",
-    );
-    match err {
-        ComposeError::MapKeyCollision(details) => {
-            assert_eq!(details.field, "router.rule");
-            assert_eq!(details.key, "web");
-        }
-        other => panic!("expected MapKeyCollision on router.rule, got {other:?}"),
-    }
-}
-
-/// A `$param` inside a matcher argument is substituted like every other
-/// literal slot. Missing this walk would let the parameter's own name
-/// reach codegen and land in a Traefik rule (#168's bug class).
-#[test]
-fn a_param_inside_a_matcher_argument_is_substituted() {
-    let composed = compose_ok(
-        "template api(h) {\n  router web { rule: Host($h) && !PathPrefix(\"/admin\") }\n}\n\
-         service s {\n  with api { h: \"a.example.com\" }\n  image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    let rule = router_named(service, "web").rule.as_ref().unwrap();
-    let args = rule.args();
-    assert_eq!(args[0].text(), "a.example.com");
-    assert_eq!(args[1].text(), "/admin");
-}
-
-/// A matcher argument is reference-shaped free text, exactly as a
-/// `path_prefix` entry is, so a substituted bare number is rejected at
-/// the call site that passed it.
-#[test]
-fn a_numeric_argument_to_a_matcher_is_rejected() {
-    let err = compose_err(
-        "template api(h) {\n  router web { rule: Host($h) }\n}\n\
-         service s {\n  with api { h: 8080 }\n  image \"x\"\n}\n",
-    );
-    assert!(
-        matches!(err, ComposeError::ArgumentNotReferenceShaped { .. }),
-        "got {err:?}"
-    );
-}
-
-/// An `alias.name` qualifier has nothing to resolve against inside a
-/// Traefik rule, the same way it has nothing inside a `path_prefix`.
-#[test]
-fn a_qualified_matcher_argument_is_rejected() {
-    let err = compose_err(
-        "use \"other.hll\" as other\n\
-         service s {\n  image \"x\"\n  router web { rule: Host(other.thing) }\n}\n",
-    );
-    match err {
-        ComposeError::UnsupportedQualifiedReference { field, .. } => {
-            assert_eq!(field, "router.rule");
-        }
-        other => panic!("expected UnsupportedQualifiedReference, got {other:?}"),
-    }
-}
 
 // --- `{{param}}` interpolation inside string content (#266) ---
 //
@@ -3144,21 +2579,6 @@ fn a_parameter_interpolates_into_string_content() {
     );
     let service = single_service(&composed);
     assert_eq!(label_value(service, "rule"), "Host(`a.example.com`)");
-}
-
-/// Both halves of a `labels` entry are plain `Literal` slots, so both
-/// interpolate — the key is where a Traefik router name would land.
-#[test]
-fn a_parameter_interpolates_into_a_label_key() {
-    let composed = compose_ok(
-        "template t(router) {\n  labels { \"traefik.http.routers.{{router}}.rule\": \"x\" }\n}\n\
-         service s {\n  with t { router: \"web\" }\n  image \"x\"\n}\n",
-    );
-    let service = single_service(&composed);
-    assert_eq!(
-        service.fields.labels.entries[0].key.text(),
-        "traefik.http.routers.web.rule"
-    );
 }
 
 /// Every literal kind an argument can be has a text form, and each

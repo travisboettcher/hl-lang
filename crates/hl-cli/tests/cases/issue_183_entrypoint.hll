@@ -3,10 +3,10 @@
 # `ENTRYPOINT` — distinct from `command`, which overrides its `CMD`. It
 # used to be reachable only through `raw`. Both forms are covered, plus
 # a `$param` written into each (which composition has to substitute, per
-# #168), and the coexistence #199 disentangled: the service-level
-# `entrypoint` field and `router`'s `entrypoints` sub-field, a list of
-# Traefik entry points, both appear in service `router` below and reach
-# different parts of the output.
+# #168). The last service is named `router` on purpose: the language
+# reserves no words, so a name that once collided with a built-in field
+# is an ordinary identifier — and since #271 there is no `router` field
+# left for it to be confused with at all.
 template shell_entrypoint(ep) {
   entrypoint $ep
 }
@@ -45,8 +45,7 @@ service router {
   image "alpine:3"
   entrypoint "/docker-entrypoint.sh"
   expose 8080
-  router {
-    host: "router.example.com"
-    entrypoints: web, web-secure
+  labels {
+    "traefik.http.routers.{{name}}.entrypoints": "web,web-secure"
   }
 }

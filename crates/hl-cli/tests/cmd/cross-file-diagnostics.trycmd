@@ -44,15 +44,3 @@ $ hllc build imported-codegen-error.hll
 interpolating-template.hll:2:18: unknown interpolation `{{nmae}}`
 
 ```
-
-A `router` with a `middleware` but no `host` has no rule for Traefik to
-match, so the middleware would attach to nothing. This used to build a
-service with the middleware silently missing; it now fails, and the
-message carries the fix.
-
-```console
-$ hllc build router-less-middleware.hll --out docker-compose.yml
-? 1
-router-less-middleware.hll:4:3: service `web` declares an unnamed `router` with no `host` and no `rule`, so there is no rule for Traefik to match — add a host (`host: "web.example.com"`), write a `rule`, or drop the `router`
-
-```

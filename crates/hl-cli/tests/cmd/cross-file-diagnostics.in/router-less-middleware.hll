@@ -1,7 +1,0 @@
-service web {
-  image "nginx:alpine"
-  expose 80
-  router {
-    middleware: forwardAuth-authentik
-  }
-}

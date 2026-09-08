@@ -17,10 +17,10 @@ template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
   expose $port
-  router {
-    host: "{{name}}.internal.example.com"
-    entrypoints: web-secure
-    middleware: local-ipwhitelist
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`{{name}}.internal.example.com`)"
+    "traefik.http.routers.{{name}}.entrypoints": "web-secure"
+    "traefik.http.routers.{{name}}.middlewares": ["local-ipwhitelist@file"]
   }
 }
 ```
@@ -49,15 +49,15 @@ A template with no parameters just omits the parameter list:
 
 ```hll
 template authenticated {
-  router {
-    middleware: forwardAuth-authentik
+  labels {
+    "traefik.http.routers.{{name}}.middlewares": ["forwardAuth-authentik@file"]
   }
 }
 ```
 
-Both templates name the *unnamed* router, so composing them merges the
-two blocks under that one key and their `middleware` lists concatenate
-in tier order—see [`router`](#merge-order-and-collisions) below.
+Both templates write the same `labels` key, and because each writes a
+*list* the two concatenate in tier order rather than colliding—see
+[Merge order and collisions](#merge-order-and-collisions) below.
 
 ## Applying a template with `with`
 
@@ -97,7 +97,9 @@ template linuxserver_app(puid, pgid) {
 template linuxserver_web(puid, pgid, port) {
   with linuxserver_app { puid: $puid, pgid: $pgid }
   expose $port
-  router { entrypoints: web-secure }
+  labels {
+    "traefik.http.routers.{{name}}.entrypoints": "web-secure"
+  }
 }
 ```
 
@@ -412,124 +414,25 @@ Two rules keep this unambiguous, and both are worth knowing before you
 hit them:
 
 - **Value positions only.** `networks [...]`, `dns`, `env_file`,
-  `depends_on`, a router's `entrypoints`/`path_prefix`/`middleware`, and
-  a named-volume mount's host side all name a *declaration*, and a `.`
+  `depends_on`, and a named-volume mount's host side all name a
+  *declaration*, and a `.`
   there already qualifies that name by an import alias. Writing
   `networks [$net.name]` is an error that says so.
 - **At most three parts.** Two name a declaration and a field, three
   name an alias, a declaration and a field, and `$param` takes exactly
   one field. A fourth part has no reading left.
 
-## Routing with `std:traefik`
+## A worked set of templates: routing
 
-`hllc` bundles one module, and its templates write Traefik's router and
-service labels. Import it like any other file:
+Routing is the biggest thing templates do in a real homelab, and it's
+entirely templates—`hllc` bundles a module of them, `std:traefik`, and
+has no routing built in at all. It's a good read once this page
+makes sense, because it exercises every feature here at once:
+parameters, interpolation into a string, list arguments, reading a
+declaration's name, and list-valued labels composing across tiers.
 
-```hll,build
-use "std:traefik" as traefik
+[Routing](./routing.md) covers it.
 
-service web {
-  image "nginx"
-  with traefik.http { host: "web.example.com", port: 8123 }
-}
-```
-
-```yaml
-services:
-  web:
-    image: nginx
-    expose:
-    - 8123
-    labels:
-    - traefik.http.routers.web.rule=Host(`web.example.com`)
-    - traefik.http.services.web.loadbalancer.server.port=8123
-```
-
-That's the same document a [`router`](./built-in-fields.md#router) block
-produces for the same service—byte for byte, which the compiler's own
-test suite checks for every shape a router can take. Both spellings work
-today.
-
-### One template per label
-
-The set is deliberately small-grained. A `labels` block writes every key
-it lists, and nothing omits one, so a single template taking every
-optional field would write `entrypoints=` for a router that has no
-entrypoints. Each label a router may or may not carry gets its own
-template instead, and you list the ones you want:
-
-| template | writes |
-| --- | --- |
-| `http_rule(router, rule)` | `…routers.<router>.rule` |
-| `http_entrypoints(router, entrypoints)` | `…routers.<router>.entrypoints` |
-| `http_middlewares(router, middlewares)` | `…routers.<router>.middlewares` |
-| `http_priority(router, priority)` | `…routers.<router>.priority` |
-| `http_service(router, port)` | `…routers.<router>.service` and that service's port |
-| `port(port)` | the service-wide load-balancer port |
-| `disable()` | `traefik.enable=false` |
-
-`tcp_rule`, `tcp_entrypoints`, `tcp_middlewares`, `tcp_priority` and
-`tcp_service` mirror the five HTTP ones in Traefik's TCP namespace. A
-separate set rather than a `protocol` parameter, because the namespace
-is part of the label *key* and no template chooses a key by condition.
-
-`router` takes the full router id rather than a name the module builds:
-`"{{name}}"` for the one unnamed router a service may have,
-`"{{name}}-api"` for a named one. `{{name}}` resolves inside an
-argument, so you write it at the call site and the module stays out of
-the business of deriving ids.
-
-`entrypoints` and `middlewares` take lists, joined into one label:
-
-```hll,build
-use "std:traefik" as traefik
-
-service web {
-  image "nginx"
-  expose 8123
-  with
-    traefik.http_rule { router: "{{name}}-api", rule: "Host(`api.example.com`)" },
-    traefik.http_entrypoints { router: "{{name}}-api", entrypoints: ["web-secure", "web"] },
-    traefik.http_middlewares { router: "{{name}}-api", middlewares: ["auth@file", "compress@file"] },
-    traefik.port { port: 8123 }
-}
-```
-
-```yaml
-labels:
-- traefik.http.routers.web-api.rule=Host(`api.example.com`)
-- traefik.http.routers.web-api.entrypoints=web-secure,web
-- traefik.http.routers.web-api.middlewares=auth@file,compress@file
-- traefik.http.services.web.loadbalancer.server.port=8123
-```
-
-Each middleware carries its own `@file` suffix. The `middleware` field
-adds that for you, and a list of strings can't, since a string is all
-the module holds.
-
-### The order you list them is the order they land
-
-Labels come out in `with`-list order, so listing the templates in the
-order the preceding table gives matches what a `router` block emits. Nothing depends on
-that—Docker reads labels as a map—but a diff against a file that used
-the built-in stays readable.
-
-### What the module can't do for you
-
-Two things the `router` block does that a template can't.
-
-It **doesn't write `traefik.docker.network`**. `hllc` still derives that
-one from whichever of your service's networks is `external`, so the
-label appears whether or not you route through this module, and writing
-it yourself is an error saying it's already generated.
-
-It **doesn't check your rule**. `router { rule: … }` parses the
-expression and rejects an unknown matcher or a wrong argument count
-against a table of Traefik's own. A rule you hand `http_rule` is a
-string, so `PathPrefx(\`/api\`)` compiles here and fails at Traefik
-instead—a router that silently never matches. Read
-[a value goes through as written](./built-in-fields.md#a-value-goes-through-as-written)
-before you build one from a parameter.
 
 ## Every template needs a `with`
 
@@ -544,7 +447,7 @@ template defaults {
 service jellyfin {
   with defaults
   image "jellyfin/jellyfin:latest"
-  expose 8096 as "media.example.com"
+  expose 8096
 }
 ```
 
@@ -617,19 +520,14 @@ Different field kinds merge differently:
   always are, whatever those two entries' values happen to be.
 - **Scalar fields** (`image`, `restart`, `expose`'s `port`) error on
   collision among explicit templates only, per the preceding rule.
-- **`healthcheck` and `router`** are the built-in struct fields with
-  more than one sub-field, and both merge per sub-field independently
-  rather than as one indivisible unit—the same key-by-key reasoning as
-  a map field, applied to a struct's named fields instead of a map's
-  keys. Each sub-field then follows its own kind's rule. Every
-  `healthcheck` sub-field but `test` is a scalar and collides like
-  `expose.port` does, and `test` collides the same way even though its
-  value isn't a plain string or number—see below. A `router`'s `host`
-  is a scalar and collides, while its `entrypoints` is a list and
-  concatenates, so two explicit templates each naming one entry point
-  produce a router attached to both—and two naming the *same* entry
-  point produce a router attached to it once, per the preceding
-  distinct-name rule.
+- **`healthcheck`** is the built-in struct field with more than one
+  sub-field, and it merges per sub-field independently rather than as
+  one indivisible unit—the same key-by-key reasoning as a map field,
+  applied to a struct's named fields instead of a map's keys. Each
+  sub-field then follows its own kind's rule: every sub-field but `test`
+  is a scalar and collides like `expose.port` does, and `test` collides
+  the same way even though its value isn't a plain string or
+  number—see below.
 
   `healthcheck.test` and `healthcheck.disable` collide the same way a
   scalar sub-field does, even though neither is a plain `Literal`:
@@ -654,37 +552,33 @@ Different field kinds merge differently:
   *each other*: a template that sets `entrypoint` and a template that
   sets `command` merge cleanly, and the service gets both.
 
-- **`router`** merges keyed by router name, and then per sub-field
-  within each name—both halves of the two preceding rules, one nested
-  inside the other. Keyed, so a template's `router api` and a service's `router
-  web` give the service two routers rather than one. Per sub-field, so a
-  service body writing `router api { host: "..." }` over a template's
-  `router api { entrypoints: web-secure, path_prefix: [...] }` keeps the
-  entry point and the prefixes it didn't mention. Within one name,
-  `host` is a scalar and collides between two explicit templates,
-  `entrypoints` and the router's own `middleware` concatenate by distinct
-  name like the service-level `middleware`, and `path_prefix`
-  concatenates keeping duplicates like `dns`, since the prefixes are
-  alternatives whose order is observable in the emitted rule. A
-  collision names the router as well as the field, since a message about
-  `router.host` alone doesn't say which router.
+- **`labels`** merges key by key like any map field, but the *shape* of
+  a value decides what a second contributor means. A single value says
+  the key holds one thing, so two explicit templates setting it collide.
+  A list says the key holds several, so they concatenate in tier order,
+  dropping a repeat—which is what lets a template add one middleware to
+  whatever it's mixed into. One key written as a list in one place and a
+  single value in another is its own error, since the two disagree about
+  what the key holds.
 
-  A shared middleware is exactly what a template is for: name it once
-  in a template's `router` block and every service that composes that
+  A shared middleware is exactly what a list-valued `labels` entry is
+  for: name it once in a template and every service composing that
   template gets it, with each service free to add its own on top—see
-  [`middleware`](./built-in-fields.md#middleware).
+  [A list value composes instead of
+  colliding](./built-in-fields.md#a-list-value-composes-instead-of-colliding).
 
-That last point about per-sub-field merging means a service's own body
-can override just a router's `host` while still inheriting its
-`entrypoint` from a `with`-listed template, without repeating it:
+A service's own body still wins over a template for a single-valued
+entry, so it can override one routing label while inheriting the rest:
 
 ```hll
 service it-tools {
   with internal_web { port: 8080 }
   image "corentinth/it-tools:latest"
-  # overrides just the unnamed router's host—its entry points still come
-  # from internal_web
-  router { host: "tools.internal.example.com" }
+  # overrides just the rule—the entrypoints and middlewares entries
+  # still come from internal_web
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`tools.internal.example.com`)"
+  }
 }
 ```
 
@@ -705,16 +599,16 @@ template internal_web(port) {
   networks [traefik-net]
   restart unless-stopped
   expose $port
-  router {
-    host: "{{name}}.internal.example.com"
-    entrypoints: web-secure
-    middleware: local-ipwhitelist
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`{{name}}.internal.example.com`)"
+    "traefik.http.routers.{{name}}.entrypoints": "web-secure"
+    "traefik.http.routers.{{name}}.middlewares": ["local-ipwhitelist@file"]
   }
 }
 
 template authenticated {
-  router {
-    middleware: forwardAuth-authentik
+  labels {
+    "traefik.http.routers.{{name}}.middlewares": ["forwardAuth-authentik@file"]
   }
 }
 
@@ -733,10 +627,10 @@ service syncthing {
 `syncthing` ends up with:
 
 - a network reference and `restart` from `internal_web`
-- an `expose` block built from `internal_web`'s `port` parameter, and an
-  unnamed `router` block with its `{{name}}`-interpolated host
-- a middleware entry each from `internal_web` and `authenticated`, both
-  landing on that same unnamed router
+- an `expose` block built from `internal_web`'s `port` parameter, and
+  its routing labels with their `{{name}}`-interpolated host
+- a middlewares entry contributed by both `internal_web` and
+  `authenticated`, joined into one label because each wrote a list
 - two `env` entries from `linuxserver_app`
 - its own `image` and `volume`, which no template sets
 

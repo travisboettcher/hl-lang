@@ -1,17 +1,21 @@
-# #232: a service with both a `router` block and `raw { labels: [...] }`
-# loses the entire router-computed label set — `rule`, `entrypoints`,
-# `docker.network`, the loadbalancer port — because `raw` replaces a
-# built-in key it names rather than merging with it. The output below is
-# what `hllc` has always produced; what this pins down is the warning
-# that now says so, since `labels` is the aggregate of several features
-# rather than one field, and losing it silently was the footgun.
+# #232: a service with both a `labels` field and `raw { labels: [...] }`
+# loses the entire computed label set, because `raw` replaces a built-in
+# key it names rather than merging with it. The output below is what
+# `hllc` has always produced; what this pins down is the warning that
+# says so, since `labels` aggregates entries from every template tier as
+# well as the service's own body, and losing all of them silently was
+# the footgun.
+#
+# Written with `std:traefik` since #271: the labels `raw` discards here
+# used to be computed by a `router` block, which makes the loss no less
+# silent — the routing is simply spelled as templates now.
+use "std:traefik" as traefik
+
 service web {
   image "test"
-  expose 8123
-  router {
-    host: "hass.example.com"
-    entrypoints: web-secure
-  }
+  with
+    traefik.http { host: "hass.example.com", port: 8123 },
+    traefik.http_entrypoints { router: "{{name}}", entrypoints: ["web-secure"] }
   raw {
     labels: [
       "traefik.http.routers.web-internal.tls.domains[0].main=internal.example.com"

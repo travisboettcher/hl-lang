@@ -779,6 +779,48 @@ fn a_qualified_field_access_resolves_in_the_scope_it_was_written_in() {
     assert_eq!(decoy_label(template), "docker_default");
 }
 
+#[test]
+fn a_qualified_field_access_naming_neither_kind_is_an_error() {
+    let template = parse_template(
+        "template web {\n  labels { \"k\": traefik.nothing.name }\n}\n",
+        "web",
+    );
+    let resolver = FakeResolver {
+        modules: decoy_modules(template),
+    };
+    let s = parse_service("service s {\n  image \"x\"\n  with templates.web\n}\n", "s");
+    let err = compose_with_resolver(Vec::new(), Vec::new(), vec![s], Scope::Service, &resolver)
+        .expect_err("expected a compose error");
+    match err {
+        ComposeError::UnknownQualifiedDeclaration { alias, name, .. } => {
+            assert_eq!(alias, "traefik");
+            assert_eq!(name, "nothing");
+        }
+        other => panic!("expected UnknownQualifiedDeclaration, got {other:?}"),
+    }
+}
+
+/// An alias that resolves to nothing at all is a different mistake with
+/// a different fix, so it keeps its own diagnostic rather than being
+/// folded into "no such declaration."
+#[test]
+fn a_field_access_through_an_unknown_alias_names_the_alias() {
+    let template = parse_template(
+        "template web {\n  labels { \"k\": nope.proxy.name }\n}\n",
+        "web",
+    );
+    let resolver = FakeResolver {
+        modules: decoy_modules(template),
+    };
+    let s = parse_service("service s {\n  image \"x\"\n  with templates.web\n}\n", "s");
+    let err = compose_with_resolver(Vec::new(), Vec::new(), vec![s], Scope::Service, &resolver)
+        .expect_err("expected a compose error");
+    match err {
+        ComposeError::UnknownAlias { alias, .. } => assert_eq!(alias, "nope"),
+        other => panic!("expected UnknownAlias, got {other:?}"),
+    }
+}
+
 /// The interpolated spelling carries the same lexical-scoping
 /// requirement, and is resolved in the same place for that reason.
 #[test]
@@ -831,46 +873,4 @@ fn a_qualified_field_access_reads_an_imported_volumes_name() {
         "web",
     );
     assert_eq!(decoy_label(template), "media_store");
-}
-
-#[test]
-fn a_qualified_field_access_naming_neither_kind_is_an_error() {
-    let template = parse_template(
-        "template web {\n  labels { \"k\": traefik.nothing.name }\n}\n",
-        "web",
-    );
-    let resolver = FakeResolver {
-        modules: decoy_modules(template),
-    };
-    let s = parse_service("service s {\n  image \"x\"\n  with templates.web\n}\n", "s");
-    let err = compose_with_resolver(Vec::new(), Vec::new(), vec![s], Scope::Service, &resolver)
-        .expect_err("expected a compose error");
-    match err {
-        ComposeError::UnknownQualifiedDeclaration { alias, name, .. } => {
-            assert_eq!(alias, "traefik");
-            assert_eq!(name, "nothing");
-        }
-        other => panic!("expected UnknownQualifiedDeclaration, got {other:?}"),
-    }
-}
-
-/// An alias that resolves to nothing at all is a different mistake with
-/// a different fix, so it keeps its own diagnostic rather than being
-/// folded into "no such declaration."
-#[test]
-fn a_field_access_through_an_unknown_alias_names_the_alias() {
-    let template = parse_template(
-        "template web {\n  labels { \"k\": nope.proxy.name }\n}\n",
-        "web",
-    );
-    let resolver = FakeResolver {
-        modules: decoy_modules(template),
-    };
-    let s = parse_service("service s {\n  image \"x\"\n  with templates.web\n}\n", "s");
-    let err = compose_with_resolver(Vec::new(), Vec::new(), vec![s], Scope::Service, &resolver)
-        .expect_err("expected a compose error");
-    match err {
-        ComposeError::UnknownAlias { alias, .. } => assert_eq!(alias, "nope"),
-        other => panic!("expected UnknownAlias, got {other:?}"),
-    }
 }

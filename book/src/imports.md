@@ -18,14 +18,12 @@ use "docker.hll" as traefik
   bare identifier: a `networks [...]` entry (`networks
   [traefik.traefik-net]`), a named-volume mount's host side, or a `with`
   invocation's target (`with common.internal_web { ... }`).
-- `dns`, `env_file`, `depends_on`, and a router's own `entrypoints` and
-  `middleware` lists don't support a qualified form. None has a coherent
-  cross-file meaning: `depends_on` names a same-file sibling service,
-  `dns` and `env_file` name an IP address and a path on disk, and an
-  entry point or a middleware belongs to the deployment's own
-  `traefik.yml`—each is just text passed through verbatim. Only `networks` and a named-volume mount's host side resolve
-  a qualifier, since only they name something another `.hll` file
-  actually declares.
+- `dns`, `env_file` and `depends_on` don't support a qualified form.
+  None has a coherent cross-file meaning: `depends_on` names a same-file
+  sibling service, and `dns` and `env_file` name an IP address and a
+  path on disk—each is just text passed through verbatim. Only
+  `networks` and a named-volume mount's host side resolve a qualifier,
+  since only they name something another `.hll` file actually declares.
 
 ## Splitting a homelab across files
 
@@ -49,16 +47,16 @@ template internal_web(port) {
   networks [net.traefik-net]
   restart unless-stopped
   expose $port
-  router {
-    host: "{{name}}.internal.example.com"
-    entrypoints: web-secure
-    middleware: local-ipwhitelist
+  labels {
+    "traefik.http.routers.{{name}}.rule": "Host(`{{name}}.internal.example.com`)"
+    "traefik.http.routers.{{name}}.entrypoints": "web-secure"
+    "traefik.http.routers.{{name}}.middlewares": ["local-ipwhitelist@file"]
   }
 }
 
 template authenticated {
-  router {
-    middleware: forwardAuth-authentik
+  labels {
+    "traefik.http.routers.{{name}}.middlewares": ["forwardAuth-authentik@file"]
   }
 }
 
@@ -289,9 +287,8 @@ use "std:traefik" as traefik
 
 That path resolves against the compiler's own modules rather than
 against your tree. This compiler bundles one, `std:traefik`, whose
-templates write the same Traefik labels a
-[`router`](./built-in-fields.md#router) block generates. See
-[Routing with `std:traefik`](./templates-and-composition.md#routing-with-stdtraefik).
+templates write a service's Traefik router labels—see
+[Routing](./routing.md).
 Ask for a name it doesn't carry and the diagnostic says what it does:
 
 ```text

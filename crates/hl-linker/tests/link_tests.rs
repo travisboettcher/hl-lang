@@ -428,51 +428,6 @@ fn duplicate_network_name_in_one_file_is_error() {
     ));
 }
 
-/// The imported-file case of the same check: a library module's
-/// `networks` map is what every `alias.name` lookup goes through, so a
-/// duplicate there is exactly the ambiguity this rejects.
-#[test]
-fn duplicate_network_name_in_an_imported_file_is_error() {
-    let mut loader = InMemoryLoader::default();
-    loader.add(
-        "docker.hll",
-        "network proxy {\n  external\n}\nnetwork proxy {\n  name: \"other\"\n}\n",
-    );
-    loader.add(
-        "service.hll",
-        "use \"docker.hll\" as traefik\n\
-         service s {\n  image \"x\"\n  networks [traefik.proxy]\n}\n",
-    );
-
-    let err = link(Path::new("service.hll"), &loader).expect_err("expected a link error");
-    assert!(matches!(
-        err,
-        LinkError::Compose { source: ComposeError::DuplicateNetworkName { name, .. }, .. } if name == "proxy"
-    ));
-}
-
-/// The same network name declared in two *different* modules stays
-/// legal — each module has its own symbol table, and that's exactly what
-/// makes a shared `network` definition importable. Nothing in the entry
-/// file's own `networks [proxy]` reaches across the import, so the two
-/// declarations never have to be told apart.
-#[test]
-fn same_network_name_in_two_modules_is_fine() {
-    let mut loader = InMemoryLoader::default();
-    loader.add("docker.hll", "network proxy {\n  external\n}\n");
-    loader.add(
-        "service.hll",
-        "use \"docker.hll\" as traefik\n\
-         network proxy {\n  external\n}\n\
-         service s {\n  image \"x\"\n  networks [proxy]\n}\n",
-    );
-
-    let composed = link(Path::new("service.hll"), &loader)
-        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
-        .program;
-    assert_eq!(composed.networks.len(), 1);
-}
-
 /// #71: ...but the moment the entry file *does* reach across the import
 /// while declaring its own `proxy`, the two become indistinguishable.
 /// Codegen re-resolves `networks [...]` by bare name against one flat
@@ -1113,56 +1068,6 @@ const REGISTRY: &[(&str, &str)] = &[
     ),
 ];
 
-/// Against the *real* registry, so this pins what a user actually sees
-/// rather than what a fixture would say. `traefik` is bundled since
-/// #269, so the unknown name here is one that isn't.
-#[test]
-fn an_unknown_std_module_names_what_this_compiler_bundles() {
-    let mut loader = InMemoryLoader::default();
-    loader.add(
-        "svc.hll",
-        "use \"std:caddy\" as c\nservice s {\n  image \"x\"\n}\n",
-    );
-
-    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
-    assert!(
-        matches!(&err, LinkError::UnknownStdModule { name, .. } if name == "caddy"),
-        "unexpected error: {err:?}"
-    );
-    assert_eq!(
-        err.to_string(),
-        "svc.hll:1:5: unknown standard library module \"std:caddy\" — this compiler bundles: \
-         std:traefik"
-    );
-}
-
-/// The other half of that message, which the shipped registry can no
-/// longer produce. Reached through the test seam rather than deleted:
-/// an empty registry is still a state the formatter can be asked about,
-/// and "bundles: " with nothing after it would be the bug this branch
-/// exists to prevent.
-#[test]
-fn an_empty_registry_says_so_rather_than_listing_nothing() {
-    let mut loader = InMemoryLoader::default();
-    loader.add(
-        "svc.hll",
-        "use \"std:traefik\" as t\nservice s {\n  image \"x\"\n}\n",
-    );
-
-    let err = hl_linker::link_with_std_registry(Path::new("svc.hll"), &loader, &[])
-        .expect_err("expected a link error");
-    assert!(
-        matches!(&err, LinkError::UnknownStdModule { name, available, .. }
-            if name == "traefik" && available.is_empty()),
-        "unexpected error: {err:?}"
-    );
-    assert_eq!(
-        err.to_string(),
-        "svc.hll:1:5: unknown standard library module \"std:traefik\" — this compiler bundles \
-         no standard library modules"
-    );
-}
-
 #[test]
 fn an_unknown_std_module_names_every_module_that_is_bundled() {
     let mut loader = InMemoryLoader::default();
@@ -1387,5 +1292,100 @@ fn an_absolute_import_inside_a_bundled_module_is_rejected_too() {
     assert!(
         matches!(&err, LinkError::PathEscape { raw, .. } if raw == "/etc/hostname"),
         "unexpected error: {err:?}"
+    );
+}
+
+/// The imported-file case of the same check: a library module's
+/// `networks` map is what every `alias.name` lookup goes through, so a
+/// duplicate there is exactly the ambiguity this rejects.
+#[test]
+fn duplicate_network_name_in_an_imported_file_is_error() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "docker.hll",
+        "network proxy {\n  external\n}\nnetwork proxy {\n  name: \"other\"\n}\n",
+    );
+    loader.add(
+        "service.hll",
+        "use \"docker.hll\" as traefik\n\
+         service s {\n  image \"x\"\n  networks [traefik.proxy]\n}\n",
+    );
+
+    let err = link(Path::new("service.hll"), &loader).expect_err("expected a link error");
+    assert!(matches!(
+        err,
+        LinkError::Compose { source: ComposeError::DuplicateNetworkName { name, .. }, .. } if name == "proxy"
+    ));
+}
+
+/// The same network name declared in two *different* modules stays
+/// legal — each module has its own symbol table, and that's exactly what
+/// makes a shared `network` definition importable. Nothing in the entry
+/// file's own `networks [proxy]` reaches across the import, so the two
+/// declarations never have to be told apart.
+#[test]
+fn same_network_name_in_two_modules_is_fine() {
+    let mut loader = InMemoryLoader::default();
+    loader.add("docker.hll", "network proxy {\n  external\n}\n");
+    loader.add(
+        "service.hll",
+        "use \"docker.hll\" as traefik\n\
+         network proxy {\n  external\n}\n\
+         service s {\n  image \"x\"\n  networks [proxy]\n}\n",
+    );
+
+    let composed = link(Path::new("service.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
+    assert_eq!(composed.networks.len(), 1);
+}
+
+/// Against the *real* registry, so this pins what a user actually sees
+/// rather than what a fixture would say. `traefik` is bundled since
+/// #269, so the unknown name here is one that isn't.
+#[test]
+fn an_unknown_std_module_names_what_this_compiler_bundles() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "svc.hll",
+        "use \"std:caddy\" as c\nservice s {\n  image \"x\"\n}\n",
+    );
+
+    let err = link(Path::new("svc.hll"), &loader).expect_err("expected a link error");
+    assert!(
+        matches!(&err, LinkError::UnknownStdModule { name, .. } if name == "caddy"),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "svc.hll:1:5: unknown standard library module \"std:caddy\" — this compiler bundles: \
+         std:traefik"
+    );
+}
+
+/// The other half of that message, which the shipped registry can no
+/// longer produce. Reached through the test seam rather than deleted:
+/// an empty registry is still a state the formatter can be asked about,
+/// and "bundles: " with nothing after it would be the bug this branch
+/// exists to prevent.
+#[test]
+fn an_empty_registry_says_so_rather_than_listing_nothing() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "svc.hll",
+        "use \"std:traefik\" as t\nservice s {\n  image \"x\"\n}\n",
+    );
+
+    let err = hl_linker::link_with_std_registry(Path::new("svc.hll"), &loader, &[])
+        .expect_err("expected a link error");
+    assert!(
+        matches!(&err, LinkError::UnknownStdModule { name, available, .. }
+            if name == "traefik" && available.is_empty()),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "svc.hll:1:5: unknown standard library module \"std:traefik\" — this compiler bundles \
+         no standard library modules"
     );
 }

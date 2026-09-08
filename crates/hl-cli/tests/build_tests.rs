@@ -1122,42 +1122,6 @@ fn build_emits_a_declared_volumes_options_in_the_top_level_section() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// #80's one hard error: a Traefik-only construct with no router to
-/// attach it to used to build a service with its middleware silently
-/// missing. It now fails the build — since #221 as a host-less `router`,
-/// the one shape of that mistake still writable.
-///
-/// The message itself lives in `tests/cmd/cross-file-diagnostics.trycmd`.
-/// What stays here is the half a transcript can't see: a failed build
-/// must leave *no* output behind, and a directory comparison can only
-/// assert that a file it names is present and correct, never that an
-/// unnamed one is absent.
-#[test]
-fn build_fails_on_middleware_without_a_host() {
-    let dir = scratch_dir("router-less-middleware");
-    let entry = dir.join("svc.hll");
-    fs::write(
-        &entry,
-        "service web {\n  image \"nginx\"\n  expose 80\n  \
-           router { middleware: forwardAuth-authentik }\n}\n",
-    )
-    .unwrap();
-    let out = dir.join("docker-compose.yml");
-
-    let code = run(Cli {
-        command: Command::Build {
-            file: entry,
-            out: Some(out.clone()),
-            force: false,
-        },
-    });
-
-    assert_eq!(code, ExitCode::FAILURE);
-    assert!(!out.exists(), "a failed build must not write output");
-
-    fs::remove_dir_all(&dir).ok();
-}
-
 /// #129: `check` runs the whole pipeline and writes nothing. That
 /// "nothing" is the entire feature, and it is exactly what a transcript
 /// can't assert — `tests/cmd/check.trycmd` pins what `check` prints,

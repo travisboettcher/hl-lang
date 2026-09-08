@@ -26,9 +26,10 @@ template/`with` composition → cross-file `use` imports → codegen →
 command-line tool. A `.hll` file declares `network`, `volume` and
 `service` blocks. A service carries the image or build context it runs,
 the ports it exposes or publishes, its volumes, environment, restart and
-health-check policy, one or more Traefik `router` blocks, extra Docker
-`labels`, and a `raw` escape hatch for any Compose key the language
-doesn't model yet. The user guide lists every field and what it
+health-check policy, its Docker `labels`, and a `raw` escape hatch for
+any Compose key the language doesn't model yet. Routing is labels rather
+than a built-in field—`hllc` bundles a `std:traefik` module of templates
+that write them. The user guide lists every field and what it
 generates. Services combine reusable `template`s via `with`, and
 `use` another `.hll` file under a local alias to reuse its
 templates/networks across files (`use "docker.hll" as traefik`, then for
