@@ -33,6 +33,12 @@ pub struct Block {
     pub line: usize,
     pub code: String,
     pub attrs: Vec<String>,
+    /// The ` ```yaml `/` ```text ` block immediately following this
+    /// fence, if there is one — the output a page tells its reader to
+    /// expect. Captured here rather than re-scanned by the test that
+    /// checks it, so the book's fence shape stays known in exactly one
+    /// place.
+    pub expected_output: Option<String>,
 }
 
 impl Block {
@@ -100,11 +106,36 @@ pub fn extract_blocks() -> Vec<Block> {
                 code.push('\n');
             }
 
+            // An output block counts as this fence's only when it
+            // follows immediately, separated by at most one blank line.
+            // Anything further down the page is prose's, not this
+            // example's, and claiming it would pin the wrong thing.
+            let mut expected_output = None;
+            if lines.peek().is_some_and(|(_, l)| l.trim().is_empty()) {
+                lines.next();
+            }
+            if lines
+                .peek()
+                .is_some_and(|(_, l)| *l == "```yaml" || *l == "```text")
+            {
+                lines.next();
+                let mut out = String::new();
+                for (_, body_line) in lines.by_ref() {
+                    if body_line == "```" {
+                        break;
+                    }
+                    out.push_str(body_line);
+                    out.push('\n');
+                }
+                expected_output = Some(out);
+            }
+
             blocks.push(Block {
                 source: source_name.clone(),
                 line: idx + 1,
                 code,
                 attrs,
+                expected_output,
             });
         }
     }

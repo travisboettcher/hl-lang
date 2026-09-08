@@ -363,8 +363,9 @@ service jellyfin {
 ```yaml
 networks:
 - proxy
+expose:
+- 8096
 labels:
-- traefik.docker.network=docker_default
 - caddy.network=docker_default
 - caddy.upstream=jellyfin:8096
 ```

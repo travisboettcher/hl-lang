@@ -470,17 +470,16 @@ service web {
 
 ```yaml
 labels:
-- traefik.docker.network=docker_default
 - traefik.http.routers.web.rule=Host(`web.example.com`)
-- traefik.http.routers.web.entrypoints=web-secure
 - traefik.http.services.web.loadbalancer.server.port=8123
+- traefik.http.routers.web.entrypoints=web-secure
 - traefik.http.routers.web.tls.domains[0].main=internal.example.com
 - com.example.owner=platform-team
 ```
 
-Explicit entries always come last, after every computed label. Nothing a
-service computed moves to make room, so a file that writes no `labels`
-block generates exactly what it would without one.
+Entries land in tier order: each `with` target left to right, then the
+service's own body last. Nothing a template wrote moves to make room, so
+a service that applies no template emits exactly what it wrote.
 
 This is where routing labels go, either written by hand or by the
 templates in [`std:traefik`](./routing.md), and where a label no
@@ -561,7 +560,7 @@ labels {
 ```
 
 ```text
-5:3: duplicate `labels` entry: key "com.example.owner" already set at 4:3
+5:5: duplicate `labels` entry: key "com.example.owner" already set at 4:5
 ```
 
 ### A key two entries resolve to is an error
