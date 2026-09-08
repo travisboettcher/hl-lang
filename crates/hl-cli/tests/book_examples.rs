@@ -26,6 +26,13 @@
 //!   `InMemoryLoader`, keyed by its own `file=NAME`; the block also
 //!   marked `entry` is the one `link`+`generate` runs against.
 //! - `ignore` — excluded from validation entirely.
+//!
+//! A `build` block usually prints the document it produces underneath
+//! itself, and `book_documented_output_matches` holds those to the
+//! compiler. Compiling an example only proves it still *works*; the
+//! YAML beside it is a separate claim about what it produces, and
+//! nothing checked that claim until #271 left three of them describing
+//! labels `hllc` had stopped generating.
 
 // The fence scanner itself lives in `book_blocks/` because
 // `compose_differential.rs` needs the same blocks — see that module's
@@ -37,6 +44,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use book_blocks::{Block, book_src_dir, extract_blocks};
+use serde_yaml_ng::Value;
 
 fn parse_ok(src: &str) -> Result<(), String> {
     hl_parser::parse(src)
@@ -52,6 +60,123 @@ fn build_ok(src: &str) -> Result<(), String> {
     hl_codegen::generate(linked.program)
         .map(|_| ())
         .map_err(|err| err.to_string())
+}
+
+/// Builds one source the way `book_examples_compile` does, and hands
+/// back the generated document rather than discarding it.
+fn build_output(src: &str) -> Result<String, String> {
+    let mut loader = hl_linker::InMemoryLoader::default();
+    loader.add("example.hll", src);
+    let linked =
+        hl_linker::link(Path::new("example.hll"), &loader).map_err(|err| err.to_string())?;
+    hl_codegen::generate(linked.program)
+        .map(|generated| generated.yaml)
+        .map_err(|err| err.to_string())
+}
+
+/// Whether `expected` describes some part of `actual`.
+///
+/// Equality is the ordinary case: a page that prints a whole document
+/// gets that document checked whole. The looser arm is for the pages
+/// that print an excerpt — just the `labels:` a section is about, say —
+/// where the surrounding service would be noise. Such an excerpt matches
+/// a mapping that carries every key it names, **with exactly the value
+/// it names**, which is what keeps "excerpt" from meaning "unchecked":
+/// a documented `labels:` list still has to be the list `hllc` emits,
+/// entry for entry.
+fn describes(expected: &Value, actual: &Value) -> bool {
+    if expected == actual {
+        return true;
+    }
+    if let (Value::Mapping(want), Value::Mapping(have)) = (expected, actual)
+        && want.iter().all(|(k, v)| have.get(k) == Some(v))
+    {
+        return true;
+    }
+    match actual {
+        Value::Mapping(m) => m.values().any(|v| describes(expected, v)),
+        Value::Sequence(s) => s.iter().any(|v| describes(expected, v)),
+        _ => false,
+    }
+}
+
+/// Every `build` example that prints its output generates exactly that.
+///
+/// The gap this closes: `book_examples_compile` runs the compiler over
+/// each example and throws the result away, so an example goes on
+/// passing while the YAML printed beneath it drifts into fiction. That
+/// is not hypothetical — #271 stopped the compiler generating
+/// `traefik.docker.network`, and three blocks went on claiming it,
+/// one of them on an example about *Caddy*. Nothing failed, because
+/// nothing was looking.
+///
+/// Compared as parsed YAML rather than as text, so the check is about
+/// what the document *says*. Sequence indentation and key order are the
+/// emitter's business and change nothing a reader relies on; a label
+/// that isn't there is a different document.
+#[test]
+fn book_documented_output_matches() {
+    let mut failures = Vec::new();
+    let mut checked = 0;
+
+    for block in extract_blocks() {
+        // `file=` blocks are one file of a multi-file group, built
+        // together by the test above; the group's output isn't this
+        // block's to claim.
+        let (Some(expected_src), true, None) = (
+            block.expected_output.as_deref(),
+            block.has("build"),
+            block.attr("file="),
+        ) else {
+            continue;
+        };
+
+        let actual_src = match build_output(&block.code) {
+            Ok(yaml) => yaml,
+            // A `build` block that no longer builds is the other test's
+            // failure to report, not this one's — saying it twice would
+            // make one broken example look like two.
+            Err(_) => continue,
+        };
+
+        let expected: Value = match serde_yaml_ng::from_str(expected_src) {
+            Ok(value) => value,
+            Err(err) => {
+                failures.push(format!(
+                    "{}: the block beneath this example is not YAML ({err}) — a `build` \
+                     example's output block documents a generated document, so if this one \
+                     is prose it wants a blank line between it and the example",
+                    block.location()
+                ));
+                continue;
+            }
+        };
+        let actual: Value = serde_yaml_ng::from_str(&actual_src)
+            .unwrap_or_else(|err| panic!("hllc emitted invalid YAML: {err}\n{actual_src}"));
+
+        checked += 1;
+        if !describes(&expected, &actual) {
+            failures.push(format!(
+                "{}: the output documented here is not what this example generates\n\
+                 --- documented ---\n{expected_src}--- actual ---\n{actual_src}",
+                block.location()
+            ));
+        }
+    }
+
+    assert!(
+        checked >= 20,
+        "expected the book to document output for at least 20 `build` examples, found \
+         {checked} — if output blocks were deliberately removed, lower this floor; \
+         otherwise the extractor has stopped finding them and this test is passing \
+         vacuously"
+    );
+    assert!(
+        failures.is_empty(),
+        "{} documented output block(s) disagree with the compiler:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
 }
 
 #[test]

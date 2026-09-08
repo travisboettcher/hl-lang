@@ -39,10 +39,15 @@ Every statement is one of two shapes:
 
 A "value" itself can be a string (`"jellyfin/jellyfin:latest"`), a number
 (`8096`), a bare word (`unless-stopped`), a list (`[a, b, c]`), or another
-nested statement—bodies nest arbitrarily, which is how `router { host:
-"...", entrypoints: web-secure }` and `with internal_web { port: 8080 }`
-both work: the `{ ... }` after `internal_web` is itself a body, using
-the exact same grammar as a service's own top-level body.
+nested statement—bodies nest arbitrarily, which is how a `healthcheck {
+... }` block and `with internal_web { port: 8080 }` both work: the
+`{ ... }` after `internal_web` is itself a body, using the exact same
+grammar as a service's own top-level body.
+
+One difference between the two is worth knowing early. A field's own
+body separates its statements by newline, like a service body does. An
+invocation's *argument* body also accepts commas, which is what lets
+`with caddy { net: proxy, port: 8096 }` fit on one line.
 
 ## Reserved words
 
