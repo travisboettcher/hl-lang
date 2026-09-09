@@ -1,0 +1,2 @@
+--- error ---
+issue_296_argument_names_no_imported_declaration.hll:21:22: no network or volume `proxy` in `traefik`
