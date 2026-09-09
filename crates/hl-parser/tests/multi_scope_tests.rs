@@ -18,8 +18,8 @@
 use std::collections::HashMap;
 
 use hl_parser::{
-    ComposeError, Ident, Network, Service, Span, SymbolResolver, TemplateDecl, TopDecl, Volume,
-    compose_with_resolver, parse,
+    ComposeError, ComposedProgram, Ident, Network, Service, Span, SymbolResolver, TemplateDecl,
+    TopDecl, Volume, compose_with_resolver, parse,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -832,6 +832,49 @@ fn a_qualified_interpolated_field_access_resolves_in_the_same_scope() {
     assert_eq!(decoy_label(template), "x-docker_default");
 }
 
+/// Composes `service s { with templates.web }` against
+/// [`decoy_modules`], with a second template `inner` dropped into the
+/// same `Templates` scope for `web` to invoke — the shape every case
+/// about an *argument* needs, since an argument only means anything at
+/// a call site.
+///
+/// `entry_networks`/`entry_volumes` are the composing program's own
+/// declarations, which is how a case can put a *local* declaration in
+/// the way of the alias spelling.
+fn decoy_invocation(
+    inner: TemplateDecl,
+    web: TemplateDecl,
+    entry_networks: Vec<Network>,
+    entry_volumes: Vec<Volume>,
+) -> Result<ComposedProgram, ComposeError> {
+    let mut modules = decoy_modules(web);
+    modules
+        .get_mut(&Scope::Templates)
+        .expect("templates module")
+        .templates
+        .insert("inner".to_string(), inner);
+
+    let resolver = FakeResolver { modules };
+    let s = parse_service("service s {\n  image \"x\"\n  with templates.web\n}\n", "s");
+    compose_with_resolver(
+        entry_networks,
+        entry_volumes,
+        vec![s],
+        Scope::Service,
+        &resolver,
+    )
+}
+
+/// [`decoy_invocation`]'s first label, for the cases that expect one.
+fn decoy_invocation_label(inner: TemplateDecl, web: TemplateDecl) -> String {
+    let composed = decoy_invocation(inner, web, Vec::new(), Vec::new())
+        .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
+    composed.services[0].fields.labels.entries[0]
+        .value
+        .text()
+        .to_string()
+}
+
 /// A `with`-invocation's arguments are values written at the call site,
 /// so one written inside a template resolves against that template's
 /// own file — which is why field access is resolved before the
@@ -846,12 +889,120 @@ fn a_qualified_field_access_in_an_invocation_argument_uses_the_writing_scope() {
         "template web {\n  with inner { n: traefik.proxy.name }\n}\n",
         "web",
     );
+    assert_eq!(decoy_invocation_label(inner, web), "docker_default");
+}
+
+/// #296: a two-segment `alias.decl` argument names the *declaration*,
+/// which the callee then reads a field off — and the field resolves in
+/// the scope the argument was written in, not the invoking service's,
+/// whose own `traefik` alias points at the decoy.
+#[test]
+fn an_imported_declaration_argument_is_read_in_the_writing_scope() {
+    let inner = parse_template(
+        "template inner(n) {\n  labels { \"caddy.network\": \"{{n.name}}\" }\n}\n",
+        "inner",
+    );
+    let web = parse_template(
+        "template web {\n  with inner { n: traefik.proxy }\n}\n",
+        "web",
+    );
+    assert_eq!(decoy_invocation_label(inner, web), "docker_default");
+}
+
+/// The `$param.field` spelling of the same read, which substitution
+/// binds through a different path than the interpolated one.
+#[test]
+fn an_imported_declaration_argument_answers_a_slot_field_access() {
+    let inner = parse_template(
+        "template inner(n) {\n  labels { \"caddy.network\": $n.name }\n}\n",
+        "inner",
+    );
+    let web = parse_template(
+        "template web {\n  with inner { n: traefik.proxy }\n}\n",
+        "web",
+    );
+    assert_eq!(decoy_invocation_label(inner, web), "docker_default");
+}
+
+/// An undotted `{{n}}` interpolates the declaration's own identifier —
+/// the bare name it is reached by once imported, which is exactly what a
+/// same-file declaration passed the same way contributes.
+#[test]
+fn an_imported_declaration_argument_interpolates_as_its_bare_name() {
+    let inner = parse_template(
+        "template inner(n) {\n  labels { \"caddy.network\": \"{{n}}\" }\n}\n",
+        "inner",
+    );
+    let web = parse_template(
+        "template web {\n  with inner { n: traefik.proxy }\n}\n",
+        "web",
+    );
+    assert_eq!(decoy_invocation_label(inner, web), "proxy");
+}
+
+/// A parameter bound to an imported declaration reaches `networks
+/// [$net]` too, and attaching it there imports the declaration exactly
+/// as a written `networks [alias.name]` would — bare reference in the
+/// service, declaration in the program.
+#[test]
+fn an_imported_declaration_argument_attaches_the_network_it_names() {
+    let inner = parse_template("template inner(n) {\n  networks [$n]\n}\n", "inner");
+    let web = parse_template(
+        "template web {\n  with inner { n: traefik.proxy }\n}\n",
+        "web",
+    );
+    let composed = decoy_invocation(inner, web, Vec::new(), Vec::new())
+        .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
+    let network_ref = &composed.services[0].fields.networks[0];
+    assert!(network_ref.qualifier().is_none());
+    assert_eq!(network_ref.text(), "proxy");
+    assert_eq!(composed.networks.len(), 1);
+    assert_eq!(
+        composed.networks[0].real_name.as_ref().unwrap().text(),
+        "docker_default"
+    );
+}
+
+/// A list argument carries one item by item, so an imported
+/// declaration splices into `networks [$nets]` beside a same-file name
+/// and is imported exactly as a written entry would be.
+#[test]
+fn an_imported_declaration_splices_out_of_a_list_argument() {
+    let inner = parse_template("template inner(nets) {\n  networks [$nets]\n}\n", "inner");
+    let web = parse_template(
+        "template web {\n  with inner { nets: [traefik.proxy] }\n}\n",
+        "web",
+    );
+    let composed = decoy_invocation(inner, web, Vec::new(), Vec::new())
+        .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
+    let network_ref = &composed.services[0].fields.networks[0];
+    assert!(network_ref.qualifier().is_none());
+    assert_eq!(network_ref.text(), "proxy");
+    assert_eq!(composed.networks.len(), 1);
+}
+
+/// Forwarding one on through a second `with` hop reaches the same
+/// answer: the innermost read still resolves against the file that
+/// wrote `traefik.proxy`, however many parameters it was renamed
+/// through on the way.
+#[test]
+fn a_forwarded_imported_declaration_argument_still_reads_in_the_writing_scope() {
+    let inner = parse_template(
+        "template inner(i) {\n  labels { \"caddy.network\": \"{{i.name}}\" }\n}\n",
+        "inner",
+    );
+    let mid = parse_template("template mid(n) {\n  with inner { i: $n }\n}\n", "mid");
+    let web = parse_template(
+        "template web {\n  with mid { n: traefik.proxy }\n}\n",
+        "web",
+    );
     let mut modules = decoy_modules(web);
-    modules
+    let templates = &mut modules
         .get_mut(&Scope::Templates)
         .expect("templates module")
-        .templates
-        .insert("inner".to_string(), inner);
+        .templates;
+    templates.insert("inner".to_string(), inner);
+    templates.insert("mid".to_string(), mid);
 
     let resolver = FakeResolver { modules };
     let s = parse_service("service s {\n  image \"x\"\n  with templates.web\n}\n", "s");
@@ -862,6 +1013,148 @@ fn a_qualified_field_access_in_an_invocation_argument_uses_the_writing_scope() {
         composed.services[0].fields.labels.entries[0].value.text(),
         "docker_default"
     );
+}
+
+/// A declaration is not a value: passing one to a parameter the callee
+/// splices into an ordinary field says so at the argument, rather than
+/// letting a reference reach codegen.
+#[test]
+fn an_imported_declaration_argument_in_a_value_position_is_refused() {
+    let inner = parse_template(
+        "template inner(n) {\n  labels { \"caddy.network\": $n }\n}\n",
+        "inner",
+    );
+    let web = parse_template(
+        "template web {\n  with inner { n: traefik.proxy }\n}\n",
+        "web",
+    );
+    let err =
+        decoy_invocation(inner, web, Vec::new(), Vec::new()).expect_err("expected a compose error");
+    match err {
+        ComposeError::QualifiedArgumentNotAValue {
+            template,
+            alias,
+            name,
+            ..
+        } => {
+            assert_eq!(template, "inner");
+            assert_eq!(alias, "traefik");
+            assert_eq!(name, "proxy");
+        }
+        other => panic!("expected QualifiedArgumentNotAValue, got {other:?}"),
+    }
+}
+
+/// A base that names one of the program's own declarations keeps the
+/// field-access reading it has always had, whatever the aliases in
+/// scope: the alias spelling is only ever tried for a base that names
+/// nothing local, so no access written before #296 can change meaning.
+#[test]
+fn a_local_declaration_wins_the_two_segment_argument_spelling() {
+    let inner = parse_template(
+        "template inner(n) {\n  labels { \"caddy.network\": $n }\n}\n",
+        "inner",
+    );
+    let web = parse_template(
+        "template web {\n  with inner { n: traefik.name }\n}\n",
+        "web",
+    );
+    let local = parse_network("network traefik {\n  name: \"local_net\"\n}\n", "traefik");
+    let composed = decoy_invocation(inner, web, vec![local], Vec::new())
+        .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
+    assert_eq!(
+        composed.services[0].fields.labels.entries[0].value.text(),
+        "local_net"
+    );
+}
+
+/// Both kinds count as local, since both answer a field access: a
+/// `volume` in the way of an alias name takes the spelling exactly as a
+/// `network` does.
+#[test]
+fn a_local_volume_also_wins_the_two_segment_argument_spelling() {
+    let inner = parse_template(
+        "template inner(n) {\n  labels { \"caddy.network\": $n }\n}\n",
+        "inner",
+    );
+    let web = parse_template(
+        "template web {\n  with inner { n: traefik.name }\n}\n",
+        "web",
+    );
+    let local = parse_volume("volume traefik {\n  name: \"local_vol\"\n}\n", "traefik");
+    let composed = decoy_invocation(inner, web, Vec::new(), vec![local])
+        .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
+    assert_eq!(
+        composed.services[0].fields.labels.entries[0].value.text(),
+        "local_vol"
+    );
+}
+
+/// The argument pass claims only what an argument put there, so a field
+/// access bound to an ordinary same-file name still resolves where it
+/// always did — over the service's *merged* fields. A contribution the
+/// service's own body overrides is gone by then, and goes on drawing no
+/// diagnostic, however unresolvable the access it carried.
+#[test]
+fn an_overridden_contributions_field_access_still_draws_no_diagnostic() {
+    let inner = parse_template("template inner(n) {\n  image $n.name\n}\n", "inner");
+    let web = parse_template("template web {\n  with inner { n: ghost }\n}\n", "web");
+    let composed = decoy_invocation(inner, web, Vec::new(), Vec::new())
+        .unwrap_or_else(|err| panic!("unexpected compose error: {err}"));
+    assert_eq!(
+        composed.services[0]
+            .fields
+            .image
+            .as_ref()
+            .unwrap()
+            .reference
+            .as_ref()
+            .unwrap()
+            .text(),
+        "x"
+    );
+}
+
+/// An alias that resolves, holding no declaration by that name, names
+/// the mistake that was actually made — #296's own complaint about the
+/// diagnostic, which used to send the reader hunting for a local
+/// declaration they never meant to write.
+#[test]
+fn an_argument_naming_no_declaration_in_a_real_alias_says_so() {
+    let inner = parse_template(
+        "template inner(n) {\n  labels { \"caddy.network\": \"{{n.name}}\" }\n}\n",
+        "inner",
+    );
+    let web = parse_template(
+        "template web {\n  with inner { n: traefik.nothing }\n}\n",
+        "web",
+    );
+    let err =
+        decoy_invocation(inner, web, Vec::new(), Vec::new()).expect_err("expected a compose error");
+    match err {
+        ComposeError::UnknownQualifiedDeclaration { alias, name, .. } => {
+            assert_eq!(alias, "traefik");
+            assert_eq!(name, "nothing");
+        }
+        other => panic!("expected UnknownQualifiedDeclaration, got {other:?}"),
+    }
+}
+
+/// A base that is neither a local declaration nor an alias was a field
+/// access all along, and is still reported as one.
+#[test]
+fn an_argument_naming_neither_a_declaration_nor_an_alias_stays_a_field_access() {
+    let inner = parse_template(
+        "template inner(n) {\n  labels { \"caddy.network\": \"{{n.name}}\" }\n}\n",
+        "inner",
+    );
+    let web = parse_template("template web {\n  with inner { n: nope.name }\n}\n", "web");
+    let err =
+        decoy_invocation(inner, web, Vec::new(), Vec::new()).expect_err("expected a compose error");
+    match err {
+        ComposeError::FieldBaseNotDeclared { base, .. } => assert_eq!(base, "nope"),
+        other => panic!("expected FieldBaseNotDeclared, got {other:?}"),
+    }
 }
 
 /// `alias.decl.name` says nothing about which kind `decl` is, and both

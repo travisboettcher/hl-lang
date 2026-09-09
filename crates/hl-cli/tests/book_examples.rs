@@ -74,6 +74,29 @@ fn build_output(src: &str) -> Result<String, String> {
         .map_err(|err| err.to_string())
 }
 
+/// The same, for a multi-file `group=` example: every member is loaded
+/// under its own `file=` name and the one tagged `entry` is built. A
+/// group's output belongs to that entry block, which is where a reader
+/// sees it printed.
+fn build_group_output(members: &[&Block]) -> Result<String, String> {
+    let mut loader = hl_linker::InMemoryLoader::default();
+    let mut entry = None;
+    for block in members {
+        let name = block
+            .attr("file=")
+            .ok_or("group block has no `file=NAME`")?;
+        loader.add(name, &block.code);
+        if block.has("entry") {
+            entry = Some(name.to_string());
+        }
+    }
+    let entry = entry.ok_or("group has no block tagged `entry`")?;
+    let linked = hl_linker::link(Path::new(&entry), &loader).map_err(|err| err.to_string())?;
+    hl_codegen::generate(linked.program)
+        .map(|generated| generated.yaml)
+        .map_err(|err| err.to_string())
+}
+
 /// Whether `expected` describes some part of `actual`.
 ///
 /// Equality is the ordinary case: a page that prints a whole document
@@ -119,19 +142,35 @@ fn book_documented_output_matches() {
     let mut failures = Vec::new();
     let mut checked = 0;
 
-    for block in extract_blocks() {
-        // `file=` blocks are one file of a multi-file group, built
-        // together by the test above; the group's output isn't this
-        // block's to claim.
-        let (Some(expected_src), true, None) = (
+    let blocks = extract_blocks();
+    // A `group=` example is many blocks and one document, so the group
+    // is gathered first and its output claimed by the `entry` block that
+    // prints it — the multi-file worked examples document what they
+    // generate exactly as the single-file ones do.
+    let mut groups: HashMap<String, Vec<&Block>> = HashMap::new();
+    for block in &blocks {
+        if let Some(group) = block.attr("group=") {
+            groups.entry(group.to_string()).or_default().push(block);
+        }
+    }
+
+    for block in &blocks {
+        let group = block.attr("group=");
+        // A `build` tag is what marks a single-file block as one that
+        // documents output; a group member has `file=`/`entry` instead,
+        // since its group is always built.
+        let (Some(expected_src), true) = (
             block.expected_output.as_deref(),
-            block.has("build"),
-            block.attr("file="),
+            block.has("build") || (group.is_some() && block.has("entry")),
         ) else {
             continue;
         };
 
-        let actual_src = match build_output(&block.code) {
+        let built = match group {
+            Some(group) => build_group_output(&groups[group]),
+            None => build_output(&block.code),
+        };
+        let actual_src = match built {
             Ok(yaml) => yaml,
             // A `build` block that no longer builds is the other test's
             // failure to report, not this one's — saying it twice would

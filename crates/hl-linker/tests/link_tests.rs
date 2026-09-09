@@ -1389,3 +1389,72 @@ fn an_empty_registry_says_so_rather_than_listing_nothing() {
          no standard library modules"
     );
 }
+
+/// #296: the `network` a homelab shares across files, handed to
+/// `std:traefik`'s own `docker_network` template as an argument. The
+/// two-segment `alias.decl` spelling names the imported declaration, and
+/// the template's `{{net.name}}` reads the Docker name off it — the
+/// whole point of sharing one declaration through `use`.
+#[test]
+fn an_imported_network_passed_to_a_bundled_template_writes_its_docker_name() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "network.hll",
+        "network traefik-net {\n  external\n  name: \"docker_default\"\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"network.hll\" as net\n\
+         use \"std:traefik\" as traefik\n\
+         service web {\n  image \"nginx\"\n  networks [net.traefik-net]\n  \
+         with traefik.docker_network { net: net.traefik-net }\n}\n",
+    );
+
+    let composed = link(Path::new("svc.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
+    let labels = &composed.services[0].fields.labels.entries;
+    assert_eq!(labels[0].key.text(), "traefik.docker.network");
+    assert_eq!(labels[0].value.text(), "docker_default");
+}
+
+/// The same call one hop further out, which is how #296 was actually
+/// hit: the shared `templates.hll` holds both the `use` and the
+/// invocation, and the entry file knows nothing of either. The alias
+/// resolves where it is written, so the entry file needs no `use` of its
+/// own for the label to come out right.
+#[test]
+fn an_imported_network_passed_from_a_shared_templates_file_resolves_there() {
+    let mut loader = InMemoryLoader::default();
+    loader.add(
+        "network.hll",
+        "network traefik-net {\n  external\n  name: \"docker_default\"\n}\n",
+    );
+    loader.add(
+        "templates.hll",
+        "use \"network.hll\" as net\n\
+         use \"std:traefik\" as traefik\n\
+         template internal_web(port) {\n  networks [net.traefik-net]\n  \
+         with traefik.docker_network { net: net.traefik-net },\n       \
+         traefik.port { port: $port }\n}\n",
+    );
+    loader.add(
+        "svc.hll",
+        "use \"templates.hll\" as t\n\
+         service web {\n  image \"nginx\"\n  with t.internal_web { port: 8096 }\n}\n",
+    );
+
+    let composed = link(Path::new("svc.hll"), &loader)
+        .unwrap_or_else(|err| panic!("unexpected link error: {err}"))
+        .program;
+    let service = &composed.services[0];
+    assert_eq!(
+        service.fields.labels.entries[0].value.text(),
+        "docker_default"
+    );
+    // The network the argument named is attached by the `networks` entry
+    // beside it, and imported once for both.
+    assert!(service.fields.networks[0].qualifier().is_none());
+    assert_eq!(service.fields.networks[0].text(), "traefik-net");
+    assert_eq!(composed.networks.len(), 1);
+}

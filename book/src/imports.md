@@ -16,8 +16,9 @@ use "docker.hll" as traefik
   the directory you invoked `hllc` from.
 - `alias.name` then qualifies any reference that would otherwise be a
   bare identifier: a `networks [...]` entry (`networks
-  [traefik.traefik-net]`), a named-volume mount's host side, or a `with`
-  invocation's target (`with common.internal_web { ... }`).
+  [traefik.traefik-net]`), a named-volume mount's host side, a `with`
+  invocation's target (`with common.internal_web { ... }`), or an
+  argument to one (`with traefik.docker_network { net: net.traefik-net }`).
 - `dns`, `env_file` and `depends_on` don't support a qualified form.
   None has a coherent cross-file meaning: `depends_on` names a same-file
   sibling service, and `dns` and `env_file` name an IP address and a
@@ -180,6 +181,59 @@ section describes, since no second declaration comes over to collide.
 template—the same lexical-scoping rule as any other reference, and it
 covers a `with`-invocation's arguments too, since those are values the
 calling file wrote.
+
+## Passing an imported declaration to a template
+
+A template parameter takes an imported declaration the same way it takes
+a same-file one: `alias.name`, with no third segment, names the
+declaration itself, and the template reads whatever it needs off it.
+That's what makes `std:traefik`'s `docker_network` usable from a shared
+templates file, where the network it labels lives in a third file:
+
+```hll,file=network.hll,group=passed-declaration
+# network.hll
+network traefik-net {
+  external
+  name: "docker_default"
+}
+```
+
+```hll,file=web.hll,group=passed-declaration,entry
+# web.hll
+use "network.hll" as net
+use "std:traefik" as traefik
+
+service web {
+  image "nginx"
+  networks [net.traefik-net]
+  with traefik.docker_network { net: net.traefik-net }
+}
+```
+
+```yaml
+labels:
+- traefik.docker.network=docker_default
+```
+
+`docker_network`'s body reads `"{{net.name}}"`, and it resolves against
+`web.hll`'s own `net` alias—the file that wrote the argument—not the
+standard library file the template lives in. The lexical-scoping rule
+again, and it's what lets the same argument travel one hop further, from
+a shared `templates.hll` into a service file that never imports
+`network.hll` at all.
+
+The two things a template can do with the declaration you hand it are
+what a declaration is for: attach it (`networks [$net]`) or read a field
+off it (`"{{net.name}}"`, `$net.name`). Splicing it into an ordinary
+value—an `env` value, an `image`—is an error naming the argument, since a
+declaration has no text form a plain field could take. Pass
+`net.traefik-net.name` when the field is what you meant.
+
+A local declaration always wins the two-segment spelling. If the file
+also declares `network net { ... }`, then `net.traefik-net` reads the
+field `traefik-net` off *that* network—and says it has no such
+field—rather than reaching through the alias. Rename one of the two if
+they collide.
 
 ## Two networks, or two volumes, can't share one bare name
 

@@ -1,0 +1,22 @@
+# #296: a two-segment argument whose base names no local declaration is
+# read as `alias.decl`, naming a declaration in an imported file — which
+# is what lets one shared `network.hll` be passed to the templates that
+# label it.
+#
+# When the alias resolves and holds no such declaration, that is the
+# mistake to report. The old reading — a field access on a local
+# declaration nobody wrote — sent the reader hunting for a typo in a
+# name they never meant to spell, which is the diagnostic half of the
+# issue.
+use "std:traefik" as traefik
+
+template attach(net) {
+  labels {
+    "traefik.docker.network": "{{net.name}}"
+  }
+}
+
+service web {
+  image "nginx"
+  with attach { net: traefik.proxy }
+}

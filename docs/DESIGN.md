@@ -326,11 +326,32 @@ field_access   ::= IDENT "." IDENT              # local declaration, field
 - **Inside a value position, the segment count decides the shape.** Two
   segments name a local declaration and a field, three name an alias, a
   declaration and a field, and a `$param` base takes exactly one field,
-  since a parameter already names one declaration. A bare `alias.decl`
-  never meant anything in a value position, so reading the last segment
-  as a field takes nothing away. A fourth segment has no shape left to
-  be, so it draws an error rather than a partial reading of the first
-  three.
+  since a parameter already names one declaration. A fourth segment has
+  no shape left to be, so it draws an error rather than a partial
+  reading of the first three.
+- **A `with`-invocation's argument is the one value position where two
+  segments may instead name an imported declaration** (`with
+  docker_network { net: shared.proxy }`), because a parameter is the one
+  value that goes on to be a *reference*: bound to a declaration, it
+  reaches `networks [$net]` and `{{net.name}}` in the template it was
+  passed to, exactly as a bare same-file `IDENT` argument already does,
+  which is how one shared `network.hll` serves the template files that
+  label it. Precedence settles the ambiguity rather than syntax: a base
+  naming any of the program's own declarations keeps the field-access
+  reading it has always had, and only a base naming none of them takes
+  the alias reading, so no access already written can change meaning. A
+  base naming neither still reports as the field access the parser made
+  of it. A base naming a real alias that holds no such declaration says
+  *that* instead, since "no such local declaration" would name the wrong
+  mistake.
+- **A declaration bound to a parameter is a reference, not a value.**
+  The template that takes it may attach it (`networks [$net]`) or read a
+  field off it (`$net.name`, `{{net.name}}`). Splicing it into an
+  ordinary value draws an error at the argument, since a declaration has
+  no text form an `env` value or an `image` could take. Attaching one
+  imports it, on the same terms a written `networks [alias.name]` does,
+  bare-name collision check included, while reading a field still
+  imports nothing.
 - The same access interpolates into string content as a dotted
   `{{binding}}`—`"prefix-{{proxy.name}}"`, `"{{alias.proxy.name}}"`,
   `"{{net.name}}"` for a parameter—reading exactly as it does in source,
@@ -347,9 +368,15 @@ field_access   ::= IDENT "." IDENT              # local declaration, field
   and after the invocation resolves, that file is no longer in hand.
   Whatever is still a `$param` at that point resolves in a second pass
   over each service's fully merged fields, once every argument has a
-  binding. Reading a name attaches nothing: `networks [...]` is what
-  attaches a network, so a label naming one leaves the generated
-  `networks:` section alone.
+  binding. Between the two sits a third, narrower pass, over one
+  invocation's substituted body: an argument naming an imported
+  declaration leaves an `alias.decl.field` access behind in the template
+  it reaches, and the alias means something only in the file that
+  wrote the argument. That file is the invocation's own scope, in hand
+  there and gone by the time the merged fields reach a service. Reading
+  a name attaches
+  nothing: `networks [...]` is what attaches a network, so a label
+  naming one leaves the generated `networks:` section alone.
 
 `statement` is the whole language: a `named_decl` is one particular shape
 of it with a mandatory second name and mandatory body. Every field
@@ -1117,6 +1144,13 @@ use "docker.hll" as traefik
   sections stay as they were. That also means it never trips the "an
   imported network keeps its own bare name" collision below, since no
   second declaration comes over.
+- `alias.name` in a `with`-invocation's argument is a qualified
+  *reference*, not a field access, and behaves like every other one: a
+  template attaching it to `networks` imports the declaration and can
+  collide on its bare name, while a template that only reads a field off
+  it imports nothing. The precedence rule in the preceding Syntactic
+  grammar section decides which of the two a two-segment argument
+  is—a local declaration first, an alias only otherwise.
 - **Templates are lexically scoped, not dynamically scoped.** If a
   template declared in `templates.hll` writes
   `networks [traefik.traefik-net]`, that `traefik` resolves against

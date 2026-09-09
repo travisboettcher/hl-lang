@@ -388,6 +388,13 @@ Three spellings read the same field:
 | `net.proxy.name` | one an [imported file](./imports.md) declares |
 | `$net.name` | whichever declaration the invocation binds `net` to |
 
+The last row is what makes the parameter worth having, and it takes an
+imported declaration as readily as a same-file one: `with caddy { net:
+shared.proxy }` binds the declaration `shared.hll` declares, and
+`$net.name` reads `docker_default` off it just the same. See [Passing an
+imported declaration to a
+template](./imports.md#passing-an-imported-declaration-to-a-template).
+
 A field is readable when it holds a value. `name` holds one on both
 kinds, and a `volume`'s `driver` holds one too:
 
@@ -422,6 +429,13 @@ hit them:
 - **At most three parts.** Two name a declaration and a field, three
   name an alias, a declaration and a field, and `$param` takes exactly
   one field. A fourth part has no reading left.
+
+A `with`-invocation's argument is the one value position where two parts
+may instead name an imported *declaration*, since a parameter is the one
+value that can go on to be a reference. A base naming one of this
+program's own declarations still reads as a field access there, so
+nothing you already write changes meaning. Only a base naming nothing
+local takes the import-alias reading.
 
 ## A worked set of templates: routing
 
