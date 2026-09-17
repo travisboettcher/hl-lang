@@ -1,6 +1,6 @@
-//! Lexer for hl-lang, the DSL that transpiles to Docker Compose YAML +
-//! Traefik labels (see `docs/DESIGN.md` in the repo root for the full
-//! grammar and motivation).
+//! Lexer for hl-lang, the DSL that transpiles to Docker Compose YAML
+//! (see `docs/DESIGN.md` in the repo root for the full grammar and
+//! motivation).
 //!
 //! This crate turns hl-lang source text into a stream of [`Token`]s. It
 //! recognizes the language's lexical grammar exactly and no more:

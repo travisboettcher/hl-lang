@@ -5,11 +5,13 @@
 
 `hll` (pronounced "hell"—short for **H**ome**L**ab **L**anguage) is a
 small declarative Domain-Specific Language (DSL) that transpiles to Docker
-Compose YAML plus Traefik labels, so that standing up a new homelab service
-doesn't mean rewriting a near-identical Compose block + label set every
-time. It's a transpiler, not an interpreter—no evaluation, no closures, no
-runtime—and doubles as a "learn to write a language" project covering the
-lexer → parser → Abstract Syntax Tree (AST) → codegen pipeline. Source
+Compose YAML, so that standing up a new homelab service doesn't mean
+rewriting a near-identical Compose block every time—routing included,
+which is labels a template writes rather than anything the compiler
+knows about. It's a transpiler, not an interpreter—no evaluation, no
+closures, no runtime—and doubles as a "learn to write a language"
+project covering the lexer → parser → Abstract Syntax Tree (AST) →
+codegen pipeline. Source
 files use the `.hll` extension, and the command-line tool binary is
 `hllc`.
 
@@ -51,7 +53,7 @@ hl-lang/
     hl-linker/   # loads a real `use` graph off disk (or, for tests, an
                  # in-memory map) and implements hl-parser's SymbolResolver
                  # over it
-    hl-codegen/  # ComposedProgram -> Docker Compose YAML + Traefik labels
+    hl-codegen/  # ComposedProgram -> Docker Compose YAML
     hl-cli/      # `hllc build <file.hll> [--out <path>]` runs the full
                  # pipeline (link -> compose -> codegen); `hllc check`
                  # runs it and writes nothing; `hllc parse`/`hllc tokens`
@@ -286,7 +288,10 @@ either way:
   stdout vs. stderr, and exit codes.
 - **Generated-Compose semantics.** What the emitted YAML *does* when
   `docker compose up` runs it: the services, images, ports, volumes,
-  networks, environment, and Traefik labels it describes.
+  networks, environment, and labels it describes. The compiler derives no
+  labels of its own—a document's labels are the ones its author and its
+  templates wrote, `std:traefik`'s included—so what's promised is that
+  they still reach Compose saying the same thing.
 
 Not covered—these can change in any release, including a patch:
 

@@ -1,10 +1,11 @@
 //! Codegen for hl-lang: walks a [`hl_parser::ComposedProgram`] (the
 //! output of `hl_parser::compose`, with every `template`/`with`
 //! composition already resolved) and emits one Docker Compose YAML
-//! document covering every service in the program, with Traefik labels
-//! on each service's own `labels:` list — required, not stylistic,
-//! since Traefik's Docker provider reads labels off container metadata
-//! directly.
+//! document covering every service in the program. A service's
+//! `labels:` list holds what its `labels` blocks and templates wrote
+//! and nothing else: codegen derives no label of its own, which is
+//! what #271 settled — a reverse proxy's labels are a template's job,
+//! not the compiler's.
 //!
 //! One input program produces one output document, which may hold
 //! multiple services (mirroring how a real multi-service Compose

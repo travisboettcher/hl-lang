@@ -969,28 +969,29 @@ pub struct ServiceFields {
     /// `publish 8096 -> 8096` entries — Compose's `ports:` key. Distinct
     /// from `expose` above, which is Compose's `expose:` (visible to
     /// other containers on the same network, never published to the
-    /// host) plus the `loadbalancer.server.port` label. Shares [`ArrowMap`] with
+    /// host) and, since #271, nothing else. Shares [`ArrowMap`] with
     /// [`Self::volumes`]/[`Self::devices`] below — see that type's own
     /// doc for the shape all three fields share and the two ways
     /// `volume` alone still differs.
     pub publish: ArrowMap,
     pub volumes: ArrowMap,
     pub env: EnvMap,
-    /// `labels { "com.example.owner": "platform-team" }` (#243) — extra
-    /// Docker labels, **added** to the set `hl_codegen`'s `labels.rs`
-    /// computes from `router`/`expose`/`traefik`/the docker-network
-    /// label rather than replacing it, which is the one thing
-    /// `raw { labels: [...] }` cannot do (#232).
+    /// `labels { "com.example.owner": "platform-team" }` (#243) — the
+    /// service's Docker labels, which since #271 are *every* label it
+    /// carries: `hl_codegen`'s `labels.rs` computes none of its own, so
+    /// this field and the templates merged into it are the whole list.
+    /// A label **adds** to that list rather than replacing it, which is
+    /// the one thing `raw { labels: [...] }` cannot do (#232).
     ///
-    /// Emitted after every computed label, so a service that writes none
-    /// of these gets exactly the label list it got before this field
-    /// existed, byte for byte.
-    ///
-    /// A key that collides with a computed one is a hard error in
-    /// codegen (`CodegenError::LabelCollidesWithGenerated`), not a
-    /// precedence rule: whichever side won silently, one of the two
-    /// lines the author wrote would do nothing, which is the failure
-    /// #193, #206 and #232 all exist to close.
+    /// The field arrived alongside labels the compiler derived from
+    /// `router`/`expose`/`traefik`, which is why its own doc used to be
+    /// about coexisting with them. A key colliding with a derived one
+    /// was a hard error rather than a precedence rule, on the
+    /// reasoning that whichever side won silently, one of the two lines the
+    /// author wrote would do nothing — the failure #193, #206 and #232
+    /// all exist to close. Nothing derives a label any more, so what's
+    /// left of that rule is the duplicate-key check below, which asks
+    /// the same question between two things the author *did* write.
     ///
     /// Merged across template tiers exactly like [`Self::env`] — same
     /// [`crate::schema::MapSide::Key`] convention, same `merge_map`, so

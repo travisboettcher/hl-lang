@@ -2,9 +2,9 @@
 
 `hll` (pronounced "hell"—short for **H**ome**L**ab **L**anguage) is a
 small declarative Domain-Specific Language (DSL) that transpiles to Docker
-Compose YAML plus Traefik labels. It's a transpiler, not an
-interpreter—no evaluation, no closures, no runtime. This document is the
-language's spec: grammar, semantics, and worked examples. It's the source
+Compose YAML. It's a transpiler, not an interpreter—no evaluation, no
+closures, no runtime. This document is the language's spec: grammar,
+semantics, and worked examples. It's the source
 of truth that the lexer, parser, and codegen implementations build
 against. Source files use the `.hll` extension, and `hllc` is the
 command-line tool.
@@ -12,16 +12,19 @@ command-line tool.
 ## Motivation
 
 Standing up a new homelab service usually means rewriting a near-identical
-Docker Compose service block plus Traefik labels: image, port, subdomain,
+Docker Compose service block plus its proxy labels: image, port, subdomain,
 volume, restart policy, sometimes Authentik forward-auth. `hl-lang` removes
 that repetition by compiling a compact declaration down to the Compose YAML
-and Traefik labels that would otherwise be hand-written.
+that would otherwise be hand-written—labels included, though those the
+compiler carries from a document's own `labels` blocks and its templates
+rather than deriving any of its own, per the built-in schema table's note
+on #271.
 
 ## Design principle: generic core, specific templates
 
 The compiler's built-in schema stays small and generically
-Docker-Compose/Traefik-shaped—it has no knowledge of any particular
-homelab's conventions, such as specific auth providers, domain names, or
+Docker-Compose-shaped—it has no knowledge of any particular homelab's
+conventions, such as specific auth providers, domain names, or
 Process User Identifier (PUID) and Process Group Identifier (PGID)
 values. Anything that's actually about *one* homelab belongs in
 `template` files that get imported, not in the
@@ -1440,7 +1443,8 @@ readability choice, not a different construct.
    cross-file `alias.name` references—see the preceding Imports section.
 5. **Codegen** (`crates/hl-codegen`)—walks a composed program and emits
    one Compose YAML document per input file (which may hold multiple
-   services), with Traefik labels on each service's own `labels:` list.
+   services), with each service's own `labels:` list carrying whatever
+   the document and its templates wrote there.
    Codegen also hosts the two by-name reference checks, since each asks
    a whole-program question a single service's syntax can't answer. A
    `networks [x]` entry has to resolve to a top-level `network x`, or
