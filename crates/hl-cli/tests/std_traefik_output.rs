@@ -14,6 +14,16 @@
 //! routes also carries `expose:` and `networks:` a reader would notice
 //! moving, and a failure prints both documents rather than a boolean,
 //! because the interesting outcome is *what* changed.
+//!
+//! Which makes this a *change* detector and not a correctness check,
+//! and #302 is where that gap got divided up rather than left implicit.
+//! A key that was wrong from the first commit passes this file forever,
+//! so the keys themselves are checked against Traefik's own reference
+//! in `std_traefik_label_keys.rs` beside it, and whether a router does
+//! what its author meant is answered by running it. docs/DESIGN.md's
+//! "Modules bundled with the compiler" holds the whole decision,
+//! including why standing Traefik up in CI is deliberately not part of
+//! it.
 
 use hl_linker::InMemoryLoader;
 

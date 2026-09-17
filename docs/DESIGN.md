@@ -1226,6 +1226,39 @@ moved it in the same change that removed the derivation, since a template
 writing the label while the compiler still derived it would collide with
 it—there was no intermediate state where both spellings worked.
 
+**What checks the module is right.** Three things, and #302 is where
+saying which is which stopped being optional, because #271 retired the
+one that used to answer the question on its own. Until then
+`crates/hl-cli/tests/std_traefik_output.rs` compiled each service twice,
+once through the built-ins and once through the module, and asserted the
+two documents equal byte for byte. With the built-ins gone there is no
+second side to compare against, and what remains is a snapshot: it
+catches a change, not a mistake, and a key that was wrong from the first
+commit passes it forever.
+
+So the module's correctness divides deliberately:
+
+1. **Its keys.** `crates/hl-cli/tests/std_traefik_label_keys.rs` holds a
+   hand-maintained inventory citing Traefik's own reference, and every
+   key the module writes has to appear in it. Adding or altering a key
+   fails that test until someone edits the list, which turns a key
+   change into a reviewable diff rather than a snapshot refresh. It
+   catches a typo, most usefully one copied between the HTTP set and the
+   TCP set, where the only difference is a path segment.
+2. **Its output.** `std_traefik_output.rs` pins it whole, so a template
+   that starts writing something different says so.
+3. **Its semantics**, meaning whether Traefik does what the author
+   meant. Only running it answers that, and nothing in this repo can: the `docker compose config` differential grades
+   documents against Compose's parser, and Compose accepts any `labels`
+   list whatsoever.
+
+Standing Traefik itself up against a generated document and asserting
+the routers it discovers would close the third, and deliberately doesn't
+happen. It reintroduces exactly the third-party coupling #271 removed,
+as a test dependency rather than a compiler one, which is a materially
+different thing but a cost all the same—and one worth paying only if a
+real routing bug ever gets past the first two.
+
 **A rule handed to a template is a string.** Nothing parses it. A
 misspelled matcher compiles and fails at Traefik as a router that never
 matches. That validation was Traefik-shaped knowledge, and losing it
