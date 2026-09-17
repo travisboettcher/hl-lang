@@ -122,6 +122,40 @@ fn two_named_routers_sharing_one_port() {
     );
 }
 
+/// Two routers through the composite that writes labels only (#305).
+///
+/// The cliff this closes: `http_named` twice on one service would set
+/// `expose` twice and collide, so the second router used to mean
+/// dropping to the primitives for both. `http_router` is that
+/// composite's label half, and the service names its port once through
+/// `expose` and `port` the way a two-router service already did.
+#[test]
+fn two_routers_through_the_labels_only_composite() {
+    assert_generates(
+        "two_routers_through_the_labels_only_composite",
+        "use \"std:traefik\" as traefik\nservice web {\n  image \"nginx\"\n  expose 8123\n  with\n    traefik.http_router { router: \"public\", host: \"web.example.com\" },\n    traefik.http_router { router: \"admin\", host: \"admin.example.com\" },\n    traefik.port { port: 8123 }\n}\n",
+        "services:\n  web:\n    image: nginx\n    expose:\n    - 8123\n    labels:\n    - traefik.http.routers.web-public.rule=Host(`web.example.com`)\n    - traefik.http.routers.web-admin.rule=Host(`admin.example.com`)\n    - traefik.http.services.web.loadbalancer.server.port=8123\n",
+    );
+}
+
+/// `http_named` builds on `http_router` rather than on `http_rule`
+/// directly, so this pins that the refactoring left its output alone:
+/// one `http_router` plus the port half is exactly one `http_named`.
+#[test]
+fn the_labels_only_composite_plus_a_port_is_http_named() {
+    let through_parts = build(
+        "use \"std:traefik\" as traefik\nservice web {\n  image \"nginx\"\n  expose 8123\n  with traefik.http_router { router: \"api\", host: \"api.example.com\" }, traefik.port { port: 8123 }\n}\n",
+    );
+    let through_composite = build(
+        "use \"std:traefik\" as traefik\nservice web {\n  image \"nginx\"\n  with traefik.http_named { router: \"api\", host: \"api.example.com\", port: 8123 }\n}\n",
+    );
+    assert_eq!(
+        through_parts, through_composite,
+        "`http_named` should be `http_router` plus the port half\n\
+         \n--- parts ---\n{through_parts}\n--- composite ---\n{through_composite}"
+    );
+}
+
 /// A router naming its own port gets a Traefik service of its own
 /// (#225) — the `.service=` pointer plus that service's port, the pair
 /// `http_service` writes together, since writing one without the other

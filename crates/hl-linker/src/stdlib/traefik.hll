@@ -148,6 +148,31 @@ template http(host, port) {
 # The same, for one of several named routers on a service.
 template http_named(router, host, port) {
   expose $port
-  with http_rule { router: "{{name}}-{{router}}", rule: "Host(`{{host}}`)" },
+  with http_router { router: $router, host: $host },
        port { port: $port }
+}
+
+# `http_named`'s label half, for the second router onward (#305).
+#
+# The two composites above write `expose` as well as the labels, and
+# `expose` holds one port, so a service can apply one of them and no
+# more: a second would be a second answer to a one-answer question and
+# collide. That put the cliff at exactly the point a user reaches for
+# composition — the second router — and dropped them to the primitives
+# for both.
+#
+# This is the way back up. It writes the rule label and nothing else,
+# so a service names its own `expose` and its own `port` once and then
+# adds as many routers as it has:
+#
+#   expose 8080
+#   with http_router { router: "public", host: "web.example.com" },
+#        http_router { router: "admin",  host: "admin.example.com" },
+#        port { port: 8080 }
+#
+# `router` is a name rather than a full router id, matching
+# `http_named` — the id is `<service>-<name>` — so moving a service off
+# `http_named` keeps every argument meaning what it meant.
+template http_router(router, host) {
+  with http_rule { router: "{{name}}-{{router}}", rule: "Host(`{{host}}`)" }
 }

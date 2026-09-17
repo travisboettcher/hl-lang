@@ -1,0 +1,10 @@
+--- compose ---
+services:
+  web:
+    image: nginx
+    expose:
+    - 8080
+    labels:
+    - traefik.http.routers.web-public.rule=Host(`web.example.com`)
+    - traefik.http.routers.web-admin.rule=Host(`admin.example.com`)
+    - traefik.http.services.web.loadbalancer.server.port=8080

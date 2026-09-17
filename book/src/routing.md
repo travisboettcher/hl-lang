@@ -59,8 +59,10 @@ building the `<service>-<name>` router id from the name you pass.
 
 Both composites write the service's `expose`, though, which means you
 can apply *one* of them per service: two would each set `expose.port`
-and collide. A service with two routers drops to the primitives below,
-where the service writes its own `expose` once:
+and collide. `http_router` is the way past that. It's `http_named`'s
+label half—same `router` name, same `Host(...)` rule built for you, no
+`expose` and no port label—so a service names its port once and then
+adds routers:
 
 ```hll,build
 use "std:traefik" as traefik
@@ -69,8 +71,8 @@ service web {
   image "nginx"
   expose 8080
   with
-    traefik.http_rule { router: "{{name}}-public", rule: "Host(`web.example.com`)" },
-    traefik.http_rule { router: "{{name}}-admin", rule: "Host(`admin.example.com`)" },
+    traefik.http_router { router: "public", host: "web.example.com" },
+    traefik.http_router { router: "admin", host: "admin.example.com" },
     traefik.port { port: 8080 }
 }
 ```
@@ -89,6 +91,15 @@ services:
 
 Naming one template twice in a `with` list is how you say "two of
 these." No template needs a plural form.
+
+Reach for `http` or `http_named` for a service with one router, and
+for `http_router` plus `expose` and `port` when it has several. The
+one-router case is the one that gets to write its port once, which is
+the only thing the port half buys.
+
+Going further down—`http_rule` with the rule written out—is for a
+router that matches on something other than a bare host. `http_router`
+builds `Host(...)` and nothing else.
 
 ## One template per label
 
