@@ -221,6 +221,12 @@ hllc parse jellyfin.hll
 It's a debugging aid, and its output is often thousands of lines, so
 it's usually worth a pager: `hllc parse jellyfin.hll | less`.
 
+The printed tree is the compiler's own AST types rendered with `{:#?}`,
+and those types change whenever the parser does. The README's "What a
+version number promises" carves that out: `parse` keeps existing and
+keeps taking one file, but don't build anything on the shape of what it
+prints—read it, don't parse it. The same goes for `tokens` below.
+
 ## `tokens`
 
 Runs the lexer over one file and prints its token stream, one token per
@@ -230,6 +236,9 @@ something you'd reach for day to day:
 ```sh
 hllc tokens jellyfin.hll
 ```
+
+As with `parse`, the layout of those lines is a debugging convenience
+rather than a promised format.
 
 ## Exit codes
 
