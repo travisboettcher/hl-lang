@@ -1101,6 +1101,35 @@ service it-tools {
 }
 ```
 
+**A parameter binds from its call site and nowhere else.** A template
+never reads the service it merges into. #261 asked for the
+opposite—a parameter declared required but not passed, bound instead
+from the enclosing service's own fields, so that a Traefik template
+could take the container port from the service's `expose` rather than
+take it twice. The answer is no, for reasons that outlive the example:
+
+- Composition computes a template's contribution and *then* merges it.
+  Reading the service's fields during that computation introduces a
+  phase where "the service's fields" are half-formed, and since
+  `expose` can itself come from another template, the answer would
+  depend on which templates had merged so far. Left-to-right `with`
+  order would become semantically load-bearing in a way it isn't today.
+- Injection needs either a closed list of the field paths a parameter
+  may read, which is another schema table, or an open path grammar with
+  a type story #201 deliberately removed.
+- `with internal_web { port: 8080 }` says what it reads. `with
+  internal_web` reaching into `expose` behind the reader's back
+  doesn't, which is a real loss for a language whose pitch is that a
+  service block is the whole description of a service.
+
+The duplication comes from a template producing half of a coupled pair,
+and the fix is to let it produce both: `std:traefik`'s `http` writes the
+service's `expose` *and* the label that needs the port, so the port
+appears once. #305 is that answer's own cost showing up—`expose` holds
+one port, so two such templates collide—and it resolves by splitting the
+pair back into a labels-only composite, not by reaching into the
+service. Both halves stay call-site-bound either way.
+
 ## Imports
 
 Real-world templates and network declarations are for sharing across
