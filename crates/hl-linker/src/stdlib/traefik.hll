@@ -61,6 +61,49 @@ template http_service(router, port) {
   }
 }
 
+## HTTP TLS
+
+# TLS on, with whatever certificate Traefik's default resolver hands
+# out. The bare flag and nothing else, which is the whole of what an
+# HTTPS router needs when a wildcard certificate already covers it.
+#
+# Three templates rather than one `tls(router, resolver)`, for the same
+# reason the module has no omnibus `router`: a `labels` block emits
+# every key it lists, so one template taking every TLS option would
+# write an empty `certresolver=` for a router that has none.
+template http_tls(router) {
+  labels {
+    "traefik.http.routers.{{router}}.tls": "true"
+  }
+}
+
+# Which resolver issues this router's certificate — the name of one of
+# the `certificatesresolvers` entries in Traefik's own static
+# configuration, which is where a resolver is defined and where it
+# stays.
+template http_tls_certresolver(router, resolver) {
+  labels {
+    "traefik.http.routers.{{router}}.tls.certresolver": "{{resolver}}"
+  }
+}
+
+# The domains a certificate covers, for the wildcard case (#231): a
+# main domain and the Subject Alternative Names beside it. `sans` takes
+# a list, which interpolates comma-joined (#283) — exactly the
+# separator Traefik reads that key with.
+#
+# `domains[0]` and no other index. The key carries an array index no
+# other label here has to build, and a caller managing indices across
+# separate invocations would have to keep them distinct by hand. One
+# entry covers the certificate a homelab has; a second is the
+# hand-written `labels` entry any label always is.
+template http_tls_domains(router, main, sans) {
+  labels {
+    "traefik.http.routers.{{router}}.tls.domains[0].main": "{{main}}"
+    "traefik.http.routers.{{router}}.tls.domains[0].sans": "{{sans}}"
+  }
+}
+
 ## TCP routers
 
 # The TCP namespace, one label at a time, mirroring the HTTP set above.
@@ -95,6 +138,41 @@ template tcp_service(router, port) {
   labels {
     "traefik.tcp.routers.{{router}}.service": "{{router}}"
     "traefik.tcp.services.{{router}}.loadbalancer.server.port": "{{port}}"
+  }
+}
+
+## TCP TLS
+
+# The HTTP TLS set, one segment over, on the same reasoning the five
+# `tcp_*` templates above exist: the namespace is part of the key, so a
+# TCP router's TLS can't be the HTTP template with an argument.
+template tcp_tls(router) {
+  labels {
+    "traefik.tcp.routers.{{router}}.tls": "true"
+  }
+}
+
+template tcp_tls_certresolver(router, resolver) {
+  labels {
+    "traefik.tcp.routers.{{router}}.tls.certresolver": "{{resolver}}"
+  }
+}
+
+template tcp_tls_domains(router, main, sans) {
+  labels {
+    "traefik.tcp.routers.{{router}}.tls.domains[0].main": "{{main}}"
+    "traefik.tcp.routers.{{router}}.tls.domains[0].sans": "{{sans}}"
+  }
+}
+
+# Hand the connection to the backend still encrypted, rather than
+# terminating TLS at Traefik. TCP only — there is no HTTP mirror,
+# because an HTTP router that doesn't decrypt has nothing to route on.
+# Zero-valued like `disable`: `passthrough` defaults to off, so the
+# only reason to write the key is to turn it on.
+template tcp_tls_passthrough(router) {
+  labels {
+    "traefik.tcp.routers.{{router}}.tls.passthrough": "true"
   }
 }
 

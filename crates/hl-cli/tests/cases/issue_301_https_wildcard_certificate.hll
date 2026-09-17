@@ -1,0 +1,21 @@
+# #301: the HTTPS case, through templates rather than hand-written
+# labels. `std:traefik` shipped without a single TLS label, which left
+# the module teaching routing right up to the point a reader's first
+# HTTPS service begins. The wildcard pair is the shape #231 asked for:
+# one certificate covering every service on the homelab, named once as
+# a main domain plus the SANs beside it.
+use "std:traefik" as traefik
+
+service web {
+  image "nginx"
+  with
+    traefik.http { host: "web.internal.example.com", port: 8080 },
+    traefik.http_entrypoints { router: "{{name}}", entrypoints: ["websecure"] },
+    traefik.http_tls { router: "{{name}}" },
+    traefik.http_tls_certresolver { router: "{{name}}", resolver: "letsencrypt" },
+    traefik.http_tls_domains {
+      router: "{{name}}"
+      main: "internal.example.com"
+      sans: ["*.internal.example.com"]
+    }
+}

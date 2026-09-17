@@ -169,6 +169,45 @@ fn a_router_with_its_own_service_port() {
     );
 }
 
+/// The HTTPS case (#301): TLS on, a resolver to issue the certificate,
+/// and the wildcard domain pair #231 originally asked for. The `sans`
+/// list comma-joins (#283), which is the separator Traefik reads that
+/// key with, and `domains[0]` is the one index the module writes.
+#[test]
+fn an_https_router_with_a_wildcard_certificate() {
+    assert_generates(
+        "an_https_router_with_a_wildcard_certificate",
+        "use \"std:traefik\" as traefik\nservice web {\n  image \"nginx\"\n  with\n    traefik.http { host: \"web.internal.example.com\", port: 8123 },\n    traefik.http_entrypoints { router: \"{{name}}\", entrypoints: [\"websecure\"] },\n    traefik.http_tls { router: \"{{name}}\" },\n    traefik.http_tls_certresolver { router: \"{{name}}\", resolver: \"letsencrypt\" },\n    traefik.http_tls_domains { router: \"{{name}}\", main: \"internal.example.com\", sans: [\"*.internal.example.com\", \"*.vpn.internal.example.com\"] }\n}\n",
+        "services:\n  web:\n    image: nginx\n    expose:\n    - 8123\n    labels:\n    - traefik.http.routers.web.rule=Host(`web.internal.example.com`)\n    - traefik.http.services.web.loadbalancer.server.port=8123\n    - traefik.http.routers.web.entrypoints=websecure\n    - traefik.http.routers.web.tls=true\n    - traefik.http.routers.web.tls.certresolver=letsencrypt\n    - traefik.http.routers.web.tls.domains[0].main=internal.example.com\n    - traefik.http.routers.web.tls.domains[0].sans=*.internal.example.com,*.vpn.internal.example.com\n",
+    );
+}
+
+/// The TCP TLS set, which is the HTTP one a segment over plus
+/// `passthrough` — the one TLS key with no HTTP mirror, since an HTTP
+/// router that never decrypts has nothing to route on. Pinned for the
+/// same reason the rest of the TCP set is: a typo in a key nothing else
+/// writes looks exactly like a correct key to a snapshot.
+#[test]
+fn the_tcp_tls_set() {
+    assert_generates(
+        "the_tcp_tls_set",
+        "use \"std:traefik\" as traefik\nservice db {\n  image \"postgres:15\"\n  with\n    traefik.tcp_rule { router: \"{{name}}\", rule: \"HostSNI(`db.internal.example.com`)\" },\n    traefik.tcp_service { router: \"{{name}}\", port: 5432 },\n    traefik.tcp_tls { router: \"{{name}}\" },\n    traefik.tcp_tls_certresolver { router: \"{{name}}\", resolver: \"letsencrypt\" },\n    traefik.tcp_tls_domains { router: \"{{name}}\", main: \"internal.example.com\", sans: [\"*.internal.example.com\"] }\n}\n",
+        "services:\n  db:\n    image: postgres:15\n    labels:\n    - traefik.tcp.routers.db.rule=HostSNI(`db.internal.example.com`)\n    - traefik.tcp.routers.db.service=db\n    - traefik.tcp.services.db.loadbalancer.server.port=5432\n    - traefik.tcp.routers.db.tls=true\n    - traefik.tcp.routers.db.tls.certresolver=letsencrypt\n    - traefik.tcp.routers.db.tls.domains[0].main=internal.example.com\n    - traefik.tcp.routers.db.tls.domains[0].sans=*.internal.example.com\n",
+    );
+}
+
+/// `tcp_tls_passthrough` hands the connection on still encrypted, so it
+/// stands alone rather than beside a resolver: a router that doesn't
+/// terminate TLS has no certificate to issue.
+#[test]
+fn a_tcp_router_passing_tls_through() {
+    assert_generates(
+        "a_tcp_router_passing_tls_through",
+        "use \"std:traefik\" as traefik\nservice imap {\n  image \"dovecot\"\n  with\n    traefik.tcp_rule { router: \"{{name}}\", rule: \"HostSNI(`mail.example.com`)\" },\n    traefik.tcp_service { router: \"{{name}}\", port: 993 },\n    traefik.tcp_tls_passthrough { router: \"{{name}}\" }\n}\n",
+        "services:\n  imap:\n    image: dovecot\n    labels:\n    - traefik.tcp.routers.imap.rule=HostSNI(`mail.example.com`)\n    - traefik.tcp.routers.imap.service=imap\n    - traefik.tcp.services.imap.loadbalancer.server.port=993\n    - traefik.tcp.routers.imap.tls.passthrough=true\n",
+    );
+}
+
 /// `traefik.disable` (#159) is one label and nothing else.
 #[test]
 fn a_disabled_service() {

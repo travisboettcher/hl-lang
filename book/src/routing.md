@@ -113,7 +113,11 @@ router can carry:
 | `http_middlewares(router, middlewares)` | its `middlewares` |
 | `http_priority(router, priority)` | its `priority` |
 | `http_service(router, port)` | a Traefik service of its own, and the pointer to it |
-| `tcp_*` | the same five, one segment over, for TCP routers |
+| `http_tls(router)` | `tls=true`, and nothing else |
+| `http_tls_certresolver(router, resolver)` | which resolver issues its certificate |
+| `http_tls_domains(router, main, sans)` | the domains that certificate covers |
+| `tcp_*` | the same eight, one segment over, for TCP routers |
+| `tcp_tls_passthrough(router)` | hand the connection on still encrypted |
 | `port(port)` | the load-balancer target every router falls back to |
 | `docker_network(net)` | `traefik.docker.network`, from a network declaration |
 | `disable()` | `traefik.enable=false`, and nothing else |
@@ -176,6 +180,163 @@ with traefik.http_rule {
 string, substitutes any `{{...}}` in it, and writes it out—which is the
 whole of what it does to any label value. See [A value goes through as
 written](./built-in-fields.md#a-value-goes-through-as-written).
+
+## Terminating TLS
+
+Three templates, because a `labels` block writes every key it lists and
+a router that has no resolver shouldn't get an empty `certresolver=`:
+
+```hll,build
+use "std:traefik" as traefik
+
+service web {
+  image "nginx"
+  with
+    traefik.http { host: "web.internal.example.com", port: 8080 },
+    traefik.http_entrypoints { router: "{{name}}", entrypoints: ["websecure"] },
+    traefik.http_tls { router: "{{name}}" },
+    traefik.http_tls_certresolver { router: "{{name}}", resolver: "letsencrypt" }
+}
+```
+
+```text
+services:
+  web:
+    image: nginx
+    expose:
+    - 8080
+    labels:
+    - traefik.http.routers.web.rule=Host(`web.internal.example.com`)
+    - traefik.http.services.web.loadbalancer.server.port=8080
+    - traefik.http.routers.web.entrypoints=websecure
+    - traefik.http.routers.web.tls=true
+    - traefik.http.routers.web.tls.certresolver=letsencrypt
+```
+
+`resolver` names an entry in Traefik's own static configuration, under
+`certificatesresolvers`. That file holds the account, the challenge and
+the storage each resolver uses, and nothing about it moves here—these
+templates only say *which* one a router uses.
+
+### A wildcard certificate
+
+Left alone, a resolver asks for a certificate covering the router's own
+host. `http_tls_domains` asks for a different one—a main domain and the
+Subject Alternative Names beside it, which is how one certificate covers
+every service on a homelab:
+
+```hll,build
+use "std:traefik" as traefik
+
+service web {
+  image "nginx"
+  with
+    traefik.http { host: "web.internal.example.com", port: 8080 },
+    traefik.http_tls { router: "{{name}}" },
+    traefik.http_tls_certresolver { router: "{{name}}", resolver: "letsencrypt" },
+    traefik.http_tls_domains {
+      router: "{{name}}"
+      main: "internal.example.com"
+      sans: ["*.internal.example.com"]
+    }
+}
+```
+
+```text
+services:
+  web:
+    image: nginx
+    expose:
+    - 8080
+    labels:
+    - traefik.http.routers.web.rule=Host(`web.internal.example.com`)
+    - traefik.http.services.web.loadbalancer.server.port=8080
+    - traefik.http.routers.web.tls=true
+    - traefik.http.routers.web.tls.certresolver=letsencrypt
+    - traefik.http.routers.web.tls.domains[0].main=internal.example.com
+    - traefik.http.routers.web.tls.domains[0].sans=*.internal.example.com
+```
+
+`sans` is a list, and a list argument joins with commas—which is the
+separator that key reads with, so the two conventions line up.
+
+The template writes `domains[0]` and no other index. A second entry is
+the hand-written `labels` entry any label always is:
+
+```hll,fragment
+labels {
+  "traefik.http.routers.{{name}}.tls.domains[1].main": "other.example.com"
+}
+```
+
+Four templates is enough repetition that a homelab usually wraps them
+into one of its own:
+
+```hll,build
+use "std:traefik" as traefik
+
+template https(host, port, resolver) {
+  with
+    traefik.http { host: $host, port: $port },
+    traefik.http_entrypoints { router: "{{name}}", entrypoints: ["websecure"] },
+    traefik.http_tls { router: "{{name}}" },
+    traefik.http_tls_certresolver { router: "{{name}}", resolver: $resolver }
+}
+
+service jellyfin {
+  image "jellyfin/jellyfin"
+  with https { host: "jellyfin.internal.example.com", port: 8096, resolver: "letsencrypt" }
+}
+```
+
+```text
+services:
+  jellyfin:
+    image: jellyfin/jellyfin
+    expose:
+    - 8096
+    labels:
+    - traefik.http.routers.jellyfin.rule=Host(`jellyfin.internal.example.com`)
+    - traefik.http.services.jellyfin.loadbalancer.server.port=8096
+    - traefik.http.routers.jellyfin.entrypoints=websecure
+    - traefik.http.routers.jellyfin.tls=true
+    - traefik.http.routers.jellyfin.tls.certresolver=letsencrypt
+```
+
+That template is yours, not the module's. `std:traefik` stops at one
+template per label plus the `http` composites, because the preceding
+shape is where a homelab's own conventions start—the entry point it named,
+the resolver it runs, whether every service gets the same certificate.
+
+### TLS on a TCP router
+
+The TCP set mirrors all three, and adds one that has no HTTP
+counterpart. `tcp_tls_passthrough` hands the connection to the
+container still encrypted, so Traefik routes on the Server Name
+Indication (SNI) without holding a certificate at all:
+
+```hll,build
+use "std:traefik" as traefik
+
+service imap {
+  image "dovecot"
+  with
+    traefik.tcp_rule { router: "{{name}}", rule: "HostSNI(`mail.example.com`)" },
+    traefik.tcp_service { router: "{{name}}", port: 993 },
+    traefik.tcp_tls_passthrough { router: "{{name}}" }
+}
+```
+
+```text
+services:
+  imap:
+    image: dovecot
+    labels:
+    - traefik.tcp.routers.imap.rule=HostSNI(`mail.example.com`)
+    - traefik.tcp.routers.imap.service=imap
+    - traefik.tcp.services.imap.loadbalancer.server.port=993
+    - traefik.tcp.routers.imap.tls.passthrough=true
+```
 
 ## Composing middlewares
 
