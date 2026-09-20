@@ -1,0 +1,16 @@
+# #305: a service with two routers can say so through a composite. The
+# `http`/`http_named` pair writes the service's `expose` alongside the
+# labels, and `expose` holds one port, so a second invocation collided —
+# putting the cliff at exactly the point a user reaches for composition.
+# `http_router` is the label half: the service names its port once, and
+# each router is one line.
+use "std:traefik" as traefik
+
+service web {
+  image "nginx"
+  expose 8080
+  with
+    traefik.http_router { router: "public", host: "web.example.com" },
+    traefik.http_router { router: "admin", host: "admin.example.com" },
+    traefik.port { port: 8080 }
+}

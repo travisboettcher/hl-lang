@@ -130,13 +130,21 @@ pub enum Command {
     ///
     /// A debugging aid: it resolves no imports and no template
     /// composition.
+    ///
+    /// The command and its argument are inside the frozen CLI
+    /// contract; what it prints is not. Its output is this crate's AST
+    /// types rendered with `{:#?}`, and the README puts those types
+    /// outside the version promise, so covering the output too would
+    /// make every new AST field a breaking change. See #304.
     Parse {
         /// Path to an .hll source file.
         file: PathBuf,
     },
     /// Lex one file and print its token stream.
     ///
-    /// A debugging aid for the lexer itself.
+    /// A debugging aid for the lexer itself. Like `parse`, the command
+    /// is covered by the CLI contract and its line format isn't — see
+    /// #304.
     Tokens {
         /// Path to an .hll source file.
         file: PathBuf,

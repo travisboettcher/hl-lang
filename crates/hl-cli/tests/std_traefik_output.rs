@@ -14,6 +14,16 @@
 //! routes also carries `expose:` and `networks:` a reader would notice
 //! moving, and a failure prints both documents rather than a boolean,
 //! because the interesting outcome is *what* changed.
+//!
+//! Which makes this a *change* detector and not a correctness check,
+//! and #302 is where that gap got divided up rather than left implicit.
+//! A key that was wrong from the first commit passes this file forever,
+//! so the keys themselves are checked against Traefik's own reference
+//! in `std_traefik_label_keys.rs` beside it, and whether a router does
+//! what its author meant is answered by running it. docs/DESIGN.md's
+//! "Modules bundled with the compiler" holds the whole decision,
+//! including why standing Traefik up in CI is deliberately not part of
+//! it.
 
 use hl_linker::InMemoryLoader;
 
@@ -122,6 +132,40 @@ fn two_named_routers_sharing_one_port() {
     );
 }
 
+/// Two routers through the composite that writes labels only (#305).
+///
+/// The cliff this closes: `http_named` twice on one service would set
+/// `expose` twice and collide, so the second router used to mean
+/// dropping to the primitives for both. `http_router` is that
+/// composite's label half, and the service names its port once through
+/// `expose` and `port` the way a two-router service already did.
+#[test]
+fn two_routers_through_the_labels_only_composite() {
+    assert_generates(
+        "two_routers_through_the_labels_only_composite",
+        "use \"std:traefik\" as traefik\nservice web {\n  image \"nginx\"\n  expose 8123\n  with\n    traefik.http_router { router: \"public\", host: \"web.example.com\" },\n    traefik.http_router { router: \"admin\", host: \"admin.example.com\" },\n    traefik.port { port: 8123 }\n}\n",
+        "services:\n  web:\n    image: nginx\n    expose:\n    - 8123\n    labels:\n    - traefik.http.routers.web-public.rule=Host(`web.example.com`)\n    - traefik.http.routers.web-admin.rule=Host(`admin.example.com`)\n    - traefik.http.services.web.loadbalancer.server.port=8123\n",
+    );
+}
+
+/// `http_named` builds on `http_router` rather than on `http_rule`
+/// directly, so this pins that the refactoring left its output alone:
+/// one `http_router` plus the port half is exactly one `http_named`.
+#[test]
+fn the_labels_only_composite_plus_a_port_is_http_named() {
+    let through_parts = build(
+        "use \"std:traefik\" as traefik\nservice web {\n  image \"nginx\"\n  expose 8123\n  with traefik.http_router { router: \"api\", host: \"api.example.com\" }, traefik.port { port: 8123 }\n}\n",
+    );
+    let through_composite = build(
+        "use \"std:traefik\" as traefik\nservice web {\n  image \"nginx\"\n  with traefik.http_named { router: \"api\", host: \"api.example.com\", port: 8123 }\n}\n",
+    );
+    assert_eq!(
+        through_parts, through_composite,
+        "`http_named` should be `http_router` plus the port half\n\
+         \n--- parts ---\n{through_parts}\n--- composite ---\n{through_composite}"
+    );
+}
+
 /// A router naming its own port gets a Traefik service of its own
 /// (#225) — the `.service=` pointer plus that service's port, the pair
 /// `http_service` writes together, since writing one without the other
@@ -132,6 +176,45 @@ fn a_router_with_its_own_service_port() {
         "a_router_with_its_own_service_port",
         "use \"std:traefik\" as traefik\nservice web {\n  image \"nginx\"\n  with\n    traefik.http_rule { router: \"{{name}}-a\", rule: \"Host(`a.example.com`)\" },\n    traefik.http_service { router: \"{{name}}-a\", port: 9000 }\n}\n",
         "services:\n  web:\n    image: nginx\n    labels:\n    - traefik.http.routers.web-a.rule=Host(`a.example.com`)\n    - traefik.http.routers.web-a.service=web-a\n    - traefik.http.services.web-a.loadbalancer.server.port=9000\n",
+    );
+}
+
+/// The HTTPS case (#301): TLS on, a resolver to issue the certificate,
+/// and the wildcard domain pair #231 originally asked for. The `sans`
+/// list comma-joins (#283), which is the separator Traefik reads that
+/// key with, and `domains[0]` is the one index the module writes.
+#[test]
+fn an_https_router_with_a_wildcard_certificate() {
+    assert_generates(
+        "an_https_router_with_a_wildcard_certificate",
+        "use \"std:traefik\" as traefik\nservice web {\n  image \"nginx\"\n  with\n    traefik.http { host: \"web.internal.example.com\", port: 8123 },\n    traefik.http_entrypoints { router: \"{{name}}\", entrypoints: [\"websecure\"] },\n    traefik.http_tls { router: \"{{name}}\" },\n    traefik.http_tls_certresolver { router: \"{{name}}\", resolver: \"letsencrypt\" },\n    traefik.http_tls_domains { router: \"{{name}}\", main: \"internal.example.com\", sans: [\"*.internal.example.com\", \"*.vpn.internal.example.com\"] }\n}\n",
+        "services:\n  web:\n    image: nginx\n    expose:\n    - 8123\n    labels:\n    - traefik.http.routers.web.rule=Host(`web.internal.example.com`)\n    - traefik.http.services.web.loadbalancer.server.port=8123\n    - traefik.http.routers.web.entrypoints=websecure\n    - traefik.http.routers.web.tls=true\n    - traefik.http.routers.web.tls.certresolver=letsencrypt\n    - traefik.http.routers.web.tls.domains[0].main=internal.example.com\n    - traefik.http.routers.web.tls.domains[0].sans=*.internal.example.com,*.vpn.internal.example.com\n",
+    );
+}
+
+/// The TCP TLS set, which is the HTTP one a segment over plus
+/// `passthrough` — the one TLS key with no HTTP mirror, since an HTTP
+/// router that never decrypts has nothing to route on. Pinned for the
+/// same reason the rest of the TCP set is: a typo in a key nothing else
+/// writes looks exactly like a correct key to a snapshot.
+#[test]
+fn the_tcp_tls_set() {
+    assert_generates(
+        "the_tcp_tls_set",
+        "use \"std:traefik\" as traefik\nservice db {\n  image \"postgres:15\"\n  with\n    traefik.tcp_rule { router: \"{{name}}\", rule: \"HostSNI(`db.internal.example.com`)\" },\n    traefik.tcp_service { router: \"{{name}}\", port: 5432 },\n    traefik.tcp_tls { router: \"{{name}}\" },\n    traefik.tcp_tls_certresolver { router: \"{{name}}\", resolver: \"letsencrypt\" },\n    traefik.tcp_tls_domains { router: \"{{name}}\", main: \"internal.example.com\", sans: [\"*.internal.example.com\"] }\n}\n",
+        "services:\n  db:\n    image: postgres:15\n    labels:\n    - traefik.tcp.routers.db.rule=HostSNI(`db.internal.example.com`)\n    - traefik.tcp.routers.db.service=db\n    - traefik.tcp.services.db.loadbalancer.server.port=5432\n    - traefik.tcp.routers.db.tls=true\n    - traefik.tcp.routers.db.tls.certresolver=letsencrypt\n    - traefik.tcp.routers.db.tls.domains[0].main=internal.example.com\n    - traefik.tcp.routers.db.tls.domains[0].sans=*.internal.example.com\n",
+    );
+}
+
+/// `tcp_tls_passthrough` hands the connection on still encrypted, so it
+/// stands alone rather than beside a resolver: a router that doesn't
+/// terminate TLS has no certificate to issue.
+#[test]
+fn a_tcp_router_passing_tls_through() {
+    assert_generates(
+        "a_tcp_router_passing_tls_through",
+        "use \"std:traefik\" as traefik\nservice imap {\n  image \"dovecot\"\n  with\n    traefik.tcp_rule { router: \"{{name}}\", rule: \"HostSNI(`mail.example.com`)\" },\n    traefik.tcp_service { router: \"{{name}}\", port: 993 },\n    traefik.tcp_tls_passthrough { router: \"{{name}}\" }\n}\n",
+        "services:\n  imap:\n    image: dovecot\n    labels:\n    - traefik.tcp.routers.imap.rule=HostSNI(`mail.example.com`)\n    - traefik.tcp.routers.imap.service=imap\n    - traefik.tcp.services.imap.loadbalancer.server.port=993\n    - traefik.tcp.routers.imap.tls.passthrough=true\n",
     );
 }
 

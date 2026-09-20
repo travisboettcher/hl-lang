@@ -1,0 +1,14 @@
+--- compose ---
+services:
+  web:
+    image: nginx
+    expose:
+    - 8080
+    labels:
+    - traefik.http.routers.web.rule=Host(`web.internal.example.com`)
+    - traefik.http.services.web.loadbalancer.server.port=8080
+    - traefik.http.routers.web.entrypoints=websecure
+    - traefik.http.routers.web.tls=true
+    - traefik.http.routers.web.tls.certresolver=letsencrypt
+    - traefik.http.routers.web.tls.domains[0].main=internal.example.com
+    - traefik.http.routers.web.tls.domains[0].sans=*.internal.example.com

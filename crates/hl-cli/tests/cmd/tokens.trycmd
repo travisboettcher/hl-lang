@@ -7,7 +7,10 @@ listed.
 
 `errors.trycmd` pins what a lexer error looks like on this path. What
 this transcript holds is the successful shape — that a token carries a
-position, a kind, and the exact source text it came from.
+position, a kind, and the exact source text it came from. As with
+`parse`, that shape is pinned for review rather than promised to users:
+#304 keeps the command inside the frozen contract and its line format
+outside it.
 
 ```console
 $ hllc tokens web.hll

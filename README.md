@@ -5,11 +5,13 @@
 
 `hll` (pronounced "hell"—short for **H**ome**L**ab **L**anguage) is a
 small declarative Domain-Specific Language (DSL) that transpiles to Docker
-Compose YAML plus Traefik labels, so that standing up a new homelab service
-doesn't mean rewriting a near-identical Compose block + label set every
-time. It's a transpiler, not an interpreter—no evaluation, no closures, no
-runtime—and doubles as a "learn to write a language" project covering the
-lexer → parser → Abstract Syntax Tree (AST) → codegen pipeline. Source
+Compose YAML, so that standing up a new homelab service doesn't mean
+rewriting a near-identical Compose block every time—routing included,
+which is labels a template writes rather than anything the compiler
+knows about. It's a transpiler, not an interpreter—no evaluation, no
+closures, no runtime—and doubles as a "learn to write a language"
+project covering the lexer → parser → Abstract Syntax Tree (AST) →
+codegen pipeline. Source
 files use the `.hll` extension, and the command-line tool binary is
 `hllc`.
 
@@ -51,7 +53,7 @@ hl-lang/
     hl-linker/   # loads a real `use` graph off disk (or, for tests, an
                  # in-memory map) and implements hl-parser's SymbolResolver
                  # over it
-    hl-codegen/  # ComposedProgram -> Docker Compose YAML + Traefik labels
+    hl-codegen/  # ComposedProgram -> Docker Compose YAML
     hl-cli/      # `hllc build <file.hll> [--out <path>]` runs the full
                  # pipeline (link -> compose -> codegen); `hllc check`
                  # runs it and writes nothing; `hllc parse`/`hllc tokens`
@@ -283,10 +285,15 @@ either way:
   still compiles, and still means the same thing.
 - **The `hllc` command-line tool contract.** Subcommand and flag names
   and their semantics, positional arguments, the shape of what lands on
-  stdout vs. stderr, and exit codes.
+  stdout vs. stderr, and exit codes. With one carve-out: `hllc parse` and
+  `hllc tokens` are debugging aids, and the *shape of what they print* is
+  not covered—see the following list.
 - **Generated-Compose semantics.** What the emitted YAML *does* when
   `docker compose up` runs it: the services, images, ports, volumes,
-  networks, environment, and Traefik labels it describes.
+  networks, environment, and labels it describes. The compiler derives no
+  labels of its own—a document's labels are the ones its author and its
+  templates wrote, `std:traefik`'s included—so what's promised is that
+  they still reach Compose saying the same thing.
 
 Not covered—these can change in any release, including a patch:
 
@@ -296,6 +303,15 @@ Not covered—these can change in any release, including a patch:
 - **Exact YAML key ordering and formatting.** Byte-for-byte output
   stability isn't promised—only what the document means to Compose.
   Diffing generated output across `hllc` versions may show churn.
+- **What `hllc parse` and `hllc tokens` print.** Both commands exist,
+  keep taking one file as their positional argument, keep printing to
+  stdout, and keep their exit codes—the preceding bullet promises that
+  much. The shape of what they print falls outside it: `parse` renders
+  `hl-parser`'s AST types and `tokens` renders `hl-lexer`'s, and the
+  next bullet holds those types changeable at any time. Promising both
+  surfaces would make a new AST field a patch-level Rust change and a
+  breaking command-line change at once. Treat neither command as an
+  interchange format. For that, read `hllc build`'s Compose YAML.
 - **The Rust API of the `hl-*` crates.** Type layouts, public fields,
   error enum variants (none are `#[non_exhaustive]`), function
   signatures, module paths—all implementation detail, changeable at

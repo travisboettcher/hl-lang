@@ -4,16 +4,16 @@
 small declarative language for describing homelab services. You write a
 compact `.hll` file describing a service—its image, the port it
 exposes, its volumes, environment variables, restart policy—and `hllc`,
-the `hll` compiler, transpiles it into a Docker Compose YAML file with
-Traefik reverse-proxy labels already attached.
+the `hll` compiler, transpiles it into a Docker Compose YAML file.
 
 It exists to remove copy-paste. Standing up a new homelab service with
-Docker Compose and Traefik usually means duplicating a near-identical
-Compose service block and label set, changing only the image, the port,
-and the subdomain. `hll` lets you write just what's different about a
-service, and pull in the repeated parts (the Traefik network, the
-forward-auth middleware, the `PUID`/`PGID` pair every LinuxServer.io image
-wants) from a shared **template**.
+Docker Compose and a reverse proxy usually means duplicating a
+near-identical Compose service block and label set, changing only the
+image, the port, and the subdomain. `hll` lets you write just what's
+different about a service, and pull in the repeated parts (the proxy's
+network, its routing labels, the forward-auth middleware, the
+`PUID`/`PGID` pair every LinuxServer.io image wants) from a shared
+**template**.
 
 `hll` is a transpiler, not an interpreter—there's no evaluation, no
 runtime, no state. Every `.hll` file compiles down to plain Compose YAML

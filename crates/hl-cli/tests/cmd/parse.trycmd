@@ -5,6 +5,11 @@ spans and the `FileId` every node carries — is visible somewhere as
 text, and that adding a field to the AST shows up here as a reviewable
 diff rather than silently.
 
+A diff here is not a breaking change. #304 settled that `parse`'s
+output shape sits outside the frozen command-line contract, precisely
+so that the AST stays free to grow; this transcript exists to make that
+growth visible in review, not to pin a format users may depend on.
+
 ```console
 $ hllc parse web.hll
 Program {

@@ -2,9 +2,9 @@
 
 `hll` (pronounced "hell"—short for **H**ome**L**ab **L**anguage) is a
 small declarative Domain-Specific Language (DSL) that transpiles to Docker
-Compose YAML plus Traefik labels. It's a transpiler, not an
-interpreter—no evaluation, no closures, no runtime. This document is the
-language's spec: grammar, semantics, and worked examples. It's the source
+Compose YAML. It's a transpiler, not an interpreter—no evaluation, no
+closures, no runtime. This document is the language's spec: grammar,
+semantics, and worked examples. It's the source
 of truth that the lexer, parser, and codegen implementations build
 against. Source files use the `.hll` extension, and `hllc` is the
 command-line tool.
@@ -12,16 +12,19 @@ command-line tool.
 ## Motivation
 
 Standing up a new homelab service usually means rewriting a near-identical
-Docker Compose service block plus Traefik labels: image, port, subdomain,
+Docker Compose service block plus its proxy labels: image, port, subdomain,
 volume, restart policy, sometimes Authentik forward-auth. `hl-lang` removes
 that repetition by compiling a compact declaration down to the Compose YAML
-and Traefik labels that would otherwise be hand-written.
+that would otherwise be hand-written—labels included, though those the
+compiler carries from a document's own `labels` blocks and its templates
+rather than deriving any of its own, per the built-in schema table's note
+on #271.
 
 ## Design principle: generic core, specific templates
 
 The compiler's built-in schema stays small and generically
-Docker-Compose/Traefik-shaped—it has no knowledge of any particular
-homelab's conventions, such as specific auth providers, domain names, or
+Docker-Compose-shaped—it has no knowledge of any particular homelab's
+conventions, such as specific auth providers, domain names, or
 Process User Identifier (PUID) and Process Group Identifier (PGID)
 values. Anything that's actually about *one* homelab belongs in
 `template` files that get imported, not in the
@@ -1098,6 +1101,35 @@ service it-tools {
 }
 ```
 
+**A parameter binds from its call site and nowhere else.** A template
+never reads the service it merges into. #261 asked for the
+opposite—a parameter declared required but not passed, bound instead
+from the enclosing service's own fields, so that a Traefik template
+could take the container port from the service's `expose` rather than
+take it twice. The answer is no, for reasons that outlive the example:
+
+- Composition computes a template's contribution and *then* merges it.
+  Reading the service's fields during that computation introduces a
+  phase where "the service's fields" are half-formed, and since
+  `expose` can itself come from another template, the answer would
+  depend on which templates had merged so far. Left-to-right `with`
+  order would become semantically load-bearing in a way it isn't today.
+- Injection needs either a closed list of the field paths a parameter
+  may read, which is another schema table, or an open path grammar with
+  a type story #201 deliberately removed.
+- `with internal_web { port: 8080 }` says what it reads. `with
+  internal_web` reaching into `expose` behind the reader's back
+  doesn't, which is a real loss for a language whose pitch is that a
+  service block is the whole description of a service.
+
+The duplication comes from a template producing half of a coupled pair,
+and the fix is to let it produce both: `std:traefik`'s `http` writes the
+service's `expose` *and* the label that needs the port, so the port
+appears once. #305 is that answer's own cost showing up—`expose` holds
+one port, so two such templates collide—and it resolves by splitting the
+pair back into a labels-only composite, not by reaching into the
+service. Both halves stay call-site-bound either way.
+
 ## Imports
 
 Real-world templates and network declarations are for sharing across
@@ -1222,6 +1254,39 @@ the network as an argument and reading its real Docker name through
 moved it in the same change that removed the derivation, since a template
 writing the label while the compiler still derived it would collide with
 it—there was no intermediate state where both spellings worked.
+
+**What checks the module is right.** Three things, and #302 is where
+saying which is which stopped being optional, because #271 retired the
+one that used to answer the question on its own. Until then
+`crates/hl-cli/tests/std_traefik_output.rs` compiled each service twice,
+once through the built-ins and once through the module, and asserted the
+two documents equal byte for byte. With the built-ins gone there is no
+second side to compare against, and what remains is a snapshot: it
+catches a change, not a mistake, and a key that was wrong from the first
+commit passes it forever.
+
+So the module's correctness divides deliberately:
+
+1. **Its keys.** `crates/hl-cli/tests/std_traefik_label_keys.rs` holds a
+   hand-maintained inventory citing Traefik's own reference, and every
+   key the module writes has to appear in it. Adding or altering a key
+   fails that test until someone edits the list, which turns a key
+   change into a reviewable diff rather than a snapshot refresh. It
+   catches a typo, most usefully one copied between the HTTP set and the
+   TCP set, where the only difference is a path segment.
+2. **Its output.** `std_traefik_output.rs` pins it whole, so a template
+   that starts writing something different says so.
+3. **Its semantics**, meaning whether Traefik does what the author
+   meant. Only running it answers that, and nothing in this repo can: the `docker compose config` differential grades
+   documents against Compose's parser, and Compose accepts any `labels`
+   list whatsoever.
+
+Standing Traefik itself up against a generated document and asserting
+the routers it discovers would close the third, and deliberately doesn't
+happen. It reintroduces exactly the third-party coupling #271 removed,
+as a test dependency rather than a compiler one, which is a materially
+different thing but a cost all the same—and one worth paying only if a
+real routing bug ever gets past the first two.
 
 **A rule handed to a template is a string.** Nothing parses it. A
 misspelled matcher compiles and fails at Traefik as a router that never
@@ -1440,7 +1505,8 @@ readability choice, not a different construct.
    cross-file `alias.name` references—see the preceding Imports section.
 5. **Codegen** (`crates/hl-codegen`)—walks a composed program and emits
    one Compose YAML document per input file (which may hold multiple
-   services), with Traefik labels on each service's own `labels:` list.
+   services), with each service's own `labels:` list carrying whatever
+   the document and its templates wrote there.
    Codegen also hosts the two by-name reference checks, since each asks
    a whole-program question a single service's syntax can't answer. A
    `networks [x]` entry has to resolve to a top-level `network x`, or
